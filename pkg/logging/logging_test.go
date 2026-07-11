@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
-	prettylog "github.com/krateoplatformops/plumbing/slogs/pretty"
 )
 
 func TestNewNopLogger(t *testing.T) {
@@ -162,33 +160,37 @@ func parseLogTokens(s string) map[string]string {
 	return result
 }
 
+// normalizeLevel strips a trailing slog verbosity offset (e.g. "DEBUG+3" -> "DEBUG", "INFO-1" ->
+// "INFO") so the slog and logr paths compare equal on the base level.
+func normalizeLevel(s string) string {
+	for i, r := range s {
+		if r == '+' || r == '-' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
 func TestSlogAndLogrOutputsMatch(t *testing.T) {
 	// prepare slog -> buf1
 	var buf1 bytes.Buffer
 
-	lh1 := prettylog.New(&slog.HandlerOptions{
+	// stdlib slog text handler (replaces plumbing/slogs/pretty, removed on the plumbing 1.9+ line).
+	// Both paths use the same handler type, so the slog-vs-logr token comparison below still holds.
+	lh1 := slog.NewTextHandler(&buf1, &slog.HandlerOptions{
 		Level:     slog.LevelDebug,
 		AddSource: false,
-	},
-		prettylog.WithColor(),
-		prettylog.WithOutputEmptyAttrs(),
-		prettylog.WithDestinationWriter(&buf1),
-	)
+	})
 
 	slogger := slog.New(lh1)
 	sl := NewSlogLogger(*slogger)
 
 	// prepare logr (stdr) -> buf2
 	var buf2 bytes.Buffer
-	lh2 := prettylog.New(&slog.HandlerOptions{
+	lh2 := slog.NewTextHandler(&buf2, &slog.HandlerOptions{
 		Level:     slog.LevelDebug,
 		AddSource: false,
-	},
-		prettylog.WithDestinationWriter(os.Stderr),
-		prettylog.WithColor(),
-		prettylog.WithOutputEmptyAttrs(),
-		prettylog.WithDestinationWriter(&buf2),
-	)
+	})
 	ll := NewLogrLogger(logr.FromSlogHandler(lh2))
 
 	cases := []struct {
@@ -219,9 +221,16 @@ func TestSlogAndLogrOutputsMatch(t *testing.T) {
 			t.Fatalf("%s: token count differ\nslog: %q\nlogr: %q", tc.name, out1, out2)
 		}
 		for k, v1 := range tokens1 {
-			if v2, ok := tokens2[k]; !ok {
+			v2, ok := tokens2[k]
+			if !ok {
 				t.Fatalf("%s: key %q missing in logr output\nslog: %q\nlogr: %q", tc.name, k, out1, out2)
-			} else if v1 != v2 {
+			}
+			if k == "level" {
+				// slog's TextHandler renders logr verbosity as an offset (e.g. "DEBUG+3"); the numeric
+				// offset is a logr artifact, so compare the base level. (prettylog used to hide this.)
+				v1, v2 = normalizeLevel(v1), normalizeLevel(v2)
+			}
+			if v1 != v2 {
 				t.Fatalf("%s: value mismatch for %q: slog=%q logr=%q\nslog: %q\nlogr: %q", tc.name, k, v1, v2, out1, out2)
 			}
 		}
