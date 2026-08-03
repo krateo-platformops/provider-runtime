@@ -4,7 +4,7 @@ package ratelimiter
 import (
 	"time"
 
-	internal_workqueue "github.com/krateoplatformops/provider-runtime/pkg/workqueue"
+	internal_workqueue "github.com/krateo-platformops/provider-runtime/pkg/workqueue"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/workqueue"

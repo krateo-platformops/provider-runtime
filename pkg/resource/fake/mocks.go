@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	prv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 )
 
 // Conditioned is a mock that implements Conditioned interface.

@@ -6,17 +6,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/kubeutil/event"
+	"github.com/krateo-platformops/plumbing/kubeutil/event"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	prv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
-	"github.com/krateoplatformops/provider-runtime/pkg/errors"
-	"github.com/krateoplatformops/provider-runtime/pkg/logging"
-	"github.com/krateoplatformops/provider-runtime/pkg/meta"
-	"github.com/krateoplatformops/provider-runtime/pkg/resource"
+	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
+	"github.com/krateo-platformops/provider-runtime/pkg/errors"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 )

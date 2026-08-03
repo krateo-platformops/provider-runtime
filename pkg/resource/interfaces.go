@@ -3,7 +3,7 @@ package resource
 import (
 	"context"
 
-	prv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"

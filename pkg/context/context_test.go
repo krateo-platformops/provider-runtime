@@ -4,7 +4,7 @@ import (
 	stdctx "context"
 	"testing"
 
-	"github.com/krateoplatformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 func TestLoggerContextHelpers(t *testing.T) {

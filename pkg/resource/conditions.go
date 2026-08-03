@@ -1,6 +1,6 @@
 package resource
 
-import rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+import rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 
 type Conditions []rtv1.Condition
 

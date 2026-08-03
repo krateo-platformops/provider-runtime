@@ -6,7 +6,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
-	prv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 )
 
 // EquateErrors returns true if the supplied errors are of the same type and

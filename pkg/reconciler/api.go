@@ -7,9 +7,9 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/krateoplatformops/provider-runtime/pkg/errors"
-	"github.com/krateoplatformops/provider-runtime/pkg/meta"
-	"github.com/krateoplatformops/provider-runtime/pkg/resource"
+	"github.com/krateo-platformops/provider-runtime/pkg/errors"
+	"github.com/krateo-platformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 )
 
 // Error strings.

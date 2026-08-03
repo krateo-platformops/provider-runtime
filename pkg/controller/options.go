@@ -7,8 +7,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/krateoplatformops/provider-runtime/pkg/logging"
-	"github.com/krateoplatformops/provider-runtime/pkg/ratelimiter"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimiter"
 )
 
 // DefaultOptions returns a functional set of options with conservative

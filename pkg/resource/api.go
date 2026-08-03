@@ -3,8 +3,8 @@ package resource
 import (
 	"context"
 
-	"github.com/krateoplatformops/provider-runtime/pkg/errors"
-	"github.com/krateoplatformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/errors"
+	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 

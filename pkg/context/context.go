@@ -3,7 +3,7 @@ package context
 import (
 	"context"
 
-	"github.com/krateoplatformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 type ctxKey struct{}

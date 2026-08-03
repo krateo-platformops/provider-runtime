@@ -15,12 +15,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	prv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
-	"github.com/krateoplatformops/provider-runtime/pkg/errors"
-	"github.com/krateoplatformops/provider-runtime/pkg/meta"
-	"github.com/krateoplatformops/provider-runtime/pkg/resource"
-	"github.com/krateoplatformops/provider-runtime/pkg/resource/fake"
-	"github.com/krateoplatformops/provider-runtime/pkg/test"
+	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
+	"github.com/krateo-platformops/provider-runtime/pkg/errors"
+	"github.com/krateo-platformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/resource"
+	"github.com/krateo-platformops/provider-runtime/pkg/resource/fake"
+	"github.com/krateo-platformops/provider-runtime/pkg/test"
 )
 
 var _ reconcile.Reconciler = &Reconciler{}

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/krateoplatformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"go.opentelemetry.io/otel/sdk/metric"
 	metricdata "go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -36,7 +36,7 @@ func TestNewMetricsRecordsData(t *testing.T) {
 		}
 	})
 
-	metrics, err := newMetrics(provider.Meter("github.com/krateoplatformops/provider-runtime/test"))
+	metrics, err := newMetrics(provider.Meter("github.com/krateo-platformops/provider-runtime/test"))
 	if err != nil {
 		t.Fatalf("newMetrics() returned error: %v", err)
 	}

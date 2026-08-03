@@ -3,10 +3,10 @@ package resource
 import (
 	"context"
 
-	"github.com/krateoplatformops/provider-runtime/pkg/errors"
+	"github.com/krateo-platformops/provider-runtime/pkg/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	commonv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	commonv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
