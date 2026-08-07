@@ -1,0 +1,7 @@
+apiVersion: examples.krateo.io/v1
+kind: Greeting
+metadata:
+  name: hello
+  namespace: default
+spec:
+  message: Hello from provider-runtime

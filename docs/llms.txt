@@ -1,0 +1,14 @@
+# provider-runtime — LLM doc index (pinned: v1.3.0)
+# One line per file; regenerate the pin on release.
+docs/index.md: the map of this bundle
+docs/overview.md: package design and the managed-resource reconcile flow
+docs/usage.md: go get + the minimal code to build a provider on this library
+docs/configuration.md: build tags, OTel SDK environment, option structs and runtime annotations
+docs/api.md: the exported Go API surface, package by package, plus metric instruments
+docs/examples.md: examples index
+docs/release.md: tag-only release runbook (v-prefixed git tags, Go module proxy)
+docs/log.md: curated history
+examples/greeting-controller/README.md: minimal compilable provider (Greeting CRD + fake external system)
+examples/greeting-controller/main.go: the example source
+examples/greeting-controller/crd.yaml: the Greeting CRD
+examples/greeting-controller/greeting.yaml: a sample Greeting CR
