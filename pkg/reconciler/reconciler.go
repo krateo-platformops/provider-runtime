@@ -759,18 +759,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		return reconcile.Result{Requeue: false}, nil
 	}
 
-	// If we started but never completed creation of an external resource we
-	// may have lost critical information. For example if we didn't persist
-	// an updated external name we've leaked a resource. The safest thing to
-	// do is to refuse to proceed.
-	if meta.ExternalCreateIncomplete(managed) {
-		log.Warn(errCreateIncomplete)
-		throttledRecorder.Event(managed, event.Warning(reasonCannotInitialize, actionProcessEvent, errors.New(errCreateIncomplete)))
-		managed.SetConditions(prv1.Creating(), prv1.ReconcileError(errors.New(errCreateIncomplete)))
-		if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
-			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
-		}
-		return reconcile.Result{Requeue: false}, nil
+	// We started creating an external resource but never recorded the outcome, so we may have lost
+	// critical information — for example, if we didn't persist an updated external name we've leaked
+	// a resource. We used to refuse outright here, with Requeue:false, which is terminal: nothing
+	// re-triggers it and nothing changes, so the object could only ever be freed by a human deleting
+	// the annotation (krateo-core-provider#110). That refusal also fired BEFORE Connect/Observe —
+	// it was guessing at a question it never asked.
+	//
+	// Instead, carry the unresolved handshake forward and let Observe answer it below. The window
+	// between SetExternalCreatePending and the terminal annotation is ~2s of pure bookkeeping, so
+	// the overwhelmingly common interruption is one where the external work actually completed.
+	unresolvedCreate := meta.ExternalCreateIncomplete(managed)
+	if unresolvedCreate {
+		log.Debug("Create handshake is unresolved; asking Observe whether the external resource exists")
 	}
 
 	started = time.Now()
@@ -821,6 +822,45 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 		}
 		return reconcile.Result{}, werr
+	}
+
+	// Resolve an unresolved create handshake now that Observe has answered the question the old
+	// guard was only guessing at (krateo-core-provider#110).
+	if unresolvedCreate {
+		switch {
+		case observation.ResourceExists:
+			// Observe RESOLVED the external resource, so no identity was lost and nothing leaked —
+			// the create did complete, only the bookkeeping was interrupted. Close the handshake
+			// ourselves instead of waiting for a human to delete the annotation. Writing the
+			// succeeded marker makes ExternalCreateIncomplete false from here on, because it
+			// compares timestamps and succeeded is now the newest.
+			log.Debug("Unresolved create handshake resolved: the external resource exists; adopting it")
+			meta.SetExternalCreateSucceeded(managed, time.Now())
+			if err := r.managed.UpdateCriticalAnnotations(ctx, managed); err != nil {
+				log.Error(err, errUpdateManagedAnnotations)
+				throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, errors.Wrap(err, errUpdateManagedAnnotations)))
+				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedAnnotations)
+			}
+
+		case meta.WasDeleted(managed):
+			// Being deleted and the external resource is gone: there is nothing left to leak, so
+			// refusing here would only strand the object with its finalizer held — the failure mode
+			// of krateo-core-provider#108. Fall through and let the delete path release it.
+			log.Debug("Unresolved create handshake on a deleted resource with no external counterpart; proceeding with deletion")
+
+		default:
+			// Observe could NOT find it, and we cannot distinguish "the create never reached the
+			// external system" (safe to retry) from "it was created but we lost its external name"
+			// (retrying duplicates it). That ambiguity is the whole reason this guard exists, so it
+			// keeps refusing — this is the branch that must NOT be relaxed.
+			log.Warn(errCreateIncomplete)
+			throttledRecorder.Event(managed, event.Warning(reasonCannotInitialize, actionProcessEvent, errors.New(errCreateIncomplete)))
+			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(errors.New(errCreateIncomplete)))
+			if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
+				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
+			}
+			return reconcile.Result{Requeue: false}, nil
+		}
 	}
 
 	// In the observe-only mode, !observation.ResourceExists will be an error

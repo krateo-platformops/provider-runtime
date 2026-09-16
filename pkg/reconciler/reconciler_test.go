@@ -154,6 +154,87 @@ func TestReconciler(t *testing.T) {
 			},
 			want: want{result: reconcile.Result{Requeue: false}},
 		},
+		// krateo-core-provider#110: the guard used to refuse BEFORE Connect/Observe, with
+		// Requeue:false — terminal, so the object could only ever be freed by a human deleting the
+		// annotation. When Observe can RESOLVE the external resource, nothing was leaked and the
+		// create plainly completed, so the handshake is closed automatically instead.
+		"ExternalCreatePendingButResourceExists": {
+			reason: "An unresolved create handshake whose external resource Observe can see should be adopted, not refused.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							meta.SetExternalCreatePending(obj, now.Time)
+							return nil
+						}),
+						MockUpdate: test.NewMockUpdateFn(nil),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+							if cond := obj.(*fake.Managed).GetCondition(prv1.TypeReady); cond.Reason == prv1.ReasonCreating &&
+								cond.Message == errCreateIncomplete {
+								t.Errorf("must not refuse when Observe resolved the external resource")
+							}
+							return nil
+						}),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
+					WithCriticalAnnotationUpdater(CriticalAnnotationUpdateFn(func(_ context.Context, o client.Object) error {
+						// The handshake is closed by stamping the terminal marker, which makes
+						// ExternalCreateIncomplete false from here on (it compares timestamps).
+						if meta.ExternalCreateIncomplete(o) {
+							t.Errorf("adopting must resolve the handshake, but ExternalCreateIncomplete is still true")
+						}
+						return nil
+					})),
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						return &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								return ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+							},
+						}, nil
+					})),
+				},
+			},
+			want: want{result: reconcile.Result{RequeueAfter: defaultpollInterval}},
+		},
+		// Being deleted with no external counterpart: there is nothing left to leak, so refusing would
+		// only strand the object with its finalizer held (the failure mode of #108).
+		"ExternalCreatePendingWhileDeletedDoesNotRefuse": {
+			reason: "An unresolved create handshake must not block deletion when the external resource does not exist.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							meta.SetExternalCreatePending(obj, now.Time)
+							obj.SetDeletionTimestamp(&now)
+							return nil
+						}),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+							if cond := obj.(*fake.Managed).GetCondition(prv1.TypeReady); cond.Message == errCreateIncomplete {
+								t.Errorf("must not refuse a deleted resource with no external counterpart")
+							}
+							return nil
+						}),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithFinalizer(resource.FinalizerFns{RemoveFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						return &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								return ExternalObservation{ResourceExists: false}, nil
+							},
+						}, nil
+					})),
+				},
+			},
+			want: want{result: reconcile.Result{Requeue: false}},
+		},
 		"ExternalConnectError": {
 			reason: "Errors connecting to the provider should trigger a requeue after a short wait.",
 			args: args{
