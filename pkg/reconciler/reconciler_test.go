@@ -32,6 +32,12 @@ func TestReconciler(t *testing.T) {
 		o  []ReconcilerOption
 	}
 
+	// Set by ExternalCreatePendingPastGracePeriod's MockUpdate when it observes the pending
+	// annotation gone. Asserted after the table runs — MockUpdate serves several purposes in a
+	// single reconcile, so "every call has it cleared" is the wrong assertion; "some call did" is
+	// the one that distinguishes retrying from refusing forever.
+	pendingCleared := false
+
 	type want struct {
 		result        reconcile.Result
 		resultCmpOpts []cmp.Option
@@ -129,7 +135,7 @@ func TestReconciler(t *testing.T) {
 			want: want{result: reconcile.Result{Requeue: false}},
 		},
 		"ExternalCreatePending": {
-			reason: "We should return early if the managed resource appears to be pending creation. We might have leaked a resource and don't want to create another.",
+			reason: "A RECENT unresolved create should keep refusing and re-observe, not recreate: an external API that is eventually consistent may not be showing a create that did land, and recreating inside that window would duplicate it.",
 			args: args{
 				m: &fake.Manager{
 					Client: &test.MockClient{
@@ -152,7 +158,45 @@ func TestReconciler(t *testing.T) {
 				},
 				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
 			},
-			want: want{result: reconcile.Result{Requeue: false}},
+			want: want{result: reconcile.Result{RequeueAfter: defaultCreateRecoveryReobserveInterval}},
+		},
+		// krateo-platformops/git-provider#22: once the confirm-the-negative window has FULLY
+		// elapsed and the resource is still not observable, refusing further strands the object
+		// forever — six Repo CRs sat terminal for over a day, with the error message instructing
+		// the operator to delete the annotation by hand. The pending marker is cleared instead so
+		// the normal create path can run again.
+		"ExternalCreatePendingPastGracePeriod": {
+			reason: "An unresolved create whose grace period has elapsed with the resource still absent should clear the pending marker and retry, not refuse forever.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							// Older than the default 2-minute recovery window.
+							meta.SetExternalCreatePending(obj, now.Add(-1*time.Hour))
+							return nil
+						}),
+						MockUpdate: test.NewMockUpdateFn(nil, func(obj client.Object) error {
+							if _, ok := obj.GetAnnotations()[meta.AnnotationKeyExternalCreatePending]; !ok {
+								pendingCleared = true
+							}
+							return nil
+						}),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, _ client.Object, _ ...client.SubResourceUpdateOption) error {
+							return nil
+						}),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(&NopConnecter{}),
+					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
+				},
+			},
+			// Requeue rather than the old terminal false: having cleared the marker we fall through
+			// to the normal create path, which requeues to observe what it just created. The
+			// difference from the old behaviour is the whole point — the resource moves again.
+			want: want{result: reconcile.Result{Requeue: true}},
 		},
 		// krateo-core-provider#110: the guard used to refuse BEFORE Connect/Observe, with
 		// Requeue:false — terminal, so the object could only ever be freed by a human deleting the
@@ -1060,5 +1104,11 @@ func TestReconciler(t *testing.T) {
 				t.Errorf("\nReason: %s\nr.Reconcile(...): -want, +got:\n%s", tc.reason, diff)
 			}
 		})
+	}
+
+	if !pendingCleared {
+		t.Errorf("ExternalCreatePendingPastGracePeriod: the pending annotation was never cleared. " +
+			"An unresolved create whose grace period has elapsed must be retried; refusing forever " +
+			"is what left six Repo CRs terminal for over a day (git-provider#22).")
 	}
 }

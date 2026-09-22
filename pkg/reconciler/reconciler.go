@@ -31,6 +31,13 @@ const (
 
 	defaultpollInterval = 1 * time.Minute
 	defaultGracePeriod  = 30 * time.Second
+
+	// defaultCreateRecoveryGracePeriod bounds the confirm-the-negative window for an unresolved
+	// create handshake. Long enough for an eventually-consistent API to surface a create that
+	// landed; short enough that a create which never landed is retried promptly.
+	defaultCreateRecoveryGracePeriod = 2 * time.Minute
+	// defaultCreateRecoveryReobserveInterval is how often to re-observe inside that window.
+	defaultCreateRecoveryReobserveInterval = 15 * time.Second
 )
 
 // Error strings.
@@ -361,6 +368,14 @@ type Reconciler struct {
 	timeout             time.Duration
 	creationGracePeriod time.Duration
 
+	// createRecoveryGracePeriod bounds how long an UNRESOLVED create handshake keeps refusing
+	// before concluding the create never landed and retrying it. Distinct from
+	// creationGracePeriod, which covers a create we know SUCCEEDED but whose resource is not yet
+	// visible; this one covers a create whose outcome was never recorded at all.
+	createRecoveryGracePeriod time.Duration
+	// createRecoveryReobserveInterval is how soon to re-observe while still inside that window.
+	createRecoveryReobserveInterval time.Duration
+
 	// The below structs embed the set of interfaces used to implement the
 	// managed resource reconciler. We do this primarily for readability, so
 	// that the reconciler logic reads r.external.Connect(),
@@ -551,6 +566,30 @@ func WithCreationGracePeriod(d time.Duration) ReconcilerOption {
 	}
 }
 
+// WithCreateRecoveryGracePeriod specifies how long an UNRESOLVED create handshake keeps refusing
+// before the reconciler concludes the create never reached the external system and retries it.
+//
+// This is the confirm-the-negative window. Inside it nothing is recreated, so a create that DID
+// land but is not yet visible in an eventually-consistent API is adopted rather than duplicated.
+// Once it elapses with the resource still absent, refusing further would strand the resource
+// forever — see the recovery branch in Reconcile. Defaults to 2 minutes.
+//
+// Providers whose external API is slower to converge should raise this. Setting it to zero makes
+// recovery retry immediately, which is only safe when the external API is strongly consistent.
+func WithCreateRecoveryGracePeriod(d time.Duration) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.createRecoveryGracePeriod = d
+	}
+}
+
+// WithCreateRecoveryReobserveInterval specifies how soon to re-observe an unresolved create while
+// still inside the recovery grace period. Defaults to 15 seconds.
+func WithCreateRecoveryReobserveInterval(d time.Duration) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.createRecoveryReobserveInterval = d
+	}
+}
+
 // WithExternalConnecter specifies how the Reconciler should connect to the API
 // used to sync and delete external resources.
 func WithExternalConnecter(c ExternalConnecter) ReconcilerOption {
@@ -635,6 +674,9 @@ func NewReconciler(m manager.Manager, of resource.ManagedKind, o ...ReconcilerOp
 		pollInterval:        defaultpollInterval,
 		pollIntervalHook:    defaultPollIntervalHook,
 		creationGracePeriod: defaultGracePeriod,
+
+		createRecoveryGracePeriod:       defaultCreateRecoveryGracePeriod,
+		createRecoveryReobserveInterval: defaultCreateRecoveryReobserveInterval,
 		timeout:             reconcileTimeout,
 		managed:             defaultMRManaged(m),
 		external:            defaultMRExternal(),
@@ -848,18 +890,60 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// of krateo-core-provider#108. Fall through and let the delete path release it.
 			log.Debug("Unresolved create handshake on a deleted resource with no external counterpart; proceeding with deletion")
 
-		default:
-			// Observe could NOT find it, and we cannot distinguish "the create never reached the
-			// external system" (safe to retry) from "it was created but we lost its external name"
-			// (retrying duplicates it). That ambiguity is the whole reason this guard exists, so it
-			// keeps refusing — this is the branch that must NOT be relaxed.
-			log.Warn(errCreateIncomplete)
-			throttledRecorder.Event(managed, event.Warning(reasonCannotInitialize, actionProcessEvent, errors.New(errCreateIncomplete)))
+		case meta.ExternalCreatePendingDuring(managed, r.createRecoveryGracePeriod):
+			// Observe could NOT find it, but the create attempt is still RECENT. We cannot yet
+			// distinguish "the create never reached the external system" (safe to retry) from "it
+			// was created but we lost its external name" (retrying duplicates it), and an external
+			// API that is eventually consistent may simply not be showing it yet.
+			//
+			// So confirm the negative before acting on it: keep the pending marker, keep refusing,
+			// and re-observe. This is the conservative window — nothing is recreated inside it.
+			log.Debug("Unresolved create handshake: external resource not observed yet, waiting out the recovery grace period",
+				"pendingAge", time.Since(meta.GetExternalCreatePending(managed)).String(),
+				"gracePeriod", r.createRecoveryGracePeriod.String())
 			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(errors.New(errCreateIncomplete)))
 			if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
 				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 			}
-			return reconcile.Result{Requeue: false}, nil
+			return reconcile.Result{RequeueAfter: r.createRecoveryReobserveInterval}, nil
+
+		default:
+			// The grace period has FULLY elapsed and the external resource is still not observable.
+			// An eventually-consistent API has had its window; a create that had landed would be
+			// visible by now. So the create genuinely did not reach the external system, and
+			// retrying is safe.
+			//
+			// The old behaviour refused here permanently, with `Requeue: false`. That was safe
+			// against duplication and unsafe against everything else: the resource was terminal,
+			// the ambiguity was never resolved, and the only documented remedy was for a human to
+			// delete the annotation by hand — which papers over the defect and destroys the evidence
+			// that any fix works. Six Repo CRs sat in exactly that state for over a day
+			// (krateo-platformops/git-provider#22).
+			//
+			// Clearing the pending marker lets the normal create path run again on the next pass.
+			// Note this does NOT relax the duplication guard — it relocates it into the window
+			// above, where it is bounded by evidence instead of holding forever on an ambiguity
+			// that nothing will ever resolve.
+			log.Debug("Unresolved create handshake: recovery grace period elapsed with the external resource still absent; treating the create as never landed and retrying",
+				"pendingAge", time.Since(meta.GetExternalCreatePending(managed)).String(),
+				"gracePeriod", r.createRecoveryGracePeriod.String())
+			meta.RemoveAnnotations(managed, meta.AnnotationKeyExternalCreatePending)
+
+			// A plain Update, deliberately NOT UpdateCriticalAnnotations. That helper captures the
+			// object's annotations, re-Gets the object from the API server, and then ADDS the
+			// captured set back — so an annotation removed locally is restored by the re-Get and
+			// written straight back. It can add and overwrite; it cannot delete. Using it here
+			// would leave the marker in place and the resource wedged exactly as before, with
+			// nothing failing to indicate it.
+			if err := r.client.Update(ctx, managed); err != nil {
+				if kerrors.IsConflict(err) {
+					// Someone else wrote first; re-read and retry rather than fight over it.
+					return reconcile.Result{Requeue: true}, nil
+				}
+				log.Error(err, errUpdateManagedAnnotations)
+				throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, errors.Wrap(err, errUpdateManagedAnnotations)))
+				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedAnnotations)
+			}
 		}
 	}
 
