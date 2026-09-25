@@ -280,6 +280,22 @@ func ExternalCreateSucceededDuring(o metav1.Object, d time.Duration) bool {
 	return time.Since(t) < d
 }
 
+// ExternalCreatePendingDuring returns true if a create attempt was STARTED (the pending marker was
+// set) within the supplied duration.
+//
+// It exists to confirm-the-negative during incomplete-create recovery. An external Create that
+// actually landed may not yet be visible in an eventually-consistent API, so a still-recent pending
+// marker means "wait and re-observe" rather than "the create never happened, recreate it" — which
+// would duplicate the external resource. Once the duration has fully elapsed and the resource is
+// still not observable, the create genuinely did not land and retrying is safe.
+func ExternalCreatePendingDuring(o metav1.Object, d time.Duration) bool {
+	t := GetExternalCreatePending(o)
+	if t.IsZero() {
+		return false
+	}
+	return time.Since(t) < d
+}
+
 // IsPaused returns true if the object has the AnnotationKeyReconciliationPaused
 // annotation set to `true`.
 func IsPaused(o metav1.Object) bool {
