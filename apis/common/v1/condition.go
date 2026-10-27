@@ -28,6 +28,9 @@ const (
 	ReasonUnavailable ConditionReason = "Unavailable"
 	ReasonCreating    ConditionReason = "Creating"
 	ReasonDeleting    ConditionReason = "Deleting"
+	// ReasonZeroEvidence: readiness could not be assessed AT ALL — every signal the controller
+	// knows how to read was absent, not negative. See ZeroEvidence.
+	ReasonZeroEvidence ConditionReason = "ZeroEvidence"
 )
 
 // Reasons a resource is or is not synced.
@@ -194,6 +197,35 @@ func Available() Condition {
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonAvailable,
+	}
+}
+
+// ZeroEvidence returns a condition that indicates readiness could not be assessed at all: every
+// signal the controller knows how to read was ABSENT, so neither True nor False is supportable
+// and the status is Unknown.
+//
+// It is NOT "unhealthy" and it is NOT a milder Unavailable. Unavailable means the resource was
+// observed and found sick; this means it was not observed. The distinction exists because the two
+// call for opposite handling: a consumer gating on readiness must wait on Unavailable, while
+// waiting on ZeroEvidence would wait forever — absence of evidence is usually a steady state, not
+// a transient one.
+//
+// That is the trap it is built to avoid. Krateo's composition child-health rollup counts children
+// whose kind it cannot interpret and, when EVERY child is uninterpretable, has been reporting
+// Available over nothing at all (krateo-platformops/core-provider#165). Reporting False instead
+// would be just as untrue and far more damaging: consumers that gate on readiness would block
+// indefinitely on resources that are, as far as anyone knows, fine.
+//
+// So the reason is the contract, not the status. A consumer that can distinguish this case may
+// treat it as passable; one that cannot must keep testing for True and is no worse off than
+// before. Consumers MUST key on the reason, never on the message text, which is prose and will
+// change.
+func ZeroEvidence() Condition {
+	return Condition{
+		Type:               TypeReady,
+		Status:             metav1.ConditionUnknown,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonZeroEvidence,
 	}
 }
 
