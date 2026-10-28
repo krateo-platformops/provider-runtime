@@ -2,6 +2,8 @@ module github.com/krateo-platformops/provider-runtime
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/go-logr/logr v1.4.4
 	github.com/google/go-cmp v0.7.0

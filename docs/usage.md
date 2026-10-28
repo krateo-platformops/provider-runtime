@@ -20,6 +20,13 @@ against code using this module. You don't need to pin a patch version for
 this: the floating `golang:1.26` images (for example `golang:1.26-trixie`)
 track the latest 1.26 patch, which was 1.26.10 on 2026-10-28.
 
+This repo's own `go.mod` carries `toolchain go1.26.10`, so its builds,
+tests and `govulncheck` scans use a patched standard library. Go ignores a
+dependency's `toolchain` line, so it does not raise your floor. Set your
+own if you scan locally with an older Go: under `GOTOOLCHAIN=auto` the scan
+runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
+standard-library findings your patched build doesn't have.
+
 ```sh
 go get github.com/krateo-platformops/provider-runtime@v1.7.0
 ```
