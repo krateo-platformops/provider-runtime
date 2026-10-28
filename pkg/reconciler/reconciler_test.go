@@ -375,6 +375,45 @@ func TestReconciler(t *testing.T) {
 			},
 			want: want{err: errors.Wrap(errBoom, errReconcileObserve)},
 		},
+		// oasgen-provider#266, core-provider#236: an unresolved create waits on Observe's answer, so
+		// an erroring Observe holds it. The object must say both what failed and that a create is
+		// pending behind it; ExternalObserveError above is the control without a pending create.
+		"ExternalObserveErrorWithUnresolvedCreate": {
+			reason: "An Observe error on an unresolved create handshake should name the pending create alongside the Observe error.",
+			args: args{
+				m: &fake.Manager{
+					Client: &test.MockClient{
+						MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+							meta.SetExternalCreatePending(obj, now.Time)
+							return nil
+						}),
+						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+							want := &fake.Managed{}
+							meta.SetExternalCreatePending(want, now.Time)
+							want.SetConditions(prv1.ReconcileError(errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve),
+								errFmtCreateWaitsOnObserve, now.Time.Format(time.RFC3339))))
+							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {
+								reason := "An Observe error on an unresolved create should name the pending create in the conditioned status."
+								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
+							}
+							return nil
+						}),
+					},
+					Scheme: fake.SchemeWith(&fake.Managed{}),
+				},
+				mg: resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				o: []ReconcilerOption{
+					WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+						return &ExternalClientFns{
+							ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+								return ExternalObservation{}, errBoom
+							},
+						}, nil
+					})),
+				},
+			},
+			want: want{err: errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve), errFmtCreateWaitsOnObserve, now.Time.Format(time.RFC3339))},
+		},
 		"CreationGracePeriod": {
 			reason: "If our resource appears not to exist during the creation grace period we should return early.",
 			args: args{

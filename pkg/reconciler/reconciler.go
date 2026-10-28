@@ -47,6 +47,7 @@ const (
 	errCreateIncomplete         = "cannot determine creation result - remove the " + meta.AnnotationKeyExternalCreatePending + " annotation if it is safe to proceed"
 	errReconcileConnect         = "connect failed"
 	errReconcileObserve         = "observe failed"
+	errFmtCreateWaitsOnObserve  = "external create pending since %s cannot be resolved until observe succeeds"
 	errReconcileCreate          = "create failed"
 	errReconcileUpdate          = "update failed"
 	errReconcileDelete          = "delete failed"
@@ -237,14 +238,14 @@ type ExternalClient interface {
 	// ResourceLateInitialized for more detail.
 	//
 	// When the external resource does not exist, return ResourceExists: false
-	// with a nil error. An unresolved create handshake is resolved from
-	// Observe's answer, and an error returns before that happens, so an
-	// Observe that errors on "not found" keeps such a resource stuck. Before
-	// returning an error, ask whether answering ResourceExists: false could
-	// make Create duplicate the resource. If not, answer. If so, return an
-	// error only for a transient failure that a retry can resolve; a
-	// permanent one (for example a local template that never renders)
-	// strands the resource. See docs/overview.md.
+	// with a nil error. An error ends the reconcile before Create and before
+	// an unresolved create handshake can be resolved, which needs Observe's
+	// answer. Before returning an error, ask whether answering
+	// ResourceExists: false could make Create duplicate the resource. If not,
+	// answer. If so, return an error only for a transient failure that a
+	// retry can resolve; a permanent one (for example a local template that
+	// never renders) keeps the resource stuck until the provider changes.
+	// See docs/overview.md.
 	Observe(ctx context.Context, mg resource.Managed) (ExternalObservation, error)
 
 	// Create an external resource per the specifications of the supplied
@@ -869,6 +870,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		}
 		throttledRecorder.Event(managed, event.Warning(reasonCannotObserve, actionObserveExternalResource, err))
 		werr := errors.Wrap(err, errReconcileObserve)
+		if unresolvedCreate {
+			// An unresolved create handshake is resolved from Observe's answer, so it waits on
+			// exactly this error. Name both on the object: what failed, and that a create is
+			// pending behind it. Recovery resumes by itself once Observe answers; a permanent
+			// Observe error is a provider defect, not something this reconciler can bound
+			// without creating blind (oasgen-provider#266, core-provider#236).
+			werr = errors.Wrapf(werr, errFmtCreateWaitsOnObserve, meta.GetExternalCreatePending(managed).Format(time.RFC3339))
+		}
 		managed.SetConditions(prv1.ReconcileError(werr))
 		if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
 			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)

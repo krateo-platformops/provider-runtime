@@ -70,30 +70,48 @@ A handshake whose outcome was never recorded (`ExternalCreateIncomplete`:
 
 **The contract this puts on `Observe`:** when the external resource does not
 exist, return `ExternalObservation{ResourceExists: false}` with a **nil**
-error. An `Observe` error returns before the guard runs, so a provider whose
-`Observe` errors on "not found" (or on any input it cannot read for a
-half-created resource) keeps an unresolved handshake stuck indefinitely, on
-every runtime version.
+error. An `Observe` error ends the reconcile before both the guard and
+`Create`, with or without a pending create. So an `Observe` that errors on
+"not found" never creates anything. On a half-created resource it also holds
+the unresolved handshake, because the guard needs `Observe`'s answer.
 
-For each error return in `Observe`, ask: **if I answered
+The handshake itself never holds the resource beyond that. Once `Observe`
+answers again, the guard adopts the resource or retries the create within the
+recovery grace period. While `Observe` errors on an unresolved handshake, the
+`Synced` condition names both the `Observe` error and the pending create
+(since v1.6.0). For example:
+
+```
+external create pending since 2026-10-28T18:12:41Z cannot be resolved until observe succeeds: observe failed: <the provider's error>
+```
+
+The runtime deliberately does not bound this by calling `Create` anyway. A
+create without an observation can duplicate exactly the resource whose
+identity was lost, which is what the guard exists to prevent. And it gains
+nothing when `Create` hits the same failure.
+
+So the fix belongs in `Observe`. For each error return, ask: **if I answered
 `ResourceExists: false` here and the resource did exist, would `Create`
 duplicate it?**
 
 - **No**, because `Create` is idempotent for this resource (a deterministic
   name, or an apply that converges): answer instead of erroring. Report the
   cause through a condition if it helps, for example
-  `Unavailable().WithMessage(...)`. The guard then resolves the handshake,
-  and if the same failure hits `Create`, it surfaces there as a create error
-  rather than as an unresolved handshake.
+  `Unavailable().WithMessage(...)`. If the same failure then hits `Create`,
+  it surfaces there as a create error, which closes the handshake
+  (`external-create-failed`).
 - **Yes**, because identity could be lost: an error is correct, but only for a
   *transient* "cannot tell", such as a failed read from the external system
   that a retry can answer.
 
 Treat a **permanent** "cannot tell" as a defect to fix, not as an error to
 return. Examples are a local template that fails to render, or a spec that
-cannot be parsed into a lookup. The guard treats transient and permanent
-errors alike, and retrying never resolves a permanent one, so it strands the
-resource exactly like the stuck create the guard exists to break.
+cannot be parsed into a lookup. Retrying never resolves it, so the resource
+stays stuck until the provider changes. Watch for one error return that
+carries both kinds: oasgen-provider#266 found a single call that wraps two
+local renders and two cluster calls, so it can't be classified at the call
+site without splitting it. core-provider#236 shows the fix: answer existence
+from what the object already records, and let `Create` report the failure.
 
 ## Supporting packages
 
