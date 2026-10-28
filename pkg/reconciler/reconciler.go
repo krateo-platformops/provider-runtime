@@ -239,8 +239,12 @@ type ExternalClient interface {
 	// When the external resource does not exist, return ResourceExists: false
 	// with a nil error. An unresolved create handshake is resolved from
 	// Observe's answer, and an error returns before that happens, so an
-	// Observe that errors on "not found" keeps such a resource stuck. Return an
-	// error only when it cannot be determined whether the resource exists.
+	// Observe that errors on "not found" keeps such a resource stuck. Before
+	// returning an error, ask whether answering ResourceExists: false could
+	// make Create duplicate the resource. If not, answer. If so, return an
+	// error only for a transient failure that a retry can resolve; a
+	// permanent one (for example a local template that never renders)
+	// strands the resource. See docs/overview.md.
 	Observe(ctx context.Context, mg resource.Managed) (ExternalObservation, error)
 
 	// Create an external resource per the specifications of the supplied

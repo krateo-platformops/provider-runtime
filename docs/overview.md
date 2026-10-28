@@ -73,8 +73,27 @@ exist, return `ExternalObservation{ResourceExists: false}` with a **nil**
 error. An `Observe` error returns before the guard runs, so a provider whose
 `Observe` errors on "not found" (or on any input it cannot read for a
 half-created resource) keeps an unresolved handshake stuck indefinitely, on
-every runtime version. Return an error only when you cannot tell whether the
-resource exists.
+every runtime version.
+
+For each error return in `Observe`, ask: **if I answered
+`ResourceExists: false` here and the resource did exist, would `Create`
+duplicate it?**
+
+- **No**, because `Create` is idempotent for this resource (a deterministic
+  name, or an apply that converges): answer instead of erroring. Report the
+  cause through a condition if it helps, for example
+  `Unavailable().WithMessage(...)`. The guard then resolves the handshake,
+  and if the same failure hits `Create`, it surfaces there as a create error
+  rather than as an unresolved handshake.
+- **Yes**, because identity could be lost: an error is correct, but only for a
+  *transient* "cannot tell", such as a failed read from the external system
+  that a retry can answer.
+
+Treat a **permanent** "cannot tell" as a defect to fix, not as an error to
+return. Examples are a local template that fails to render, or a spec that
+cannot be parsed into a lookup. The guard treats transient and permanent
+errors alike, and retrying never resolves a permanent one, so it strands the
+resource exactly like the stuck create the guard exists to break.
 
 ## Supporting packages
 
