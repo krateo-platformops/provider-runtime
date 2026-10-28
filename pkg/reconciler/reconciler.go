@@ -677,11 +677,11 @@ func NewReconciler(m manager.Manager, of resource.ManagedKind, o ...ReconcilerOp
 
 		createRecoveryGracePeriod:       defaultCreateRecoveryGracePeriod,
 		createRecoveryReobserveInterval: defaultCreateRecoveryReobserveInterval,
-		timeout:             reconcileTimeout,
-		managed:             defaultMRManaged(m),
-		external:            defaultMRExternal(),
-		log:                 logging.NewNopLogger(),
-		record:              event.NewNopRecorder(),
+		timeout:                         reconcileTimeout,
+		managed:                         defaultMRManaged(m),
+		external:                        defaultMRExternal(),
+		log:                             logging.NewNopLogger(),
+		record:                          event.NewNopRecorder(),
 	}
 
 	for _, ro := range o {
