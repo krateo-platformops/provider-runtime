@@ -16,7 +16,9 @@ v0.35.x — your provider's controller-runtime version must be compatible.
 Build with **Go ≥ 1.26.10**. The `go` line is only the language floor; the
 standard library comes from your toolchain. Older 1.26 patches carry
 `net/http` and `crypto/x509` vulnerabilities that `govulncheck` reports
-against code using this module.
+against code using this module. You don't need to pin a patch version for
+this: the floating `golang:1.26` images (for example `golang:1.26-trixie`)
+track the latest 1.26 patch, which was 1.26.10 on 2026-10-28.
 
 ```sh
 go get github.com/krateo-platformops/provider-runtime@v1.7.0
