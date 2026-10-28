@@ -225,6 +225,12 @@ func TestSlogAndLogrOutputsMatch(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s: key %q missing in logr output\nslog: %q\nlogr: %q", tc.name, k, out1, out2)
 			}
+			if k == "time" {
+				// The two calls run one after the other, so their timestamps differ whenever they
+				// straddle a millisecond (often under -race). Both outputs must carry a time, which
+				// the key check above already asserts; its value is not part of the format contract.
+				continue
+			}
 			if k == "level" {
 				// slog's TextHandler renders logr verbosity as an offset (e.g. "DEBUG+3"); the numeric
 				// offset is a logr artifact, so compare the base level. (prettylog used to hide this.)
