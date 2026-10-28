@@ -4,7 +4,7 @@ title: provider-runtime — overview
 description: Package design and the managed-resource reconcile flow provider-runtime drives for every Krateo provider.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, reconciler, architecture]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-10-28T00:00:00Z
 ---
 
 # Overview
@@ -48,10 +48,33 @@ the `Ready`/`Synced` conditions from `apis/common/v1`, and requeues on the
 poll interval (default 1m, jitter/hook configurable).
 
 A guard against half-completed creates: before calling `Create` the reconciler
-stamps `krateo.io/external-create-pending` through a
-`CriticalAnnotationUpdater` (retrying variant in `pkg/reconciler/api.go`), and
-records success/failure in the paired annotations, refusing to proceed while
-the outcome is unknowable (`ExternalCreateIncomplete`).
+stamps `krateo.io/external-create-pending`. Afterwards it records
+`-succeeded` or `-failed` through a `CriticalAnnotationUpdater` (retrying
+variant in `pkg/reconciler/api.go`), which re-reads the object before writing.
+Every `Create` error is stamped `-failed`, including a resource-version
+conflict, so the next reconcile retries `Create` (since v1.5.2).
+
+A handshake whose outcome was never recorded (`ExternalCreateIncomplete`:
+`pending` is newer than both terminal markers) is resolved by asking `Observe`
+(since v1.4.0):
+
+- **Resource exists**: the create landed. The reconciler stamps `-succeeded`
+  and adopts it.
+- **Resource absent, pending younger than the recovery grace period** (default
+  2m): it keeps refusing and re-observes every 15s, because an eventually
+  consistent API may not show a create that landed yet.
+- **Resource absent, grace period elapsed**: it clears `-pending` and retries
+  `Create`.
+- **Managed resource being deleted, external resource absent**: deletion
+  proceeds.
+
+**The contract this puts on `Observe`:** when the external resource does not
+exist, return `ExternalObservation{ResourceExists: false}` with a **nil**
+error. An `Observe` error returns before the guard runs, so a provider whose
+`Observe` errors on "not found" (or on any input it cannot read for a
+half-created resource) keeps an unresolved handshake stuck indefinitely, on
+every runtime version. Return an error only when you cannot tell whether the
+resource exists.
 
 ## Supporting packages
 

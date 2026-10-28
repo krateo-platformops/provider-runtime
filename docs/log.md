@@ -4,13 +4,40 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-10-28T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-10-28 — v1.5.2, v1.5.3
+- v1.5.2: a `Create` that returns a resource-version conflict, plain or
+  wrapped, is now stamped `external-create-failed` like any other error (#14).
+  Before, it requeued without stamping. `pending` stayed the newest marker and
+  the resource waited out the recovery window, or forever before v1.4.0. Seen
+  as a stuck RestDefinition on 2 of 2 fresh installs with oasgen-provider
+  pinned to v1.3.0 (oasgen-provider#254).
+- v1.5.3: no runtime change. The release-notes trigger now matches `v`-prefixed
+  tags (#16), so this is the first release with a GitHub Release.
+- Documented the `Observe` contract the create-handshake recovery depends on:
+  return `ResourceExists: false`, not an error, for an absent resource.
+
+## 2026-10-27 — v1.5.0, v1.5.1
+- v1.5.0 added a `ZeroEvidence` condition constructor (#11); v1.5.1 reverted
+  it (#12) because its consumer uses unstructured-runtime's conditions. Do not
+  use v1.5.0.
+
+## 2026-09-25 — v1.4.0
+- An unresolved create handshake no longer refuses forever (#10). After the
+  create recovery grace period (2m) with `Observe` still reporting the resource
+  absent, the reconciler clears `external-create-pending` and retries.
+  Motivated by six Repo CRs stuck for over a day (git-provider#22).
+
+## 2026-09-16 — v1.3.1
+- An unresolved create handshake is resolved by asking `Observe` instead of
+  refusing before it (#7). If the resource exists, it is adopted.
 
 ## 2026-08-07
 - Adopted the Krateo Documentation Standard (this bundle) — the repo's first

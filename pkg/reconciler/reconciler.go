@@ -235,6 +235,12 @@ type ExternalClient interface {
 	// reflect the state of the external resource. Status modifications are
 	// automatically persisted unless ResourceLateInitialized is true - see
 	// ResourceLateInitialized for more detail.
+	//
+	// When the external resource does not exist, return ResourceExists: false
+	// with a nil error. An unresolved create handshake is resolved from
+	// Observe's answer, and an error returns before that happens, so an
+	// Observe that errors on "not found" keeps such a resource stuck. Return an
+	// error only when it cannot be determined whether the resource exists.
 	Observe(ctx context.Context, mg resource.Managed) (ExternalObservation, error)
 
 	// Create an external resource per the specifications of the supplied

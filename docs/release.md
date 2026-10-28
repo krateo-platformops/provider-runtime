@@ -4,22 +4,24 @@ title: provider-runtime — release
 description: How a provider-runtime version actually ships — an annotated git tag consumed via the Go module proxy; no images, no charts, no OCI artifacts.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, release, go-module]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-10-28T00:00:00Z
 ---
 
 # Release
 
 provider-runtime is **tag-only**: a release is a git tag on `main`, consumed
-by providers through the Go module proxy. There is no release workflow, no
-container image, no chart and no OCI artifact — this is the intended reality
-for this library, not a gap.
+by providers through the Go module proxy. There is no build or publish
+workflow, no container image, no chart and no OCI artifact — this is the
+intended reality for this library, not a gap. The only thing a tag triggers is
+its release notes (see [CI](#ci)).
 
 ## Tag convention
 
 Tags are semver **with the `v` prefix** (the Go-module requirement):
-`v0.4.7` … `v1.2.2`, `v1.3.0` (latest at the time of writing). Note this
-differs from Krateo *chart* repos, whose tags carry no `v` prefix — Go module
-tags must have it.
+`v0.4.7` … `v1.5.3`. Note this differs from Krateo *chart* repos, whose tags
+carry no `v` prefix — Go module tags must have it, and any tag-triggered
+workflow here must match `v[0-9]+.[0-9]+.[0-9]+`. The bare-semver trigger the
+chart repos use never fired here; release notes start at v1.5.3 (#16).
 
 ## CI
 
@@ -27,7 +29,13 @@ One workflow, `.github/workflows/run-tests.yaml` (**Test and coverage**),
 runs on every pull request to `main`: `go test -race -coverprofile=…
 -covermode=atomic ./...` plus a Codecov upload (needs the `CODECOV_TOKEN`
 secret). The `lint-docs` job (this standard's conformance check) runs
-alongside it. Nothing runs on tag push.
+alongside it, and `security.yml` runs the org's shared security checks.
+
+On a tag push, `.github/workflows/release-notes.yaml` calls the org's shared
+release-notes workflow. It creates the GitHub Release and writes generated
+notes into it. If generation fails, it leaves a list of commit subjects
+instead, and a re-run (`workflow_dispatch` with the `tag` input) replaces it.
+Notes never fail a release.
 
 ## Cutting a release
 
@@ -48,9 +56,10 @@ alongside it. Nothing runs on tag push.
      github.com/krateo-platformops/provider-runtime@vX.Y.Z
    ```
 
-5. Optionally draft the GitHub Release notes on the tag (release notes live in
-   GitHub Releases, not in this bundle; [log](./log.md) records only curated
-   history).
+5. Check the GitHub Release the tag push created. Its notes are generated (see
+   [CI](#ci)). Because they are generated from the commits, put the reasoning
+   in the annotated tag message and commit bodies. [log](./log.md) records
+   only curated history.
 
 ## After a release
 
