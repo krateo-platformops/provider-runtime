@@ -14,7 +14,9 @@ name: release-notes
 
 on:
   push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+    # Go module versions carry a v prefix (v1.5.2), so the bare-semver glob the other repos use never
+    # matched here and no release since this workflow landed got notes.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       tag:
