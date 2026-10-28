@@ -1112,3 +1112,87 @@ func TestReconciler(t *testing.T) {
 			"is what left six Repo CRs terminal for over a day (git-provider#22).")
 	}
 }
+
+// krateo-platformops/oasgen-provider#254: a Create that returned a resource-version conflict,
+// plain or wrapped, used to requeue BEFORE stamping external-create-failed. external-create-pending
+// stayed the newest marker, and every later reconcile refused with errCreateIncomplete. Every create
+// error must close the handshake, so that the next pass retries Create instead of refusing.
+func TestCreateErrorClosesHandshake(t *testing.T) {
+	conflict := kerrors.NewConflict(schema.GroupResource{Group: "example.krateo.io", Resource: "things"}, "x",
+		errors.New("the object has been modified"))
+
+	cases := map[string]struct {
+		createErr  error
+		wantResult reconcile.Result
+		wantErr    bool
+	}{
+		"Conflict":        {createErr: conflict, wantResult: reconcile.Result{Requeue: true}},
+		"WrappedConflict": {createErr: errors.Wrap(conflict, "cannot update status"), wantResult: reconcile.Result{Requeue: true}},
+		"PlainError":      {createErr: errors.New("boom"), wantErr: true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			// What the API server holds; every write lands here and every read comes from here.
+			persisted := &fake.Managed{}
+			creates := 0
+
+			mc := &test.MockClient{
+				MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+					obj.SetAnnotations(persisted.GetAnnotations())
+					return nil
+				}),
+				MockUpdate: test.NewMockUpdateFn(nil, func(obj client.Object) error {
+					persisted.SetAnnotations(obj.GetAnnotations())
+					return nil
+				}),
+				MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+					if cond := obj.(*fake.Managed).GetCondition(prv1.TypeReady); cond.Message == errCreateIncomplete {
+						t.Errorf("must not refuse with %q after a create error", errCreateIncomplete)
+					}
+					return nil
+				}),
+			}
+			r := NewReconciler(&fake.Manager{Client: mc, Scheme: fake.SchemeWith(&fake.Managed{})},
+				resource.ManagedKind(fake.GVK(&fake.Managed{})),
+				WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+					return &ExternalClientFns{
+						ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+							return ExternalObservation{ResourceExists: false}, nil
+						},
+						CreateFn: func(_ context.Context, _ resource.Managed) error {
+							creates++
+							return tc.createErr
+						},
+					}, nil
+				})),
+				WithCriticalAnnotationUpdater(CriticalAnnotationUpdateFn(func(_ context.Context, o client.Object) error {
+					persisted.SetAnnotations(o.GetAnnotations())
+					return nil
+				})),
+				WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
+			)
+
+			got, err := r.Reconcile(context.Background(), reconcile.Request{})
+			if (err != nil) != tc.wantErr {
+				t.Errorf("r.Reconcile(...): want error %t, got %v", tc.wantErr, err)
+			}
+			if diff := cmp.Diff(tc.wantResult, got); diff != "" {
+				t.Errorf("r.Reconcile(...): -want, +got:\n%s", diff)
+			}
+			if meta.GetExternalCreateFailed(persisted).IsZero() {
+				t.Errorf("a create error must persist %s; got annotations %v", meta.AnnotationKeyExternalCreateFailed, persisted.GetAnnotations())
+			}
+			if meta.ExternalCreateIncomplete(persisted) {
+				t.Errorf("a create error must close the handshake, but %s is still the newest marker: %v",
+					meta.AnnotationKeyExternalCreatePending, persisted.GetAnnotations())
+			}
+
+			// The next reconcile must retry Create, not refuse.
+			_, _ = r.Reconcile(context.Background(), reconcile.Request{})
+			if creates != 2 {
+				t.Errorf("the reconcile after a create error must retry Create: want 2 Create calls, got %d", creates)
+			}
+		})
+	}
+}
