@@ -29,7 +29,10 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   Before, it requeued without stamping. `pending` stayed the newest marker and
   the resource waited out the recovery window, or forever before v1.4.0. Seen
   as a stuck RestDefinition on 2 of 2 fresh installs with oasgen-provider
-  pinned to v1.3.0 (oasgen-provider#254).
+  pinned to v1.3.0 (oasgen-provider#254). This fixes the **conflict** path
+  only. A resource whose `Observe` errors needs the consumer-side `Observe`
+  contract in [overview](./overview.md); a runtime bump alone does not fix
+  it (core-provider#236).
 - v1.5.3: no runtime change. The release-notes trigger now matches `v`-prefixed
   tags (#16), so this is the first release with a GitHub Release.
 

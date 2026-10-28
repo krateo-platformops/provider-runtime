@@ -75,6 +75,18 @@ error. An `Observe` error ends the reconcile before both the guard and
 "not found" never creates anything. On a half-created resource it also holds
 the unresolved handshake, because the guard needs `Observe`'s answer.
 
+**The common trap is not a mishandled "not found".** It is an error return
+*earlier* in `Observe`, on a prerequisite the provider reads before it can
+look: a chart, a template, a credential, a registry. core-provider's
+`Observe` handled "not found" correctly the whole time. Its existence check
+was unreachable behind four error returns on reading the chart. So check your
+not-found branch, and also every error return that **precedes** your existence
+check. Ask whether the condition causing it can persist across reconciles (an
+unreachable registry, an unreadable input, a missing credential). If it can,
+it holds the resource for as long as it persists. Where existence can be
+answered without that prerequisite, answer it. core-provider#236 took the GVK
+the question needed from the object's status instead of from the chart.
+
 The handshake itself never holds the resource beyond that. Once `Observe`
 answers again, the guard adopts the resource or retries the create within the
 recovery grace period. While `Observe` errors on an unresolved handshake, the
