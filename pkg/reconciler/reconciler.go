@@ -1087,10 +1087,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// issue we'll be requeued implicitly when we update our status with
 			// the new error condition. If not, we requeue explicitly, which will trigger backoff.
 			log.Error(err, "Cannot create external resource")
-			if kerrors.IsConflict(err) {
-				return reconcile.Result{Requeue: true}, nil
-			}
-			throttledRecorder.Event(managed, event.Warning(reasonCannotCreate, actionCreateExternalResource, err))
 
 			// We handle annotations specially here because it's
 			// critical that they are persisted to the API server.
@@ -1098,6 +1094,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// the reconciler will refuse to proceed, because it
 			// won't know whether or not it created an external
 			// resource.
+			//
+			// This must happen for EVERY create error, conflicts included. We used to requeue on a
+			// conflict before stamping, which left external-create-pending as the newest marker, so
+			// every later reconcile refused with errCreateIncomplete until a human removed it
+			// (krateo-platformops/oasgen-provider#254). The critical annotation updater re-reads
+			// the object before writing, so a stale resourceVersion does not stop the stamp.
 			meta.SetExternalCreateFailed(managed, time.Now())
 			if err := r.managed.UpdateCriticalAnnotations(ctx, managed); err != nil {
 				log.Error(err, errUpdateManagedAnnotations)
@@ -1109,6 +1111,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				// set our status condition to the reason the
 				// create failed.
 			}
+
+			// A conflict is transient: someone else wrote the object first. Retry promptly rather
+			// than report it as a create failure; the next pass observes before it creates again.
+			if kerrors.IsConflict(err) {
+				return reconcile.Result{Requeue: true}, nil
+			}
+			throttledRecorder.Event(managed, event.Warning(reasonCannotCreate, actionCreateExternalResource, err))
 
 			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(errors.Wrap(err, errReconcileCreate)))
 			if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
