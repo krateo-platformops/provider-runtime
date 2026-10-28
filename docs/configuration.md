@@ -4,7 +4,7 @@ title: provider-runtime — configuration
 description: Everything provider-runtime reads — build tags, environment consumed via the OTel SDK, option structs and their defaults, and the annotation switches honored at runtime.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, configuration, otel, annotations]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-10-28T00:00:00Z
 ---
 
 # Configuration
@@ -67,7 +67,9 @@ The library itself reads no environment variables. `telemetry.Setup` with
 |---|---|---|
 | External-call timeout | `1m` (+30s reconcile grace) | `WithTimeout` |
 | Poll interval | `1m` | `WithPollInterval`, `WithPollIntervalHook`, `WithPollJitterHook` |
-| Creation grace period | `30s` | `WithCreationGracePeriod` |
+| Creation grace period (wait for a create that **succeeded** to become observable) | `30s` | `WithCreationGracePeriod` |
+| Create recovery grace period (how long an **unresolved** create keeps refusing before it is retried) | `2m` | `WithCreateRecoveryGracePeriod` |
+| Create recovery re-observe interval (inside that window) | `15s` | `WithCreateRecoveryReobserveInterval` |
 | Finalizer | `finalizer.managedresource.krateo.io` (`APIFinalizer`) | `WithFinalizer` |
 | Logger / events / metrics | nop logger, nop recorder, no metrics | `WithLogger`, `WithRecorder`, `WithThrottledRecorder`, `WithMetrics` |
 | Critical-annotation updater | retrying updater | `WithCriticalAnnotationUpdater` |

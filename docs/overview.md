@@ -4,7 +4,7 @@ title: provider-runtime — overview
 description: Package design and the managed-resource reconcile flow provider-runtime drives for every Krateo provider.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, reconciler, architecture]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-10-28T00:00:00Z
 ---
 
 # Overview
@@ -48,10 +48,82 @@ the `Ready`/`Synced` conditions from `apis/common/v1`, and requeues on the
 poll interval (default 1m, jitter/hook configurable).
 
 A guard against half-completed creates: before calling `Create` the reconciler
-stamps `krateo.io/external-create-pending` through a
-`CriticalAnnotationUpdater` (retrying variant in `pkg/reconciler/api.go`), and
-records success/failure in the paired annotations, refusing to proceed while
-the outcome is unknowable (`ExternalCreateIncomplete`).
+stamps `krateo.io/external-create-pending`. Afterwards it records
+`-succeeded` or `-failed` through a `CriticalAnnotationUpdater` (retrying
+variant in `pkg/reconciler/api.go`), which re-reads the object before writing.
+Every `Create` error is stamped `-failed`, including a resource-version
+conflict, so the next reconcile retries `Create` (since v1.5.2).
+
+A handshake whose outcome was never recorded (`ExternalCreateIncomplete`:
+`pending` is newer than both terminal markers) is resolved by asking `Observe`
+(since v1.4.0):
+
+- **Resource exists**: the create landed. The reconciler stamps `-succeeded`
+  and adopts it.
+- **Resource absent, pending younger than the recovery grace period** (default
+  2m): it keeps refusing and re-observes every 15s, because an eventually
+  consistent API may not show a create that landed yet.
+- **Resource absent, grace period elapsed**: it clears `-pending` and retries
+  `Create`.
+- **Managed resource being deleted, external resource absent**: deletion
+  proceeds.
+
+**The contract this puts on `Observe`:** when the external resource does not
+exist, return `ExternalObservation{ResourceExists: false}` with a **nil**
+error. An `Observe` error ends the reconcile before both the guard and
+`Create`, with or without a pending create. So an `Observe` that errors on
+"not found" never creates anything. On a half-created resource it also holds
+the unresolved handshake, because the guard needs `Observe`'s answer.
+
+**The common trap is not a mishandled "not found".** It is an error return
+*earlier* in `Observe`, on a prerequisite the provider reads before it can
+look: a chart, a template, a credential, a registry. core-provider's
+`Observe` handled "not found" correctly the whole time. Its existence check
+was unreachable behind four error returns on reading the chart. So check your
+not-found branch, and also every error return that **precedes** your existence
+check. Ask whether the condition causing it can persist across reconciles (an
+unreachable registry, an unreadable input, a missing credential). If it can,
+it holds the resource for as long as it persists. Where existence can be
+answered without that prerequisite, answer it. core-provider#236 took the GVK
+the question needed from the object's status instead of from the chart.
+
+The handshake itself never holds the resource beyond that. Once `Observe`
+answers again, the guard adopts the resource or retries the create within the
+recovery grace period. While `Observe` errors on an unresolved handshake, the
+`Synced` condition names both the `Observe` error and the pending create
+(since v1.6.0). For example:
+
+```
+external create pending since 2026-10-28T18:12:41Z cannot be resolved until observe succeeds: observe failed: <the provider's error>
+```
+
+The runtime deliberately does not bound this by calling `Create` anyway. A
+create without an observation can duplicate exactly the resource whose
+identity was lost, which is what the guard exists to prevent. And it gains
+nothing when `Create` hits the same failure.
+
+So the fix belongs in `Observe`. For each error return, ask: **if I answered
+`ResourceExists: false` here and the resource did exist, would `Create`
+duplicate it?**
+
+- **No**, because `Create` is idempotent for this resource (a deterministic
+  name, or an apply that converges): answer instead of erroring. Report the
+  cause through a condition if it helps, for example
+  `Unavailable().WithMessage(...)`. If the same failure then hits `Create`,
+  it surfaces there as a create error, which closes the handshake
+  (`external-create-failed`).
+- **Yes**, because identity could be lost: an error is correct, but only for a
+  *transient* "cannot tell", such as a failed read from the external system
+  that a retry can answer.
+
+Treat a **permanent** "cannot tell" as a defect to fix, not as an error to
+return. Examples are a local template that fails to render, or a spec that
+cannot be parsed into a lookup. Retrying never resolves it, so the resource
+stays stuck until the provider changes. Watch for one error return that
+carries both kinds: oasgen-provider#266 found a single call that wraps two
+local renders and two cluster calls, so it can't be classified at the call
+site without splitting it. core-provider#236 shows the fix: answer existence
+from what the object already records, and let `Create` report the failure.
 
 ## Supporting packages
 

@@ -4,7 +4,7 @@ title: provider-runtime — api
 description: The exported Go API surface of provider-runtime, package by package, plus the OTLP metric instruments it emits.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-api, reconciler, metrics]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-10-28T00:00:00Z
 ---
 
 # API
@@ -21,7 +21,7 @@ types, by package:
 - `ExternalConnecter` — `Connect(ctx, mg resource.Managed) (ExternalClient, error)`; also `ExternalDisconnecter`, `ExternalConnectDisconnecter`, `NopDisconnecter`/`NewNopDisconnecter`, and `…Fn`/`…Fns` adapters.
 - `ExternalClient` — `Observe(ctx, mg) (ExternalObservation, error)`, `Create(ctx, mg) error`, `Update(ctx, mg) error`, `Delete(ctx, mg) error`; `ExternalClientFns`, `NopConnecter`, `NopClient`.
 - `ExternalObservation` — `ResourceExists`, `ResourceUpToDate`, `ResourceLateInitialized`, `Diff`.
-- Options: `WithTimeout`, `WithPollInterval`, `WithPollIntervalHook`, `WithPollJitterHook`, `WithCreationGracePeriod`, `WithExternalConnecter`, `WithExternalConnectDisconnecter`, `WithCriticalAnnotationUpdater`, `WithFinalizer`, `WithLogger`, `WithMetrics`, `WithRecorder`, `WithThrottledRecorder`.
+- Options: `WithTimeout`, `WithPollInterval`, `WithPollIntervalHook`, `WithPollJitterHook`, `WithCreationGracePeriod`, `WithCreateRecoveryGracePeriod`, `WithCreateRecoveryReobserveInterval`, `WithExternalConnecter`, `WithExternalConnectDisconnecter`, `WithCriticalAnnotationUpdater`, `WithFinalizer`, `WithLogger`, `WithMetrics`, `WithRecorder`, `WithThrottledRecorder`.
 - `MetricsRecorder` — the interface `WithMetrics` accepts (durations + failure counters for get/connect/observe/create/update/delete/finalizers/status, in-flight gauge; satisfied by `*telemetry.Metrics`).
 - `CriticalAnnotationUpdater` / `RetryingCriticalAnnotationUpdater` / `NewRetryingCriticalAnnotationUpdater` — retry-on-conflict updates of the external-create tracking annotations.
 - `ControllerName(kind string) string`, `FinalizerName = "finalizer.managedresource.krateo.io"`.
