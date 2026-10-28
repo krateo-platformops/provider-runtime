@@ -4,17 +4,22 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-10-28T00:00:00Z
 ---
 
 # Usage
 
-provider-runtime is consumed as a plain Go module. It requires Go ≥ 1.25 (see
-`go.mod`) and pins `sigs.k8s.io/controller-runtime` v0.23.x / `k8s.io/*`
+provider-runtime is consumed as a plain Go module. It requires Go ≥ 1.26
+(see `go.mod`; since v1.7.0) and pins `sigs.k8s.io/controller-runtime` v0.23.x / `k8s.io/*`
 v0.35.x — your provider's controller-runtime version must be compatible.
 
+Build with **Go ≥ 1.26.10**. The `go` line is only the language floor; the
+standard library comes from your toolchain. Older 1.26 patches carry
+`net/http` and `crypto/x509` vulnerabilities that `govulncheck` reports
+against code using this module.
+
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.3.0
+go get github.com/krateo-platformops/provider-runtime@v1.7.0
 ```
 
 ## Minimal provider

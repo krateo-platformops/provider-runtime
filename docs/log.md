@@ -12,6 +12,17 @@ timestamp: 2026-10-28T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-10-28 — v1.7.0
+- **Requires Go 1.26** (`go 1.26.0`, was 1.25.6). Every `golang.org/x/net`
+  release that fixes the HTTP/2 vulnerabilities this module reaches through
+  client-go requires it.
+- Dependency vulnerabilities closed: x/net v0.62.0, x/text v0.43.0, gRPC
+  v1.85.0, OTel v1.45.0 (six Dependabot alerts, three high, plus further
+  `govulncheck` findings). With Go 1.26.10, `govulncheck` reports none.
+  Standard-library findings depend on the consumer's toolchain: build with
+  Go ≥ 1.26.10.
+- No API or behaviour change.
+
 ## 2026-10-28 — v1.6.0
 - When `Observe` errors on an unresolved create handshake, the `Synced`
   condition and the returned error name the pending create alongside the
