@@ -28,8 +28,12 @@ runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
 standard-library findings your patched build doesn't have.
 
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.7.0
+go get github.com/krateo-platformops/provider-runtime@v1.7.1
 ```
+
+If your provider also uses `github.com/krateo-platformops/audit` (v0.3.0+),
+use provider-runtime ≥ v1.7.1. v1.7.0's `pkg/logging` doesn't compile
+against the `otel/log` version audit selects.
 
 ## Minimal provider
 

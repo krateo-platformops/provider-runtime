@@ -18,7 +18,7 @@ its release notes (see [CI](#ci)).
 ## Tag convention
 
 Tags are semver **with the `v` prefix** (the Go-module requirement):
-`v0.4.7` … `v1.7.0`. Note this differs from Krateo *chart* repos, whose tags
+`v0.4.7` … `v1.7.1`. Note this differs from Krateo *chart* repos, whose tags
 carry no `v` prefix — Go module tags must have it, and any tag-triggered
 workflow here must match `v[0-9]+.[0-9]+.[0-9]+`. The bare-semver trigger the
 chart repos use never fired here; release notes start at v1.5.3 (#16).
