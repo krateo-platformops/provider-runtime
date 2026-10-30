@@ -4,13 +4,24 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-10-30T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-10-30 — v1.7.1
+- `pkg/logging` now builds alongside `github.com/krateo-platformops/audit`
+  v0.3.0. v1.7.0 pinned the OTel slog bridge at `otelslog` v0.8.0 with
+  `otel/log` v0.9.0. audit requires `otel/log` v0.21.0, Go's version
+  selection takes the higher, and `otelslog` v0.8.0 doesn't compile against
+  it (`undefined: log.KeyValue`). Any provider using both failed to build
+  until it bumped `otelslog` itself.
+- Now `otelslog` v0.20.0 + `otel/log` v0.21.0, the pair that matches this
+  module's `otel` v1.45.0. The core OTel modules are unchanged.
+- No API or behaviour change.
 
 ## 2026-10-28 — v1.7.0
 - **Requires Go 1.26** (`go 1.26.0`, was 1.25.6). Every `golang.org/x/net`
