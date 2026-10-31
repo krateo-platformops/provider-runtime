@@ -4,13 +4,24 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-10-30T00:00:00Z
+timestamp: 2026-10-31T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-10-31 — v1.7.2
+- A resource-version conflict while persisting late-initialized fields now
+  requeues at once, like every other write to the managed resource. Before,
+  it was reported as `ReconcileError` with a Warning event and waited out
+  error backoff. The condition never stuck: the status write carried the same
+  stale version and failed too. But each lost race showed up as an error.
+  Found while checking provider-runtime for the shape unstructured-runtime
+  fixed in v1.7.2, where a conflict became a lasting `ReconcileError`; that
+  shape does not occur here (see [overview](./overview.md)).
+- No API change.
 
 ## 2026-10-30 — v1.7.1
 - `pkg/logging` now builds alongside `github.com/krateo-platformops/audit`
