@@ -47,6 +47,20 @@ finalizer (`finalizer.managedresource.krateo.io`), records Kubernetes events
 the `Ready`/`Synced` conditions from `apis/common/v1`, and requeues on the
 poll interval (default 1m, jitter/hook configurable).
 
+**Conflicts are transient, not errors.** A resource-version conflict on any
+write to the managed resource is retried, never reported as
+`Synced=False/ReconcileError`:
+- the writes covered are the finalizer, the external-create annotations and the
+  late-initialized fields (since v1.7.2);
+- the external-create annotations go through `RetryingCriticalAnnotationUpdater`,
+  which re-reads the object and retries;
+- the other writes requeue at once and redo the work from a fresh read.
+
+A failed status write records nothing and returns its error, so the reconcile
+is retried with backoff. Every path that does record `ReconcileError` also
+requeues, and the next successful pass sets `ReconcileSuccess`, so a lost race
+cannot leave the condition stuck.
+
 A guard against half-completed creates: before calling `Create` the reconciler
 stamps `krateo.io/external-create-pending`. Afterwards it records
 `-succeeded` or `-failed` through a `CriticalAnnotationUpdater` (retrying

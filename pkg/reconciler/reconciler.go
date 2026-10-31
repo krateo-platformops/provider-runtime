@@ -1192,6 +1192,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// an immediate reconcile which should re-observe the external resource
 		// and persist its status.
 		if err := r.client.Update(ctx, managed); err != nil {
+			// A conflict is transient: someone else wrote the object first. Requeue promptly and
+			// late-initialize again from a fresh read, as every other write to the managed resource
+			// does, rather than report a ReconcileError and wait out error backoff.
+			if kerrors.IsConflict(err) {
+				return reconcile.Result{Requeue: true}, nil
+			}
 			log.Error(err, "Cannot update managed resource")
 			throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, err))
 			managed.SetConditions(prv1.ReconcileError(errors.Wrap(err, errUpdateManaged)))

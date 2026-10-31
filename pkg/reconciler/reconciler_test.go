@@ -1152,6 +1152,58 @@ func TestReconciler(t *testing.T) {
 	}
 }
 
+// Persisting late-initialized fields is a write to the managed resource like the finalizer and
+// create-pending writes, and a resource-version conflict there is just as transient: someone
+// else wrote first. It must requeue promptly like those, not be reported as a ReconcileError
+// (with a Warning event and error backoff) for a race that the next pass resolves by re-reading.
+func TestLateInitializeConflictRequeues(t *testing.T) {
+	conflict := kerrors.NewConflict(schema.GroupResource{Group: "example.krateo.io", Resource: "things"}, "x",
+		errors.New("the object has been modified"))
+
+	updates, statusUpdates := 0, 0
+	mc := &test.MockClient{
+		MockGet: test.NewMockGetFn(nil),
+		MockUpdate: test.NewMockUpdateFn(nil, func(_ client.Object) error {
+			updates++
+			return conflict
+		}),
+		MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+			statusUpdates++
+			if cond := obj.(*fake.Managed).GetCondition(prv1.TypeSynced); cond.Reason == prv1.ReasonReconcileError {
+				t.Errorf("a late-init conflict must not be recorded as %s: %q", prv1.ReasonReconcileError, cond.Message)
+			}
+			return nil
+		}),
+	}
+	r := NewReconciler(&fake.Manager{Client: mc, Scheme: fake.SchemeWith(&fake.Managed{})},
+		resource.ManagedKind(fake.GVK(&fake.Managed{})),
+		WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
+			return &ExternalClientFns{
+				ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+					return ExternalObservation{ResourceExists: true, ResourceUpToDate: true, ResourceLateInitialized: true}, nil
+				},
+			}, nil
+		})),
+		WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
+	)
+
+	got, err := r.Reconcile(context.Background(), reconcile.Request{})
+
+	// The denominator: without a conflicting Update, this test could not tell the fix from its absence.
+	if updates == 0 {
+		t.Fatalf("the late-init Update was never called, so no conflict was produced")
+	}
+	if err != nil {
+		t.Errorf("r.Reconcile(...): a late-init conflict must not return an error (that means error backoff); got %v", err)
+	}
+	if diff := cmp.Diff(reconcile.Result{Requeue: true}, got); diff != "" {
+		t.Errorf("r.Reconcile(...): -want, +got:\n%s", diff)
+	}
+	if statusUpdates != 0 {
+		t.Errorf("a late-init conflict must requeue without writing status; got %d status updates", statusUpdates)
+	}
+}
+
 // krateo-platformops/oasgen-provider#254: a Create that returned a resource-version conflict,
 // plain or wrapped, used to requeue BEFORE stamping external-create-failed. external-create-pending
 // stayed the newest marker, and every later reconcile refused with errCreateIncomplete. Every create
