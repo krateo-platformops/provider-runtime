@@ -12,6 +12,14 @@ timestamp: 2026-11-04T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-04 — docs: errors become readable status
+- overview.md now states that every error a provider returns is written
+  verbatim into `Synced`'s message, readable by anyone with `get` on the
+  resource, and that keeping credentials and raw vendor bodies out of those
+  errors is the provider's job. The runtime cannot tell what is sensitive.
+  Decided with the user after oasgen-provider#433 found a vendor's error body
+  exposed. No code change.
+
 ## 2026-11-04 — v1.8.2
 - **The runtime sets `Ready=Deleting` when `Connect` or `Observe` fails on a
   resource being deleted** (deletion timestamp set). v1.8.0/v1.8.1 kept
