@@ -28,6 +28,12 @@ const (
 	ReasonUnavailable ConditionReason = "Unavailable"
 	ReasonCreating    ConditionReason = "Creating"
 	ReasonDeleting    ConditionReason = "Deleting"
+
+	// ReasonNotObserved means the runtime could not observe the external
+	// resource (Connect or Observe failed), so it cannot vouch for the Ready
+	// the provider last reported. The error is on the Synced condition.
+	// Readers match this value by equality; do not change it.
+	ReasonNotObserved ConditionReason = "NotObserved"
 )
 
 // Reasons a resource is or is not synced.
@@ -207,6 +213,26 @@ func Unavailable() Condition {
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonUnavailable,
+	}
+}
+
+// messageNotObserved is the message of the NotObserved condition. It is
+// deliberately constant: the error that prevented the observation is reported
+// on the Synced condition, so a repeated failure with a different error text
+// does not rewrite Ready or move its LastTransitionTime.
+const messageNotObserved = "The external resource could not be observed; see the Synced condition for the error."
+
+// NotObserved returns a condition that indicates the external resource could
+// not be observed, so whether it is ready is unknown. The runtime sets it when
+// Connect or Observe fails; providers do not set it themselves. A successful
+// Observe replaces it with the Ready the provider reports.
+func NotObserved() Condition {
+	return Condition{
+		Type:               TypeReady,
+		Status:             metav1.ConditionUnknown,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonNotObserved,
+		Message:            messageNotObserved,
 	}
 }
 

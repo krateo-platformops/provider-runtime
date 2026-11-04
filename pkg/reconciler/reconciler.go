@@ -52,6 +52,9 @@ const (
 	errReconcileUpdate          = "update failed"
 	errReconcileDelete          = "delete failed"
 	errExternalResourceNotExist = "external resource does not exist"
+	errReadyNotSetAfterObserve  = "Observe succeeded but did not set the Ready condition, which still reads " +
+		string(prv1.ReasonNotObserved) + " from an earlier failure: the provider breaks the provider-runtime contract " +
+		"\"a successful Observe must set Ready\". Ready stays " + string(prv1.ReasonNotObserved) + " until the provider sets it"
 )
 
 // Event reasons.
@@ -67,6 +70,10 @@ const (
 	reasonCannotUnpublish     event.Reason = "CannotUnpublishConnectionDetails"
 	reasonCannotUpdate        event.Reason = "CannotUpdateExternalResource"
 	reasonCannotUpdateManaged event.Reason = "CannotUpdateManagedResource"
+
+	// reasonReadyNotSetAfterObserve reports a provider defect: Observe succeeded but left
+	// Ready at NotObserved. See the Ready contract on ExternalClient.Observe.
+	reasonReadyNotSetAfterObserve event.Reason = "ReadyNotSetAfterObserve"
 
 	reasonDeleted event.Reason = "DeletedExternalResource"
 	reasonCreated event.Reason = "CreatedExternalResource"
@@ -246,6 +253,16 @@ type ExternalClient interface {
 	// retry can resolve; a permanent one (for example a local template that
 	// never renders) keeps the resource stuck until the provider changes.
 	// See docs/overview.md.
+	//
+	// Every Observe that returns a nil error must set the Ready condition on
+	// mg, on every path, including those that report ResourceExists: false.
+	// When Connect or Observe returns an error, the runtime sets Ready to
+	// NotObserved (Status Unknown) next to the error on Synced, unless Ready
+	// is Deleting or the error is wrapped with ReadyAssessed, which an Observe
+	// returns when it set Ready itself and the error concerns something else.
+	// The runtime never sets Ready on recovery: a successful Observe that
+	// leaves Ready at NotObserved is reported as a provider defect.
+	// reconcilertest.AssertObserveSetsReady checks this in a provider's tests.
 	Observe(ctx context.Context, mg resource.Managed) (ExternalObservation, error)
 
 	// Create an external resource per the specifications of the supplied
@@ -373,6 +390,10 @@ type ExternalObservation struct {
 type Reconciler struct {
 	client     client.Client
 	newManaged func() resource.Managed
+
+	// kind names the managed kind (Kind.group) in reports about it, because a typed object
+	// read through the client does not reliably carry its own TypeMeta.
+	kind string
 
 	pollInterval        time.Duration
 	pollIntervalHook    PollIntervalHook
@@ -682,6 +703,7 @@ func NewReconciler(m manager.Manager, of resource.ManagedKind, o ...ReconcilerOp
 	r := &Reconciler{
 		client:              m.GetClient(),
 		newManaged:          nm,
+		kind:                schema.GroupVersionKind(of).GroupKind().String(),
 		pollInterval:        defaultpollInterval,
 		pollIntervalHook:    defaultPollIntervalHook,
 		creationGracePeriod: defaultGracePeriod,
@@ -841,6 +863,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			return reconcile.Result{Requeue: true}, nil
 		}
 		throttledRecorder.Event(managed, event.Warning(reasonCannotConnect, actionProcessEvent, err))
+		// Without a client nothing was observed, so the last Ready can no longer be vouched for.
+		markNotObserved(managed, err)
 		managed.SetConditions(prv1.ReconcileError(errors.Wrap(err, errReconcileConnect)))
 		if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
 			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
@@ -878,11 +902,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// without creating blind (oasgen-provider#266, core-provider#236).
 			werr = errors.Wrapf(werr, errFmtCreateWaitsOnObserve, meta.GetExternalCreatePending(managed).Format(time.RFC3339))
 		}
+		// Observe could not answer, so the Ready it last reported is no longer known to hold.
+		// Leaving it would show a stale True next to the error.
+		markNotObserved(managed, err)
 		managed.SetConditions(prv1.ReconcileError(werr))
 		if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
 			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 		}
 		return reconcile.Result{}, werr
+	}
+
+	// A successful Observe must set Ready. If it is still the NotObserved marker an earlier
+	// failure left, this path of the provider's Observe never sets it. The runtime cannot
+	// know the true Ready, so it does not invent one: it keeps the marker, which is honest,
+	// and makes the breach loud so that it is fixed in the provider.
+	if readyNotSetAfterObserve(managed) {
+		log.Error(errors.New(errReadyNotSetAfterObserve), "Provider broke the Ready contract: a successful Observe must set Ready",
+			"kind", r.kind, "namespace", managed.GetNamespace(), "name", managed.GetName())
+		throttledRecorder.Event(managed, event.Warning(reasonReadyNotSetAfterObserve, actionObserveExternalResource, errors.New(errReadyNotSetAfterObserve)))
 	}
 
 	// Resolve an unresolved create handshake now that Observe has answered the question the old

@@ -287,7 +287,7 @@ func TestReconciler(t *testing.T) {
 						MockGet: test.NewMockGetFn(nil),
 						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, got client.Object, _ ...client.SubResourceUpdateOption) error {
 							want := &fake.Managed{}
-							want.SetConditions(prv1.ReconcileError(errors.Wrap(errBoom, errReconcileConnect)))
+							want.SetConditions(prv1.NotObserved(), prv1.ReconcileError(errors.Wrap(errBoom, errReconcileConnect)))
 							if diff := cmp.Diff(want, got, test.EquateConditions()); diff != "" {
 								reason := "Errors connecting to the provider should be reported as a conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
@@ -351,7 +351,7 @@ func TestReconciler(t *testing.T) {
 						MockGet: test.NewMockGetFn(nil),
 						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
 							want := &fake.Managed{}
-							want.SetConditions(prv1.ReconcileError(errors.Wrap(errBoom, errReconcileObserve)))
+							want.SetConditions(prv1.NotObserved(), prv1.ReconcileError(errors.Wrap(errBoom, errReconcileObserve)))
 							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {
 								reason := "Errors observing the managed resource should be reported as a conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
@@ -390,7 +390,7 @@ func TestReconciler(t *testing.T) {
 						MockStatusUpdate: test.MockSubResourceUpdateFn(func(_ context.Context, obj client.Object, _ ...client.SubResourceUpdateOption) error {
 							want := &fake.Managed{}
 							meta.SetExternalCreatePending(want, now.Time)
-							want.SetConditions(prv1.ReconcileError(errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve),
+							want.SetConditions(prv1.NotObserved(), prv1.ReconcileError(errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve),
 								errFmtCreateWaitsOnObserve, now.Time.Format(time.RFC3339))))
 							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {
 								reason := "An Observe error on an unresolved create should name the pending create in the conditioned status."

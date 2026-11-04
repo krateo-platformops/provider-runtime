@@ -4,7 +4,7 @@ title: provider-runtime — api
 description: The exported Go API surface of provider-runtime, package by package, plus the OTLP metric instruments it emits.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-api, reconciler, metrics]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 ---
 
 # API
@@ -21,15 +21,20 @@ types, by package:
 - `ExternalConnecter` — `Connect(ctx, mg resource.Managed) (ExternalClient, error)`; also `ExternalDisconnecter`, `ExternalConnectDisconnecter`, `NopDisconnecter`/`NewNopDisconnecter`, and `…Fn`/`…Fns` adapters.
 - `ExternalClient` — `Observe(ctx, mg) (ExternalObservation, error)`, `Create(ctx, mg) error`, `Update(ctx, mg) error`, `Delete(ctx, mg) error`; `ExternalClientFns`, `NopConnecter`, `NopClient`.
 - `ExternalObservation` — `ResourceExists`, `ResourceUpToDate`, `ResourceLateInitialized`, `Diff`.
+- Ready contract (since v1.8.0): `ReadyAssessed(err error) error` marks an error returned after `Observe` set `Ready` itself, so the runtime leaves `Ready` alone (nil-safe; keeps the message; `errors.Is`/`As`/`Unwrap` see through it); `IsReadyAssessed(err error) bool`. See [overview](./overview.md#the-ready-contract-since-v180).
 - Options: `WithTimeout`, `WithPollInterval`, `WithPollIntervalHook`, `WithPollJitterHook`, `WithCreationGracePeriod`, `WithCreateRecoveryGracePeriod`, `WithCreateRecoveryReobserveInterval`, `WithExternalConnecter`, `WithExternalConnectDisconnecter`, `WithCriticalAnnotationUpdater`, `WithFinalizer`, `WithLogger`, `WithMetrics`, `WithRecorder`, `WithThrottledRecorder`.
 - `MetricsRecorder` — the interface `WithMetrics` accepts (durations + failure counters for get/connect/observe/create/update/delete/finalizers/status, in-flight gauge; satisfied by `*telemetry.Metrics`).
 - `CriticalAnnotationUpdater` / `RetryingCriticalAnnotationUpdater` / `NewRetryingCriticalAnnotationUpdater` — retry-on-conflict updates of the external-create tracking annotations.
 - `ControllerName(kind string) string`, `FinalizerName = "finalizer.managedresource.krateo.io"`.
 
+## `pkg/reconciler/reconcilertest`
+
+- `AssertObserveSetsReady(t testing.TB, ctx context.Context, c reconciler.ExternalClient, mg resource.Managed) (reconciler.ExternalObservation, error)` — sets `Ready=NotObserved` on `mg`, calls `c.Observe`, and fails `t` if `Ready` is still `NotObserved`, or if `Observe` returned an error not wrapped with `ReadyAssessed`. Call once per success path.
+
 ## `apis/common/v1`
 
-- `Condition` (`Type`, `Status`, `LastTransitionTime`, `Reason`, `Message`), `ConditionType` (`TypeReady`, `TypeSynced`), `ConditionReason` (`Available`, `Unavailable`, `Creating`, `Deleting`, `ReconcileSuccess`, `ReconcileError`, `ReconcilePaused`).
-- `ConditionedStatus` with `GetCondition`/`SetConditions`/`Equal`; constructors `Creating()`, `Deleting()`, `Available()`, `Unavailable()`, `ReconcileSuccess()`, `ReconcileError(err)`, `ReconcilePaused()`.
+- `Condition` (`Type`, `Status`, `LastTransitionTime`, `Reason`, `Message`), `ConditionType` (`TypeReady`, `TypeSynced`), `ConditionReason` (`Available`, `Unavailable`, `Creating`, `Deleting`, `NotObserved`, `ReconcileSuccess`, `ReconcileError`, `ReconcilePaused`).
+- `ConditionedStatus` with `GetCondition`/`SetConditions`/`Equal`; constructors `Creating()`, `Deleting()`, `Available()`, `Unavailable()`, `NotObserved()` (`Ready` `Unknown`, set by the runtime when it can't observe; since v1.8.0), `ReconcileSuccess()`, `ReconcileError(err)`, `ReconcilePaused()`.
 - Selector types CRDs embed: `Reference`, `EnvSelector`, `SecretKeySelector`, `ConfigMapKeySelector`, `CredentialSelectors`.
 
 ## `pkg/resource`

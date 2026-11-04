@@ -4,7 +4,7 @@ title: greeting-controller — a minimal provider built on provider-runtime
 description: A compilable managed-resource controller (Greeting CRD + fake external system) showing the full provider-runtime wiring.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [example, reconciler, managed-resource]
-timestamp: 2026-08-07T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 ---
 
 # greeting-controller
@@ -28,6 +28,12 @@ The external name lifecycle is real: on first reconcile `Observe` reports the
 external resource missing, `Create` stamps the `krateo.io/external-name`
 annotation, and subsequent reconciles report `Available` (the `Ready`
 condition) or drift (`Diff`) when `spec.message` changes.
+
+`Observe` sets `Ready` on every path that returns no error, as the
+provider-runtime Ready contract requires (since v1.8.0; see
+[overview](../../docs/overview.md#the-ready-contract-since-v180)).
+`main_test.go` checks each of those paths with
+`reconcilertest.AssertObserveSetsReady`; run it with `go test .`.
 
 ## Compile (no cluster needed)
 

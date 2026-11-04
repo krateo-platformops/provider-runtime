@@ -4,13 +4,43 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-10-31T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-04 — v1.8.0
+- **Behaviour change: `Ready` is `Unknown/NotObserved` when the external
+  resource can't be observed.** On a `Connect` or `Observe` error the runtime
+  now sets `Ready` to `NotObserved()` next to `Synced=False/ReconcileError`.
+  Before, only `Synced` changed and `Ready` kept its last value, so it could
+  show a stale `True` next to the error. The exceptions are a `Ready` of
+  `Deleting` and an error wrapped with `reconciler.ReadyAssessed`. The message
+  is constant, so `lastTransitionTime` doesn't move on repeated failures; the
+  error stays on `Synced`. Conflicts still requeue without touching
+  conditions.
+- **The contract is explicit.** Every successful `Observe` must set `Ready`.
+  The runtime never invents a value on recovery. If a successful `Observe`
+  leaves `NotObserved` in place, the runtime keeps it and reports the breach
+  with an Error log and a throttled Warning event, `ReadyNotSetAfterObserve`.
+  See [overview](./overview.md).
+- Why the runtime doesn't detect "did the provider set Ready" by comparing
+  before and after: providers set `Ready` to the value it already had and
+  then return an error (alert-provider's Alert, incident-provider's
+  IncidentApply). A comparison can't see that, so the provider says it with
+  `ReadyAssessed`.
+- New API: `prv1.ReasonNotObserved` (`"NotObserved"`, fixed),
+  `prv1.NotObserved()`, `reconciler.ReadyAssessed(err)`,
+  `reconciler.IsReadyAssessed(err)`, and the package
+  `pkg/reconciler/reconcilertest` with `AssertObserveSetsReady`.
+- **Migration** (no provider changes until it bumps): see
+  [usage](./usage.md#migrating-to-v180). Bump in the same PR as the
+  provider's `Observe` fixes. core-provider's rollup of `NotObserved`
+  (core-provider#310) must be released before a v1.8.0 provider build
+  reaches a cluster.
 
 ## 2026-10-31 — v1.7.2
 - A resource-version conflict while persisting late-initialized fields now

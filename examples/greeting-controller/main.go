@@ -114,6 +114,10 @@ type external struct {
 	store externalStore
 }
 
+// Observe sets the Ready condition on every path that returns a nil error: that
+// is the provider-runtime Ready contract (since v1.8.0), checked per path in
+// main_test.go with reconcilertest.AssertObserveSetsReady. On an error the
+// runtime sets Ready to NotObserved itself.
 func (e *external) Observe(_ context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	g, ok := mg.(*Greeting)
 	if !ok {
@@ -122,14 +126,19 @@ func (e *external) Observe(_ context.Context, mg resource.Managed) (reconciler.E
 
 	name := meta.GetExternalName(g)
 	if name == "" {
+		g.SetConditions(prv1.Unavailable().WithMessage("the external greeting has not been created"))
 		return reconciler.ExternalObservation{ResourceExists: false}, nil
 	}
 
 	got, exists := e.store[name]
 	if !exists {
+		g.SetConditions(prv1.Unavailable().WithMessage("the external greeting does not exist"))
 		return reconciler.ExternalObservation{ResourceExists: false}, nil
 	}
 
+	// The greeting exists and serves a message, so it is available even while
+	// the message is out of date; Update brings it up to date.
+	g.SetConditions(prv1.Available())
 	if got != g.Spec.Message {
 		return reconciler.ExternalObservation{
 			ResourceExists:   true,
@@ -138,7 +147,6 @@ func (e *external) Observe(_ context.Context, mg resource.Managed) (reconciler.E
 		}, nil
 	}
 
-	g.SetConditions(prv1.Available())
 	return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 }
 
