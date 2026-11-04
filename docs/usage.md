@@ -96,7 +96,13 @@ only if it serves the parent of a v1.8.x provider's kind.
 
 **Verifying the rollup during a provider rollout.** The rollup's handling of
 `NotObserved` can only be seen once a v1.8.x provider is deployed and one of
-its `Observe` calls fails. Judge it per parent composition:
+its `Observe` calls fails. A healthy rollout fails nothing, so it cannot
+exercise this: "never caught" is the expected result of every clean rollout,
+and a series of them is not evidence. The rollup is verified by an end-to-end
+test in core-provider's CI, on a throwaway cluster, with a provider whose
+`Observe` is made to fail. Watching a real rollout is optional and only
+meaningful when something actually breaks. When you do judge it, judge it per
+parent composition:
 
 - *Excluded parent:* any other child is *not* healthy (`Ready=True`) or
   unevaluated (`Unknown/ZeroEvidence` or `Unknown/NotObserved`). That covers
