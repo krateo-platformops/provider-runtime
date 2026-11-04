@@ -147,10 +147,9 @@ as a deletion timestamp, surfaces as a resourceVersion conflict when the
 status is written. That requeues, and the next pass sees one consistent
 object. An `Observe` that fetches the resource again into the object it was
 given, for "fresh data", breaks that: the runtime and the provider then
-decide from two different versions of the object. Read the *external*
-system as much as you need; take the *managed resource* as given.
-(unstructured-runtime has this two-read shape in its worker, and
-core-provider is fixing it there.)
+decide from two different versions of the object, and nothing reconciles
+the two answers. Read the *external* system as much as you need; take the
+*managed resource* as given.
 
 ## The Ready contract (since v1.8.0)
 
