@@ -99,8 +99,14 @@ only if it serves the parent of a v1.8.x provider's kind.
 its `Observe` calls fails. A healthy rollout fails nothing, so it cannot
 exercise this: "never caught" is the expected result of every clean rollout,
 and a series of them is not evidence. The rollup is verified by an end-to-end
-test in core-provider's CI, on a throwaway cluster, with a provider whose
-`Observe` is made to fail. Watching a real rollout is optional and only
+test in core-provider's CI, against a real API server (envtest), with a
+separate provider process built on this runtime whose `Observe` is made to
+fail per object: `internal/composition/notobserved_envtest_test.go` in the
+composition-dynamic-controller, run by the `envtest-cdc` job on every PR
+(`go test -tags envtest -run NotObservedEnvtest`). Its cases follow the rule
+below, including the excluded mixed parent, and a CI step removes the
+rollup's `NotObserved` mapping to prove the test then fails (core-provider#317).
+Watching a real rollout is optional and only
 meaningful when something actually breaks. When you do judge it, judge it per
 parent composition:
 
