@@ -217,8 +217,12 @@ provider's responsibility:
   a returned error.
 - Don't embed raw response bodies from an external API. They can echo
   request data, internal hostnames or another tenant's details. Summarise
-  instead: the operation, the status code, and a short vendor error code or
-  message if the vendor documents it as safe.
+  instead, using only text your provider generates itself: the operation,
+  the resource, the status code. Don't copy fields out of the vendor's
+  response either. No key name guarantees what a vendor puts under it
+  (`code` can hold prose, `field` can hold a credential), so a key allowlist
+  is a heuristic that looks like a guarantee, and a filter that misses
+  invites the assumption that whatever got through is safe.
 - Log the full body at **Info**, capped (for example 2 KiB through an
   `io.LimitReader`), so the vendor's explanation reaches operators on a
   default install. The point is *who* can read it, not how much is logged: a
