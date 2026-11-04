@@ -88,6 +88,33 @@ any provider built on v1.8.x is deployed there. Otherwise the rollup reads
 `NotObserved` as "converging", and a parent composition goes
 `Ready=False/Creating` during a provider's outage.
 
+"Live" means the code is running, not that a chart was pinned: core-provider
+runs a separate composition controller per CompositionDefinition version
+(`<resource>-<version>-controller`), so check the image on every one of them.
+A leftover controller that nothing drives keeps its old image; it matters
+only if it serves the parent of a v1.8.x provider's kind.
+
+**Verifying the rollup during a provider rollout.** The rollup's handling of
+`NotObserved` can only be seen once a v1.8.x provider is deployed and one of
+its `Observe` calls fails. Judge it per parent composition:
+
+- *Excluded parent:* any other child is *not* healthy (`Ready=True`) or
+  unevaluated (`Unknown/ZeroEvidence` or `Unknown/NotObserved`). That covers
+  `Ready=False` for any reason, and `Ready=Unknown` with any other reason,
+  including one added later: its reason belongs to that child, and a new
+  reason excludes the parent until someone deliberately adds it to the
+  unevaluated list.
+- *Eligible parent:* at least one child is `Ready=Unknown/NotObserved`, and
+  the parent is not excluded.
+- *Pass:* every eligible parent reads `Ready=True` (`Available` or
+  `AvailablePartialCoverage`), or `Unknown/ZeroEvidence` when every child is
+  unevaluated.
+- *Fail:* an eligible parent reads `Ready=False`, whatever the reason.
+- *No result*, reported as such: "never caught" when no child reached
+  `NotObserved`, and "inconclusive" when `NotObserved` children appeared but
+  every parent was excluded. Give the counts: eligible, excluded, and total
+  parents with a `NotObserved` child.
+
 v1.8.0 makes the Ready contract explicit (see
 [overview](./overview.md#the-ready-contract-since-v180)). When `Connect` or
 `Observe` fails, the runtime now sets `Ready` to `Unknown/NotObserved`. The
