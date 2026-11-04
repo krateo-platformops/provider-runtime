@@ -4,7 +4,7 @@ title: provider-runtime — overview
 description: Package design and the managed-resource reconcile flow provider-runtime drives for every Krateo provider.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, reconciler, architecture]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 ---
 
 # Overview
@@ -139,11 +139,67 @@ local renders and two cluster calls, so it can't be classified at the call
 site without splitting it. core-provider#236 shows the fix: answer existence
 from what the object already records, and let `Create` report the failure.
 
+## The Ready contract (since v1.8.0)
+
+`Synced` says whether the last reconcile worked. `Ready` says whether the
+external resource is ready, and only `Observe` can know that. So `Ready` is
+the provider's to set, and the contract has three rules.
+
+**1. Every `Observe` that returns a nil error sets `Ready`.** This covers every
+path, including the ones that report `ResourceExists: false` or
+`ResourceUpToDate: false`. Use `Available()`, `Unavailable()`, `Creating()` or
+your own `Ready` condition. The runtime still sets `Creating` after a
+successful `Create` and `Deleting` while it deletes.
+
+**2. When `Connect` or `Observe` fails, the runtime sets `Ready` to
+`NotObserved`.** It writes this next to `Synced=False/ReconcileError`. Before
+v1.8.0 only `Synced` changed, so `Ready` could show a stale `True` next to
+the error. The runtime leaves `Ready` alone in two cases:
+
+- `Ready` is `Deleting`. That stays true whatever the external system
+  answers.
+- The error is wrapped with `reconciler.ReadyAssessed`. `Observe` returns
+  this when it set `Ready` itself and then failed on something else, for
+  example a write after the read. `ReadyAssessed` keeps the error's message,
+  and `errors.Is`/`errors.As` see through it. Don't wrap an error that means
+  "I could not tell": there `NotObserved` is the true answer.
+
+A resource-version conflict still requeues without touching any condition.
+
+**3. The runtime never invents a `Ready` on recovery.** The next successful
+`Observe` replaces `NotObserved` with the provider's answer. If a successful
+`Observe` leaves it at `NotObserved`, the provider broke rule 1 on that path.
+The runtime keeps the marker, since it can't know the true value. It reports
+the breach with an Error log (naming the kind, namespace and name) and a
+Warning event with reason `ReadyNotSetAfterObserve`. The event goes through
+the throttled recorder, like the runtime's other error events. `Synced` is
+not affected.
+
+What readers see while the resource can't be observed:
+
+| Condition | Status | Reason | Message |
+|---|---|---|---|
+| `Ready` | `Unknown` | `NotObserved` | `The external resource could not be observed; see the Synced condition for the error.` |
+| `Synced` | `False` | `ReconcileError` | the error, for example `observe failed: <the provider's error>` |
+
+The `Ready` message never changes, so repeated failures with different errors
+don't move `Ready`'s `lastTransitionTime`. The error text is only on `Synced`.
+Match `NotObserved` by its reason, which is fixed. A reader that rolls `Ready`
+up should treat it as "unknown", not as "not ready". core-provider's rollup
+matches this reason (core-provider#310).
+
+`reconcilertest.AssertObserveSetsReady(t, ctx, client, mg)` checks rule 1 in
+a provider's own tests. It sets `Ready` to `NotObserved` on `mg`, calls
+`Observe`, and fails the test if `Ready` is still `NotObserved` afterwards. It
+also fails on a plain error, because then there is nothing to check. Call it
+once per success path. [greeting-controller](../examples/greeting-controller/README.md)
+does this in `main_test.go`.
+
 ## Supporting packages
 
 | Package | Role |
 |---|---|
-| `apis/common/v1` | The shared condition model (`Condition`, `ConditionedStatus`, `Ready`/`Synced` types, `Available()`/`Creating()`/`ReconcileError()` constructors) and reference selectors (`Reference`, `SecretKeySelector`, `ConfigMapKeySelector`, `EnvSelector`, `CredentialSelectors`) that provider CRDs embed. Deepcopy is generated (`make generate`). |
+| `apis/common/v1` | The shared condition model (`Condition`, `ConditionedStatus`, `Ready`/`Synced` types, `Available()`/`Creating()`/`NotObserved()`/`ReconcileError()` constructors) and reference selectors (`Reference`, `SecretKeySelector`, `ConfigMapKeySelector`, `EnvSelector`, `CredentialSelectors`) that provider CRDs embed. Deepcopy is generated (`make generate`). |
 | `pkg/resource` | The `Managed`/`Object`/`Conditioned`/`Finalizer` interfaces, `ManagedKind`, `APIFinalizer`, error-ignoring helpers (`IgnoreNotFound`, `IgnoreAny`), secret/configmap readers, plus `pkg/resource/fake` mocks. |
 | `pkg/meta` | The `krateo.io/*` annotation vocabulary and helpers: external-name, external-create tracking, pause, verbose, management policy (`default`, `observe-create-update`, `observe-delete`, `observe`) and deletion policy (`delete`, `orphan`). |
 | `pkg/controller` | `Options`/`DefaultOptions` and `ForControllerRuntime()`, which wires the per-item exponential rate limiter and — when a `QueueWaitRecorder` is set — an instrumented workqueue (`queue_wait.go`) measuring queue depth, wait time, oldest-item age and work duration. |
@@ -153,6 +209,7 @@ from what the object already records, and let `Create` report the failure.
 | `pkg/workqueue` | `NewExponentialTimedFailureRateLimiter` — per-item exponential backoff whose failure history expires after 2× max delay, so long-quiet items restart fast. |
 | `pkg/context` | `CtxWithLogger`/`LoggerFromCtx` to carry a `logging.Logger` through a `context.Context`. |
 | `pkg/errors` | A stdlib-backed drop-in for the archived pkg/errors surface (`Wrap`, `Wrapf`, `Cause`, …). |
+| `pkg/reconciler/reconcilertest` | `AssertObserveSetsReady`, the conformance check for the Ready contract in a provider's own tests. |
 | `pkg/test` | `cmp` options (`EquateErrors`, `EquateConditions`) and a full mock `client.Client` for provider unit tests. |
 
 ## How it composes with peers

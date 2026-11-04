@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 ---
 
 # Usage
@@ -28,7 +28,7 @@ runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
 standard-library findings your patched build doesn't have.
 
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.7.1
+go get github.com/krateo-platformops/provider-runtime@v1.8.0
 ```
 
 If your provider also uses `github.com/krateo-platformops/audit` (v0.3.0+),
@@ -74,6 +74,45 @@ Your CRD type satisfies `resource.Managed` by embedding
 `Observe`/`Create`/`Update`/`Delete`. A complete, compilable version of this —
 including scheme registration, the OTel-model logger and a runnable CRD — is
 [examples/greeting-controller](../examples/greeting-controller/README.md).
+
+## Migrating to v1.8.0
+
+v1.8.0 makes the Ready contract explicit (see
+[overview](./overview.md#the-ready-contract-since-v180)). When `Connect` or
+`Observe` fails, the runtime now sets `Ready` to `Unknown/NotObserved`. The
+next successful `Observe` must set `Ready` again, because the runtime won't.
+A provider adopting v1.8.0 must:
+
+1. **Set `Ready` on every successful `Observe` path**, including
+   `ResourceExists: false`, drift and early "nothing to do" returns. A path
+   that doesn't set it leaves `NotObserved` in place after a failure, and the
+   runtime reports it as a `ReadyNotSetAfterObserve` Warning event and an
+   Error log.
+2. **Wrap with `reconciler.ReadyAssessed` the errors returned after setting
+   `Ready`.** For example, when `Observe` reads the resource, sets `Ready`,
+   and then a write fails:
+
+   ```go
+   mg.SetConditions(prv1.Available())
+   if err := writeStatus(ctx, mg); err != nil {
+       return reconciler.ExternalObservation{}, reconciler.ReadyAssessed(err)
+   }
+   ```
+
+   Without the wrap, the runtime replaces that `Ready` with `NotObserved`.
+   Don't wrap an error that means "I could not tell".
+3. **Add `reconcilertest.AssertObserveSetsReady` to your tests**, once per
+   success path, so the contract can't silently rot:
+
+   ```go
+   reconcilertest.AssertObserveSetsReady(t, ctx, client, mg)
+   ```
+
+Make the bump in the same PR as these fixes. A bump alone turns every path
+that misses `Ready` into a stuck `NotObserved` with a Warning. Nothing
+changes for a provider until it bumps. Anything that rolls `Ready` up must
+know the `NotObserved` reason before a v1.8.0 provider reaches a cluster.
+For Krateo, that's core-provider#310.
 
 ## The pieces you opt into
 
