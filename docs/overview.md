@@ -203,6 +203,32 @@ also fails on a plain error, because then there is nothing to check. Call it
 once per success path. [greeting-controller](../examples/greeting-controller/README.md)
 does this in `main_test.go`.
 
+## Errors become status that others can read
+
+Every error a provider returns from `Connect`, `Observe`, `Create`, `Update`
+or `Delete` is written, wrapped but otherwise verbatim, into the managed
+resource's `Synced` condition message (`ReconcileError(err)` uses
+`err.Error()`). It is also recorded in Warning events and logs. Anyone with
+`get` on the resource can read the condition, and usually the events too. The
+runtime cannot tell which part of an error is sensitive, so this is the
+provider's responsibility:
+
+- Never put credentials, tokens, keys, signed URLs or connection strings in
+  a returned error.
+- Don't embed raw response bodies from an external API. They can echo
+  request data, internal hostnames or another tenant's details. Summarise
+  instead: the operation, the status code, and a short vendor error code or
+  message if the vendor documents it as safe. Log the full body at Debug if
+  you need it for diagnosis.
+- Keep the error useful. A message that says what failed and what to check
+  is what users need on `Synced`; the goal is to keep secrets out, not to
+  make the message vague.
+
+`Ready`'s message is fixed when the runtime sets `NotObserved`. That keeps
+`lastTransitionTime` stable; it is not a confidentiality measure, and the
+error text is still on `Synced`. (oasgen-provider#433 found a vendor's error
+body exposed this way.)
+
 ## Supporting packages
 
 | Package | Role |
