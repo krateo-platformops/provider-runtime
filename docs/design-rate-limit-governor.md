@@ -154,11 +154,18 @@ the response and passes it through unchanged.
   advisory) and `X-RateLimit-Used`.
 - **When a response counts as throttled:** a 429, or a 403 with
   `Remaining: 0` or with `Retry-After`.
-  - GitHub's secondary limit is signalled by the response body. Body parsing
-    isn't in v1, so a secondary-limit 403 without `Retry-After` stays the
-    provider's to classify.
-- **How the key is chosen:** the request URL's host by default. A provider
-  can override it per request through the request context.
+  - On a 403 or 429, `Retry-After` is authoritative on its own. GitHub's
+    secondary limits arrive that way, sometimes *without*
+    `X-RateLimit-Remaining: 0` (github-provider-kog's owner pointed this out),
+    so a check keyed only on `Remaining` or `Reset` would miss them.
+  - A secondary-limit 403 with neither `Retry-After` nor `Remaining: 0` is
+    signalled only in the response body. Body parsing isn't in v1, so that
+    case stays the provider's to classify.
+- **How the key is chosen:** the request URL's host by default, or
+  `host|credential` where the quota is per token. GitHub's is per token: all
+  32 of github-provider-kog's RestDefinitions share one host and one budget
+  per token. A provider can override the key per request through the request
+  context.
 - **Vendor headers can change.** The helper's header list is verified against
   each vendor's current documentation when it's implemented, not taken from
   this document. Its tests use recorded responses.
@@ -240,7 +247,23 @@ Tests, each written so it fails without the behaviour it checks:
 3. **Per-verb cost.** #50 defers weighting verbs by cost for v1. This design
    agrees, for the same reason: guessing weights would be worse than not
    weighting.
-4. **The Azure DevOps provider runs on the old
-   `github.com/krateoplatformops/provider-runtime v0.7.0`**, a different
-   module. It gets none of this until it moves to v1.x, which is its owner's
-   decision.
+4. **Which callers are actually in scope.**
+   - **GitHub through github-provider-kog: in scope, through
+     unstructured-runtime.** That chart has no plugin. Its 32 RestDefinitions
+     call `https://api.github.com` directly from rest-dynamic-controller, so
+     GitHub's headers reach rest-dynamic-controller itself, whose
+     `RetryAfter` already parses them. GitHub Enterprise arrives with
+     oasgen-provider#374 (`spec.serverURL`, targeted at 0.52.0). No change to
+     the RestDefinitions is needed for this design: the signalling and keying
+     live in rest-dynamic-controller.
+   - **Git over HTTP (GitHub Enterprise, Azure DevOps) through git-provider:
+     in scope, on provider-runtime.** It needs the `httpsignal` transport
+     plugged into go-git (§6), which is git-provider's change.
+   - **Azure DevOps through `krateoplatformops/azuredevops-provider` and the
+     `*-rest-dynamic-controller-plugin` repos: out of scope, with no known
+     owner.** They live only in the old `krateoplatformops` org, which
+     github-provider-kog's owner describes as superseded. The provider is on
+     the old `github.com/krateoplatformops/provider-runtime v0.7.0`, and the
+     plugins drop the vendor's response headers before rest-dynamic-controller
+     sees them. Whoever takes on Azure DevOps REST would need to move it to
+     v1.x and forward the headers.
