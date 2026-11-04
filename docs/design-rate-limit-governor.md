@@ -1,19 +1,19 @@
 ---
 type: Architecture
-title: provider-runtime — automatic slow-down under server-side rate limits
-description: Design (not implemented) for a per-endpoint governor that slows reconciles when an external API signals a rate limit, aligned with unstructured-runtime's design.
+title: provider-runtime — automatic slow-down under rate limits and controller saturation
+description: Design (not implemented) for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU or memory is saturated, aligned with unstructured-runtime's design.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, reconciler, workqueue]
 timestamp: 2026-11-05T00:00:00Z
 ---
 
-# Automatic slow-down under server-side rate limits
+# Automatic slow-down under rate limits and controller saturation
 
 **Status:** design, not implemented. **Scope:** provider-runtime. The same
 feature for unstructured-runtime is designed by its owner in
 [unstructured-runtime#50](https://github.com/krateo-platformops/unstructured-runtime/pull/50).
 This document reuses that design's vocabulary on purpose and only spells out
-where provider-runtime differs. §8 lists two points that apply to both and
+where provider-runtime differs. §9 lists two points that apply to both and
 are raised on #50.
 
 ## 1. The problem, measured
@@ -195,11 +195,99 @@ go-git doesn't expose response headers, so git-provider would plug this
 helper in through go-git's HTTP transport. That's git-provider's change; this
 design only makes it possible.
 
-## 7. Observability and verification
+## 7. Slowing down when the controller itself is saturated
+
+A rate limit is the external API saying "too fast". The controller's own pod
+can say it too: CPU starved, or memory close to its limit. Today that is also
+tuned by hand, with the same `--max-reconcile-rate`. Too high, and a burst of
+reconciles gets the pod OOMKilled or CPU-throttled until its probes fail.
+Too low, and it idles on a quiet day. The same governor handles both, with a
+second, process-wide input.
+
+**What is measured: the container's cgroup, never the node.** The controller
+can only shed its own work, so it reads the cgroup v2 files of its own
+container:
+
+| Input | File | Meaning |
+|---|---|---|
+| CPU pressure | `cpu.pressure`, `some avg10` | Share of the last 10s in which a runnable task waited for CPU. It covers throttling by the CPU limit and contention on the node alike. |
+| Memory working set | `memory.current` minus `inactive_file` from `memory.stat`, against `memory.max` | The same working set kubelet uses for eviction and the OOM killer acts on. Page cache the kernel can drop is excluded, so a large but reclaimable cache does not slow anything down. |
+| Memory pressure | `memory.pressure`, `full avg10` | Share of time all tasks stalled on reclaim. This catches thrashing before the working set reaches the limit. |
+
+**Where it hooks in: the gate from §5, with a process-wide capacity.** The
+governor already keeps a capacity per key. Saturation adds one more capacity,
+`local`, which bounds in-flight gated calls across *all* keys:
+
+- One sampler goroutine reads the files every second (default) and publishes
+  the result atomically. `Acquire` reads that value and does no I/O, so the
+  hot path stays as cheap as §4 requires.
+- A call needs a slot in both its key and `local`.
+- *Saturated* (any input over its threshold for one sample): `local`
+  halves, with a minimum of 1. One call always keeps going, so a saturated
+  controller still finishes deletions and still makes progress. Halving is
+  rate-limited to once per sample period, so one bad second can't drive
+  capacity to 1.
+- *Recovery:* +1 per clean `RecoveryInterval`, up to `MaxConcurrentReconciles`.
+  This is the same additive rule as §2, so both inputs recover in the same
+  way.
+- *Hard memory limit:* at 95% of `memory.max` by default, `local` drops to 1
+  at once rather than halving. Close to the limit, the next allocation can be
+  the OOMKill, and one call in flight is the floor.
+
+**A saturation deferral uses the same contract as any other.** It writes
+`Synced=False/ReconcileDeferred`, leaves `Ready` unchanged, returns
+`RequeueAfter` with a nil error, and uses the jittered "waiting for
+capacity" interval from §5. The message names the cause, for example
+`controller saturated: memory working set 93% of limit`, so an operator can
+tell a full controller from a throttling vendor. It gets no new reason. A
+consumer that knows `ReconcileDeferred` already reads it correctly: the object
+was not assessed this pass, and it says why.
+
+**When the input isn't there, the input is off, not the controller.**
+
+- With no cgroup v2, or no PSI files (cgroup v1, some kernels, local runs
+  outside a container), that input is disabled. The runtime logs this once at
+  Info and reports it as a metric. Failing closed would stop a controller
+  because of how its node was built.
+- With no memory limit (`memory.max` is `max`), the working-set check is off
+  and memory pressure still applies.
+- With no CPU limit, CPU pressure still measures contention on the node,
+  which is the case where slowing down helps.
+
+**Out of scope here:**
+
+- `GOMEMLIMIT`. Setting it from the container limit makes the Go GC work
+  harder before the OOM killer acts, which helps alongside this design. It's
+  a deployment setting each provider's chart owns, and a runtime library
+  shouldn't change it at import time.
+- The Kubernetes API server's own overload. client-go already honours API
+  Priority and Fairness 429s with `Retry-After`.
+- A vendor server that is saturated rather than rate-limited. That is a
+  vendor's 503 with `Retry-After`. §6's helper should treat it like a 429,
+  and the implementation adds that case to its header table.
+
+**Configuration**, like the rest, is controller options only, with flags and
+env set by each chart and nothing in any CRD:
+
+- whether saturation is enabled at all, independently of the rate-limit
+  input;
+- the sample period;
+- the CPU and memory pressure thresholds;
+- the working-set soft and hard ratios, 90% and 95% by default.
+
+The CPU and memory pressure thresholds in this document are starting points.
+Before the defaults are fixed, the implementation PR measures them on a kind
+cluster with a provider under synthetic load, as it reports. This is
+open question 5.
+
+## 8. Observability and verification
 
 - **Metrics:** the same four as #50, under the `provider_runtime.ratelimit.*`
   prefix: per-key capacity, deferrals, seconds to reset, and signals by
   kind.
+  Saturation (§7) adds `local` capacity, each input's current value, and
+  deferrals by cause (`throttled`, `capacity`, `saturated`). A disabled
+  input reports as disabled, not as zero, since zero reads as healthy.
 - **An event:** a Normal `ReconcileDeferred` event on the first deferral of an
   object per throttle window. It goes through the throttled recorder, so a
   long window doesn't flood events.
@@ -217,6 +305,11 @@ Tests, each written so it fails without the behaviour it checks:
 | Recovery is additive | Capacity returns to the ceiling in N steps of `RecoveryInterval`, not one. |
 | Off by default | With no governor: no gate, no deferrals, and the existing suite passes unchanged. |
 | Providers really report | A conformance helper in `pkg/reconciler/reconcilertest`, alongside `AssertObserveSetsReady`: feed the provider's client a recorded 429 and a recorded Azure DevOps advisory 200, and assert that a `Signal` was reported. |
+| Saturation halves, floors at 1, recovers additively | Feed cgroup fixtures (testdata copies of `cpu.pressure`, `memory.pressure`, `memory.current`, `memory.stat`, `memory.max`). Pressure over the threshold halves `local` once per sample, never below 1. Clean samples add +1 per `RecoveryInterval`. |
+| The working set excludes reclaimable cache | A fixture with `memory.current` at 98% of the limit, mostly `inactive_file`, does not slow down. The same total with no `inactive_file` does. |
+| The hard memory ratio drops to 1 at once | At 95% working set, `local` goes from N to 1 in one sample. |
+| A missing input is disabled, not saturated | With no PSI files, or `memory.max` set to `max`, the controller runs at full capacity, and the metric says the input is disabled. |
+| The hot path does no I/O | `Acquire` makes no syscalls, checked with a sampler stub that fails the test if it is read outside its tick. |
 | The reason string can't drift | A contract test pinning `"ReconcileDeferred"`, and naming its consumers. |
 
 **What a clean rollout cannot verify** (the
@@ -230,8 +323,12 @@ Tests, each written so it fails without the behaviour it checks:
 - **What a green run doesn't cover:** the vendor's live header behaviour, which
   can change without notice, and how throttling interacts with other clients
   that share the same quota outside Krateo.
+- **Saturation (§7) has the same gap.** A healthy rollout never saturates.
+  The instrument is the fixture tests plus the kind measurement from
+  open question 5. A green run doesn't cover real kernels' PSI behaviour
+  across node images.
 
-## 8. Two points that apply to unstructured-runtime#50 too
+## 9. Two points that apply to unstructured-runtime#50 too
 
 1. **#50 never says how the key is known before the call.** It says "each
    worker calls `Acquire` immediately before `externalClient.Observe`", but
@@ -245,7 +342,7 @@ Tests, each written so it fails without the behaviour it checks:
    starve the healthy ones. §5's non-blocking gate, which defers immediately,
    avoids that.
 
-## 9. Open questions
+## 10. Open questions
 
 1. **Where the shared types live: decided, duplicated.** core-provider, as
    plumbing's owner, chose to duplicate `Signal` and `"ReconcileDeferred"` in
@@ -288,3 +385,10 @@ Tests, each written so it fails without the behaviour it checks:
      plugins drop the vendor's response headers before rest-dynamic-controller
      sees them. Whoever takes on Azure DevOps REST would need to move it to
      v1.x and forward the headers.
+5. **Saturation thresholds (§7).** The CPU and memory pressure defaults
+   are measured, not chosen: a kind cluster, a provider built on this
+   runtime, and synthetic load until the pod is throttled or close to its
+   memory limit. The implementation PR records the thresholds where
+   slowing down prevented the OOMKill or probe failure without idling the
+   controller. The same question goes to unstructured-runtime's owner, so
+   both runtimes slow down at the same point.

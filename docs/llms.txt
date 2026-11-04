@@ -8,7 +8,7 @@ docs/api.md: the exported Go API surface, package by package, plus metric instru
 docs/examples.md: examples index
 docs/release.md: tag-only release runbook (v-prefixed git tags, Go module proxy)
 docs/log.md: curated history
-docs/design-rate-limit-governor.md: design (not implemented) for per-endpoint slow-down under server-side rate limits
+docs/design-rate-limit-governor.md: design (not implemented) for slow-down under server-side rate limits and controller CPU/memory saturation
 examples/greeting-controller/README.md: minimal compilable provider (Greeting CRD + fake external system)
 examples/greeting-controller/main.go: the example source
 examples/greeting-controller/crd.yaml: the Greeting CRD
