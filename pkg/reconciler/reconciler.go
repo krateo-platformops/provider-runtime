@@ -58,6 +58,12 @@ const (
 )
 
 // Event reasons.
+// ReasonReadyNotSetAfterObserve is the reason of the Warning event the runtime
+// records when a provider breaks the Ready contract: Observe succeeded but left
+// Ready at NotObserved. Exported so providers' tests can assert on the event.
+// See the Ready contract on ExternalClient.Observe.
+const ReasonReadyNotSetAfterObserve event.Reason = "ReadyNotSetAfterObserve"
+
 const (
 	reasonCannotConnect       event.Reason = "CannotConnectToProvider"
 	reasonCannotDisconnect    event.Reason = "CannotDisconnectFromProvider"
@@ -70,10 +76,6 @@ const (
 	reasonCannotUnpublish     event.Reason = "CannotUnpublishConnectionDetails"
 	reasonCannotUpdate        event.Reason = "CannotUpdateExternalResource"
 	reasonCannotUpdateManaged event.Reason = "CannotUpdateManagedResource"
-
-	// reasonReadyNotSetAfterObserve reports a provider defect: Observe succeeded but left
-	// Ready at NotObserved. See the Ready contract on ExternalClient.Observe.
-	reasonReadyNotSetAfterObserve event.Reason = "ReadyNotSetAfterObserve"
 
 	reasonDeleted event.Reason = "DeletedExternalResource"
 	reasonCreated event.Reason = "CreatedExternalResource"
@@ -916,10 +918,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	// failure left, this path of the provider's Observe never sets it. The runtime cannot
 	// know the true Ready, so it does not invent one: it keeps the marker, which is honest,
 	// and makes the breach loud so that it is fixed in the provider.
-	if readyNotSetAfterObserve(managed) {
+	//
+	// A managed resource that is being deleted is exempt: on every deletion path below, the
+	// runtime sets Ready=Deleting itself (or removes the finalizer and the object goes away), so
+	// Ready is the runtime's to write there and a provider that leaves it unset breaks nothing.
+	if !meta.WasDeleted(managed) && readyNotSetAfterObserve(managed) {
 		log.Error(errors.New(errReadyNotSetAfterObserve), "Provider broke the Ready contract: a successful Observe must set Ready",
 			"kind", r.kind, "namespace", managed.GetNamespace(), "name", managed.GetName())
-		throttledRecorder.Event(managed, event.Warning(reasonReadyNotSetAfterObserve, actionObserveExternalResource, errors.New(errReadyNotSetAfterObserve)))
+		throttledRecorder.Event(managed, event.Warning(ReasonReadyNotSetAfterObserve, actionObserveExternalResource, errors.New(errReadyNotSetAfterObserve)))
 	}
 
 	// Resolve an unresolved create handshake now that Observe has answered the question the old
