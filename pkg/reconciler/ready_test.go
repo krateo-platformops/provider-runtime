@@ -241,6 +241,53 @@ func TestReadyDeletingSurvivesObserveError(t *testing.T) {
 		prv1.ReconcileError(errors.Wrap(errBoom, errReconcileObserve)))
 }
 
+// A resource being deleted whose Observe fails before writing Ready: its fate is not in doubt,
+// so the runtime answers Ready=Deleting itself rather than NotObserved (v1.8.2). Before, a
+// provider had to remember to set Deleting before every error on its deletion path.
+func TestReadyDeletingOnObserveErrorWhileDeleted(t *testing.T) {
+	errBoom := errors.New("boom")
+	run := reconcileReady(t, readySetup{
+		start:   []prv1.Condition{prv1.Available(), prv1.ReconcileSuccess()},
+		deleted: true,
+		observe: func(resource.Managed) (ExternalObservation, error) { return ExternalObservation{}, errBoom },
+	})
+
+	mustHaveWrittenStatus(t, run)
+	wantCondition(t, run.persisted.GetCondition(prv1.TypeReady), prv1.Deleting())
+	wantCondition(t, run.persisted.GetCondition(prv1.TypeSynced),
+		prv1.ReconcileError(errors.Wrap(errBoom, errReconcileObserve)))
+}
+
+// The same for a Connect failure on a resource being deleted.
+func TestReadyDeletingOnConnectErrorWhileDeleted(t *testing.T) {
+	run := reconcileReady(t, readySetup{
+		start:      []prv1.Condition{prv1.Available(), prv1.ReconcileSuccess()},
+		deleted:    true,
+		connectErr: errors.New("no credentials"),
+	})
+
+	mustHaveWrittenStatus(t, run)
+	wantCondition(t, run.persisted.GetCondition(prv1.TypeReady), prv1.Deleting())
+	if got := run.persisted.GetCondition(prv1.TypeSynced); got.Status != metav1.ConditionFalse || got.Reason != prv1.ReasonReconcileError {
+		t.Errorf("Synced: want False/ReconcileError, got %s/%s", got.Status, got.Reason)
+	}
+}
+
+// ReadyAssessed still wins on a resource being deleted: the provider said it set Ready.
+func TestReadyAssessedWinsWhileDeleted(t *testing.T) {
+	run := reconcileReady(t, readySetup{
+		start:   []prv1.Condition{prv1.Available(), prv1.ReconcileSuccess()},
+		deleted: true,
+		observe: func(mg resource.Managed) (ExternalObservation, error) {
+			mg.SetConditions(prv1.Unavailable())
+			return ExternalObservation{}, ReadyAssessed(errors.New("cannot update status"))
+		},
+	})
+
+	mustHaveWrittenStatus(t, run)
+	wantCondition(t, run.persisted.GetCondition(prv1.TypeReady), prv1.Unavailable())
+}
+
 // The alert-provider Alert and incident-provider IncidentApply shape: Observe reads the external
 // resource, sets Ready (here to the value it already had, so no before/after comparison could
 // tell that it did), and then fails on something else. ReadyAssessed says so, and Ready stays.

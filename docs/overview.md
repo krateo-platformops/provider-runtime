@@ -157,10 +157,13 @@ owe `Ready` there. Setting it anyway is allowed and harmless (since v1.8.1).
 **2. When `Connect` or `Observe` fails, the runtime sets `Ready` to
 `NotObserved`.** It writes this next to `Synced=False/ReconcileError`. Before
 v1.8.0 only `Synced` changed, so `Ready` could show a stale `True` next to
-the error. The runtime leaves `Ready` alone in two cases:
+the error. Two cases are different:
 
-- `Ready` is `Deleting`. That stays true whatever the external system
-  answers.
+- The resource is being deleted (it has a deletion timestamp, or `Ready`
+  already reads `Deleting`). The runtime sets `Ready=Deleting`, which stays
+  true whatever the external system answers. Since v1.8.2 it does this itself,
+  so a provider doesn't need to set `Deleting` before returning an error on
+  its deletion path (doing so stays harmless).
 - The error is wrapped with `reconciler.ReadyAssessed`. `Observe` returns
   this when it set `Ready` itself and then failed on something else, for
   example a write after the read. `ReadyAssessed` keeps the error's message,
