@@ -12,6 +12,20 @@ timestamp: 2026-11-04T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-04 — v1.8.1
+- **Fix: a resource being deleted is no longer reported as a Ready-contract
+  breach.** v1.8.0 checked "a successful `Observe` must set `Ready`" before the
+  runtime's own deletion branch, which sets `Ready=Deleting` itself on every
+  path. So after an outage, deleting a resource whose `Observe` doesn't set
+  `Ready` on its deletion path emitted a false `ReadyNotSetAfterObserve`
+  Warning and Error log. The check now skips resources with a deletion
+  timestamp. Found by incident-provider's adoption of v1.8.0.
+- **`reconciler.ReasonReadyNotSetAfterObserve` is exported**, so a
+  provider's tests can assert on the Warning event by constant rather than by
+  string.
+- `reconcilertest.AssertObserveSetsReady` is unchanged: a provider that sets
+  `Ready` on its deletion paths can still check them with it.
+
 ## 2026-11-04 — v1.8.0
 - **Behaviour change: `Ready` is `Unknown/NotObserved` when the external
   resource can't be observed.** On a `Connect` or `Observe` error the runtime

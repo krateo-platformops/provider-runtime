@@ -149,7 +149,10 @@ the provider's to set, and the contract has three rules.
 path, including the ones that report `ResourceExists: false` or
 `ResourceUpToDate: false`. Use `Available()`, `Unavailable()`, `Creating()` or
 your own `Ready` condition. The runtime still sets `Creating` after a
-successful `Create` and `Deleting` while it deletes.
+successful `Create` and `Deleting` while it deletes. A managed resource that
+is being deleted (it has a deletion timestamp) is the one exception: on every
+deletion path the runtime sets `Ready=Deleting` itself, so `Observe` doesn't
+owe `Ready` there. Setting it anyway is allowed and harmless (since v1.8.1).
 
 **2. When `Connect` or `Observe` fails, the runtime sets `Ready` to
 `NotObserved`.** It writes this next to `Synced=False/ReconcileError`. Before
@@ -171,7 +174,9 @@ A resource-version conflict still requeues without touching any condition.
 `Observe` leaves it at `NotObserved`, the provider broke rule 1 on that path.
 The runtime keeps the marker, since it can't know the true value. It reports
 the breach with an Error log (naming the kind, namespace and name) and a
-Warning event with reason `ReadyNotSetAfterObserve`. The event goes through
+Warning event with reason `ReadyNotSetAfterObserve`
+(`reconciler.ReasonReadyNotSetAfterObserve`, exported since v1.8.1). A
+resource being deleted is never reported (since v1.8.1). The event goes through
 the throttled recorder, like the runtime's other error events. `Synced` is
 not affected.
 

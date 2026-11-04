@@ -309,10 +309,10 @@ func TestReadyNotSetAfterObserveIsReported(t *testing.T) {
 	// The breach is the provider's; the reconcile itself succeeded.
 	wantCondition(t, run.persisted.GetCondition(prv1.TypeSynced), prv1.ReconcileSuccess())
 
-	got := run.events.withReason(reasonReadyNotSetAfterObserve)
+	got := run.events.withReason(ReasonReadyNotSetAfterObserve)
 	if len(got) != 1 || got[0].Type != event.TypeWarning || got[0].Message != errReadyNotSetAfterObserve {
 		t.Errorf("want one Warning event %s with the contract message, got %+v (all events: %+v)",
-			reasonReadyNotSetAfterObserve, got, run.events.events)
+			ReasonReadyNotSetAfterObserve, got, run.events.events)
 	}
 
 	wantKind := schema.GroupVersionKind(fake.GVK(&fake.Managed{})).GroupKind().String()
@@ -327,6 +327,34 @@ func TestReadyNotSetAfterObserveIsReported(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("want an Error log for the breach, got %v", *run.log.errors)
+	}
+}
+
+// A managed resource being deleted is exempt from the breach report: the runtime's deletion
+// branch sets Ready=Deleting itself, so a provider whose Observe leaves Ready unset on that
+// path breaks nothing, and reporting it would be a false alarm on every delete after an outage.
+func TestReadyNotSetAfterObserveExemptsDeletion(t *testing.T) {
+	run := reconcileReady(t, readySetup{
+		start:   []prv1.Condition{prv1.NotObserved(), prv1.ReconcileError(errors.New("boom"))},
+		deleted: true,
+		observe: func(resource.Managed) (ExternalObservation, error) {
+			return ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
+		},
+	})
+
+	if run.err != nil {
+		t.Errorf("r.Reconcile(...): %v", run.err)
+	}
+	mustHaveWrittenStatus(t, run)
+	// The runtime, not the provider, answers Ready while it deletes.
+	wantCondition(t, run.persisted.GetCondition(prv1.TypeReady), prv1.Deleting())
+	if got := run.events.withReason(ReasonReadyNotSetAfterObserve); len(got) != 0 {
+		t.Errorf("a deleted resource must not be reported as a Ready-contract breach, got %+v", got)
+	}
+	for _, l := range *run.log.errors {
+		if l.err != nil && l.err.Error() == errReadyNotSetAfterObserve {
+			t.Errorf("a deleted resource must not log a Ready-contract breach, got %v", l.values)
+		}
 	}
 }
 

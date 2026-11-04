@@ -28,7 +28,7 @@ runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
 standard-library findings your patched build doesn't have.
 
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.8.0
+go get github.com/krateo-platformops/provider-runtime@v1.8.1
 ```
 
 If your provider also uses `github.com/krateo-platformops/audit` (v0.3.0+),
@@ -77,6 +77,9 @@ including scheme registration, the OTel-model logger and a runnable CRD — is
 
 ## Migrating to v1.8.0
 
+Use v1.8.1 or later: it fixes a false `ReadyNotSetAfterObserve` report on
+resources being deleted. v1.8.0 requires Go 1.26 (since v1.7.0).
+
 v1.8.0 makes the Ready contract explicit (see
 [overview](./overview.md#the-ready-contract-since-v180)). When `Connect` or
 `Observe` fails, the runtime now sets `Ready` to `Unknown/NotObserved`. The
@@ -86,8 +89,12 @@ A provider adopting v1.8.0 must:
 1. **Set `Ready` on every successful `Observe` path**, including
    `ResourceExists: false`, drift and early "nothing to do" returns. A path
    that doesn't set it leaves `NotObserved` in place after a failure, and the
-   runtime reports it as a `ReadyNotSetAfterObserve` Warning event and an
-   Error log.
+   runtime reports it as a `ReadyNotSetAfterObserve` Warning event
+   (`reconciler.ReasonReadyNotSetAfterObserve`) and an Error log. Paths taken
+   while the resource is being deleted are exempt: the runtime sets
+   `Ready=Deleting` there itself (v1.8.1; v1.8.0 reported them by mistake).
+   Setting `Ready` there anyway is allowed, so the helper can still check such
+   a path if your `Observe` sets it.
 2. **Wrap with `reconciler.ReadyAssessed` the errors returned after setting
    `Ready`.** For example, when `Observe` reads the resource, sets `Ready`,
    and then a write fails:
