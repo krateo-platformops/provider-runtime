@@ -28,7 +28,7 @@ runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
 standard-library findings your patched build doesn't have.
 
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.8.1
+go get github.com/krateo-platformops/provider-runtime@v1.8.2
 ```
 
 If your provider also uses `github.com/krateo-platformops/audit` (v0.3.0+),
@@ -77,8 +77,16 @@ including scheme registration, the OTel-model logger and a runnable CRD — is
 
 ## Migrating to v1.8.0
 
-Use v1.8.1 or later: it fixes a false `ReadyNotSetAfterObserve` report on
-resources being deleted. v1.8.0 requires Go 1.26 (since v1.7.0).
+Use v1.8.2 or later. v1.8.1 fixed a false `ReadyNotSetAfterObserve` report
+on resources being deleted; v1.8.2 makes the runtime set `Ready=Deleting`
+itself when `Connect` or `Observe` fails on a resource being deleted. v1.8.x
+requires Go 1.26 (since v1.7.0).
+
+**Rollout order, per cluster:** core-provider **2.13.56** or later (its
+rollup maps `NotObserved` as unevaluated) must be live on a cluster before
+any provider built on v1.8.x is deployed there. Otherwise the rollup reads
+`NotObserved` as "converging", and a parent composition goes
+`Ready=False/Creating` during a provider's outage.
 
 v1.8.0 makes the Ready contract explicit (see
 [overview](./overview.md#the-ready-contract-since-v180)). When `Connect` or

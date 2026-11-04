@@ -12,6 +12,17 @@ timestamp: 2026-11-04T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-04 — v1.8.2
+- **The runtime sets `Ready=Deleting` when `Connect` or `Observe` fails on a
+  resource being deleted** (deletion timestamp set). v1.8.0/v1.8.1 kept
+  `Deleting` only if the provider had already written it, so a provider whose
+  deletion path returned an error before setting `Ready` got `NotObserved` for
+  an object whose fate is not in doubt. Every adopter had to remember to set
+  `Deleting` first (oasgen-provider and incident-provider did). A
+  `ReadyAssessed` error still wins: the provider's own `Ready` stays.
+- docs/usage.md now states the per-cluster rollout order: core-provider
+  2.13.56 live before any v1.8.x provider build.
+
 ## 2026-11-04 — v1.8.1
 - **Fix: a resource being deleted is no longer reported as a Ready-contract
   breach.** v1.8.0 checked "a successful `Observe` must set `Ready`" before the

@@ -3,6 +3,7 @@ package reconciler
 import (
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/errors"
+	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 )
 
@@ -48,15 +49,20 @@ func IsReadyAssessed(err error) bool {
 	return errors.As(err, &target)
 }
 
-// markNotObserved sets Ready to NotObserved after Connect or Observe failed
-// with err, unless the provider assessed Ready itself (ReadyAssessed) or the
-// resource is being deleted, where Deleting is still true whatever the
-// external system answers.
+// markNotObserved sets Ready after Connect or Observe failed with err:
+//   - the provider assessed Ready itself (ReadyAssessed): Ready is left as the
+//     provider set it;
+//   - the resource is being deleted (it has a deletion timestamp, or Ready
+//     already reads Deleting): Ready is Deleting, which is true whatever the
+//     external system answers, so the runtime writes it rather than relying on
+//     every provider to set it before an error on its deletion path (v1.8.2);
+//   - otherwise: Ready is NotObserved.
 func markNotObserved(mg resource.Managed, err error) {
 	if IsReadyAssessed(err) {
 		return
 	}
-	if mg.GetCondition(prv1.TypeReady).Reason == prv1.ReasonDeleting {
+	if meta.WasDeleted(mg) || mg.GetCondition(prv1.TypeReady).Reason == prv1.ReasonDeleting {
+		mg.SetConditions(prv1.Deleting())
 		return
 	}
 	mg.SetConditions(prv1.NotObserved())
