@@ -219,11 +219,21 @@ Tests, each written so it fails without the behaviour it checks:
 
 ## 9. Open questions
 
-1. **Where the shared types live.** The two runtimes don't depend on each
-   other, so `Signal` and the reason string would be duplicated, each pinned
-   by a contract test, unless both import a small shared module. Plumbing is
-   the candidate, and it's owned by core-provider. Duplicating them is simpler;
-   a shared module makes drift impossible instead of merely detected.
+1. **Where the shared types live: decided, duplicated.** core-provider, as
+   plumbing's owner, chose to duplicate `Signal` and `"ReconcileDeferred"` in
+   each runtime. Each repo gets a contract test that pins the literal and
+   names the other runtime as a consumer, in the shape `ReasonZeroEvidence`
+   already uses. The reasons:
+   - a shared type would make every vocabulary change wait for a plumbing
+     release and two bumps;
+   - the compiler would only check that the field names match, not that both
+     runtimes read `Throttled` or `ResetAt` the same way, which needs a test
+     either way.
+
+   If the two ever have to change in lockstep more than once, that's the
+   evidence for a shared module. (provider-runtime already depends on plumbing,
+   at v1.13.0, so the extra dependency isn't the cost; the release coupling
+   is.)
 2. **Should `httpsignal` (§6) be shared too?** It's useful to providers on
    both runtimes, for example rest-dynamic-controller's vendor calls. Same
    question as 1.
