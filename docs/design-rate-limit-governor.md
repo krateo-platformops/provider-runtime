@@ -79,6 +79,12 @@ against the same GitHub Enterprise report the same state in the same words:
   backoff.
 - **Off by default.** With no governor configured, behaviour is identical to
   today's.
+- **Configured in the controller, not in any CRD.** The governor's settings
+  (`RecoveryInterval`, the ceiling, enabled or not) are controller options,
+  with flags and env set by each provider's chart. Nothing goes into a
+  managed-resource or RestDefinition schema. oasgen doesn't regenerate existing
+  CRDs on upgrade (oasgen-provider#453), so a schema-borne setting would never
+  reach kinds that are already deployed.
 
 `ReconcileDeferred` doesn't collide with any provider-runtime reason today:
 `Available`, `Unavailable`, `Creating`, `Deleting`, `NotObserved`,
@@ -123,6 +129,17 @@ type RateLimitKeyer interface {
 - An error from `RateLimitKey` is a provider defect. The reconcile proceeds
   ungated and the runtime logs once per object. Failing closed would turn a
   keying bug into an outage.
+- **Key on the credential's reference, never its value.** Where the quota is
+  per identity, use the reference (for example the Secret's namespace and
+  name), not the token or anything derived from it. Credentials are rotated by
+  secret managers outside Krateo, often. A key that changes on rotation would
+  silently split one budget into several, each believing it has the full quota.
+  (Raised by oasgen-provider, whose rest-dynamic-controller resolves auth per
+  request.)
+- **The host comes from configuration, not from a request.** For
+  rest-dynamic-controller it's the RestDefinition's server, or
+  `spec.serverURL`, already resolved by its host policy. Per-operation
+  `servers` are refused there, so there's one host per RestDefinition.
 
 ## 5. The gate must never block a worker
 
