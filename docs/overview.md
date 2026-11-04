@@ -218,8 +218,15 @@ provider's responsibility:
 - Don't embed raw response bodies from an external API. They can echo
   request data, internal hostnames or another tenant's details. Summarise
   instead: the operation, the status code, and a short vendor error code or
-  message if the vendor documents it as safe. Log the full body at Debug if
-  you need it for diagnosis.
+  message if the vendor documents it as safe.
+- Log the full body at **Info**, capped (for example 2 KiB through an
+  `io.LimitReader`), so the vendor's explanation reaches operators on a
+  default install. The point is *who* can read it, not how much is logged: a
+  condition is readable by anyone with `get` on the resource, a log by
+  operators. Debug is the wrong place, because a provider that runs without
+  debug logging by default would then keep the explanation from everyone.
+  Logs can also be exported to the platform's log store, so its readers are
+  part of the audience too: never log credentials at any level.
 - Keep the error useful. A message that says what failed and what to check
   is what users need on `Synced`; the goal is to keep secrets out, not to
   make the message vague.
