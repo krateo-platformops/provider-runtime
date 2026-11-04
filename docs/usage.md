@@ -106,6 +106,11 @@ composition-dynamic-controller, run by the `envtest-cdc` job on every PR
 (`go test -tags envtest -run NotObservedEnvtest`). Its cases follow the rule
 below, including the excluded mixed parent, and a CI step removes the
 rollup's `NotObserved` mapping to prove the test then fails (core-provider#317).
+What a green run does *not* cover: envtest has no kubelet, scheduler or helm,
+so the test says nothing about the composition controller as a deployed image,
+its RBAC (a child it isn't allowed to read is a separate path, core-provider#318),
+its Deployment wiring, or helm actually rendering the children. It proves the
+rollup's mapping, not the installed controller around it.
 Watching a real rollout is optional and only
 meaningful when something actually breaks. When you do judge it, judge it per
 parent composition:
