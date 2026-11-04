@@ -1,10 +1,10 @@
 ---
-type: Design
+type: Architecture
 title: provider-runtime — automatic slow-down under server-side rate limits
 description: Design (not implemented) for a per-endpoint governor that slows reconciles when an external API signals a rate limit, aligned with unstructured-runtime's design.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, reconciler, workqueue]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # Automatic slow-down under server-side rate limits
@@ -150,6 +150,10 @@ a deferral immediately:
 - **At capacity:** defer for a short, jittered interval, by default a random
   value between 1s and the current `RecoveryInterval`. It isn't a deadline,
   so the condition message says "waiting for capacity" rather than a time.
+  The random value comes from `crypto/rand`, as in unstructured-runtime#53:
+  `math/rand` trips gosec G404, and a scanner that passes needs no `#nosec`
+  for every later reviewer to re-justify. If the read fails, the full
+  `RecoveryInterval` is used, never a shorter delay.
 
 A blocking gate would park a worker on a throttled key. With
 `MaxConcurrentReconciles` workers and one throttled endpoint, every worker
@@ -276,11 +280,11 @@ Tests, each written so it fails without the behaviour it checks:
    - **Git over HTTP (GitHub Enterprise, Azure DevOps) through git-provider:
      in scope, on provider-runtime.** It needs the `httpsignal` transport
      plugged into go-git (§6), which is git-provider's change.
-   - **Azure DevOps through `krateoplatformops/azuredevops-provider` and the
+   - **Azure DevOps through the `azuredevops-provider` and
      `*-rest-dynamic-controller-plugin` repos: out of scope, with no known
      owner.** They live only in the old `krateoplatformops` org, which
      github-provider-kog's owner describes as superseded. The provider is on
-     the old `github.com/krateoplatformops/provider-runtime v0.7.0`, and the
+     provider-runtime v0.7.0 under that org's old module path, and the
      plugins drop the vendor's response headers before rest-dynamic-controller
      sees them. Whoever takes on Azure DevOps REST would need to move it to
      v1.x and forward the headers.
