@@ -80,6 +80,8 @@ type readyRun struct {
 	persisted     *fake.Managed
 	// inMemory is the object the reconciler worked on, for paths that write nothing.
 	inMemory *fake.Managed
+	// creates counts calls to the external client's Create.
+	creates int
 
 	events *eventCapture
 	log    errorLogCapture
@@ -131,6 +133,10 @@ func reconcileReady(t *testing.T, s readySetup) readyRun {
 			return &ExternalClientFns{
 				ObserveFn: func(_ context.Context, mg resource.Managed) (ExternalObservation, error) {
 					return s.observe(mg)
+				},
+				CreateFn: func(_ context.Context, _ resource.Managed) error {
+					run.creates++
+					return nil
 				},
 				DeleteFn: func(_ context.Context, _ resource.Managed) error { return nil },
 			}, nil
@@ -402,6 +408,45 @@ func TestReadyNotSetAfterObserveExemptsDeletion(t *testing.T) {
 		if l.err != nil && l.err.Error() == errReadyNotSetAfterObserve {
 			t.Errorf("a deleted resource must not log a Ready-contract breach, got %v", l.values)
 		}
+	}
+}
+
+// An Observe that fails must never lead to Create, even when its observation says the resource
+// does not exist: "I could not look" is not "it is not there". Creating on that answer could
+// duplicate an external resource that exists but could not be read. The reconciler returns on
+// the error before the create branch; this pins it explicitly rather than relying on a nil
+// CreateFn panicking.
+func TestObserveErrorNeverCreates(t *testing.T) {
+	run := reconcileReady(t, readySetup{
+		start: []prv1.Condition{prv1.Available(), prv1.ReconcileSuccess()},
+		observe: func(resource.Managed) (ExternalObservation, error) {
+			return ExternalObservation{ResourceExists: false}, errors.New("cannot reach the external API")
+		},
+	})
+
+	mustHaveWrittenStatus(t, run)
+	if run.creates != 0 {
+		t.Errorf("Create must not run after a failed Observe; it ran %d time(s)", run.creates)
+	}
+	wantCondition(t, run.persisted.GetCondition(prv1.TypeReady), prv1.NotObserved())
+	if run.err == nil {
+		t.Errorf("r.Reconcile(...): want the Observe error, got nil")
+	}
+}
+
+// Control for TestObserveErrorNeverCreates: the same observation without the error does create,
+// so a zero there is the reconciler's choice and not a harness that can never call Create.
+func TestObserveNotFoundCreates(t *testing.T) {
+	run := reconcileReady(t, readySetup{
+		start: []prv1.Condition{prv1.ReconcileSuccess()},
+		observe: func(mg resource.Managed) (ExternalObservation, error) {
+			mg.SetConditions(prv1.Unavailable())
+			return ExternalObservation{ResourceExists: false}, nil
+		},
+	})
+
+	if run.creates != 1 {
+		t.Errorf("a successful Observe reporting ResourceExists=false must lead to exactly one Create; got %d", run.creates)
 	}
 }
 
