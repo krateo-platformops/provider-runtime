@@ -26,3 +26,4 @@ It is consumed as a plain Go module — no image, no chart, no CRDs shipped.
 - [examples](./examples.md) — index of runnable examples
 - [release](./release.md) — how a version ships (git tag, Go module proxy)
 - [log](./log.md) — curated history
+- [design: rate-limit governor](./design-rate-limit-governor.md) — proposed automatic slow-down under server-side rate limits (not implemented)
