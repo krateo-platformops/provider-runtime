@@ -98,10 +98,14 @@ only if it serves the parent of a v1.8.x provider's kind.
 `NotObserved` can only be seen once a v1.8.x provider is deployed and one of
 its `Observe` calls fails. Judge it per parent composition:
 
+- *Excluded parent:* any other child is *not* healthy (`Ready=True`) or
+  unevaluated (`Unknown/ZeroEvidence` or `Unknown/NotObserved`). That covers
+  `Ready=False` for any reason, and `Ready=Unknown` with any other reason,
+  including one added later: its reason belongs to that child, and a new
+  reason excludes the parent until someone deliberately adds it to the
+  unevaluated list.
 - *Eligible parent:* at least one child is `Ready=Unknown/NotObserved`, and
-  every other child is healthy (`Ready=True`) or unevaluated
-  (`Unknown/ZeroEvidence` or `Unknown/NotObserved`). A parent with any other
-  child at `Ready=False` is *excluded*: its reason belongs to that child.
+  the parent is not excluded.
 - *Pass:* every eligible parent reads `Ready=True` (`Available` or
   `AvailablePartialCoverage`), or `Unknown/ZeroEvidence` when every child is
   unevaluated.
