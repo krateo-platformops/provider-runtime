@@ -16,6 +16,7 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/errors"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -421,6 +422,10 @@ type Reconciler struct {
 	record            event.Recorder
 	throttledRecorder event.Recorder
 	metrics           MetricsRecorder
+
+	// governor gates external calls; nil (the default) gates nothing.
+	governor  *ratelimit.Governor
+	keyErrors keyErrorLog
 }
 
 type mrManaged struct {
@@ -437,6 +442,10 @@ func defaultMRManaged(m manager.Manager) mrManaged {
 
 type mrExternal struct {
 	ExternalConnectDisconnecter
+
+	// keyer is the connecter's RateLimitKeyer, or nil. It is taken from the
+	// connecter the provider supplied, because NewNopDisconnecter hides it.
+	keyer RateLimitKeyer
 }
 
 func defaultMRExternal() mrExternal {
@@ -629,6 +638,7 @@ func WithCreateRecoveryReobserveInterval(d time.Duration) ReconcilerOption {
 func WithExternalConnecter(c ExternalConnecter) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.external.ExternalConnectDisconnecter = NewNopDisconnecter(c)
+		r.external.keyer = keyerOf(c)
 	}
 }
 
@@ -637,6 +647,7 @@ func WithExternalConnecter(c ExternalConnecter) ReconcilerOption {
 func WithExternalConnectDisconnecter(c ExternalConnectDisconnecter) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.external.ExternalConnectDisconnecter = c
+		r.external.keyer = keyerOf(c)
 	}
 }
 
@@ -741,6 +752,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 
 	externalCtx, externalCancel := context.WithTimeout(ctx, r.timeout)
 	defer externalCancel()
+	if r.governor != nil {
+		// Signals the provider reports during its calls reach the governor.
+		externalCtx = ratelimit.WithSink(externalCtx, r.governor)
+	}
 
 	statusUpdate := func(updateFn func() error) error {
 		started := time.Now()
@@ -851,8 +866,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		log.Debug("Create handshake is unresolved; asking Observe whether the external resource exists")
 	}
 
+	// pristine is the object as read, so a deferral that would write it back
+	// unchanged can skip the status update. Taken only with a governor.
+	var pristine resource.Managed
+	if r.governor != nil {
+		pristine, _ = managed.DeepCopyObject().(resource.Managed)
+	}
+	// deferred ends a pass whose next external call the governor deferred.
+	deferred := func(d *ratelimit.Deferral) (reconcile.Result, error) {
+		return r.deferReconcile(log, managed, pristine, d, func() error {
+			return statusUpdate(func() error { return r.client.Status().Update(ctx, managed) })
+		})
+	}
+
+	release, deferral := r.gate(ctx, log, r.external.keyer, managed)
+	if deferral != nil {
+		return deferred(deferral)
+	}
+	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
 	external, err := r.external.Connect(externalCtx, managed)
+	release()
 	r.recordConnect(ctx, started, err)
 	if err != nil {
 		// We'll usually hit this case if our Provider or its secret are missing
@@ -880,8 +914,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		}
 	}()
 
+	// The client is gated on its own key, or on the connecter's.
+	clientKeyer := keyerOf(external)
+	if clientKeyer == nil {
+		clientKeyer = r.external.keyer
+	}
+
+	release, deferral = r.gate(ctx, log, clientKeyer, managed)
+	if deferral != nil {
+		return deferred(deferral)
+	}
+	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
 	observation, err := external.Observe(externalCtx, managed)
+	release()
 	r.recordObserve(ctx, started, err)
 	if err != nil {
 		// We'll usually hit this case if our Provider credentials are invalid
@@ -1037,8 +1083,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// We'll only reach this point if deletion policy is not orphan, so we
 		// are safe to call external deletion if external resource exists.
 		if observation.ResourceExists && meta.ShouldDelete(managed) {
+			release, deferral = r.gate(ctx, log, clientKeyer, managed)
+			if deferral != nil {
+				return deferred(deferral)
+			}
+			defer release() // a backstop if the call panics; release is idempotent
 			started = time.Now()
 			err = external.Delete(externalCtx, managed)
+			release()
 			r.recordDelete(ctx, started, err)
 			if err != nil {
 				// We'll hit this condition if we can't delete our external
@@ -1118,6 +1170,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	}
 
 	if !observation.ResourceExists && meta.ShouldCreate(managed) {
+		// Ask the gate before the create-pending annotation is written: a
+		// deferral after it would leave an unresolved create handshake behind
+		// for a create that was never attempted.
+		releaseCreate, deferral := r.gate(ctx, log, clientKeyer, managed)
+		if deferral != nil {
+			return deferred(deferral)
+		}
+		defer releaseCreate() // also a backstop if Create panics; release is idempotent
+
 		// We write this annotation for two reasons. Firstly, it helps
 		// us to detect the case in which we fail to persist critical
 		// information (like the external name) that may be set by the
@@ -1141,6 +1202,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 
 		started = time.Now()
 		err = external.Create(externalCtx, managed)
+		releaseCreate()
 		r.recordCreate(ctx, started, err)
 		if err != nil {
 			// We'll hit this condition if we can't create our external
@@ -1282,8 +1344,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		return reconcile.Result{RequeueAfter: reconcileAfter}, nil
 	}
 
+	release, deferral = r.gate(ctx, log, clientKeyer, managed)
+	if deferral != nil {
+		return deferred(deferral)
+	}
+	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
 	err = external.Update(externalCtx, managed)
+	release()
 	r.recordUpdate(ctx, started, err)
 	if err != nil {
 		// We'll hit this condition if we can't update our external resource,

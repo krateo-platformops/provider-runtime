@@ -4,13 +4,59 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-05 — v1.9.0: rate-limit governor
+- **Reconciles slow down by themselves** when an external API signals a rate
+  limit, per endpoint key, or when the controller's own container is
+  CPU-saturated. It replaces hand-tuning `--max-reconcile-rate` and
+  `--poll`. Design: [design-rate-limit-governor](./design-rate-limit-governor.md).
+- **Off by default.** With nothing configured, nothing is gated and
+  `ratelimit.Report` is a no-op. A provider turns each input on with one chart
+  flag. The rate-limit input (`controller.Options.RateLimit.Enabled`) also
+  needs `reconciler.RateLimitKeyer` and reported signals. The saturation input
+  (`RateLimit.Saturation.Enabled`) bounds every gated call, keyer or not.
+- A deferred pass makes no external call, writes
+  `Synced=False/ReconcileDeferred` with the key and deadline in the message,
+  leaves `Ready` unchanged, and requeues with a nil error, so it consumes no
+  failure backoff.
+- New API: `prv1.ReasonReconcileDeferred` (`"ReconcileDeferred"`, fixed;
+  shared with unstructured-runtime) and `prv1.ReconcileDeferred(msg)`;
+  `reconciler.RateLimitKeyer` and `reconciler.WithRateLimitGovernor`;
+  `controller.Options.RateLimit`, `controller.Options.RateLimitGovernor` and
+  `(*controller.Options).SetupRateLimitGovernor`; the packages
+  `pkg/ratelimit` (Signal, Report, Governor, saturation sampler) and
+  `pkg/ratelimit/httpsignal` (GitHub and Azure DevOps headers);
+  `reconcilertest.AssertReportsRateLimits` and the recorded vendor
+  responses; `provider_runtime.ratelimit.*` metrics.
+- **It ships rate-limit and CPU slow-down, not memory protection.** The user
+  decided this from kind measurements on the example provider (see
+  [configuration](./configuration.md#the-pressure-thresholds-are-provisional)):
+  - Saturation reads CPU pressure only, on a 1s sample. The threshold stays
+    50%, provisional until core-provider validates it. Under a CPU limit below
+    one core that means close to one call at a time; raise the threshold or
+    the limit if that's too slow.
+  - The memory working set is experimental and off by default
+    (`ExperimentalMemoryWorkingSet`). It did not prevent OOMKills in 0 of 19
+    runs on an overcommitted workload. 0.80/0.90 are its provisional ratios.
+  - `memory.pressure` is dropped: it read 0 up to every OOMKill.
+  - `local` starts at 1 and rises by 1 per 2s until its first cut. After any
+    cut it rises by 1 per clean `RecoveryInterval` (30s), like API limits. One
+    call always keeps going.
+  - Saturation bounds calls without a keyer too.
+  - A deferral that would write the object back unchanged skips the status
+    update.
+  - A deferral on the startup ramp is quiet: no `Synced`, no event, and only
+    the `deferrals` metric shows it, under cause `ramping`. Otherwise a restart
+    turned every healthy object `Synced=False`.
+- Follow-up for the memory input is filed in the design's §11: setting the Go
+  memory limit, testing headroom under it as the input, and the re-test gates.
 
 ## 2026-11-04 — docs: errors become readable status
 - overview.md now states that every error a provider returns is written

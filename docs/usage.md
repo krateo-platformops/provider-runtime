@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # Usage
@@ -28,7 +28,7 @@ runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
 standard-library findings your patched build doesn't have.
 
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.8.2
+go get github.com/krateo-platformops/provider-runtime@v1.9.0
 ```
 
 If your provider also uses `github.com/krateo-platformops/audit` (v0.3.0+),
@@ -192,6 +192,110 @@ For Krateo, that's core-provider#310.
   defaults, `ratelimiter.LimitRESTConfig(cfg, rps)` to bound client-side QPS,
   `workqueue.NewExponentialTimedFailureRateLimiter` for time-expiring
   per-item backoff.
+- **Rate-limit governor** (off by default) — slows reconciles down by itself
+  when an external API signals a rate limit, per endpoint key, or when the
+  controller's container is CPU-saturated. It replaces hand-tuning
+  `--max-reconcile-rate` and `--poll`. See
+  [configuration](./configuration.md#rate-limit-governor-controlleroptionsratelimit)
+  for every setting and
+  [the design](./design-rate-limit-governor.md) for why it works this way.
+  - *Wiring.* Set `o.RateLimit.Enabled` (and `o.RateLimit.Saturation.Enabled`
+    for the saturation input) from one chart flag each, call
+    `o.SetupRateLimitGovernor(mgr)` once, and pass
+    `reconciler.WithRateLimitGovernor(o.RateLimitGovernor)` to every
+    reconciler. A `nil` governor is a no-op, so this is safe when the chart
+    leaves the flag unset.
+  - *Saturation.* With `o.RateLimit.Saturation.Enabled`, every gated call
+    (`Connect` and each `ExternalClient` method) needs a slot in the
+    process-wide `local` capacity, whether or not the provider implements
+    `RateLimitKeyer`. The provider writes no code for it. It reads
+    `cpu.pressure` (`some avg10`) once a second. `local` starts at 1 and rises
+    by 1 every 2s until its first cut, so 16 workers take about 30s. A
+    saturated sample halves it, never below 1, and after any cut it rises by 1
+    per clean `RecoveryInterval` (30s), the same as API limits.
+  - *A restart is quiet.* While `local` is on its startup ramp, before its
+    first cut and with nothing saturated, a pass deferred by the local capacity
+    just requeues: `Synced` stays as it was, with no event and no status write
+    for the deferral. This is the one exception to "a deferred pass writes
+    `Synced=False`", decided by the user: the ramp lasts about 30s and isn't a
+    state of the object, and reporting it turned 200 healthy objects
+    `Synced=False` on a restart, with 200 status updates and 0 provider calls.
+    If the pass already ran `Observe`, what `Observe` learned is still written.
+    The restart shows in `provider_runtime.ratelimit.deferrals` under cause
+    `ramping`. Throttled, per-key at-capacity and saturated deferrals, and
+    at-capacity after a cut, still write, also during the ramp. Quiet needs a
+    running sampler: if you call `ratelimit.New` yourself, add the Governor to
+    the manager. Otherwise deferrals show `saturation sampler is not running`
+    on the object, because nothing would ever raise `local`.
+  - *Memory is not protected.* The saturation flag reads CPU only. The working
+    set is a separate input,
+    `o.RateLimit.Saturation.ExperimentalMemoryWorkingSet`, off by default and
+    experimental. Don't turn it on expecting OOM protection: it did not
+    prevent OOMKills in 0 of 19 runs on an overcommitted workload, or a crash
+    loop after one (see
+    [configuration](./configuration.md#re-measurement-of-the-memory-input)).
+    Keep workers times the largest call well under the memory limit. A sample
+    period below 1s only matters to this input.
+  - *Keying.* A keyer is needed only for per-endpoint API rate limits.
+    Implement `reconciler.RateLimitKeyer` on the connecter, the client, or
+    both. Only calls of a connecter or client that implements it are gated
+    per endpoint; each key recovers by 1 per `RecoveryInterval` (30s). Return
+    the endpoint host (`httpsignal.HostKey` of the base
+    URL), or `host|credential-reference` when the quota is per identity. Key
+    on the credential's reference (for example the Secret's namespace and
+    name), never its value: credentials rotate, and a key that changes on
+    rotation splits one quota into several. `RateLimitKey` must not do I/O,
+    and must return the same string the provider's signals use.
+  - *Reporting.* Wrap the HTTP client's transport with
+    `httpsignal.NewTransport(base)` and pass the context the runtime handed
+    to `Connect` or the `ExternalClient` method into each request
+    (`http.NewRequestWithContext`). Or call `ratelimit.Report(ctx, Signal)`
+    yourself. Report on successful responses too: Azure DevOps announces a
+    delay on a 200 before it starts refusing.
+  - *Testing.* Call `reconcilertest.AssertReportsRateLimits` in the
+    provider's tests. It feeds the provider's call a recorded GitHub 429, a
+    recorded Azure DevOps advisory 200 and a healthy GitHub 200, and fails
+    unless the first is reported as throttled with a deadline, the second as
+    advisory, and the third as neither. The runtime can't check this from
+    outside: a provider that never reports looks like an endpoint that is
+    never limited.
+  - *What a deferral looks like.* A pass whose next call is deferred makes no
+    external call. It writes `Synced=False` with reason `ReconcileDeferred`
+    and leaves `Ready` as it was. The message names the key and the server's
+    deadline, for example `reconciliation deferred: api.github.com is
+    rate-limited by the server; next attempt 2026-11-05T10:00:31Z`, or says
+    it is waiting for capacity. A deferral by the local capacity names the
+    cause and no key, for example `reconciliation deferred: controller
+    saturated: CPU pressure 63% (some avg10); waiting for capacity (1
+    call(s) in flight allowed); no server deadline was given`, or
+    `reconciliation deferred: controller recovering its local concurrency
+    limit (2 call(s) in flight allowed); waiting for capacity; no server
+    deadline was given`.
+    A Normal `ReconcileDeferred` event is recorded, through the throttled
+    recorder, when the object enters a deferral or a throttle names a new
+    deadline. The pass requeues after the deadline (or 1s to the
+    RecoveryInterval) with a nil error, so it consumes no failure backoff.
+    When the deferral would write the object back exactly as it was read
+    (an at-capacity deferral repeats the same message every pass), the
+    status update is skipped and the pass only requeues. A throttled
+    deferral that names a new deadline still writes.
+  - *The pass that gets the 429 is still an error.* The call failed, so that
+    pass reports `ReconcileError` and consumes one backoff step, as today.
+    The passes after it are deferrals until the server's deadline.
+
+  **Requirement on providers: do expensive work inside the gated calls.**
+  `local` throttles only the work that runs inside a gated call: `Connect`
+  and the `ExternalClient` methods (`Observe`, `Create`, `Update`, `Delete`),
+  with or without a keyer.
+  A provider's expensive work (rendering templates, cloning repositories,
+  large API reads) must happen inside those calls, not before them in the
+  provider's own code. Work done outside them is not bounded by `local`.
+  Don't refactor that work out of the gated call: doing so silently removes
+  the throttle from exactly the work that causes saturation, and nothing fails
+  to tell you. The runtime side is pinned by
+  `TestLocalCapacityBoundsConcurrentObserveBodies` and
+  `TestProviderWithoutKeyerIsBoundedByLocal` in `pkg/reconciler`; the
+  provider side is the provider's to keep.
 
 ## Developing this library
 

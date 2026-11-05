@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -71,7 +72,20 @@ type Metrics struct {
 
 	statusUpdateDuration metric.Float64Histogram
 	statusUpdateFailure  metric.Int64Counter
+
+	// Rate-limit governor (pkg/ratelimit).
+	rateLimitDeferrals         metric.Int64Counter
+	rateLimitSignals           metric.Int64Counter
+	rateLimitCapacity          metric.Int64ObservableGauge
+	rateLimitSecondsToReset    metric.Float64ObservableGauge
+	rateLimitLocalCapacity     metric.Int64ObservableGauge
+	rateLimitSaturationInput   metric.Float64ObservableGauge
+	rateLimitSaturationEnabled metric.Int64ObservableGauge
+	// rateLimitSnapshot is the governor's state, set by ObserveRateLimit.
+	rateLimitSnapshot atomic.Pointer[func() ratelimit.Snapshot]
 }
+
+var _ ratelimit.MetricsRecorder = (*Metrics)(nil)
 
 // Setup creates and configures an OTLP metrics pipeline.
 //
@@ -227,10 +241,42 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 
+	if m.rateLimitDeferrals, err = meter.Int64Counter("provider_runtime.ratelimit.deferrals",
+		metric.WithDescription("External calls the rate-limit governor deferred, by key and cause (throttled, capacity, saturated, ramping).")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitSignals, err = meter.Int64Counter("provider_runtime.ratelimit.signals",
+		metric.WithDescription("Rate-limit signals providers reported, by key and kind (throttled, advisory).")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitCapacity, err = meter.Int64ObservableGauge("provider_runtime.ratelimit.capacity",
+		metric.WithDescription("Current concurrency the governor allows per key: the number operators used to tune by hand.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitSecondsToReset, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.seconds_to_reset",
+		metric.WithDescription("Seconds until a throttled key's hold lifts, 0 when it is not held."), metric.WithUnit("s")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitLocalCapacity, err = meter.Int64ObservableGauge("provider_runtime.ratelimit.local.capacity",
+		metric.WithDescription("Current process-wide capacity the controller's own saturation allows.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitSaturationInput, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.saturation.input",
+		metric.WithDescription("Each enabled saturation input's last value: PSI some avg10 for cpu_pressure, the share of memory.max for memory_working_set. A disabled input has no value."),
+		metric.WithUnit("%")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitSaturationEnabled, err = meter.Int64ObservableGauge("provider_runtime.ratelimit.saturation.input.enabled",
+		metric.WithDescription("1 when a saturation input is read, 0 when it is disabled (no cgroup v2, no PSI, no memory limit, or saturation off).")); err != nil {
+		return nil, err
+	}
+
 	_, err = meter.RegisterCallback(func(_ context.Context, observer metric.Observer) error {
 		observer.ObserveInt64(m.reconcileInFlight, m.reconcileInFlightCount.Load())
+		m.observeRateLimit(observer)
 		return nil
-	}, m.reconcileInFlight)
+	}, m.reconcileInFlight, m.rateLimitCapacity, m.rateLimitSecondsToReset, m.rateLimitLocalCapacity,
+		m.rateLimitSaturationInput, m.rateLimitSaturationEnabled)
 	if err != nil {
 		return nil, err
 	}
@@ -461,4 +507,55 @@ func (m *Metrics) IncStatusUpdateFailure(ctx context.Context) {
 		return
 	}
 	m.statusUpdateFailure.Add(ctx, 1)
+}
+
+// IncRateLimitDeferral counts one deferred external call for key.
+func (m *Metrics) IncRateLimitDeferral(ctx context.Context, key string, reason ratelimit.DeferReason) {
+	if m == nil {
+		return
+	}
+	m.rateLimitDeferrals.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("key", key), attribute.String("cause", reason.Cause())))
+}
+
+// IncRateLimitSignal counts one throttled or advisory signal for key.
+func (m *Metrics) IncRateLimitSignal(ctx context.Context, key string, kind ratelimit.SignalKind) {
+	if m == nil {
+		return
+	}
+	m.rateLimitSignals.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("key", key), attribute.String("kind", string(kind))))
+}
+
+// ObserveRateLimit makes snapshot the source of the rate-limit gauges.
+// ratelimit.New calls it when its Options.Metrics is set.
+func (m *Metrics) ObserveRateLimit(snapshot func() ratelimit.Snapshot) {
+	if m == nil || snapshot == nil {
+		return
+	}
+	m.rateLimitSnapshot.Store(&snapshot)
+}
+
+func (m *Metrics) observeRateLimit(observer metric.Observer) {
+	fn := m.rateLimitSnapshot.Load()
+	if fn == nil {
+		return
+	}
+	snap := (*fn)()
+	for _, k := range snap.Keys {
+		attrs := metric.WithAttributes(attribute.String("key", k.Key))
+		observer.ObserveInt64(m.rateLimitCapacity, int64(k.Capacity), attrs)
+		observer.ObserveFloat64(m.rateLimitSecondsToReset, k.SecondsToReset, attrs)
+	}
+	observer.ObserveInt64(m.rateLimitLocalCapacity, int64(snap.LocalCapacity))
+	for _, in := range snap.Inputs {
+		attrs := metric.WithAttributes(attribute.String("input", in.Input))
+		enabled := int64(0)
+		if in.Enabled {
+			enabled = 1
+			// A disabled input reports no value: zero would read as healthy.
+			observer.ObserveFloat64(m.rateLimitSaturationInput, in.Percent, attrs)
+		}
+		observer.ObserveInt64(m.rateLimitSaturationEnabled, enabled, attrs)
+	}
 }
