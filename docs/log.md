@@ -14,8 +14,8 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
 ## 2026-11-05 — rate-limit governor (unreleased)
 - **Reconciles slow down by themselves** when an external API signals a rate
-  limit, per endpoint key, or when the controller's own container is CPU- or
-  memory-saturated. It replaces hand-tuning `--max-reconcile-rate` and
+  limit, per endpoint key, or when the controller's own container is
+  CPU-saturated. It replaces hand-tuning `--max-reconcile-rate` and
   `--poll`. Design: [design-rate-limit-governor](./design-rate-limit-governor.md).
 - **Off by default.** With nothing configured, nothing is gated and
   `ratelimit.Report` is a no-op. A provider turns each input on with one chart
@@ -35,21 +35,23 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   `pkg/ratelimit/httpsignal` (GitHub and Azure DevOps headers);
   `reconcilertest.AssertReportsRateLimits` and the recorded vendor
   responses; `provider_runtime.ratelimit.*` metrics.
-- **Saturation settings decided by the user** from a kind measurement on
-  the example provider (see
+- **It ships rate-limit and CPU slow-down, not memory protection.** The user
+  decided this from kind measurements on the example provider (see
   [configuration](./configuration.md#the-pressure-thresholds-are-provisional)):
-  - `memory.pressure` is dropped as an input: it read 0 up to every OOMKill.
-  - The sample period is 250ms; the working-set ratios are 0.80 (halve) and
-    0.90 (straight to 1).
-  - `local` slow-starts at 1 and rises by 1 per clean sample.
+  - Saturation reads CPU pressure only, on a 1s sample. The threshold, 50%,
+    stays provisional until core-provider validates it.
+  - The memory working set is experimental and off by default
+    (`ExperimentalMemoryWorkingSet`). It did not prevent OOMKills in 0 of 19
+    runs on an overcommitted workload. 0.80/0.90 are its provisional ratios.
+  - `memory.pressure` is dropped: it read 0 up to every OOMKill.
+  - `local` starts at 1 and rises by 1 per 2s until its first cut. After any
+    cut it rises by 1 per clean `RecoveryInterval` (30s), like API limits. One
+    call always keeps going.
   - Saturation bounds calls without a keyer too.
   - A deferral that would write the object back unchanged skips the status
     update.
-  - The CPU pressure threshold, 50%, stays provisional until core-provider
-    validates it.
-- **Re-measured, those settings did not prevent OOMKills** on the synthetic
-  workload: 0 of 19 runs clean, and the crash loop after an OOMKill remains.
-  What is left to decide is in the design's §11.
+- Follow-up for the memory input is filed in the design's §11: setting the Go
+  memory limit, testing headroom under it as the input, and the re-test gates.
 
 ## 2026-11-04 — docs: errors become readable status
 - overview.md now states that every error a provider returns is written

@@ -28,10 +28,12 @@ demonstrating everything a real Krateo provider wires up:
   and two flags turn the inputs on —
   `--rate-limit-governor` / `GREETING_PROVIDER_RATE_LIMIT_GOVERNOR` and
   `--saturation-governor` / `GREETING_PROVIDER_SATURATION_GOVERNOR`. The
-  saturation flag turns on the local input for all of the controller's calls,
-  `Connect` and every `ExternalClient` method; it would do so even without
-  the keyer, which only matters for per-endpoint limits. Nothing else needs
-  setting; see
+  saturation flag turns on the local input, CPU only, for all of the
+  controller's calls, `Connect` and every `ExternalClient` method; it would do
+  so even without the keyer, which only matters for per-endpoint limits. A
+  third flag, `--saturation-experimental-memory` /
+  `GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY`, adds the experimental
+  memory input, which is not OOM protection. Nothing else needs setting; see
   [configuration](../../docs/configuration.md#rate-limit-governor-controlleroptionsratelimit).
 
 The external name lifecycle is real: on first reconcile `Observe` reports the

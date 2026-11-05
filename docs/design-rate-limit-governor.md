@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: provider-runtime — automatic slow-down under rate limits and controller saturation
-description: Design, implemented in provider-runtime, for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU or memory is saturated, aligned with unstructured-runtime's design; its saturation settings were decided by the user from a kind measurement.
+description: Design, implemented in provider-runtime, for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU is saturated, with an experimental memory input, aligned with unstructured-runtime's design.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, reconciler, workqueue]
 timestamp: 2026-11-05T00:00:00Z
@@ -11,16 +11,14 @@ timestamp: 2026-11-05T00:00:00Z
 
 **Status:** implemented in provider-runtime (`pkg/ratelimit`,
 `pkg/ratelimit/httpsignal`, `pkg/reconciler`, `pkg/controller`), off by
-default. The saturation settings were decided by the user on 2026-11-05
-from the kind measurement recorded in
-[configuration](./configuration.md#the-pressure-thresholds-are-provisional):
-`memory.pressure` dropped, a 250ms sample period, working-set ratios of 0.80
-and 0.90, and a slow start for `local`. Measured again, those settings did not
-prevent OOMKills on the synthetic workload, and §11 item 13 lists what that
-leaves to decide. The CPU pressure threshold (50%) stays provisional until
-core-provider validates it (open question 5). Where the implementation chose
-something this design leaves open, §11 says so, and marks what the user
-decided. **Scope:** provider-runtime. The same
+default. It ships rate-limit and CPU slow-down. **It does not ship memory
+protection:** the memory input is in the code, off by default and experimental,
+because it did not prevent OOMKills on the kind re-measurement. The saturation
+settings were decided by the user on 2026-11-05 from the measurements recorded
+in [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
+The CPU pressure threshold (50%) stays provisional until core-provider
+validates it (open question 5). Where the implementation chose something this
+design leaves open, §11 says so, and marks what the user decided. **Scope:** provider-runtime. The same
 feature for unstructured-runtime is designed by its owner in
 [unstructured-runtime#50](https://github.com/krateo-platformops/unstructured-runtime/pull/50).
 This document reuses that design's vocabulary on purpose and only spells out
@@ -212,7 +210,8 @@ design only makes it possible.
 ## 7. Slowing down when the controller itself is saturated
 
 A rate limit is the external API saying "too fast". The controller's own pod
-can say it too: CPU starved, or memory close to its limit. Today that is also
+can say it too: CPU starved, or memory close to its limit. CPU ships; memory
+is an experimental input that is off by default (§11). Today that is also
 tuned by hand, with the same `--max-reconcile-rate`. Too high, and a burst of
 reconciles gets the pod OOMKilled or CPU-throttled until its probes fail.
 Too low, and it idles on a quiet day. The same governor handles both, with a
@@ -225,7 +224,7 @@ container:
 | Input | File | Meaning |
 |---|---|---|
 | CPU pressure | `cpu.pressure`, `some avg10` | Share of the last 10s in which a runnable task waited for CPU. It covers throttling by the CPU limit and contention on the node alike. |
-| Memory working set | `memory.current` minus `inactive_file` from `memory.stat`, against `memory.max` | The same working set kubelet uses for eviction and the OOM killer acts on. Page cache the kernel can drop is excluded, so a large but reclaimable cache does not slow anything down. |
+| Memory working set (**experimental, off by default**) | `memory.current` minus `inactive_file` from `memory.stat`, against `memory.max` | The same working set kubelet uses for eviction and the OOM killer acts on. Page cache the kernel can drop is excluded, so a large but reclaimable cache does not slow anything down. It did not prevent OOMKills when measured (§11). |
 
 `memory.pressure` (`full avg10`) is not an input. It was in this design to
 catch thrashing before the working set reaches the limit, but on the kind
@@ -238,33 +237,31 @@ governor already keeps a capacity per key. Saturation adds one more capacity,
 `local`, which bounds in-flight gated calls across *all* keys, and the calls
 of providers that have no key at all:
 
-- One sampler goroutine reads the files every 250ms (default) and publishes
+- One sampler goroutine reads the files every second (default) and publishes
   the result atomically. `Acquire` reads that value and does no I/O, so the
-  hot path stays as cheap as §4 requires. A faster sample makes the
-  working-set input react faster. It doesn't make CPU pressure react faster:
+  hot path stays as cheap as §4 requires. A faster period only matters to the
+  experimental memory input. It doesn't make CPU pressure react faster:
   `avg10` is already a 10-second average.
 - A keyed call needs a slot in both its key and `local`. With saturation on,
   a call without a key (the provider implements no `RateLimitKeyer`, or it
   returned an empty key or an error) needs a `local` slot only.
-- *Slow start:* `local` starts at 1, not at the ceiling, so a controller
-  restarted after an OOMKill doesn't admit its whole backlog at once. It ramps
-  at 4 calls per second by default. On the kind measurement that was faster
-  than the working set reacts, and the crash loop remained (§11 item 13).
+- *Slow start:* `local` starts at 1, not at the ceiling, and rises by 1 per
+  `StartupRampInterval` (2s by default, not tied to the sample period) until
+  its first cut, so 16 workers are all admitted after about 30s.
 - *Saturated* (any input over its threshold for one sample): `local`
   halves, with a minimum of 1. One call always keeps going, so a saturated
   controller still finishes deletions and still makes progress. Halving is
   rate-limited to once per sample period, so one bad second can't drive
   capacity to 1.
-- *Ramp and recovery:* +1 per clean sample (no input over its threshold), up
-  to the ceiling. A saturated sample stops the ramp and halves. This is
-  additive like §2, but per sample rather than per `RecoveryInterval`: the
-  working set lags behind live memory, so a 30s step left the controller idle
-  at a working set where the ceiling would have fit. Per-key API recovery
-  stays +1 per `RecoveryInterval` (30s).
-- *Soft memory limit:* at 80% of `memory.max` by default, `local` halves.
-- *Hard memory limit:* at 90% of `memory.max` by default, `local` drops to 1
-  at once rather than halving. Close to the limit, the next allocation can be
-  the OOMKill, and one call in flight is the floor.
+- *Recovery:* one rule, whichever input made the cut. After any cut, +1 per
+  clean `RecoveryInterval` (30s by default), up to the ceiling: the same as §2
+  for API limits. A saturated sample during recovery halves again and restarts
+  the interval, and one at the floor counts as a cut too.
+- *Experimental memory input, soft ratio:* at 80% of `memory.max` by default
+  (provisional), `local` halves.
+- *Experimental memory input, hard ratio:* at 90% of `memory.max` by default
+  (provisional), `local` drops to 1 at once rather than halving. The one-call
+  floor still applies, and that call can be the OOMKill (§11).
 
 **Requirement on providers: do expensive work inside the gated calls.**
 `local` throttles only the work that runs inside a gated call: `Connect`
@@ -283,7 +280,7 @@ side is the provider's to keep.
 `Synced=False/ReconcileDeferred`, leaves `Ready` unchanged, returns
 `RequeueAfter` with a nil error, and uses the jittered "waiting for
 capacity" interval from §5. The message names the cause and no key, for
-example `controller saturated: memory working set 83% of limit`, or
+example `controller saturated: CPU pressure 63% (some avg10)`, or
 `controller ramping up its local concurrency limit (2 call(s) in flight
 allowed); waiting for capacity`, so an operator can tell a full or starting
 controller from a throttling vendor. It gets no new reason. A
@@ -296,17 +293,17 @@ was not assessed this pass, and it says why.
   outside a container), that input is disabled. The runtime logs this once at
   Info and reports it as a metric. Failing closed would stop a controller
   because of how its node was built.
-- With no memory limit (`memory.max` is `max`), the working-set check is off
-  and CPU pressure still applies.
+- With the experimental memory input on and no memory limit (`memory.max` is
+  `max`), the working-set check is off and CPU pressure still applies.
 - With no CPU limit, CPU pressure still measures contention on the node,
   which is the case where slowing down helps.
 
 **Out of scope here:**
 
-- `GOMEMLIMIT`. Setting it from the container limit makes the Go GC work
-  harder before the OOM killer acts, which helps alongside this design. It's
-  a deployment setting each provider's chart owns, and a runtime library
-  shouldn't change it at import time.
+- `GOMEMLIMIT`, for now. Setting it from the container limit makes the Go GC
+  work harder before the OOM killer acts. It's a deployment setting each
+  provider's chart owns, and a runtime library shouldn't change it at import
+  time. §11 item 14 proposes setting it when the memory input is on.
 - The Kubernetes API server's own overload. client-go already honours API
   Priority and Fairness 429s with `Retry-After`.
 - A vendor server that is saturated rather than rate-limited. That is a
@@ -318,15 +315,17 @@ env set by each chart and nothing in any CRD:
 
 - whether saturation is enabled at all, independently of the rate-limit
   input;
-- the sample period, 250ms by default;
+- the sample period, 1s by default;
+- the startup ramp interval, 2s by default;
 - the CPU pressure threshold, 50% by default (provisional);
-- the working-set soft and hard ratios, 80% and 90% by default.
+- whether the experimental memory input is on, off by default;
+- that input's working-set soft and hard ratios, 80% and 90% by default
+  (provisional).
 
-The defaults were measured on a kind cluster with a provider under synthetic
-load, and the sample period, ratios, slow start and the dropped memory
-pressure input were decided by the user from that measurement (§11). The CPU
-pressure threshold stays provisional until core-provider validates it. This
-is open question 5.
+The defaults come from measurements on a kind cluster with a provider under
+synthetic load, and were decided by the user from them (§11). The CPU pressure
+threshold stays provisional until core-provider validates it. This is open
+question 5.
 
 ## 8. Observability and verification
 
@@ -435,10 +434,9 @@ Tests, each written so it fails without the behaviour it checks:
      plugins drop the vendor's response headers before rest-dynamic-controller
      sees them. Whoever takes on Azure DevOps REST would need to move it to
      v1.x and forward the headers.
-5. **Saturation thresholds (§7).** Measured, and partly decided: the user
-   decided the sample period, the working-set ratios, the slow start and
-   dropping memory pressure (§11). The CPU pressure threshold stays
-   provisional until core-provider validates it. The defaults are measured,
+5. **Saturation thresholds (§7).** Measured, and decided by the user (§11): CPU
+   ships, with its threshold provisional until core-provider validates it, and
+   the memory input stays experimental. The defaults are measured,
    not chosen: a kind cluster, a provider built on this
    runtime, and synthetic load until the pod is throttled or close to its
    memory limit. The implementation PR records the thresholds where
@@ -505,49 +503,94 @@ Where the implementation made a choice this design leaves open:
       OOMKill. A Go controller's memory is anonymous, and with no swap there
       is nothing to reclaim and so nothing to stall on. The working-set
       ratios are the input that acts.
-    - **Decided (the user, 2026-11-05): a 250ms sample period, and
-      working-set ratios of 0.80 (halve) and 0.90 (straight to 1)**, because
-      the first kind measurement OOMed in 3 of 5 runs at 1s with 0.90/0.95. A
-      1s sample can't stop calls admitted between two samples, and at about
-      5% of the limit per call 10% of headroom is less than two calls. 0.80
-      was clean in 2 runs then; the re-measurement did not repeat that (item
-      13). `avg10` is a 10-second average, so the faster period helps the
-      working set, not CPU pressure.
-    - **Decided (the user, 2026-11-05): slow start for `local` only**,
-      because the kind measurement showed a controller restarted after an
-      OOMKill meeting its whole backlog at full concurrency and crash-looping.
-      `local` starts at 1, rises by 1 per clean sample up to the ceiling, and
-      halves on a saturated sample; the hard ratio still drops it to 1.
-      Per-key API recovery stays +1 per `RecoveryInterval`. The
-      re-measurement found the crash loop remains (item 13).
+    - **Decided, then superseded by item 13: a 250ms sample period.** The
+      first measurement OOMed in 3 of 5 runs at 1s, and a 1s sample can't stop
+      calls admitted between two samples. `avg10` is a 10-second average, so
+      the faster period could only help the working set.
+    - **Decided (the user, 2026-11-05): working-set ratios of 0.80 (halve) and
+      0.90 (straight to 1)**, because at about 5% of the limit per call 10% of
+      headroom is less than two calls. 0.80 was clean in 2 runs then; the
+      re-measurement did not repeat that. They stay as the experimental
+      input's provisional values (item 13).
+    - **Decided, then revised by item 13: slow start for `local`**, because
+      the kind measurement showed a controller restarted after an OOMKill
+      meeting its whole backlog at full concurrency and crash-looping. It first
+      rose by 1 per clean sample, which the re-measurement showed was too fast.
 12. **Decided (the user, 2026-11-05): a deferral that changes nothing writes
     nothing.** When the object would be written back exactly as it was read,
     the status update is skipped and the pass only requeues. At capacity the
     requeue is 1s to the `RecoveryInterval` and the message carries no time,
     so every pass would otherwise make the same write. A throttled deferral
     that names a new deadline still writes.
-13. **Re-measured: the decided settings did not prevent OOMKills. Open, for
-    the user to decide.** The tables are in
-    [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
+13. **Re-measured: the memory input did not prevent OOMKills. Decided (the
+    user, 2026-11-05): this release ships rate-limit and CPU slow-down, and
+    memory stays in the code, off by default and experimental.** The tables
+    are in [configuration](./configuration.md#re-measurement-of-the-memory-input).
     On the synthetic workload (16 workers holding 16 MiB each, 100% of a
-    256Mi limit), the new defaults were clean in 0 of 19 runs. In the block
-    where they alternated with the old code on the same host, they restarted
-    3, 4, 3 times and the old code 5, 0, 5. The old code is sometimes clean
-    and crash-loops harder when it isn't; the new defaults die later and
-    restart less, but always die. Cold start still crash-loops (4 restarts in
-    5 of 5 runs, against 5 with the governor off). Sampling at 250ms costs
-    1.5 to 1.8% of one core, 6 to 7% of a 250m limit. What is left to decide:
-    - **Recovery after a cut.** At +1 per clean sample, `local` is back at the
-      ceiling within 4 seconds, before the heap shrinks. A scratch build with
-      +1 per 30s after the first cut restarted 3, 1, 0 times against 4, 4, 4,
-      alternating on one host. Three runs each, so a direction, not a proof.
-    - **The floor.** In 18 of 19 runs the last sample before the first death
-      read `local=1`: the one call that "always keeps going" (§7) landed on
-      Go's retained heap. Above the hard ratio, should even that call wait?
-      That trades the OOMKill for a stall, and it would need a way to finish
+    256Mi limit), it was clean in 0 of 19 runs at 250ms, 0.80/0.90, with a slow
+    start and +1 per clean sample. Alternating on one host, it restarted 3, 4,
+    3 times and the code before it 5, 0, 5. Cold start still crash-looped (4
+    restarts in 5 of 5 runs, against 5 with the governor off). From that:
+    - **Decided: the memory input is off by default.** A provider that enables
+      saturation gets CPU only. `ExperimentalMemoryWorkingSet` turns the input
+      on, and 0.80/0.90 stay as its provisional values.
+    - **Decided: the default sample period is back to 1s.** `avg10` gains
+      nothing from a faster sample, and 250ms cost up to 1.8% of one core, 7%
+      of a 250m limit. That was on a busy host; a later session on a quieter
+      one measured 0.19%, so the cost varies about tenfold. A faster period
+      only matters to the memory input.
+    - **Decided: one recovery rule for `local`, whichever input cut.** After
+      any cut, +1 per clean `RecoveryInterval` (30s), the same as API limits
+      and what CPU 50 was first measured with. At +1 per clean sample `local`
+      was back at the ceiling within 4 seconds, before the heap shrank; a
+      scratch build with +1 per 30s after the first cut restarted 3, 1, 0
+      times against 4, 4, 4, alternating on one host (three runs each, so a
+      direction, not a proof).
+    - **Decided: a startup ramp of +1 per 2s until the first cut**, a named
+      default not tied to the sample period, so 16 workers take about 30s. +1
+      per 250ms had reached 9 calls in 2 seconds, faster than the working set
+      reacts.
+    - **Decided: the one-call floor stays.** In 18 of 19 runs the last sample
+      before the first death read `local=1`, at 96 to 100% of the limit: that
+      call landed on Go's retained heap. Holding it back would trade the
+      OOMKill for a stall, and CPU saturation needs the floor to keep finishing
       deletions.
-    - **The cold-start ramp.** +1 per 250ms reaches 9 calls in 2 seconds.
-    - **`GOMEMLIMIT`.** §7 leaves it to charts. It tripled throughput with the
-      new defaults and cut restarts to 2 or fewer, though only 1 of 5 runs was
-      clean. Without saturation it didn't help. Charts that enable saturation
-      may need it as a requirement rather than an option.
+    - **Checked at the final code:** threshold 50 at 1s ran 3 of 3 without a
+      restart, at 40 to 47% pressure against 78% with the governor off, and at
+      1.4 to 2.1 Observes/s against 2.6. A CPU limit below one core keeps
+      `local` near 1 at this threshold. No retune.
+
+The rest of this section is the follow-up for the memory input. It is filed
+here and isn't built. The memory input stays experimental until item 16's
+gates are met.
+
+14. **Follow-up: the runtime sets the Go memory limit.** When the memory input
+    is on and `GOMEMLIMIT` isn't set, the runtime calls `debug.SetMemoryLimit`
+    from the container limit, in the region of 0.8 of `memory.max` (about 200Mi
+    for 256Mi). An explicit value always wins, whether from `GOMEMLIMIT` or an
+    option. The reason: the working set sits on plateaus set by the GC's heap
+    goal, so it doesn't track load, and with `GOMEMLIMIT=200MiB` throughput
+    tripled and restarts fell to 2 or fewer (1 of 5 runs clean; no help with
+    the governor off). This revisits §7, which left it to charts. It would need
+    a measured answer to where it applies: only with the memory input on, as
+    proposed here, because a library changing it otherwise is what §7 ruled out.
+15. **Follow-up: GOMEMLIMIT-relative headroom as the input.** core-provider's
+    suggestion: a working-set ratio is the wrong input when one unit of work is
+    large relative to the limit. With a call at 6% of the limit, 90% is less
+    than two calls from the end, and the working set says little about whether
+    the next call fits. Test the headroom left under the Go memory limit
+    instead of the working-set ratio. The runtime can read that without I/O
+    (`runtime/metrics`), so it may also cost less to sample than `memory.stat`.
+16. **Follow-up: re-test gates before the memory input can default on.** All of
+    these, on the overcommitted workload and with one run at a time or
+    alternating, on a host whose load is recorded:
+    - clean in at least 18 of 20 runs, against 0 of 19 so far;
+    - no crash loop on cold start, with the backlog present before the
+      controller starts, in at least 9 of 10 runs;
+    - a control of the code before the change alternating in the same block;
+    - restarts split by cause, OOMKill or liveness kill;
+    - throughput not below the old code's clean runs;
+    - the sampler's cost reported at the chosen period, in a container;
+    - a run on a real provider, not only the example.
+
+    The numbers are proposals for the user to confirm.

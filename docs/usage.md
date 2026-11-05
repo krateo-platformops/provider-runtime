@@ -194,7 +194,7 @@ For Krateo, that's core-provider#310.
   per-item backoff.
 - **Rate-limit governor** (off by default) — slows reconciles down by itself
   when an external API signals a rate limit, per endpoint key, or when the
-  controller's container is saturated. It replaces hand-tuning
+  controller's container is CPU-saturated. It replaces hand-tuning
   `--max-reconcile-rate` and `--poll`. See
   [configuration](./configuration.md#rate-limit-governor-controlleroptionsratelimit)
   for every setting and
@@ -208,16 +208,20 @@ For Krateo, that's core-provider#310.
   - *Saturation.* With `o.RateLimit.Saturation.Enabled`, every gated call
     (`Connect` and each `ExternalClient` method) needs a slot in the
     process-wide `local` capacity, whether or not the provider implements
-    `RateLimitKeyer`. The provider writes no code for it. `local` starts at 1
-    and rises by 1 per clean sample (every 250ms by default) up to the
-    ceiling. A saturated sample halves it, and a working set at 90% of
-    `memory.max` drops it to 1. It doesn't make a controller OOM-proof: on
-    a synthetic load where workers could fill the whole memory limit, it did
-    not prevent OOMKills or a crash loop after one (see
-    [configuration](./configuration.md#the-pressure-thresholds-are-provisional)).
-    Keep workers times the largest call well under the soft ratio. The inputs
-    are `cpu.pressure` (`some avg10`) and the working set against
-    `memory.max`.
+    `RateLimitKeyer`. The provider writes no code for it. It reads
+    `cpu.pressure` (`some avg10`) once a second. `local` starts at 1 and rises
+    by 1 every 2s until its first cut, so 16 workers take about 30s. A
+    saturated sample halves it, never below 1, and after any cut it rises by 1
+    per clean `RecoveryInterval` (30s), the same as API limits.
+  - *Memory is not protected.* The saturation flag reads CPU only. The working
+    set is a separate input,
+    `o.RateLimit.Saturation.ExperimentalMemoryWorkingSet`, off by default and
+    experimental. Don't turn it on expecting OOM protection: it did not
+    prevent OOMKills in 0 of 19 runs on an overcommitted workload, or a crash
+    loop after one (see
+    [configuration](./configuration.md#re-measurement-of-the-memory-input)).
+    Keep workers times the largest call well under the memory limit. A sample
+    period below 1s only matters to this input.
   - *Keying.* A keyer is needed only for per-endpoint API rate limits.
     Implement `reconciler.RateLimitKeyer` on the connecter, the client, or
     both. Only calls of a connecter or client that implements it are gated
@@ -248,7 +252,7 @@ For Krateo, that's core-provider#310.
     rate-limited by the server; next attempt 2026-11-05T10:00:31Z`, or says
     it is waiting for capacity. A deferral by the local capacity names the
     cause and no key, for example `reconciliation deferred: controller
-    saturated: memory working set 83% of limit; waiting for capacity (1
+    saturated: CPU pressure 63% (some avg10); waiting for capacity (1
     call(s) in flight allowed); no server deadline was given`, or
     `reconciliation deferred: controller ramping up its local concurrency
     limit (2 call(s) in flight allowed); waiting for capacity; no server

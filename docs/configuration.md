@@ -81,9 +81,10 @@ The library itself reads no environment variables. `telemetry.Setup` with
 ## Rate-limit governor (`controller.Options.RateLimit`)
 
 The governor slows reconciles down by itself when an external API signals a
-rate limit, per endpoint key, or when the controller's own container is CPU-
-or memory-saturated. The design is in
-[design-rate-limit-governor](./design-rate-limit-governor.md).
+rate limit, per endpoint key, or when the controller's own container is
+CPU-saturated. It is not memory protection: see
+[the experimental memory input](#the-pressure-thresholds-are-provisional).
+The design is in [design-rate-limit-governor](./design-rate-limit-governor.md).
 
 It is off by default. With nothing set, behaviour is the same as before the
 governor existed. A provider turns it on in its chart with one flag; no other
@@ -94,19 +95,23 @@ The library reads no flags or environment itself. The flag and env names
 below are the suggested convention: each provider declares its own, following
 the `<NAME>_PROVIDER_<SETTING>` env pattern providers already use. The
 example provider declares `--rate-limit-governor` /
-`GREETING_PROVIDER_RATE_LIMIT_GOVERNOR` and `--saturation-governor` /
-`GREETING_PROVIDER_SATURATION_GOVERNOR`
+`GREETING_PROVIDER_RATE_LIMIT_GOVERNOR`, `--saturation-governor` /
+`GREETING_PROVIDER_SATURATION_GOVERNOR` and
+`--saturation-experimental-memory` /
+`GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY`
 ([greeting-controller](../examples/greeting-controller/README.md)).
 
 | Flag / env (suggested) | Option | Default | Safe unset | What it does |
 |---|---|---|---|---|
 | `--rate-limit-governor` / `<NAME>_PROVIDER_RATE_LIMIT_GOVERNOR` | `controller.Options.RateLimit.Enabled` | `false` | yes (off) | Turns on the rate-limit input: calls are gated per key, and the signals the provider reports slow that key down. |
-| `--rate-limit-recovery-interval` / `<NAME>_PROVIDER_RATE_LIMIT_RECOVERY_INTERVAL` | `RateLimit.RecoveryInterval` | `30s` | yes | How long a key must go clean before its capacity rises by one (per-endpoint API limits only; the local capacity ramps per sample instead). Also the upper bound of the "waiting for capacity" requeue delay (1s to this value). |
-| `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU and memory saturation, read from its container's cgroup v2 files. Independent of `RateLimit.Enabled`. With it on, every gated call (`Connect` and each `ExternalClient` method) needs a local slot, whether or not the provider implements `RateLimitKeyer`. Local capacity starts at 1 and ramps up. |
-| `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `250ms` | yes | How often the sampler reads the cgroup files. It is also the ramp step: local capacity rises by 1 per clean sample and halves at most once per sample. A shorter period makes the working-set input react faster; it doesn't make CPU pressure react faster, because `avg10` is already a 10-second average. |
+| `--rate-limit-recovery-interval` / `<NAME>_PROVIDER_RATE_LIMIT_RECOVERY_INTERVAL` | `RateLimit.RecoveryInterval` | `30s` | yes | How long a key must go clean before its capacity rises by one, and the same for the local capacity after any cut. Also the upper bound of the "waiting for capacity" requeue delay (1s to this value). |
+| `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, every gated call (`Connect` and each `ExternalClient` method) needs a local slot, whether or not the provider implements `RateLimitKeyer`. |
+| `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemoryWorkingSet` | `false` | yes (off) | **Experimental, and not OOM protection.** Adds the memory working set to the local input. It [did not prevent OOMKills](#re-measurement-of-the-memory-input): 0 of 19 runs clean on an overcommitted workload. |
+| `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. Local capacity halves at most once per sample. A shorter period only matters to the experimental memory input: CPU pressure's `avg10` is already a 10-second average, so sampling it faster gains nothing and costs CPU in the container it protects. |
+| `--saturation-startup-ramp-interval` / `<NAME>_PROVIDER_SATURATION_STARTUP_RAMP_INTERVAL` | `RateLimit.Saturation.StartupRampInterval` | `2s` | yes | Local capacity starts at 1 and rises by one per this interval until its first cut, so 16 workers are all admitted after about 30s. Not tied to the sample period. After any cut, `RecoveryInterval` applies instead. |
 | `--saturation-cpu-pressure-threshold` / `<NAME>_PROVIDER_SATURATION_CPU_PRESSURE_THRESHOLD` | `RateLimit.Saturation.CPUPressureThreshold` | `50` (**provisional**) | yes | `cpu.pressure` `some avg10` percentage above which the controller counts as saturated. |
-| `--saturation-working-set-soft-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_SOFT_RATIO` | `RateLimit.Saturation.WorkingSetSoftRatio` | `0.80` | yes | Working set (`memory.current` minus `inactive_file`) as a share of `memory.max` at which local capacity halves. |
-| `--saturation-working-set-hard-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_HARD_RATIO` | `RateLimit.Saturation.WorkingSetHardRatio` | `0.90` | yes | Working-set share at which local capacity drops straight to 1. |
+| `--saturation-working-set-soft-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_SOFT_RATIO` | `RateLimit.Saturation.WorkingSetSoftRatio` | `0.80` (**provisional**) | yes | Experimental memory input only. Working set (`memory.current` minus `inactive_file`) as a share of `memory.max` at which local capacity halves. |
+| `--saturation-working-set-hard-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_HARD_RATIO` | `RateLimit.Saturation.WorkingSetHardRatio` | `0.90` (**provisional**) | yes | Experimental memory input only. Working-set share at which local capacity drops straight to 1. |
 | none | `RateLimit.Saturation.CgroupDir` | the process's own cgroup (`/sys/fs/cgroup` joined with the path in `/proc/self/cgroup`, else `/sys/fs/cgroup`) | yes | The cgroup v2 directory to read. Tests point it at fixtures. |
 | none | `RateLimit.Metrics` | `nil` | yes | Records the governor's metrics, for example `*telemetry.Metrics`. |
 | `--max-reconcile-rate` / `<NAME>_PROVIDER_MAX_RECONCILE_RATE` (existing) | `controller.Options.MaxConcurrentReconciles` | the provider's existing default | yes | Each controller's worker count. The governor's ceiling is this times the number of reconcilers registered with it, so enabling the governor never holds a healthy endpoint below today's total workers. Unset counts as 1. |
@@ -126,27 +131,64 @@ negative interval. Leaving a field unset never errors.
 
 ### The pressure thresholds are provisional
 
-The CPU pressure threshold (50%) is still provisional: core-provider is
-validating it. The other saturation settings were decided by the user after
-the first kind measurement (design open question 5), and then measured again.
-**The second measurement found they do not prevent OOMKills on the synthetic
-workload**, so read "After" below before relying on them:
+**This release ships rate-limit and CPU slow-down. It does not ship memory
+protection.** The user decided what follows from the kind measurements below
+(design open question 5, and §11):
 
+- Saturation reads CPU pressure only, on a 1s sample. The threshold, 50%, stays
+  provisional: core-provider is validating it.
+- The memory working set is a separate, experimental input, off by default. It
+  [did not prevent OOMKills](#re-measurement-of-the-memory-input) in 0 of 19
+  runs on an overcommitted workload, so turning it on does not protect a
+  controller from them. 0.80 and 0.90 are its provisional ratios.
+- `local` starts at 1 and rises by 1 per `StartupRampInterval` (2s) until its
+  first cut. After any cut, it rises by 1 per clean `RecoveryInterval` (30s),
+  the same as API limits.
+- `local` never goes below 1: one call always keeps going.
 - `memory.pressure` is no longer an input. It read 0.00 up to every OOMKill.
-- The sample period is 250ms, and the working-set ratios are 0.80 (halve) and
-  0.90 (straight to 1). These replace 1s, 0.90 and 0.95.
-- `local` starts at 1 and rises by 1 per clean sample, instead of starting at
-  the ceiling.
 - Saturation bounds every gated call, with or without a keyer.
 
-#### After (the decided settings: 250ms / 0.80 / 0.90, slow start, +1 per clean sample)
+Keep workers times the largest call well under the memory limit. The governor
+can't rescue a controller whose workers can overrun it.
 
-**The decided settings did not prevent OOMKills on this workload.** They ran
-clean in 0 of 19 runs. The workload is harsh on purpose: 16 workers each
-holding 16 MiB is 100% of the 256Mi limit before the controller's own memory.
-A provider whose workers fit well under the soft ratio may never see this.
-These numbers come from the example provider under that synthetic load, not
-from a real provider.
+#### CPU at the final code
+
+Threshold 50, 1s sample, the CPU workload of the
+[first measurement](#before-first-measurement-1s--090--095-local-starting-at-the-ceiling):
+250m limit, 64 Greetings polled every 1s, 16 workers, about 100ms of CPU per
+`Observe`. Each run lasted 180s, one at a time, in the order 50, off, 50, 50.
+Means are from 40s on, after the startup ramp.
+
+| Run | `cpu.pressure` some avg10 | Observes/s | Mean `local` | CPU used (of 250ms/s) | Liveness failures | Restarts |
+|---|---|---|---|---|---|---|
+| threshold 50 (3 runs) | 47%, 45%, 40% | 1.4, 1.7, 2.1 | 1.1, 1.1, 1.3 | 218, 217, 228ms | 1, 0, 0 | 0, 0, 0 |
+| governor off (1 run) | 78% | 2.6 | — | 250ms | 3 | 0 |
+
+- No run restarted, and the governor cut CPU pressure by about 30 points.
+- **It costs throughput here:** 20 to 47% below the one governor-off run, with
+  about 1,300 deferred calls per run. With a CPU limit below one core, one busy
+  call already reads about 40 to 45%, so a second call goes over 50 and is cut,
+  and at +1 per 30s `local` stays near 1 for as long as there is work.
+  This is the behaviour CPU 50 was first measured with (2.0 Observes/s, 42%).
+- The host was shared and busy, and the governor-off control is a single run,
+  so read the throughput as a direction.
+- The threshold stays provisional, and these runs did not retune it.
+
+The sampler's own cost is below, with [the re-measurement](#re-measurement-of-the-memory-input).
+
+
+#### Re-measurement of the memory input
+
+These runs measured 250ms, 0.80/0.90, a slow start and +1 per clean sample, the
+settings before the user's final decision. They are why the memory input is
+experimental. The startup and recovery rules above came after them, and the
+memory input has not been measured with those rules.
+
+**The memory input did not prevent OOMKills on this workload.** It ran clean in
+0 of 19 runs. The workload is harsh on purpose: 16 workers each holding 16 MiB
+is 100% of the 256Mi limit before the controller's own memory, so it is
+overcommitted by construction. These numbers come from the example provider
+under that synthetic load, not from a real provider.
 
 The setup and the memory workload are those of the first measurement below.
 A run is clean with 0 restarts in 240s. CrashLoopBackOff caps restarts at about
@@ -210,13 +252,13 @@ holds 16 MiB for 300ms.
 | Governor off | 1 | 0 | 5 |
 | New defaults with `GOMEMLIMIT=200MiB` | 3 | 0 | 3, 2, 3 |
 
-**The crash loop is not gone.** At +1 per 250ms, `local` is 5 after one second
+**The crash loop was not gone.** At +1 per 250ms, `local` was 5 after one second
 and 9 after two, and in one run the working set was at 91% by the third second.
-Slow start ramps faster than the working set reacts. It delays the first death
-but doesn't prevent it.
+That ramp was faster than the working set reacts. The user replaced it with +1
+per 2s, which has not been measured against this workload.
 
-**CPU.** The first measurement's CPU workload at the 250ms period, with the
-threshold at 50.
+**CPU at 250ms.** The first measurement's CPU workload, with the threshold at
+50.
 
 | Run | `cpu.pressure` some avg10 | Observes/s | Mean `local` | CPU used (of 250ms/s) | Liveness failures | Restarts |
 |---|---|---|---|---|---|---|
@@ -230,17 +272,22 @@ and 2.7), and 11 to 13% of the CPU quota went unused, because `local` sits near
 is a 10-second average: the 250ms period lets the working-set input react
 faster, but CPU pressure reacts no faster than before.
 
-**The sampler's own cost.** One sample took 3.8 to 4.4ms of CPU in a container
-reading real cgroup files, measured as process CPU over 60s against an idle
-baseline (2 runs). That is **1.5 to 1.8% of one core at 250ms**, or 6 to 7% of
-a 250m CPU limit. At 1s it was 0.8% of a core (1 run). `BenchmarkSample` on
-fixture files reports about 0.3ms; the kernel's cgroup files cost far more than
-plain files, so don't read that benchmark as the real cost.
+**The sampler's own cost.** Process CPU over 60s against an idle baseline, in a
+container reading real cgroup files, as a share of one core:
 
-**What needs a decision.** The settings stay as decided until the user revises
-them; see §11 of the [design](./design-rate-limit-governor.md). Until then, keep
-workers times the largest call well under the soft ratio of the memory limit:
-the governor can't rescue a controller whose workers can overrun it.
+| Period | Inputs | Quieter host | Busier host |
+|---|---|---|---|
+| 1s (default) | CPU | 0.06 to 0.07% (3 runs) | not measured |
+| 1s | CPU and memory | 0.04 to 0.10% (2 runs) | 0.8% (1 run) |
+| 250ms | CPU | 0.13% (1 run) | not measured |
+| 250ms | CPU and memory | 0.18 to 0.19% (2 runs) | 1.5 to 1.8% (2 runs) |
+
+The same code differed about tenfold between the two sessions, and the cause is
+not known. So 250ms with memory cost between 0.7 and 7% of a 250m CPU limit. The
+default, 1s with CPU only, costs about 0.3% of that limit.
+
+What the user decided from these results, and the follow-up work on the memory
+input, are in §11 of the [design](./design-rate-limit-governor.md).
 
 #### Before (first measurement, 1s / 0.90 / 0.95, local starting at the ceiling)
 
@@ -313,7 +360,7 @@ Recorded when `RateLimit.Metrics` is set (meter
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |
 | `provider_runtime.ratelimit.local.capacity` | observable gauge | none | Current process-wide capacity the controller's own saturation allows. With saturation on it starts at 1 and ramps up per clean sample. |
 | `provider_runtime.ratelimit.saturation.input` | observable gauge (`%`) | `input` (`cpu_pressure`, `memory_working_set`) | Each enabled input's last value: `some avg10` for `cpu_pressure`, the share of `memory.max` for `memory_working_set`. A disabled input has no data point: 0 would read as healthy. |
-| `provider_runtime.ratelimit.saturation.input.enabled` | observable gauge | `input` | 1 when the input is read, 0 when it is disabled (no cgroup v2, no PSI, `memory.max` is `max`, or saturation off). |
+| `provider_runtime.ratelimit.saturation.input.enabled` | observable gauge | `input` | 1 when the input is read, 0 when it is disabled (no cgroup v2, no PSI, `memory.max` is `max`, saturation off, or, for `memory_working_set`, the experimental option unset). |
 
 A missing input disables that input only. It is logged once at Info, and the
 other inputs still apply.
