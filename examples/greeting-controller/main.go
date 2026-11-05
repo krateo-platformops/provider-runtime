@@ -203,7 +203,10 @@ func main() {
 		"Slow reconciles down automatically when the external API signals a rate limit.")
 	flag.BoolVar(&o.RateLimit.Saturation.Enabled, "saturation-governor",
 		env.Bool("GREETING_PROVIDER_SATURATION_GOVERNOR", false),
-		"Slow reconciles down automatically when this container is CPU- or memory-saturated.")
+		"Slow reconciles down automatically when this container is CPU-saturated.")
+	flag.BoolVar(&o.RateLimit.Saturation.ExperimentalMemoryWorkingSet, "saturation-experimental-memory",
+		env.Bool("GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY", false),
+		"EXPERIMENTAL: also read the memory working set. It is not OOM protection; see docs/configuration.md.")
 	flag.Parse()
 
 	scheme := runtime.NewScheme()

@@ -60,9 +60,10 @@ func TestRateLimitMetrics(t *testing.T) {
 		MaxConcurrentReconciles: 4,
 		Metrics:                 m,
 		Saturation: ratelimit.SaturationOptions{
-			Enabled:      true,
-			CgroupDir:    filepath.Join("..", "ratelimit", "testdata", "no-memory-limit"),
-			SamplePeriod: time.Hour,
+			Enabled:                      true,
+			ExperimentalMemoryWorkingSet: true,
+			CgroupDir:                    filepath.Join("..", "ratelimit", "testdata", "no-memory-limit"),
+			SamplePeriod:                 time.Hour,
 		},
 	})
 	if err != nil {
@@ -99,8 +100,8 @@ func TestRateLimitMetrics(t *testing.T) {
 	if got := points(t, rm, "provider_runtime.ratelimit.seconds_to_reset", "key"); got["api.github.com"] < 59 || got["dev.azure.com"] != 0 {
 		t.Errorf("seconds_to_reset by key = %v, want ~60 for the throttled key and 0 for the other", got)
 	}
-	if got := points(t, rm, "provider_runtime.ratelimit.local.capacity", "none"); got[""] != 2 {
-		t.Errorf("local capacity = %v, want 2: it starts at 1 and the one clean sample adds 1", got)
+	if got := points(t, rm, "provider_runtime.ratelimit.local.capacity", "none"); got[""] != 1 {
+		t.Errorf("local capacity = %v, want 1: it starts at 1 and one sample only starts the ramp's clock", got)
 	}
 
 	// No memory limit: the working-set input is disabled, and says so, rather

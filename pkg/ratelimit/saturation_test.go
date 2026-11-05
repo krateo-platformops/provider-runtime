@@ -11,31 +11,39 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
+const testRecovery = 30 * time.Second
+
 // saturationGovernor returns a governor with the local input on, reading the
-// fixture directory dir under testdata. Tests drive it with g.sample(), one
-// call per sample period, instead of running Start's ticker.
-func saturationGovernor(t *testing.T, ceiling int, dir string) *Governor {
+// fixture directory dir under testdata, CPU only unless memory is set. Tests
+// drive it with sample(), one call per sample period, instead of Start's
+// ticker.
+func saturationGovernor(t *testing.T, ceiling int, dir string, memory bool) (*Governor, *clock) {
 	t.Helper()
-	g, _ := testGovernor(t, Options{
+	return testGovernor(t, Options{
 		MaxConcurrentReconciles: ceiling,
-		Saturation:              SaturationOptions{Enabled: true, CgroupDir: fixture(dir)},
+		RecoveryInterval:        testRecovery,
+		Saturation:              SaturationOptions{Enabled: true, CgroupDir: fixture(dir), ExperimentalMemoryWorkingSet: memory},
 	})
-	return g
 }
 
 func fixture(dir string) string { return filepath.Join("testdata", dir) }
 
-func useFixture(g *Governor, dir string) { g.sat.reader = cgroupFiles{dir: fixture(dir)} }
+func useFixture(g *Governor, dir string) {
+	g.sat.reader = cgroupFiles{dir: fixture(dir), memory: g.sat.opts.ExperimentalMemoryWorkingSet}
+}
 
-// rampToCeiling takes clean samples until local capacity reaches the ceiling.
-func rampToCeiling(t *testing.T, g *Governor) {
+// rampToCeiling takes clean samples, one startup step apart, until local
+// capacity reaches the ceiling.
+func rampToCeiling(t *testing.T, g *Governor, c *clock) {
 	t.Helper()
 	useFixture(g, "healthy")
+	g.sample()
 	for range g.Ceiling() - 1 {
+		c.add(DefaultStartupRampInterval)
 		g.sample()
 	}
 	if got := g.LocalCapacity(); got != g.Ceiling() {
-		t.Fatalf("after %d clean samples local capacity = %d, want the ceiling %d", g.Ceiling()-1, got, g.Ceiling())
+		t.Fatalf("after the startup ramp local capacity = %d, want the ceiling %d", got, g.Ceiling())
 	}
 }
 
@@ -51,7 +59,7 @@ func inputByName(t *testing.T, g *Governor, name string) InputSnapshot {
 }
 
 func TestCgroupFixturesParse(t *testing.T) {
-	smp := cgroupFiles{dir: fixture("healthy")}.read()
+	smp := cgroupFiles{dir: fixture("healthy"), memory: true}.read()
 	if !smp.cpuPressure.enabled || smp.cpuPressure.percent != 2.10 {
 		t.Errorf("cpu.pressure some avg10 = %+v, want 2.10", smp.cpuPressure)
 	}
@@ -69,16 +77,52 @@ func TestMemoryPressureIsNotAnInput(t *testing.T) {
 			t.Errorf("input %q: memory.pressure was dropped as an input", in)
 		}
 	}
-	if got := len(saturationGovernor(t, 2, "healthy").Snapshot().Inputs); got != 2 {
+	g, _ := saturationGovernor(t, 2, "healthy", false)
+	if got := len(g.Snapshot().Inputs); got != 2 {
 		t.Errorf("the snapshot reports %d inputs, want 2 (cpu_pressure, memory_working_set)", got)
 	}
 }
 
-// Slow start: a fresh governor's local capacity is 1, and it reaches N after
-// N-1 clean samples, +1 each.
-func TestLocalCapacitySlowStartsAndRampsPerCleanSample(t *testing.T) {
-	const ceiling = 8
-	g := saturationGovernor(t, ceiling, "healthy")
+// The memory input is off by default: a provider that enables saturation gets
+// CPU only. A working set at 98% of the limit neither cuts capacity nor is
+// reported as a value, because the experimental input was not asked for.
+func TestMemoryInputIsOffByDefault(t *testing.T) {
+	g, c := saturationGovernor(t, 4, "healthy", false)
+	rampToCeiling(t, g, c)
+	useFixture(g, "no-cache-same-total")
+	g.sample()
+	if got := g.LocalCapacity(); got != 4 {
+		t.Errorf("working set 98%% with the memory input off: local capacity = %d, want 4", got)
+	}
+	if ws := inputByName(t, g, InputMemoryWorkingSet); ws.Enabled {
+		t.Errorf("memory_working_set reported as enabled (%v%%) with the experimental option unset", ws.Percent)
+	}
+	if !inputByName(t, g, InputCPUPressure).Enabled {
+		t.Error("cpu_pressure reported as disabled: saturation must still read CPU")
+	}
+	if smp := (cgroupFiles{dir: fixture("no-cache-same-total")}).read(); smp.workingSet.enabled || smp.workingSet.disabledBecause != memoryInputOff {
+		t.Errorf("working set sample = %+v, want it disabled because the input is off", smp.workingSet)
+	}
+
+	// The defaults that say so.
+	o, err := SaturationOptions{}.withDefaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.ExperimentalMemoryWorkingSet || o.SamplePeriod != time.Second || o.StartupRampInterval != 2*time.Second {
+		t.Errorf("defaults = %+v, want memory off, a 1s sample period and a 2s startup step", o)
+	}
+	if o.WorkingSetSoftRatio != 0.80 || o.WorkingSetHardRatio != 0.90 {
+		t.Errorf("provisional ratios = %v/%v, want 0.80/0.90", o.WorkingSetSoftRatio, o.WorkingSetHardRatio)
+	}
+}
+
+// Slow start: a fresh governor's local capacity is 1, and it rises by 1 per
+// StartupRampInterval until the first cut, whatever the sample period: sampled
+// four times a second, it still takes 2s a step, so 16 workers take 30s.
+func TestLocalCapacitySlowStartsAndRampsPerStartupStep(t *testing.T) {
+	const ceiling = 16
+	g, c := saturationGovernor(t, ceiling, "healthy", false)
 	if got := g.LocalCapacity(); got != 1 {
 		t.Fatalf("a fresh governor's local capacity = %d, want 1: a restart must not meet its backlog at full concurrency", got)
 	}
@@ -87,29 +131,112 @@ func TestLocalCapacitySlowStartsAndRampsPerCleanSample(t *testing.T) {
 	if d == nil || !d.Local || d.Reason != DeferAtCapacity || !strings.Contains(d.Message(), "ramping up") {
 		t.Fatalf("a second call at start got %+v, want a local AtCapacity deferral that says it is ramping up", d)
 	}
-	if strings.Contains(d.Message(), "\"b\"") || strings.Contains(d.Message(), " b ") {
+	if strings.Contains(d.Message(), " b ") {
 		t.Errorf("a local deferral's message names the key: %q", d.Message())
 	}
 	held()
 
-	for i := 2; i <= ceiling; i++ {
-		g.sample()
-		if got := g.LocalCapacity(); got != i {
-			t.Fatalf("after %d clean sample(s): local capacity = %d, want %d (+1 per clean sample)", i-1, got, i)
+	g.sample() // starts the clock
+	if got := g.LocalCapacity(); got != 1 {
+		t.Fatalf("the first sample raised local capacity to %d, want 1", got)
+	}
+	var elapsed time.Duration
+	for want := 2; want <= ceiling; want++ {
+		for range 8 { // 2s at a 250ms period
+			if got := g.LocalCapacity(); got != want-1 {
+				t.Fatalf("at %s local capacity = %d, want %d: +1 per 2s, not per sample", elapsed, got, want-1)
+			}
+			c.add(250 * time.Millisecond)
+			elapsed += 250 * time.Millisecond
+			g.sample()
+		}
+		if got := g.LocalCapacity(); got != want {
+			t.Fatalf("at %s local capacity = %d, want %d", elapsed, got, want)
 		}
 	}
+	if elapsed != 30*time.Second {
+		t.Errorf("reached the ceiling of 16 after %s, want 30s", elapsed)
+	}
+	c.add(time.Hour)
 	g.sample()
 	if got := g.LocalCapacity(); got != ceiling {
-		t.Errorf("local capacity = %d after another clean sample, want it to stay at the ceiling %d", got, ceiling)
+		t.Errorf("local capacity = %d, want it to stay at the ceiling %d", got, ceiling)
 	}
 }
 
-// Saturation halves local capacity once per sample, never below 1, stopping
-// the ramp; clean samples then ramp again by +1 each.
-func TestSaturationHalvesOncePerSampleFloorsAtOneThenRamps(t *testing.T) {
-	const ceiling = 8
-	g := saturationGovernor(t, ceiling, "healthy")
+// The step is a setting of its own, not tied to the sample period.
+func TestStartupRampIntervalIsConfigurable(t *testing.T) {
+	g, c := testGovernor(t, Options{MaxConcurrentReconciles: 4, Saturation: SaturationOptions{
+		Enabled: true, CgroupDir: fixture("healthy"), StartupRampInterval: 5 * time.Second,
+	}})
 	g.sample()
+	c.add(4 * time.Second)
+	g.sample()
+	if got := g.LocalCapacity(); got != 1 {
+		t.Fatalf("after 4s local capacity = %d, want 1 with a 5s step", got)
+	}
+	c.add(time.Second)
+	g.sample()
+	if got := g.LocalCapacity(); got != 2 {
+		t.Errorf("after 5s local capacity = %d, want 2", got)
+	}
+}
+
+// After any cut, local capacity recovers at +1 per clean RecoveryInterval, the
+// same rule as API limits, not at the startup step: a clean interval starts
+// after the last saturated sample, and a saturated sample during recovery
+// halves and restarts it.
+func TestAfterACutLocalRecoversPerCleanRecoveryInterval(t *testing.T) {
+	g, c := saturationGovernor(t, 8, "healthy", false)
+	rampToCeiling(t, g, c)
+	useFixture(g, "cpu-pressure")
+	g.sample()
+	if got := g.LocalCapacity(); got != 4 {
+		t.Fatalf("after a cut local capacity = %d, want 4", got)
+	}
+
+	useFixture(g, "healthy")
+	for elapsed := time.Second; elapsed < testRecovery; elapsed += time.Second {
+		c.add(time.Second)
+		g.sample()
+		if got := g.LocalCapacity(); got != 4 {
+			t.Fatalf("%s after the cut local capacity = %d, want 4: recovery takes a whole RecoveryInterval", elapsed, got)
+		}
+	}
+	c.add(time.Second)
+	g.sample()
+	if got := g.LocalCapacity(); got != 5 {
+		t.Fatalf("after one clean RecoveryInterval local capacity = %d, want 5", got)
+	}
+
+	// A saturated sample halves and restarts the interval.
+	c.add(testRecovery - time.Second)
+	useFixture(g, "cpu-pressure")
+	g.sample()
+	if got := g.LocalCapacity(); got != 2 {
+		t.Fatalf("a saturated sample during recovery left local capacity at %d, want 5 halved to 2", got)
+	}
+	useFixture(g, "healthy")
+	c.add(testRecovery - time.Second)
+	g.sample()
+	if got := g.LocalCapacity(); got != 2 {
+		t.Errorf("local capacity = %d, want 2: the clean interval restarts at the last saturated sample", got)
+	}
+	c.add(time.Second)
+	g.sample()
+	if got := g.LocalCapacity(); got != 3 {
+		t.Errorf("local capacity = %d after a whole clean interval, want 3", got)
+	}
+}
+
+// A cut during the startup ramp ends it, even at the floor where capacity
+// can't fall: recovery is then +1 per RecoveryInterval.
+func TestACutEndsTheStartupRamp(t *testing.T) {
+	g, c := saturationGovernor(t, 8, "healthy", false)
+	g.sample()
+	c.add(2 * time.Second)
+	g.sample()
+	c.add(2 * time.Second)
 	g.sample()
 	if got := g.LocalCapacity(); got != 3 {
 		t.Fatalf("mid-ramp local capacity = %d, want 3", got)
@@ -119,9 +246,28 @@ func TestSaturationHalvesOncePerSampleFloorsAtOneThenRamps(t *testing.T) {
 	if got := g.LocalCapacity(); got != 1 {
 		t.Fatalf("a saturated sample mid-ramp left local capacity at %d, want 3 halved to 1", got)
 	}
-
 	useFixture(g, "healthy")
-	rampToCeiling(t, g)
+	c.add(2 * time.Second)
+	g.sample()
+	if got := g.LocalCapacity(); got != 1 {
+		t.Fatalf("2s after the cut local capacity = %d, want 1: the startup ramp is over", got)
+	}
+
+	floor, c2 := saturationGovernor(t, 8, "cpu-pressure", false)
+	floor.sample()
+	useFixture(floor, "healthy")
+	c2.add(2 * time.Second)
+	floor.sample()
+	if got := floor.LocalCapacity(); got != 1 {
+		t.Errorf("a saturated sample at the floor didn't end the startup ramp: local capacity = %d, want 1", got)
+	}
+}
+
+// Saturation halves local capacity once per sample, never below 1. The one-call
+// floor is kept: with capacity at 1, a call still goes through.
+func TestSaturationHalvesOncePerSampleAndFloorsAtOne(t *testing.T) {
+	g, c := saturationGovernor(t, 8, "healthy", false)
+	rampToCeiling(t, g, c)
 	useFixture(g, "cpu-pressure")
 	for i, want := range []int{4, 2, 1, 1} {
 		g.sample()
@@ -140,13 +286,11 @@ func TestSaturationHalvesOncePerSampleFloorsAtOneThenRamps(t *testing.T) {
 		t.Errorf("cause %q / message %q, want them to name the CPU pressure", d.Cause, d.Message())
 	}
 
+	// Once clean the message stops saying saturated, while capacity recovers.
 	useFixture(g, "healthy")
 	g.sample()
-	if got := g.LocalCapacity(); got != 2 {
-		t.Errorf("one clean sample after saturation: local capacity = %d, want 2", got)
-	}
-	if _, d := g.Acquire(context.Background(), "b"); d != nil {
-		t.Errorf("with capacity 2 and one call in flight a second call was deferred: %+v", d)
+	if _, d := g.Acquire(context.Background(), "b"); d == nil || d.Reason != DeferAtCapacity || !strings.Contains(d.Message(), "ramping up") {
+		t.Errorf("after a clean sample at capacity 1, a second call got %+v, want a ramping-up deferral", d)
 	}
 }
 
@@ -154,8 +298,8 @@ func TestSaturationHalvesOncePerSampleFloorsAtOneThenRamps(t *testing.T) {
 // limit, mostly inactive_file, does not slow down. The same total with no
 // inactive_file does.
 func TestWorkingSetExcludesReclaimableCache(t *testing.T) {
-	g := saturationGovernor(t, 8, "healthy")
-	rampToCeiling(t, g)
+	g, c := saturationGovernor(t, 8, "healthy", true)
+	rampToCeiling(t, g, c)
 	useFixture(g, "cache-heavy")
 	g.sample()
 	if got := g.LocalCapacity(); got != 8 {
@@ -174,8 +318,8 @@ func TestWorkingSetExcludesReclaimableCache(t *testing.T) {
 
 // Between the soft and the hard ratio, local capacity halves.
 func TestSoftWorkingSetRatioHalves(t *testing.T) {
-	g := saturationGovernor(t, 8, "healthy")
-	rampToCeiling(t, g)
+	g, c := saturationGovernor(t, 8, "healthy", true)
+	rampToCeiling(t, g, c)
 	useFixture(g, "working-set-soft")
 	g.sample()
 	if got := g.LocalCapacity(); got != 4 {
@@ -186,8 +330,8 @@ func TestSoftWorkingSetRatioHalves(t *testing.T) {
 // The hard memory ratio drops to 1 at once: at 90% working set, local goes
 // from N to 1 in one sample.
 func TestHardWorkingSetRatioDropsToOneAtOnce(t *testing.T) {
-	g := saturationGovernor(t, 16, "healthy")
-	rampToCeiling(t, g)
+	g, c := saturationGovernor(t, 16, "healthy", true)
+	rampToCeiling(t, g, c)
 	useFixture(g, "working-set-hard")
 	g.sample()
 	if got := g.LocalCapacity(); got != 1 {
@@ -200,8 +344,8 @@ func TestHardWorkingSetRatioDropsToOneAtOnce(t *testing.T) {
 }
 
 // A missing input is disabled, not saturated: with no PSI file, or memory.max
-// set to max, the controller ramps to full capacity and the snapshot says the
-// input is disabled.
+// set to max, the controller still ramps to full capacity and the snapshot says
+// the input is disabled.
 func TestMissingInputIsDisabledNotSaturated(t *testing.T) {
 	for _, tc := range []struct {
 		dir      string
@@ -214,15 +358,16 @@ func TestMissingInputIsDisabledNotSaturated(t *testing.T) {
 	} {
 		t.Run(tc.dir, func(t *testing.T) {
 			logs := &infoLog{}
-			g, err := New(Options{MaxConcurrentReconciles: 6, Logger: logs, Saturation: SaturationOptions{Enabled: true, CgroupDir: fixture(tc.dir)}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			g, c := testGovernor(t, Options{MaxConcurrentReconciles: 6, Logger: logs, Saturation: SaturationOptions{
+				Enabled: true, CgroupDir: fixture(tc.dir), ExperimentalMemoryWorkingSet: true,
+			}})
+			g.sample()
 			for range 5 {
+				c.add(DefaultStartupRampInterval)
 				g.sample()
 			}
 			if got := g.LocalCapacity(); got != 6 {
-				t.Errorf("local capacity = %d after 5 samples, want 6: a missing input must not hold the ramp back", got)
+				t.Errorf("local capacity = %d after the ramp, want 6: a missing input must not hold it back", got)
 			}
 			for _, in := range tc.disabled {
 				if is := inputByName(t, g, in); is.Enabled {
@@ -235,7 +380,7 @@ func TestMissingInputIsDisabledNotSaturated(t *testing.T) {
 				}
 			}
 			if got := logs.countWith("Saturation input disabled"); got != len(tc.disabled) {
-				t.Errorf("logged %d disabled-input lines over five samples, want %d (once per input)", got, len(tc.disabled))
+				t.Errorf("logged %d disabled-input lines over the samples, want %d (once per input)", got, len(tc.disabled))
 			}
 		})
 	}
@@ -244,7 +389,7 @@ func TestMissingInputIsDisabledNotSaturated(t *testing.T) {
 // A call without a key asks for a local slot only: saturation bounds it, and
 // it creates no key state.
 func TestKeylessCallNeedsOnlyALocalSlot(t *testing.T) {
-	g := saturationGovernor(t, 4, "healthy")
+	g, _ := saturationGovernor(t, 4, "healthy", false)
 	release := mustAcquire(t, g, "")
 	_, d := g.Acquire(context.Background(), "")
 	if d == nil || !d.Local {
@@ -357,9 +502,8 @@ func TestStartStopsWithItsContext(t *testing.T) {
 
 // BenchmarkSample measures one sampler tick: reading the cgroup files and
 // publishing the new local capacity, on fixture files. Real cgroup files cost
-// far more: measured in a container, a sample took about 4ms of CPU, not the
-// 0.3ms this reports (docs/configuration.md). Use it to compare changes, not to
-// estimate the cost.
+// more, and that cost moved about tenfold with host load (docs/configuration.md).
+// Use it to compare changes, not to estimate the cost.
 func BenchmarkSample(b *testing.B) {
 	g, err := New(Options{MaxConcurrentReconciles: 16, Saturation: SaturationOptions{Enabled: true, CgroupDir: fixture("healthy")}})
 	if err != nil {

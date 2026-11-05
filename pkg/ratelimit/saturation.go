@@ -15,24 +15,33 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
-// Saturation defaults (design §7). Decided by the user on 2026-11-05 from the
+// Saturation defaults (design §7), decided by the user on 2026-11-05 from the
 // kind measurement in docs/configuration.md.
 //
 // The CPU pressure threshold is PROVISIONAL: the measurement supports 50, and
-// core-provider is validating it. The working-set ratios and the sample
-// period are decided, though re-measured they did not prevent OOMKills on a
-// load whose workers can fill the whole limit (design §11, item 13).
+// core-provider is validating it. The working-set ratios belong to the
+// experimental memory input, which is off by default: re-measured, that input
+// did not prevent OOMKills (design §11).
 const (
-	// DefaultSamplePeriod is how often the sampler reads the cgroup files.
-	DefaultSamplePeriod = 250 * time.Millisecond
+	// DefaultSamplePeriod is how often the sampler reads the cgroup files. CPU
+	// pressure gains nothing from a faster sample, because "avg10" is already
+	// a 10-second average, and a faster sample costs CPU in the container it
+	// protects. A shorter period only matters to the experimental memory
+	// input.
+	DefaultSamplePeriod = time.Second
+	// DefaultStartupRampInterval is how long local capacity waits between
+	// steps of +1 from the start until its first cut, so 16 workers are all
+	// admitted after about 30s. It is not tied to the sample period.
+	DefaultStartupRampInterval = 2 * time.Second
 	// DefaultCPUPressureThreshold is the cpu.pressure "some avg10" percentage
 	// above which the controller counts as CPU-saturated. PROVISIONAL.
 	DefaultCPUPressureThreshold = 50.0
 	// DefaultWorkingSetSoftRatio is the working-set share of memory.max at
-	// which local capacity halves.
+	// which the experimental memory input halves local capacity. PROVISIONAL.
 	DefaultWorkingSetSoftRatio = 0.80
 	// DefaultWorkingSetHardRatio is the working-set share of memory.max at
-	// which local capacity drops straight to 1.
+	// which the experimental memory input drops local capacity straight to 1.
+	// PROVISIONAL.
 	DefaultWorkingSetHardRatio = 0.90
 )
 
@@ -53,15 +62,27 @@ const (
 	procSelfDir        = "/proc/self"
 )
 
-// SaturationOptions configures the local input: the controller's own CPU and
-// memory saturation, read from its container's cgroup v2 files. With it
-// enabled, every gated call (Connect and each ExternalClient method) needs a
-// slot in the process-wide local capacity, whether or not the provider
-// implements a RateLimitKeyer. Local capacity starts at 1 and rises by one per
-// clean sample up to the ceiling.
+// SaturationOptions configures the local input: the controller's own CPU
+// saturation, read from its container's cgroup v2 files. With it enabled, every
+// gated call (Connect and each ExternalClient method) needs a slot in the
+// process-wide local capacity, whether or not the provider implements a
+// RateLimitKeyer. Local capacity starts at 1, rises by one per
+// StartupRampInterval until its first cut, and after any cut rises by one per
+// clean RecoveryInterval, up to the ceiling.
+//
+// Memory is not part of this unless ExperimentalMemoryWorkingSet is set.
 type SaturationOptions struct {
 	// Enabled turns the local input on, independently of the rate-limit input.
+	// It reads CPU pressure only.
 	Enabled bool
+
+	// ExperimentalMemoryWorkingSet adds the memory working set to the local
+	// input. EXPERIMENTAL, off by default, and not memory protection: on the
+	// kind re-measurement it did not prevent OOMKills, in 0 of 19 runs on an
+	// overcommitted workload (docs/configuration.md). The calls admitted
+	// between two samples, and the single call the floor always lets through,
+	// can still cross the limit.
+	ExperimentalMemoryWorkingSet bool
 
 	// CgroupDir is the cgroup v2 directory to read. Empty means the process's
 	// own cgroup: /sys/fs/cgroup joined with the path in /proc/self/cgroup
@@ -70,11 +91,16 @@ type SaturationOptions struct {
 	// container's own).
 	CgroupDir string
 
-	// SamplePeriod is how often the files are read, and how fast local
-	// capacity ramps up: +1 per clean sample. Defaults to 250ms. A shorter
-	// period makes the working-set input react faster; it doesn't make CPU
-	// pressure react faster, because "avg10" is already a 10-second average.
+	// SamplePeriod is how often the files are read. Defaults to 1s. A shorter
+	// period only matters to the experimental memory input: CPU pressure's
+	// "avg10" is already a 10-second average, so sampling it faster gains
+	// nothing and costs CPU in the container it protects.
 	SamplePeriod time.Duration
+
+	// StartupRampInterval is the time between steps of +1 from the start until
+	// the first cut. Defaults to 2s. A step happens on the first sample after
+	// the interval has passed, so a SamplePeriod above it sets the pace.
+	StartupRampInterval time.Duration
 
 	// CPUPressureThreshold is the cpu.pressure "some avg10" percentage (0-100)
 	// above which the controller is saturated. Defaults to
@@ -83,17 +109,22 @@ type SaturationOptions struct {
 
 	// WorkingSetSoftRatio is the share of memory.max (0-1) at or above which
 	// the working set (memory.current minus inactive_file) halves local
-	// capacity. Defaults to 0.80.
+	// capacity. Read only with ExperimentalMemoryWorkingSet. Defaults to 0.80
+	// (provisional).
 	WorkingSetSoftRatio float64
 
 	// WorkingSetHardRatio is the share of memory.max (0-1) at or above which
-	// local capacity drops straight to 1. Defaults to 0.90.
+	// local capacity drops straight to 1. Read only with
+	// ExperimentalMemoryWorkingSet. Defaults to 0.90 (provisional).
 	WorkingSetHardRatio float64
 }
 
 func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 	if o.SamplePeriod == 0 {
 		o.SamplePeriod = DefaultSamplePeriod
+	}
+	if o.StartupRampInterval == 0 {
+		o.StartupRampInterval = DefaultStartupRampInterval
 	}
 	if o.CPUPressureThreshold == 0 {
 		o.CPUPressureThreshold = DefaultCPUPressureThreshold
@@ -107,6 +138,8 @@ func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 	switch {
 	case o.SamplePeriod < 0:
 		return o, errors.Errorf("ratelimit: saturation SamplePeriod must be positive, got %s", o.SamplePeriod)
+	case o.StartupRampInterval < 0:
+		return o, errors.Errorf("ratelimit: saturation StartupRampInterval must be positive, got %s", o.StartupRampInterval)
 	case o.CPUPressureThreshold < 0 || o.CPUPressureThreshold > 100:
 		return o, errors.Errorf("ratelimit: saturation CPUPressureThreshold must be a percentage in (0, 100], got %v", o.CPUPressureThreshold)
 	case o.WorkingSetSoftRatio < 0 || o.WorkingSetHardRatio > 1 || o.WorkingSetSoftRatio > o.WorkingSetHardRatio:
@@ -159,6 +192,11 @@ type saturation struct {
 
 	// Owned by the sampler goroutine.
 	loggedDisabled map[string]bool
+	// lastStep is when capacity last changed, or a sample was last saturated.
+	// It is zero until the first sample.
+	lastStep time.Time
+	// cut is set by the first saturated sample, and ends the startup ramp.
+	cut bool
 }
 
 func newSaturation(o SaturationOptions, log logging.Logger) (*saturation, error) {
@@ -173,7 +211,7 @@ func newSaturation(o SaturationOptions, log logging.Logger) (*saturation, error)
 	return &saturation{
 		opts:           o,
 		dir:            dir,
-		reader:         cgroupFiles{dir: dir},
+		reader:         cgroupFiles{dir: dir, memory: o.ExperimentalMemoryWorkingSet},
 		log:            log,
 		loggedDisabled: map[string]bool{},
 	}, nil
@@ -188,30 +226,47 @@ func (s *saturation) read() cgroupSample {
 	return smp
 }
 
-// step returns the local state that follows cur after sample smp:
+// step returns the local state that follows cur after sample smp, taken at
+// now. The sampler's first call only starts the clock.
 //
-//   - working set at or above the hard ratio: capacity 1 at once;
-//   - any input over its threshold: capacity halves, minimum 1. step runs once
-//     per sample, so this halves at most once per sample period;
-//   - otherwise, a clean sample: capacity +1, up to ceiling. Local capacity
-//     starts at 1 (slow start), so a controller restarted after an OOMKill
-//     doesn't admit its whole backlog at once.
+//   - Working set at or above the hard ratio (experimental memory input): a cut,
+//     capacity 1 at once.
+//   - Any input over its threshold: a cut, capacity halves, minimum 1. step runs
+//     once per sample, so this halves at most once per sample period.
+//   - A clean sample: capacity +1, up to ceiling, once enough time has passed
+//     since the last step or saturated sample. Until the first cut that time is
+//     StartupRampInterval, so a restarted controller eases into its backlog.
+//     After any cut it is the RecoveryInterval, the same rule as for API limits,
+//     whichever input made the cut.
 //
 // cause names what made the last sample saturated, and is cleared by a clean
-// one.
-func (s *saturation) step(smp cgroupSample, cur localState, ceiling int) localState {
+// one. A saturated sample counts as a cut even at the floor, where capacity
+// can't fall further: it ends the startup ramp and restarts the clean interval.
+func (s *saturation) step(now time.Time, smp cgroupSample, cur localState, ceiling int, recovery time.Duration) localState {
+	if s.lastStep.IsZero() {
+		s.lastStep = now
+	}
 	hard, saturated, cause := s.evaluate(smp)
 	next := cur
 	switch {
 	case hard:
 		next.capacity = capacityFloor
 		next.cause = cause
+		s.cut, s.lastStep = true, now
 	case saturated:
 		next.capacity = max(capacityFloor, cur.capacity/2)
 		next.cause = cause
+		s.cut, s.lastStep = true, now
 	default:
-		next.capacity = min(ceiling, cur.capacity+1)
 		next.cause = ""
+		wait := s.opts.StartupRampInterval
+		if s.cut {
+			wait = recovery
+		}
+		if cur.capacity < ceiling && now.Sub(s.lastStep) >= wait {
+			next.capacity = cur.capacity + 1
+			s.lastStep = now
+		}
 	}
 	return next
 }
@@ -267,8 +322,15 @@ func (s *saturation) inputs() []InputSnapshot {
 	return out
 }
 
-// cgroupFiles reads the cgroup v2 interface files in dir.
-type cgroupFiles struct{ dir string }
+// cgroupFiles reads the cgroup v2 interface files in dir. The memory files are
+// read only when memory is set: the experimental input is off by default, and
+// reading memory.stat is most of a sample's cost.
+type cgroupFiles struct {
+	dir    string
+	memory bool
+}
+
+const memoryInputOff = "the experimental memory input is off (SaturationOptions.ExperimentalMemoryWorkingSet)"
 
 func (c cgroupFiles) read() cgroupSample {
 	root, err := os.OpenRoot(c.dir)
@@ -278,10 +340,11 @@ func (c cgroupFiles) read() cgroupSample {
 	}
 	defer func() { _ = root.Close() }()
 
-	return cgroupSample{
-		cpuPressure: readPressure(root, "cpu.pressure", "some"),
-		workingSet:  readWorkingSet(root),
+	smp := cgroupSample{cpuPressure: readPressure(root, "cpu.pressure", "some"), workingSet: disabled(memoryInputOff)}
+	if c.memory {
+		smp.workingSet = readWorkingSet(root)
 	}
+	return smp
 }
 
 // readPressure returns avg10 of the given line ("some" or "full") of a PSI

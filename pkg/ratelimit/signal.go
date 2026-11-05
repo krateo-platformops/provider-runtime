@@ -1,6 +1,6 @@
 // Package ratelimit slows reconciles down automatically when an external API
 // signals a rate limit, per endpoint key, or when the controller's own container
-// is CPU- or memory-saturated. It replaces hand-tuning --max-reconcile-rate and
+// is CPU-saturated. It replaces hand-tuning --max-reconcile-rate and
 // --poll per installation.
 //
 // Design: docs/design-rate-limit-governor.md. The Signal shape and its meaning

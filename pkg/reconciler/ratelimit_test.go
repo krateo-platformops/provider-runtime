@@ -557,26 +557,17 @@ func TestKeyerErrorProceedsUngatedAndLogsOncePerObject(t *testing.T) {
 	}
 }
 
-// startedGovernor returns a governor with saturation on, reading the healthy
-// fixture once at Start (the sample period is an hour), so local capacity is
-// 2: 1 at start, +1 for the one clean sample.
-func startedGovernor(t *testing.T, ctx context.Context, workers int) *ratelimit.Governor {
+// saturatedGovernor returns a governor with saturation on and its sampler not
+// started, so local capacity stays at its starting value of 1.
+func saturatedGovernor(t *testing.T, workers int) *ratelimit.Governor {
 	t.Helper()
-	g := newGovernor(t, ratelimit.Options{
+	return newGovernor(t, ratelimit.Options{
 		MaxConcurrentReconciles: workers,
 		Saturation: ratelimit.SaturationOptions{
-			Enabled:      true,
-			CgroupDir:    filepath.Join("..", "ratelimit", "testdata", "healthy"),
-			SamplePeriod: time.Hour,
+			Enabled:   true,
+			CgroupDir: filepath.Join("..", "ratelimit", "testdata", "healthy"),
 		},
 	})
-	go func() { _ = g.Start(ctx) }()
-	for deadline := time.Now().Add(5 * time.Second); g.LocalCapacity() != 2; time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatalf("local capacity = %d, want 2 after the first clean sample", g.LocalCapacity())
-		}
-	}
-	return g
 }
 
 // boundedObserve runs one reconcile per object concurrently against conn's
@@ -641,39 +632,31 @@ func boundedObserve(t *testing.T, ctx context.Context, g *ratelimit.Governor, ob
 	return maxIn.Load(), deferredLocal.Load()
 }
 
-// local bounds the work inside gated calls: with local capacity 2 (slow start
-// after one clean sample) and 8 objects on 8 different keys, at most 2 Observe
-// bodies run at once, and the rest are deferred by the local capacity with a
-// message that names no key. This is why a provider's expensive work must
-// happen inside Connect and the ExternalClient methods: work done before them,
-// in the provider's own code, is not bounded by local.
+// local bounds the work inside gated calls: with local capacity 1 and 8 objects
+// on 8 different keys, one Observe body runs at a time, and the rest are
+// deferred by the local capacity with a message that names no key. This is why
+// a provider's expensive work must happen inside Connect and the ExternalClient
+// methods: work done before them, in the provider's own code, is not bounded by
+// local.
 func TestLocalCapacityBoundsConcurrentObserveBodies(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	g := startedGovernor(t, ctx, 8)
-
-	maxIn, deferred := boundedObserve(t, ctx, g, 8, true)
-	if maxIn != 2 {
-		t.Errorf("at most %d Observe bodies ran at once, want 2: local capacity must bound concurrent gated calls", maxIn)
+	maxIn, deferred := boundedObserve(t, context.Background(), saturatedGovernor(t, 8), 8, true)
+	if maxIn != 1 {
+		t.Errorf("at most %d Observe bodies ran at once, want 1: local capacity must bound concurrent gated calls", maxIn)
 	}
-	if deferred != 6 {
-		t.Errorf("%d passes were deferred by the local capacity with a keyless message, want 6", deferred)
+	if deferred != 7 {
+		t.Errorf("%d passes were deferred by the local capacity with a keyless message, want 7", deferred)
 	}
 }
 
 // Saturation applies to every gated call, keyer or not: a provider that
 // implements no RateLimitKeyer is still bounded by local.
 func TestProviderWithoutKeyerIsBoundedByLocal(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	g := startedGovernor(t, ctx, 8)
-
-	maxIn, deferred := boundedObserve(t, ctx, g, 8, false)
-	if maxIn != 2 {
-		t.Errorf("at most %d Observe bodies of a keyless provider ran at once, want 2: saturation must bound calls without a keyer", maxIn)
+	maxIn, deferred := boundedObserve(t, context.Background(), saturatedGovernor(t, 8), 8, false)
+	if maxIn != 1 {
+		t.Errorf("at most %d Observe bodies of a keyless provider ran at once, want 1: saturation must bound calls without a keyer", maxIn)
 	}
-	if deferred != 6 {
-		t.Errorf("%d keyless passes were deferred by the local capacity, want 6", deferred)
+	if deferred != 7 {
+		t.Errorf("%d keyless passes were deferred by the local capacity, want 7", deferred)
 	}
 }
 

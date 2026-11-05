@@ -15,8 +15,8 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
-// DefaultRecoveryInterval is how long a key must go clean before its capacity
-// rises by one.
+// DefaultRecoveryInterval is how long a key, or the local capacity after a
+// cut, must go clean before its capacity rises by one.
 const DefaultRecoveryInterval = 30 * time.Second
 
 // capacityFloor is 1, never 0. One call in flight is how a throttled key finds
@@ -38,9 +38,8 @@ const (
 	// a start or a saturation, has as many calls in flight as it allows. There
 	// is no server deadline.
 	DeferAtCapacity DeferReason = "AtCapacity"
-	// DeferSaturated: the controller's own container is CPU- or
-	// memory-saturated and the process-wide local capacity is full. There is
-	// no server deadline.
+	// DeferSaturated: the controller's own container is saturated and the
+	// process-wide local capacity is full. There is no server deadline.
 	DeferSaturated DeferReason = "Saturated"
 )
 
@@ -148,10 +147,9 @@ type Options struct {
 	// false: signals are honoured.
 	IgnoreSignals bool
 
-	// RecoveryInterval is how long a key must go clean before its capacity
-	// rises by one, up to the ceiling. It is also the upper bound of the
-	// at-capacity requeue delay. Defaults to 30s. The local capacity recovers
-	// per clean sample instead (SaturationOptions.SamplePeriod).
+	// RecoveryInterval is how long a key, or the local capacity after a cut,
+	// must go clean before its capacity rises by one, up to the ceiling. It is
+	// also the upper bound of the at-capacity requeue delay. Defaults to 30s.
 	RecoveryInterval time.Duration
 
 	// Saturation configures the local input (design §7). Off unless Enabled.
@@ -244,7 +242,7 @@ func New(o Options) (*Governor, error) {
 	g.jitter = func() time.Duration { return jitterBetween(cryptorand.Reader, minCapacityJitter, g.recovery) }
 
 	// Without saturation, local capacity is the ceiling and stays there. With
-	// it, local capacity starts at 1 and ramps up per clean sample.
+	// it, local capacity starts at 1 and ramps up (see saturation.step).
 	g.local.Store(&localState{capacity: g.perController})
 	if o.Saturation.Enabled {
 		sat, err := newSaturation(o.Saturation, o.Logger)
@@ -293,7 +291,7 @@ func (g *Governor) ceilingLocked() int {
 // MaxConcurrentReconciles workers, shares it, and raises the ceiling to match.
 // Key capacities still at the old ceiling move to the new one, and so does the
 // local capacity when saturation is off; with saturation on, local capacity
-// ramps to the new ceiling per clean sample. reconciler.
+// recovers to the new ceiling at its own pace. reconciler.
 // WithRateLimitGovernor calls it; call it yourself only if you gate calls
 // through Acquire outside pkg/reconciler.
 func (g *Governor) RegisterReconciler() {
@@ -510,7 +508,7 @@ func (g *Governor) sample() {
 	smp := g.sat.read()
 	g.mu.Lock()
 	cur := g.local.Load()
-	next := g.sat.step(smp, *cur, g.ceilingLocked())
+	next := g.sat.step(g.now(), smp, *cur, g.ceilingLocked(), g.recovery)
 	if next != *cur {
 		g.local.Store(&next)
 	}

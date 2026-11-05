@@ -76,8 +76,9 @@ type RateLimitOptions struct {
 	RecoveryInterval time.Duration
 
 	// Saturation turns on and tunes the local input, the controller's own CPU
-	// and memory saturation, independently of Enabled. Default off; its
-	// thresholds default to provisional values.
+	// saturation, independently of Enabled. Default off, and its threshold
+	// defaults to a provisional value. Memory is a separate, experimental
+	// option in it, also off by default.
 	Saturation ratelimit.SaturationOptions
 
 	// Metrics records the governor's metrics, for example *telemetry.Metrics.
