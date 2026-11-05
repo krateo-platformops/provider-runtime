@@ -630,4 +630,4 @@ gates are met.
     - the sampler's cost reported at the chosen period, in a container;
     - a run on a real provider, not only the example.
 
-    The numbers are proposals for the user to confirm.
+    Decided by the user as the bar before the memory input can default on.

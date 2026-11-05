@@ -12,7 +12,7 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## 2026-11-05 — rate-limit governor (unreleased)
+## 2026-11-05 — v1.9.0: rate-limit governor
 - **Reconciles slow down by themselves** when an external API signals a rate
   limit, per endpoint key, or when the controller's own container is
   CPU-saturated. It replaces hand-tuning `--max-reconcile-rate` and
