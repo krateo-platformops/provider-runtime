@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: provider-runtime — automatic slow-down under rate limits and controller saturation
-description: Design (not implemented) for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU or memory is saturated, aligned with unstructured-runtime's design.
+description: Design, implemented in provider-runtime, for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU or memory is saturated, aligned with unstructured-runtime's design.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, reconciler, workqueue]
 timestamp: 2026-11-05T00:00:00Z
@@ -9,7 +9,12 @@ timestamp: 2026-11-05T00:00:00Z
 
 # Automatic slow-down under rate limits and controller saturation
 
-**Status:** design, not implemented. **Scope:** provider-runtime. The same
+**Status:** implemented in provider-runtime (`pkg/ratelimit`,
+`pkg/ratelimit/httpsignal`, `pkg/reconciler`, `pkg/controller`), off by
+default. The CPU and memory pressure thresholds are provisional until the
+measurement recorded in [configuration](./configuration.md#the-pressure-thresholds-are-provisional)
+fixes them (open question 5). Where the implementation chose something this
+design leaves open, §11 says so. **Scope:** provider-runtime. The same
 feature for unstructured-runtime is designed by its owner in
 [unstructured-runtime#50](https://github.com/krateo-platformops/unstructured-runtime/pull/50).
 This document reuses that design's vocabulary on purpose and only spells out
@@ -234,6 +239,18 @@ governor already keeps a capacity per key. Saturation adds one more capacity,
   at once rather than halving. Close to the limit, the next allocation can be
   the OOMKill, and one call in flight is the floor.
 
+**Requirement on providers: do expensive work inside the gated calls.**
+`local` throttles only the work that runs inside a gated call: `Connect`
+and the `ExternalClient` methods (`Observe`, `Create`, `Update`, `Delete`).
+A provider's expensive work (rendering templates, cloning repositories,
+large API reads) must happen inside those calls, not before them in the
+provider's own code. Work done outside them is not bounded by `local`.
+Don't refactor that work out of the gated call: doing so silently removes
+the throttle from exactly the work that causes saturation, and nothing fails
+to tell you. The runtime side is pinned by
+`TestLocalCapacityBoundsConcurrentObserveBodies` in `pkg/reconciler`; the
+provider side is the provider's to keep.
+
 **A saturation deferral uses the same contract as any other.** It writes
 `Synced=False/ReconcileDeferred`, leaves `Ready` unchanged, returns
 `RequeueAfter` with a nil error, and uses the jittered "waiting for
@@ -392,3 +409,47 @@ Tests, each written so it fails without the behaviour it checks:
    slowing down prevented the OOMKill or probe failure without idling the
    controller. The same question goes to unstructured-runtime's owner, so
    both runtimes slow down at the same point.
+
+## 11. Implementation notes
+
+Where the implementation made a choice this design leaves open:
+
+1. **A throttled signal also drops the key's capacity to 1**, besides closing
+   the gate until the deadline. This is unstructured-runtime#50 §3, which §2
+   adopts. When the hold lifts, the key resumes at one call and recovers
+   additively, rather than at the ceiling.
+2. **A future `ResetAt` next to a healthy quota is not advisory.**
+   `ratelimit.Classify` reads a non-throttled signal as advisory when the
+   quota is a quarter or less of the limit, when it carries a `RetryAfter`,
+   or when it carries a future `ResetAt` without quota counters. GitHub
+   sends `X-RateLimit-Reset` on every response, so treating any future reset
+   as advisory, as unstructured-runtime#53's governor does, would halve every
+   GitHub key on every call.
+3. **Only reducing signals restart the clean `RecoveryInterval`.** A healthy
+   quota report changes nothing, so a key keeps recovering while GitHub's
+   headers keep arriving.
+4. **The ceiling is `MaxConcurrentReconciles` times the reconcilers sharing
+   the governor.** Providers run several controllers, each with
+   `--max-reconcile-rate` workers, against one endpoint. A ceiling of one
+   controller's workers would cap a healthy endpoint below today's total.
+   Each `reconciler.WithRateLimitGovernor` registers one reconciler.
+5. **Calls without a keyer are not bounded by `local` either.** §4 says a
+   connecter or client that doesn't implement `RateLimitKeyer` is never
+   gated, and §7 bounds gated calls. So saturation protection also needs a
+   keyer.
+6. **`X-RateLimit-Delay` on a served response becomes `RetryAfter`** when
+   there is no `Retry-After`. The signal is then advisory. On a throttled
+   response it is not used; only `Retry-After` and `X-RateLimit-Reset` name a
+   deadline.
+7. **The gate for `Create` is asked before the create-pending annotation is
+   written.** A deferral after it would leave an unresolved create handshake
+   for a create that was never attempted.
+8. **The client is gated on its own key, or on the connecter's** when only
+   the connecter implements `RateLimitKeyer`. `Connect` is gated on the
+   connecter's key.
+9. **The `ReconcileDeferred` event** is recorded when the object enters a
+   deferral, or when a throttled deferral names a new deadline. It goes
+   through the throttled recorder.
+10. **§7 refers to "the CPU and memory pressure thresholds in this
+    document", but gives none.** The provisional defaults are 50%
+    (`cpu.pressure` `some avg10`) and 10% (`memory.pressure` `full avg10`).

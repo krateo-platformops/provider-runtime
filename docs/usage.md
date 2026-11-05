@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # Usage
@@ -192,6 +192,67 @@ For Krateo, that's core-provider#310.
   defaults, `ratelimiter.LimitRESTConfig(cfg, rps)` to bound client-side QPS,
   `workqueue.NewExponentialTimedFailureRateLimiter` for time-expiring
   per-item backoff.
+- **Rate-limit governor** (off by default) — slows reconciles down by itself
+  when an external API signals a rate limit, per endpoint key, or when the
+  controller's container is saturated. It replaces hand-tuning
+  `--max-reconcile-rate` and `--poll`. See
+  [configuration](./configuration.md#rate-limit-governor-controlleroptionsratelimit)
+  for every setting and
+  [the design](./design-rate-limit-governor.md) for why it works this way.
+  - *Wiring.* Set `o.RateLimit.Enabled` (and `o.RateLimit.Saturation.Enabled`
+    for the saturation input) from one chart flag each, call
+    `o.SetupRateLimitGovernor(mgr)` once, and pass
+    `reconciler.WithRateLimitGovernor(o.RateLimitGovernor)` to every
+    reconciler. A `nil` governor is a no-op, so this is safe when the chart
+    leaves the flag unset.
+  - *Keying.* Implement `reconciler.RateLimitKeyer` on the connecter, the
+    client, or both. Only calls of a connecter or client that implements it
+    are gated. Return the endpoint host (`httpsignal.HostKey` of the base
+    URL), or `host|credential-reference` when the quota is per identity. Key
+    on the credential's reference (for example the Secret's namespace and
+    name), never its value: credentials rotate, and a key that changes on
+    rotation splits one quota into several. `RateLimitKey` must not do I/O,
+    and must return the same string the provider's signals use.
+  - *Reporting.* Wrap the HTTP client's transport with
+    `httpsignal.NewTransport(base)` and pass the context the runtime handed
+    to `Connect` or the `ExternalClient` method into each request
+    (`http.NewRequestWithContext`). Or call `ratelimit.Report(ctx, Signal)`
+    yourself. Report on successful responses too: Azure DevOps announces a
+    delay on a 200 before it starts refusing.
+  - *Testing.* Call `reconcilertest.AssertReportsRateLimits` in the
+    provider's tests. It feeds the provider's call a recorded GitHub 429, a
+    recorded Azure DevOps advisory 200 and a healthy GitHub 200, and fails
+    unless the first is reported as throttled with a deadline, the second as
+    advisory, and the third as neither. The runtime can't check this from
+    outside: a provider that never reports looks like an endpoint that is
+    never limited.
+  - *What a deferral looks like.* A pass whose next call is deferred makes no
+    external call. It writes `Synced=False` with reason `ReconcileDeferred`
+    and leaves `Ready` as it was. The message names the key and the server's
+    deadline, for example `reconciliation deferred: api.github.com is
+    rate-limited by the server; next attempt 2026-11-05T10:00:31Z`, or says
+    it is waiting for capacity, for example `reconciliation deferred:
+    controller saturated: memory working set 93% of limit; waiting for
+    capacity (1 call(s) in flight allowed); no server deadline was given`.
+    A Normal `ReconcileDeferred` event is recorded, through the throttled
+    recorder, when the object enters a deferral or a throttle names a new
+    deadline. The pass requeues after the deadline (or 1s to the
+    RecoveryInterval) with a nil error, so it consumes no failure backoff.
+  - *The pass that gets the 429 is still an error.* The call failed, so that
+    pass reports `ReconcileError` and consumes one backoff step, as today.
+    The passes after it are deferrals until the server's deadline.
+
+  **Requirement on providers: do expensive work inside the gated calls.**
+  `local` throttles only the work that runs inside a gated call: `Connect`
+  and the `ExternalClient` methods (`Observe`, `Create`, `Update`, `Delete`).
+  A provider's expensive work (rendering templates, cloning repositories,
+  large API reads) must happen inside those calls, not before them in the
+  provider's own code. Work done outside them is not bounded by `local`.
+  Don't refactor that work out of the gated call: doing so silently removes
+  the throttle from exactly the work that causes saturation, and nothing fails
+  to tell you. The runtime side is pinned by
+  `TestLocalCapacityBoundsConcurrentObserveBodies` in `pkg/reconciler`; the
+  provider side is the provider's to keep.
 
 ## Developing this library
 

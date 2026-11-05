@@ -4,7 +4,7 @@ title: greeting-controller — a minimal provider built on provider-runtime
 description: A compilable managed-resource controller (Greeting CRD + fake external system) showing the full provider-runtime wiring.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [example, reconciler, managed-resource]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # greeting-controller
@@ -22,7 +22,14 @@ demonstrating everything a real Krateo provider wires up:
 - **`controller.DefaultOptions()`** → `ForControllerRuntime()` for queue and
   rate-limiter wiring;
 - the **OTel-model JSON logging** handler from `pkg/logging`
-  (`NewOTelJSONHandler` + `NewSlogLogger`).
+  (`NewOTelJSONHandler` + `NewSlogLogger`);
+- the **rate-limit governor**, off by default: the connector implements
+  `reconciler.RateLimitKeyer` (every Greeting talks to one store, so one key),
+  and two flags turn the inputs on —
+  `--rate-limit-governor` / `GREETING_PROVIDER_RATE_LIMIT_GOVERNOR` and
+  `--saturation-governor` / `GREETING_PROVIDER_SATURATION_GOVERNOR`. Nothing
+  else needs setting; see
+  [configuration](../../docs/configuration.md#rate-limit-governor-controlleroptionsratelimit).
 
 The external name lifecycle is real: on first reconcile `Observe` reports the
 external resource missing, `Create` stamps the `krateo.io/external-name`

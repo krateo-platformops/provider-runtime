@@ -8,7 +8,13 @@ docs/api.md: the exported Go API surface, package by package, plus metric instru
 docs/examples.md: examples index
 docs/release.md: tag-only release runbook (v-prefixed git tags, Go module proxy)
 docs/log.md: curated history
-docs/design-rate-limit-governor.md: design (not implemented) for slow-down under server-side rate limits and controller CPU/memory saturation
+docs/design-rate-limit-governor.md: design (implemented, off by default) for slow-down under server-side rate limits and controller CPU/memory saturation
+pkg/ratelimit/signal.go: the rate-limit Signal, Report and the context sink
+pkg/ratelimit/governor.go: the per-key governor and its non-blocking Acquire
+pkg/ratelimit/saturation.go: the cgroup v2 saturation sampler (local capacity)
+pkg/ratelimit/httpsignal/httpsignal.go: http.RoundTripper reporting GitHub and Azure DevOps rate-limit headers
+pkg/reconciler/ratelimit.go: RateLimitKeyer, WithRateLimitGovernor and the deferral path
+pkg/reconciler/reconcilertest/ratelimit.go: AssertReportsRateLimits, the conformance helper for providers
 examples/greeting-controller/README.md: minimal compilable provider (Greeting CRD + fake external system)
 examples/greeting-controller/main.go: the example source
 examples/greeting-controller/crd.yaml: the Greeting CRD

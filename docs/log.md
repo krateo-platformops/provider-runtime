@@ -4,13 +4,38 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-05 — rate-limit governor (unreleased)
+- **Reconciles slow down by themselves** when an external API signals a rate
+  limit, per endpoint key, or when the controller's own container is CPU- or
+  memory-saturated. It replaces hand-tuning `--max-reconcile-rate` and
+  `--poll`. Design: [design-rate-limit-governor](./design-rate-limit-governor.md).
+- **Off by default.** With nothing configured, nothing is gated and
+  `ratelimit.Report` is a no-op. A provider turns it on with one chart flag
+  (`controller.Options.RateLimit.Enabled`), implements
+  `reconciler.RateLimitKeyer`, and reports signals.
+- A deferred pass makes no external call, writes
+  `Synced=False/ReconcileDeferred` with the key and deadline in the message,
+  leaves `Ready` unchanged, and requeues with a nil error, so it consumes no
+  failure backoff.
+- New API: `prv1.ReasonReconcileDeferred` (`"ReconcileDeferred"`, fixed;
+  shared with unstructured-runtime) and `prv1.ReconcileDeferred(msg)`;
+  `reconciler.RateLimitKeyer` and `reconciler.WithRateLimitGovernor`;
+  `controller.Options.RateLimit`, `controller.Options.RateLimitGovernor` and
+  `(*controller.Options).SetupRateLimitGovernor`; the packages
+  `pkg/ratelimit` (Signal, Report, Governor, saturation sampler) and
+  `pkg/ratelimit/httpsignal` (GitHub and Azure DevOps headers);
+  `reconcilertest.AssertReportsRateLimits` and the recorded vendor
+  responses; `provider_runtime.ratelimit.*` metrics.
+- The CPU and memory pressure thresholds are provisional until measured
+  (see [configuration](./configuration.md#the-pressure-thresholds-are-provisional)).
 
 ## 2026-11-04 — docs: errors become readable status
 - overview.md now states that every error a provider returns is written
