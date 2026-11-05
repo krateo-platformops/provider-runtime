@@ -311,20 +311,30 @@ func TestReportReachesTheSinkAndDropsKeylessSignals(t *testing.T) {
 	}
 }
 
+// TestClassify is the shared vocabulary for what a Signal means. Its mirror is
+// unstructured-runtime's TestClassificationMatchesTheSharedVocabulary, which
+// has the same rows: the two runtimes duplicate Signal on purpose (design §10,
+// open question 1), so this table is what keeps them reading it the same way.
+// A change to either table must change both.
 func TestClassify(t *testing.T) {
 	now := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
 	cases := map[string]struct {
 		s    Signal
 		want SignalKind
 	}{
-		"refused":                        {Signal{Key: "h", Throttled: true}, SignalThrottled},
-		"quota a quarter left":           {Signal{Key: "h", HasQuota: true, Limit: 100, Remaining: 25}, SignalAdvisory},
-		"quota exhausted on a 200":       {Signal{Key: "h", HasQuota: true, Limit: 200, Remaining: 0}, SignalAdvisory},
-		"delay on a served call":         {Signal{Key: "h", RetryAfter: time.Second}, SignalAdvisory},
-		"reset without counters":         {Signal{Key: "h", ResetAt: now.Add(time.Minute)}, SignalAdvisory},
-		"healthy quota with a reset":     {Signal{Key: "h", HasQuota: true, Limit: 100, Remaining: 90, ResetAt: now.Add(time.Hour)}, SignalNone},
-		"reset in the past, no counters": {Signal{Key: "h", ResetAt: now.Add(-time.Minute)}, SignalNone},
-		"nothing":                        {Signal{Key: "h"}, SignalNone},
+		// An explicit RetryAfter cuts whatever the counters say. This row is
+		// where unstructured-runtime#57 diverged before #58 adopted this order.
+		"healthy quota with a delay":       {Signal{Key: "h", HasQuota: true, Limit: 5000, Remaining: 4900, RetryAfter: 2 * time.Second}, SignalAdvisory},
+		"healthy quota alone":              {Signal{Key: "h", HasQuota: true, Limit: 5000, Remaining: 4900}, SignalNone},
+		"healthy quota, reset in the past": {Signal{Key: "h", HasQuota: true, Limit: 5000, Remaining: 4900, ResetAt: now.Add(-time.Minute)}, SignalNone},
+		"refused":                          {Signal{Key: "h", Throttled: true}, SignalThrottled},
+		"quota a quarter left":             {Signal{Key: "h", HasQuota: true, Limit: 100, Remaining: 25}, SignalAdvisory},
+		"quota exhausted on a 200":         {Signal{Key: "h", HasQuota: true, Limit: 200, Remaining: 0}, SignalAdvisory},
+		"delay on a served call":           {Signal{Key: "h", RetryAfter: time.Second}, SignalAdvisory},
+		"reset without counters":           {Signal{Key: "h", ResetAt: now.Add(time.Minute)}, SignalAdvisory},
+		"healthy quota with a reset":       {Signal{Key: "h", HasQuota: true, Limit: 100, Remaining: 90, ResetAt: now.Add(time.Hour)}, SignalNone},
+		"reset in the past, no counters":   {Signal{Key: "h", ResetAt: now.Add(-time.Minute)}, SignalNone},
+		"nothing":                          {Signal{Key: "h"}, SignalNone},
 	}
 	for name, tc := range cases {
 		if got := Classify(tc.s, now); got != tc.want {
