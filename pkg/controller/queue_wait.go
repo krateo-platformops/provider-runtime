@@ -127,10 +127,6 @@ func (q *queueWaitInstrumented[T]) recordEnqueueAt(item T, started time.Time) (b
 	return true, oldestAge
 }
 
-func (q *queueWaitInstrumented[T]) recordDequeue(item T) (time.Duration, time.Duration, bool) {
-	return q.recordDequeueAt(item, time.Now())
-}
-
 func (q *queueWaitInstrumented[T]) recordDequeueAt(item T, finished time.Time) (time.Duration, time.Duration, bool) {
 	q.lock.Lock()
 	started, exists := q.enqueuedAt[item]

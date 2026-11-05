@@ -95,7 +95,7 @@ func TestAssertObserveSetsReady(t *testing.T) {
 			}
 			tb := &recordingTB{TB: t}
 
-			AssertObserveSetsReady(tb, context.Background(), tc.client, mg)
+			_, _ = AssertObserveSetsReady(tb, context.Background(), tc.client, mg)
 
 			if failed := len(tb.failures) > 0; failed != tc.wantFail {
 				t.Fatalf("want failure %t, got failures %q", tc.wantFail, tb.failures)

@@ -31,7 +31,7 @@ type Options struct {
 
 	// The GlobalRateLimiter used by this controller manager. The rate of
 	// reconciles across all controllers will be subject to this limit.
-	GlobalRateLimiter workqueue.RateLimiter
+	GlobalRateLimiter workqueue.TypedRateLimiter[any]
 
 	// PollInterval at which each controller should speculatively poll to
 	// determine whether it has work to do.
