@@ -28,7 +28,7 @@ runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
 standard-library findings your patched build doesn't have.
 
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.9.1
+go get github.com/krateo-platformops/provider-runtime@v1.10.0
 ```
 
 If your provider also uses `github.com/krateo-platformops/audit` (v0.3.0+),
@@ -246,6 +246,15 @@ For Krateo, that's core-provider#310.
     name), never its value: credentials rotate, and a key that changes on
     rotation splits one quota into several. `RateLimitKey` must not do I/O,
     and must return the same string the provider's signals use.
+  - *Objects on two endpoints.* When one object's calls reach several
+    rate-limited scopes, such as a sync from one server to another, implement
+    `reconciler.RateLimitKeysProvider` instead: `RateLimitKeys` returns every
+    scope the object's calls reach. A call then needs a slot in each key, all
+    or nothing, and is deferred if any of them is throttled or full, with the
+    deferral naming the key that stopped it. One key can't do this honestly: a
+    throttled scope the call isn't gated on keeps being called, and sharing one
+    key slows the healthy scope too. The rules for keys above hold for each
+    key. Return one key when the object's endpoints are the same.
   - *Reporting.* Wrap the HTTP client's transport with
     `httpsignal.NewTransport(base)` and pass the context the runtime handed
     to `Connect` or the `ExternalClient` method into each request

@@ -120,7 +120,8 @@ example provider declares `--rate-limit-governor` /
 Setting the flag is the only configuration. The saturation input needs
 nothing more from the provider's code: it bounds every gated call, keyer or
 not. The rate-limit input, which is per endpoint, also needs the provider to
-implement `reconciler.RateLimitKeyer` on its connecter or client and to report
+implement `reconciler.RateLimitKeyer` on its connecter or client (or
+`reconciler.RateLimitKeysProvider`, for objects on several endpoints) and to report
 signals with `ratelimit.Report` or the `pkg/ratelimit/httpsignal` transport.
 See [usage](./usage.md#the-pieces-you-opt-into).
 
@@ -364,7 +365,7 @@ Recorded when `RateLimit.Metrics` is set (meter
 
 | Instrument | Kind | Attributes | Meaning |
 |---|---|---|---|
-| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`, `saturated`, `ramping`) | External calls the governor deferred. `ramping` is a deferral on the startup ramp, which is quiet on the object, so this is where a restart shows. `key` is empty for a call deferred only by the local capacity with no key (a provider without `RateLimitKeyer`). |
+| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`, `saturated`, `ramping`) | External calls the governor deferred. `ramping` is a deferral on the startup ramp, which is quiet on the object, so this is where a restart shows. `key` is the key that stopped the call. It is empty for a call deferred only by the local capacity with no key (a provider without a keyer) or with several keys, where no one key stopped it. |
 | `provider_runtime.ratelimit.signals` | counter | `key`, `kind` (`throttled`, `advisory`) | Signals providers reported that changed a key's state. Healthy quota reports are not counted. |
 | `provider_runtime.ratelimit.capacity` | observable gauge | `key` | Current concurrency the governor allows for the key: the number operators used to tune by hand. |
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |

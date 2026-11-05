@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
@@ -51,6 +52,27 @@ type RateLimitKeyer interface {
 	RateLimitKey(mg resource.Managed) (string, error)
 }
 
+// RateLimitKeysProvider is RateLimitKeyer for an object whose calls reach
+// several rate-limited scopes, such as a sync from one endpoint to another. One
+// key can't describe that honestly: a throttled scope the call isn't gated on
+// keeps being called, and a single shared key slows the healthy scope too.
+//
+// A gated call then needs a slot in every key plus the local one, all or
+// nothing, and is deferred when any of them is held or full. Its deferral names
+// the key that stopped it. Return only the scopes the object's calls really
+// reach, so return one key for an object whose endpoints are the same.
+//
+// Everything RateLimitKeyer says about keys holds for each one: it must not do
+// I/O, key on the credential's reference, and return the strings the provider
+// reports in ratelimit.Signal.Key. Implement it on the ExternalConnecter, the
+// ExternalClient, or both; it follows the same rules as RateLimitKeyer, and
+// wins on a type that implements both. Empty keys are ignored. A nil or empty
+// result means the object's calls are not gated per endpoint, and an error is
+// treated as for RateLimitKeyer.
+type RateLimitKeysProvider interface {
+	RateLimitKeys(mg resource.Managed) ([]string, error)
+}
+
 // WithRateLimitGovernor gates Connect and every ExternalClient call through g,
 // for connecters and clients that implement RateLimitKeyer, and installs g as
 // the ratelimit sink of the context those calls receive, so ratelimit.Report
@@ -79,10 +101,22 @@ func WithRateLimitGovernor(g *ratelimit.Governor) ReconcilerOption {
 	}
 }
 
-// keyerOf returns v's RateLimitKeyer, or nil.
-func keyerOf(v any) RateLimitKeyer {
-	k, _ := v.(RateLimitKeyer)
-	return k
+// rateLimitKeys names the keys of a managed resource's gated calls.
+type rateLimitKeys func(mg resource.Managed) ([]string, error)
+
+// keyerOf returns how v names its keys, or nil when it doesn't implement
+// RateLimitKeysProvider or RateLimitKeyer.
+func keyerOf(v any) rateLimitKeys {
+	switch k := v.(type) {
+	case RateLimitKeysProvider:
+		return k.RateLimitKeys
+	case RateLimitKeyer:
+		return func(mg resource.Managed) ([]string, error) {
+			key, err := k.RateLimitKey(mg)
+			return []string{key}, err
+		}
+	}
+	return nil
 }
 
 // noRelease is the release of an ungated call.
@@ -97,32 +131,33 @@ type keyErrorLog struct {
 // gate asks the governor to let one call for mg through. It returns the
 // release to call when the call returns, or a Deferral.
 //
-// The key comes from k. With no keyer, an empty key, or a keyer error, the
+// The keys come from k. With no keyer, no non-empty key, or a keyer error, the
 // call has no key: it is not gated per endpoint, but with saturation enabled it
 // still needs a local slot, because saturation bounds every gated call. With
 // no governor, or no key and saturation off, the call goes through ungated.
-func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k RateLimitKeyer, mg resource.Managed) (func(), *ratelimit.Deferral) {
+func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k rateLimitKeys, mg resource.Managed) (func(), *ratelimit.Deferral) {
 	if r.governor == nil {
 		return noRelease, nil
 	}
-	var key string
+	var keys []string
 	if k != nil {
 		var err error
-		key, err = k.RateLimitKey(mg)
+		keys, err = k(mg)
 		if err != nil {
 			if _, seen := r.keyErrors.logged.LoadOrStore(mg.GetUID(), struct{}{}); !seen {
 				log.Error(err, "Cannot determine the rate-limit key; proceeding without per-endpoint gating. This is a provider defect: RateLimitKey must not fail",
 					"kind", r.kind, "namespace", mg.GetNamespace(), "name", mg.GetName())
 			}
-			key = ""
+			keys = nil
 		} else {
 			r.keyErrors.logged.Delete(mg.GetUID())
 		}
 	}
-	if key == "" && !r.governor.SaturationEnabled() {
+	keyed := slices.ContainsFunc(keys, func(key string) bool { return key != "" })
+	if !keyed && !r.governor.SaturationEnabled() {
 		return noRelease, nil
 	}
-	return r.governor.Acquire(ctx, key)
+	return r.governor.AcquireAll(ctx, keys)
 }
 
 // deferReconcile ends a pass whose next external call was deferred. It sets

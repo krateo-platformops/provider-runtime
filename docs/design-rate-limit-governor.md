@@ -152,6 +152,14 @@ type RateLimitKeyer interface {
   silently split one budget into several, each believing it has the full quota.
   (Raised by oasgen-provider, whose rest-dynamic-controller resolves auth per
   request.)
+- **One object can reach several scopes: `RateLimitKeysProvider`.** A sync
+  between two endpoints makes calls to both in every reconcile, and neither
+  key alone describes it. Gated on one, it keeps calling the other through a
+  429. Reporting both under one key slows the healthy endpoint and names the
+  wrong one on the object. A key per pair splits a shared quota. So a provider
+  can return all of an object's keys with `RateLimitKeys(mg) ([]string, error)`,
+  and a call needs a slot in each, all or nothing (§5). Every rule above holds
+  for each key. See §11, item 17.
 - **The host comes from configuration, not from a request.** For
   rest-dynamic-controller it's the RestDefinition's server, or
   `spec.serverURL`, already resolved by its host policy. Per-operation
@@ -377,6 +385,7 @@ Tests, each written so it fails without the behaviour it checks:
 | A deferral is visible and dated | The message parses to the deadline. One status update is the denominator. |
 | A deferral doesn't consume backoff | It returns `RequeueAfter` with a nil error. The item's `NumRequeues` stays 0 across two deferrals. |
 | Keys are independent | With two keys and one throttled, the other key's calls go through at once. |
+| A multi-key call is all or nothing | With either of its keys throttled or full, no external call is made, the object names that key, and the keys with room hold no slot afterwards. It takes one local slot, and waits for the latest of several deadlines. |
 | No worker is parked | With `MaxConcurrentReconciles=N` and one throttled key, N reconciles of a second key still run concurrently. |
 | The server's deadline is respected | `RetryAfter=30s` defers for at least 30s, never less. |
 | Recovery is additive | Capacity returns to the ceiling in N steps of `RecoveryInterval`, not one. |
@@ -631,3 +640,27 @@ gates are met.
     - a run on a real provider, not only the example.
 
     Decided by the user as the bar before the memory input can default on.
+17. **One object, several scopes. Decided by the user on 2026-11-05, after
+    git-provider's adoption found the gap.** A `Repo` has `fromRepo` and `toRepo`,
+    each with its own URL and credential, and every external method touches
+    both. The design assumed one host per object (§4), which holds for
+    rest-dynamic-controller and not here. Decided: an optional
+    `RateLimitKeysProvider`, additive, so `RateLimitKeyer` doesn't change.
+    - **All or nothing, not blocking.** `AcquireAll` checks every key, then
+      takes every slot, under one lock. A deferred call holds nothing, so calls
+      that share keys can't wait on each other, and a full key costs its
+      neighbour no capacity.
+    - **The deferral names what stopped the call.** Among held keys, the latest
+      deadline, because the call can't run sooner. A hold outranks a full key,
+      as it does for one key. A full local capacity names no key when the call
+      has several.
+    - **One call takes one local slot**, however many keys it has: `local`
+      bounds calls, not endpoints.
+    - **The cost:** a call needs all its keys free at once, so under contention
+      a multi-key object can be deferred more often than a single-key one. It
+      requeues like any deferral. This has not been measured.
+    - Not done: per-call keys, gating `Observe` on one endpoint and `Create` on
+      another. The keyer is asked per object, and a `Repo` reaches both
+      endpoints from every method.
+    - unstructured-runtime doesn't need this unless one of its objects spans
+      two scopes. `Signal`, `Classify` and the deferral wording are unchanged.

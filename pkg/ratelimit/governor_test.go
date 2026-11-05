@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -379,4 +380,255 @@ func TestIgnoreSignals(t *testing.T) {
 		t.Errorf("capacity = %d, want 4: signals are ignored", got)
 	}
 	mustAcquire(t, g, "h")()
+}
+
+func mustAcquireAll(t *testing.T, g *Governor, keys ...string) func() {
+	t.Helper()
+	release, d := g.AcquireAll(context.Background(), keys)
+	if d != nil {
+		t.Fatalf("AcquireAll(%q) was deferred (%+v), want a slot in each", keys, d)
+	}
+	return release
+}
+
+// A call on several keys needs a slot in every one, and one full key stops it.
+// The deferral names that key, not the one with room.
+func TestAcquireAllNeedsASlotInEveryKey(t *testing.T) {
+	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 1})
+	held := mustAcquire(t, g, "b")
+	defer held()
+
+	_, d := g.AcquireAll(context.Background(), []string{"a", "b"})
+	if d == nil || d.Reason != DeferAtCapacity || d.Key != "b" || d.Capacity != 1 {
+		t.Fatalf("deferral = %+v, want AtCapacity on the full key b", d)
+	}
+	if !strings.Contains(d.Message(), "b is at its concurrency limit") {
+		t.Errorf("message %q must name the key that stopped the call", d.Message())
+	}
+}
+
+// All or nothing: a deferred call holds no slot on the keys that had room, or
+// every deferral would leak one and the healthy endpoint would seize up.
+func TestAcquireAllHoldsNothingWhileDeferred(t *testing.T) {
+	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 4})
+	g.Observe(Signal{Key: "z", RetryAfter: time.Second}) // advisory: 4 -> 2
+	g.Observe(Signal{Key: "z", RetryAfter: time.Second}) // advisory: 2 -> 1
+	held := mustAcquire(t, g, "z")
+	defer held()
+
+	for range 5 {
+		if _, d := g.AcquireAll(context.Background(), []string{"a", "z"}); d == nil {
+			t.Fatal("the call was not deferred, so this test shows nothing")
+		}
+	}
+	if st := g.keys["a"]; st.inFlight != 0 {
+		t.Errorf("a has %d calls in flight, want 0: deferred calls leaked its slots", st.inFlight)
+	}
+	if g.localInFlight != 1 {
+		t.Errorf("%d local slots in flight, want 1, the held call's", g.localInFlight)
+	}
+}
+
+// Every key is released, once, however many times release runs.
+func TestAcquireAllReleasesEveryKey(t *testing.T) {
+	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 4})
+	other := mustAcquire(t, g, "a")
+	defer other()
+	release := mustAcquireAll(t, g, "a", "b")
+	if a, b := g.keys["a"].inFlight, g.keys["b"].inFlight; a != 2 || b != 1 {
+		t.Fatalf("in flight a=%d b=%d, want 2 and 1", a, b)
+	}
+	release()
+	release()
+	if a, b := g.keys["a"].inFlight, g.keys["b"].inFlight; a != 1 || b != 0 {
+		t.Errorf("after two releases in flight a=%d b=%d, want 1 and 0: release must count once on every key", a, b)
+	}
+	if g.localInFlight != 1 {
+		t.Errorf("%d local slots in flight, want 1, the other call's", g.localInFlight)
+	}
+}
+
+// A throttled key stops the call however much room the others have. This is
+// the case the feature exists for: a sync between two endpoints must stop
+// calling either one when it refuses.
+func TestAcquireAllDefersOnAThrottledKey(t *testing.T) {
+	for name, keys := range map[string][]string{
+		"first in order": {"throttled", "zz-healthy"},
+		"last in order":  {"aa-healthy", "throttled"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g, c := testGovernor(t, Options{MaxConcurrentReconciles: 2})
+			g.Observe(Signal{Key: "throttled", Throttled: true, RetryAfter: time.Minute})
+
+			_, d := g.AcquireAll(context.Background(), keys)
+			if d == nil || d.Reason != DeferThrottled || d.Key != "throttled" {
+				t.Fatalf("deferral = %+v, want Throttled on the key that was refused", d)
+			}
+			if want := c.now().Add(time.Minute); !d.Until.Equal(want) || d.RequeueAfter != time.Minute {
+				t.Errorf("Until %v, RequeueAfter %v; want %v, 1m", d.Until, d.RequeueAfter, want)
+			}
+		})
+	}
+}
+
+// With two keys held, the call can't run before the later deadline lifts, so
+// that's the one it waits for, whichever key sorts first.
+func TestAcquireAllWaitsForTheLatestDeadline(t *testing.T) {
+	for name, deadlines := range map[string]map[string]time.Duration{
+		"first key is later": {"a": time.Hour, "b": time.Minute},
+		"last key is later":  {"a": time.Minute, "b": time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 2})
+			later := ""
+			for key, d := range deadlines {
+				g.Observe(Signal{Key: key, Throttled: true, RetryAfter: d})
+				if d == time.Hour {
+					later = key
+				}
+			}
+			_, d := g.AcquireAll(context.Background(), []string{"a", "b"})
+			if d == nil || d.Key != later || d.RequeueAfter != time.Hour {
+				t.Fatalf("deferral = %+v, want the deadline of %s, 1h away", d, later)
+			}
+		})
+	}
+}
+
+// A hold outranks a full capacity, as it does for one key: a server's deadline
+// is a fact, and "waiting for capacity" would bring the call back too early.
+func TestAcquireAllPrefersAHoldToAFullKey(t *testing.T) {
+	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 1})
+	held := mustAcquire(t, g, "a")
+	defer held()
+	g.Observe(Signal{Key: "b", Throttled: true, RetryAfter: time.Minute})
+
+	_, d := g.AcquireAll(context.Background(), []string{"a", "b"})
+	if d == nil || d.Reason != DeferThrottled || d.Key != "b" {
+		t.Fatalf("deferral = %+v, want Throttled on b, not AtCapacity on a", d)
+	}
+}
+
+// A key held for one reconcile recovers even while another key stops the call,
+// or an object on a long hold would keep its other endpoint's capacity down.
+func TestAcquireAllRaisesEveryKey(t *testing.T) {
+	g, c := testGovernor(t, Options{MaxConcurrentReconciles: 4, RecoveryInterval: time.Minute})
+	g.Observe(Signal{Key: "z", RetryAfter: time.Second})
+	if got := g.Capacity("z"); got != 2 {
+		t.Fatalf("z's capacity = %d, want 2 after an advisory signal", got)
+	}
+	g.Observe(Signal{Key: "a", Throttled: true, RetryAfter: time.Hour})
+
+	c.add(2 * time.Minute)
+	if _, d := g.AcquireAll(context.Background(), []string{"a", "z"}); d == nil || d.Key != "a" {
+		t.Fatalf("deferral = %+v, want the hold on a", d)
+	}
+	// Read directly: Capacity raises the key itself.
+	if got := g.keys["z"].capacity; got != 3 {
+		t.Errorf("z's capacity = %d, want 3: the clean interval passed", got)
+	}
+}
+
+// Empty keys are ignored and a repeated key counts once, so two names for one
+// endpoint take one slot. The caller's slice is left as it was: a provider may
+// hand in the same slice every time.
+func TestAcquireAllNormalizesKeys(t *testing.T) {
+	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 4})
+	keys := []string{"b", "", "a", "b"}
+	release := mustAcquireAll(t, g, keys...)
+	defer release()
+	if !slices.Equal(keys, []string{"b", "", "a", "b"}) {
+		t.Errorf("the caller's slice became %q", keys)
+	}
+	if a, b := g.keys["a"].inFlight, g.keys["b"].inFlight; a != 1 || b != 1 {
+		t.Errorf("in flight a=%d b=%d, want 1 each: a repeated key counts once", a, b)
+	}
+	if _, ok := g.keys[""]; ok {
+		t.Error("an empty key created state")
+	}
+}
+
+// One call takes one local slot, however many keys it has. Local bounds calls,
+// not keys, so a two-endpoint sync must not count as two.
+func TestAcquireAllTakesOneLocalSlot(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	release := mustAcquireAll(t, g, "a", "b")
+	defer release()
+	if g.localInFlight != 1 {
+		t.Errorf("%d local slots in flight, want 1", g.localInFlight)
+	}
+}
+
+// A full local capacity stops a multi-key call before it takes any key slot.
+// No key stopped it, so the deferral names none: picking one would tell an
+// operator that a healthy endpoint is the problem.
+func TestAcquireAllDeferredByLocalNamesNoKey(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.local.Store(&localState{capacity: 1})
+	held := mustAcquire(t, g, "other")
+	defer held()
+
+	_, d := g.AcquireAll(context.Background(), []string{"a", "b"})
+	if d == nil || !d.Local || d.Key != "" {
+		t.Fatalf("deferral = %+v, want a Local one with no key", d)
+	}
+	if _, single := g.Acquire(context.Background(), "a"); single == nil || !single.Local || single.Key != "a" {
+		t.Errorf("single-key deferral = %+v, want it to keep its key as before", single)
+	}
+	g.local.Store(&localState{capacity: 4})
+	release := mustAcquireAll(t, g, "a", "b")
+	release()
+}
+
+// Calls on the same two keys, in either order, never get stuck: nothing blocks,
+// and a deferred call holds nothing.
+func TestAcquireAllNeverDeadlocks(t *testing.T) {
+	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 4})
+	var wg sync.WaitGroup
+	for i := range 8 {
+		keys := []string{"a", "b"}
+		if i%2 == 0 {
+			keys = []string{"b", "a"}
+		}
+		wg.Go(func() {
+			for range 200 {
+				if release, d := g.AcquireAll(context.Background(), keys); d == nil {
+					release()
+				}
+			}
+		})
+	}
+	wg.Wait()
+	mustAcquireAll(t, g, "a", "b")()
+	if st := g.keys["a"]; st.inFlight != 0 {
+		t.Errorf("a has %d calls in flight after every release, want 0", st.inFlight)
+	}
+}
+
+// deferralCounter records the keys of the deferrals it is told about.
+type deferralCounter struct {
+	keys []string
+}
+
+func (c *deferralCounter) IncRateLimitDeferral(_ context.Context, key string, _ DeferReason) {
+	c.keys = append(c.keys, key)
+}
+
+func (*deferralCounter) IncRateLimitSignal(context.Context, string, SignalKind) {}
+
+func (*deferralCounter) ObserveRateLimit(func() Snapshot) {}
+
+// The deferrals metric counts the key that stopped the call, so a dashboard
+// shows which of an object's endpoints is the problem.
+func TestDeferralMetricNamesTheKeyThatStoppedTheCall(t *testing.T) {
+	m := &deferralCounter{}
+	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 2, Metrics: m})
+	g.Observe(Signal{Key: "b", Throttled: true, RetryAfter: time.Minute})
+
+	if _, d := g.AcquireAll(context.Background(), []string{"a", "b"}); d == nil {
+		t.Fatal("the call was not deferred, so this test shows nothing")
+	}
+	if !slices.Equal(m.keys, []string{"b"}) {
+		t.Errorf("the metric counted keys %q, want just b", m.keys)
+	}
 }
