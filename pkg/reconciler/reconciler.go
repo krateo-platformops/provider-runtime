@@ -866,9 +866,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		log.Debug("Create handshake is unresolved; asking Observe whether the external resource exists")
 	}
 
+	// pristine is the object as read, so a deferral that would write it back
+	// unchanged can skip the status update. Taken only with a governor.
+	var pristine resource.Managed
+	if r.governor != nil {
+		pristine, _ = managed.DeepCopyObject().(resource.Managed)
+	}
 	// deferred ends a pass whose next external call the governor deferred.
 	deferred := func(d *ratelimit.Deferral) (reconcile.Result, error) {
-		return r.deferReconcile(log, managed, d, func() error {
+		return r.deferReconcile(log, managed, pristine, d, func() error {
 			return statusUpdate(func() error { return r.client.Status().Update(ctx, managed) })
 		})
 	}

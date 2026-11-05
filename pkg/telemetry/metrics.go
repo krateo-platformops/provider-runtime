@@ -262,7 +262,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 	if m.rateLimitSaturationInput, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.saturation.input",
-		metric.WithDescription("Each enabled saturation input's last value: PSI avg10 for cpu_pressure and memory_pressure, the share of memory.max for memory_working_set. A disabled input has no value."),
+		metric.WithDescription("Each enabled saturation input's last value: PSI some avg10 for cpu_pressure, the share of memory.max for memory_working_set. A disabled input has no value."),
 		metric.WithUnit("%")); err != nil {
 		return nil, err
 	}

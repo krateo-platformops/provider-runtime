@@ -15,8 +15,8 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
-// DefaultRecoveryInterval is how long a key, or the process-wide local
-// capacity, must go clean before its capacity rises by one.
+// DefaultRecoveryInterval is how long a key must go clean before its capacity
+// rises by one.
 const DefaultRecoveryInterval = 30 * time.Second
 
 // capacityFloor is 1, never 0. One call in flight is how a throttled key finds
@@ -34,8 +34,9 @@ const (
 	// DeferThrottled: the server refused a call for this key and named a
 	// deadline. Deferral.Until is that deadline.
 	DeferThrottled DeferReason = "Throttled"
-	// DeferAtCapacity: the key has as many calls in flight as its current
-	// capacity allows. There is no server deadline.
+	// DeferAtCapacity: the key, or the local capacity while it ramps up after
+	// a start or a saturation, has as many calls in flight as it allows. There
+	// is no server deadline.
 	DeferAtCapacity DeferReason = "AtCapacity"
 	// DeferSaturated: the controller's own container is CPU- or
 	// memory-saturated and the process-wide local capacity is full. There is
@@ -70,9 +71,14 @@ type Deferral struct {
 	// DeferThrottled it is the time left until Until, never less. Otherwise it
 	// is a random delay between 1s and the RecoveryInterval.
 	RequeueAfter time.Duration
-	// Capacity is the capacity that was full, for DeferAtCapacity (the key's)
-	// and DeferSaturated (the local one).
+	// Capacity is the capacity that was full: the key's, or the local one when
+	// Local is set.
 	Capacity int
+	// Local is set when the process-wide local capacity was full, rather than
+	// the key's. Its message names the cause and no key: the controller is
+	// saturated (DeferSaturated), or ramping up after a start or a saturation
+	// (DeferAtCapacity).
+	Local bool
 	// Cause names the saturated inputs for DeferSaturated, for example
 	// "memory working set 93% of limit".
 	Cause string
@@ -90,16 +96,15 @@ func (d *Deferral) Message() string {
 		return fmt.Sprintf("reconciliation deferred: %s is rate-limited by the server; next attempt %s",
 			d.Key, formatDeadline(d.Until))
 	case DeferSaturated:
-		cause := d.Cause
-		if cause == "" {
-			cause = "recovering from saturation"
-		}
 		return fmt.Sprintf("reconciliation deferred: controller saturated: %s; waiting for capacity (%d call(s) in flight allowed); no server deadline was given",
-			cause, d.Capacity)
-	default:
-		return fmt.Sprintf("reconciliation deferred: %s is at its concurrency limit of %d call(s); waiting for capacity; no server deadline was given",
-			d.Key, d.Capacity)
+			d.Cause, d.Capacity)
 	}
+	if d.Local {
+		return fmt.Sprintf("reconciliation deferred: controller ramping up its local concurrency limit (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
+			d.Capacity)
+	}
+	return fmt.Sprintf("reconciliation deferred: %s is at its concurrency limit of %d call(s); waiting for capacity; no server deadline was given",
+		d.Key, d.Capacity)
 }
 
 // formatDeadline formats t in RFC 3339 rounded up to the whole second, so the
@@ -143,9 +148,10 @@ type Options struct {
 	// false: signals are honoured.
 	IgnoreSignals bool
 
-	// RecoveryInterval is how long a key or the local capacity must go clean
-	// before its capacity rises by one, up to MaxConcurrentReconciles. It is
-	// also the upper bound of the at-capacity requeue delay. Defaults to 30s.
+	// RecoveryInterval is how long a key must go clean before its capacity
+	// rises by one, up to the ceiling. It is also the upper bound of the
+	// at-capacity requeue delay. Defaults to 30s. The local capacity recovers
+	// per clean sample instead (SaturationOptions.SamplePeriod).
 	RecoveryInterval time.Duration
 
 	// Saturation configures the local input (design §7). Off unless Enabled.
@@ -236,14 +242,17 @@ func New(o Options) (*Governor, error) {
 		keys:          map[string]*keyState{},
 	}
 	g.jitter = func() time.Duration { return jitterBetween(cryptorand.Reader, minCapacityJitter, g.recovery) }
-	g.local.Store(&localState{capacity: g.perController})
 
+	// Without saturation, local capacity is the ceiling and stays there. With
+	// it, local capacity starts at 1 and ramps up per clean sample.
+	g.local.Store(&localState{capacity: g.perController})
 	if o.Saturation.Enabled {
 		sat, err := newSaturation(o.Saturation, o.Logger)
 		if err != nil {
 			return nil, err
 		}
 		g.sat = sat
+		g.local.Store(&localState{capacity: capacityFloor})
 	}
 
 	if g.metrics != nil {
@@ -282,7 +291,9 @@ func (g *Governor) ceilingLocked() int {
 
 // RegisterReconciler tells the Governor one more reconciler, running
 // MaxConcurrentReconciles workers, shares it, and raises the ceiling to match.
-// Capacities still at the old ceiling move to the new one. reconciler.
+// Key capacities still at the old ceiling move to the new one, and so does the
+// local capacity when saturation is off; with saturation on, local capacity
+// ramps to the new ceiling per clean sample. reconciler.
 // WithRateLimitGovernor calls it; call it yourself only if you gate calls
 // through Acquire outside pkg/reconciler.
 func (g *Governor) RegisterReconciler() {
@@ -296,12 +307,16 @@ func (g *Governor) RegisterReconciler() {
 			st.capacity = ceiling
 		}
 	}
-	if cur := g.local.Load(); cur.capacity == old {
+	if cur := g.local.Load(); g.sat == nil && cur.capacity == old {
 		next := *cur
 		next.capacity = ceiling
 		g.local.Store(&next)
 	}
 }
+
+// SaturationEnabled reports whether the local (saturation) input is on, in
+// which case every gated call needs a local slot, keyed or not.
+func (g *Governor) SaturationEnabled() bool { return g.sat != nil }
 
 // Ceiling reports the capacity every key and the local capacity recover to.
 func (g *Governor) Ceiling() int {
@@ -342,7 +357,8 @@ func (g *Governor) maybeRaiseLocked(st *keyState, now time.Time) {
 // Acquire asks to make one gated call for key. It never blocks and does no
 // I/O: it either grants a slot in both the key's capacity and the local
 // capacity, returning the release func to call when the call returns, or it
-// returns a Deferral at once.
+// returns a Deferral at once. An empty key asks for a local slot only: the
+// call of a provider without a RateLimitKeyer, which saturation still bounds.
 //
 // A blocking gate would park workers: with MaxConcurrentReconciles workers and
 // one throttled key, every worker could end up waiting on that key while
@@ -363,7 +379,7 @@ func (g *Governor) Acquire(ctx context.Context, key string) (release func(), d *
 		once.Do(func() {
 			g.mu.Lock()
 			defer g.mu.Unlock()
-			if st, ok := g.keys[key]; ok && st.inFlight > 0 {
+			if st, ok := g.keys[key]; key != "" && ok && st.inFlight > 0 {
 				st.inFlight--
 			}
 			if g.localInFlight > 0 {
@@ -377,22 +393,30 @@ func (g *Governor) acquire(key string) *Deferral {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	now := g.now()
-	st := g.state(key)
-	g.maybeRaiseLocked(st, now)
-
-	if now.Before(st.holdUntil) {
-		return &Deferral{Key: key, Reason: DeferThrottled, Until: st.holdUntil, RequeueAfter: st.holdUntil.Sub(now)}
-	}
-	if st.inFlight >= st.capacity {
-		return &Deferral{Key: key, Reason: DeferAtCapacity, RequeueAfter: g.jitter(), Capacity: st.capacity}
+	var st *keyState
+	if key != "" {
+		now := g.now()
+		st = g.state(key)
+		g.maybeRaiseLocked(st, now)
+		if now.Before(st.holdUntil) {
+			return &Deferral{Key: key, Reason: DeferThrottled, Until: st.holdUntil, RequeueAfter: st.holdUntil.Sub(now)}
+		}
+		if st.inFlight >= st.capacity {
+			return &Deferral{Key: key, Reason: DeferAtCapacity, RequeueAfter: g.jitter(), Capacity: st.capacity}
+		}
 	}
 	local := g.local.Load()
 	if g.localInFlight >= local.capacity {
-		return &Deferral{Key: key, Reason: DeferSaturated, RequeueAfter: g.jitter(), Capacity: local.capacity, Cause: local.cause}
+		reason := DeferAtCapacity
+		if local.cause != "" {
+			reason = DeferSaturated
+		}
+		return &Deferral{Key: key, Reason: reason, Local: true, RequeueAfter: g.jitter(), Capacity: local.capacity, Cause: local.cause}
 	}
 
-	st.inFlight++
+	if st != nil {
+		st.inFlight++
+	}
 	g.localInFlight++
 	return nil
 }
@@ -486,7 +510,7 @@ func (g *Governor) sample() {
 	smp := g.sat.read()
 	g.mu.Lock()
 	cur := g.local.Load()
-	next := g.sat.step(g.now(), smp, *cur, g.ceilingLocked(), g.recovery)
+	next := g.sat.step(smp, *cur, g.ceilingLocked())
 	if next != *cur {
 		g.local.Store(&next)
 	}
@@ -507,13 +531,13 @@ type KeySnapshot struct {
 
 // InputSnapshot is one saturation input's last sample, for metrics.
 type InputSnapshot struct {
-	// Input is cpu_pressure, memory_pressure or memory_working_set.
+	// Input is cpu_pressure or memory_working_set.
 	Input string
 	// Enabled is false when the input is missing (no cgroup v2, no PSI, no
 	// memory limit) or saturation is off. A disabled input has no Percent:
 	// zero would read as healthy.
 	Enabled bool
-	// Percent is the input's value: PSI avg10 for the pressures, the working
+	// Percent is the input's value: PSI some avg10 for cpu_pressure, the working
 	// set as a share of memory.max for the working set.
 	Percent float64
 }

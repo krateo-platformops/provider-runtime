@@ -110,6 +110,9 @@ type apiServer struct {
 	updates       int
 	persisted     map[string]*fake.Managed
 	onGet         func(name string)
+	// sticky makes Get return the conditions last written, like a real API
+	// server, instead of start.
+	sticky bool
 }
 
 func newAPIServer(keys map[string]string, start ...prv1.Condition) *apiServer {
@@ -127,7 +130,14 @@ func (s *apiServer) client() *test.MockClient {
 			mg.SetNamespace(key.Namespace)
 			mg.SetUID(types.UID("uid-" + key.Name))
 			mg.SetAnnotations(map[string]string{keyAnnotation: s.keys[key.Name], meta.AnnotationKeyExternalName: key.Name})
-			mg.SetConditions(s.start...)
+			s.mu.Lock()
+			last, sticky := s.persisted[key.Name], s.sticky
+			s.mu.Unlock()
+			if sticky && last != nil {
+				mg.SetConditions(last.Conditions...)
+			} else {
+				mg.SetConditions(s.start...)
+			}
 			return nil
 		},
 		MockUpdate: func(context.Context, client.Object, ...client.UpdateOption) error {
@@ -547,81 +557,207 @@ func TestKeyerErrorProceedsUngatedAndLogsOncePerObject(t *testing.T) {
 	}
 }
 
-// local bounds the work inside gated calls: with the controller saturated
-// (local capacity halved from 8 to 4 by a CPU-pressure sample), at most 4
-// Observe bodies run at once even across 8 different keys, and the rest are
-// deferred as saturated. This is why a provider's expensive work must happen
-// inside Connect and the ExternalClient methods: work done before them, in the
-// provider's own code, is not bounded by local.
-func TestLocalCapacityBoundsConcurrentObserveBodies(t *testing.T) {
-	const workers = 8
+// startedGovernor returns a governor with saturation on, reading the healthy
+// fixture once at Start (the sample period is an hour), so local capacity is
+// 2: 1 at start, +1 for the one clean sample.
+func startedGovernor(t *testing.T, ctx context.Context, workers int) *ratelimit.Governor {
+	t.Helper()
 	g := newGovernor(t, ratelimit.Options{
 		MaxConcurrentReconciles: workers,
 		Saturation: ratelimit.SaturationOptions{
 			Enabled:      true,
-			CgroupDir:    filepath.Join("..", "ratelimit", "testdata", "cpu-pressure"),
-			SamplePeriod: time.Hour, // one sample, at Start
+			CgroupDir:    filepath.Join("..", "ratelimit", "testdata", "healthy"),
+			SamplePeriod: time.Hour,
 		},
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	go func() { _ = g.Start(ctx) }()
-	for deadline := time.Now().Add(5 * time.Second); g.LocalCapacity() != workers/2; {
+	for deadline := time.Now().Add(5 * time.Second); g.LocalCapacity() != 2; time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatalf("local capacity = %d, want %d after the saturated sample", g.LocalCapacity(), workers/2)
+			t.Fatalf("local capacity = %d, want 2 after the first clean sample", g.LocalCapacity())
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
+	return g
+}
 
+// boundedObserve runs one reconcile per object concurrently against conn's
+// clients, whose Observe holds its slot until every pass has either entered
+// Observe or ended deferred. It returns the most Observe bodies seen at once,
+// and how many passes were deferred by the local capacity.
+func boundedObserve(t *testing.T, ctx context.Context, g *ratelimit.Governor, objects int, keyed bool) (maxInObserve, localDeferrals int64) {
+	t.Helper()
 	keys := map[string]string{}
-	for i := range workers {
+	for i := range objects {
 		name := "obj-" + string(rune('a'+i))
-		keys[name] = "host-" + string(rune('a'+i)) + ".example.com" // one key each: only local can bind
+		keys[name] = ""
+		if keyed {
+			keys[name] = "host-" + string(rune('a'+i)) + ".example.com" // one key each: only local can bind
+		}
 	}
-	var inObserve, maxInObserve, settled atomic.Int64
+	var inObserve, maxIn, settled, deferredLocal atomic.Int64
 	releaseObserve := make(chan struct{})
+	observe := func(ctx context.Context, mg resource.Managed) (ExternalObservation, error) {
+		now := inObserve.Add(1)
+		for m := maxIn.Load(); now > m && !maxIn.CompareAndSwap(m, now); m = maxIn.Load() {
+		}
+		settled.Add(1)
+		// Stand-in for expensive work: hold the slot until released.
+		<-releaseObserve
+		inObserve.Add(-1)
+		return upToDate(ctx, mg)
+	}
 	srv := newAPIServer(keys)
-	conn := &keyedConnector{key: keyFromAnnotation, connect: func(context.Context, resource.Managed) (ExternalClient, error) {
-		c := countingClient(&clientCalls{}, func(ctx context.Context, mg resource.Managed) (ExternalObservation, error) {
-			now := inObserve.Add(1)
-			for m := maxInObserve.Load(); now > m && !maxInObserve.CompareAndSwap(m, now); m = maxInObserve.Load() {
-			}
-			settled.Add(1)
-			// Stand-in for expensive work: hold the slot until released.
-			<-releaseObserve
-			inObserve.Add(-1)
-			return upToDate(ctx, mg)
-		})
+	connect := func(context.Context, resource.Managed) (ExternalClient, error) {
+		c := countingClient(&clientCalls{}, observe)
 		return &c, nil
-	}}
-	r := newRateLimitedReconciler(srv, WithExternalConnecter(conn), WithRateLimitGovernor(g))
+	}
+	var opt ReconcilerOption
+	if keyed {
+		opt = WithExternalConnecter(&keyedConnector{key: keyFromAnnotation, connect: connect})
+	} else {
+		opt = WithExternalConnecter(ExternalConnectorFn(connect)) // no RateLimitKeyer anywhere
+	}
+	r := newRateLimitedReconciler(srv, opt, WithRateLimitGovernor(g))
 
-	var saturated atomic.Int64
 	var wg sync.WaitGroup
 	for name := range keys {
 		wg.Go(func() {
-			_, err := r.Reconcile(ctx, request(name))
-			if err != nil {
+			if _, err := r.Reconcile(ctx, request(name)); err != nil {
 				t.Errorf("Reconcile(%s): %v", name, err)
 			}
-			if obj := srv.persistedObject(name); obj != nil &&
-				strings.Contains(obj.GetCondition(prv1.TypeSynced).Message, "controller saturated: CPU pressure") {
-				saturated.Add(1)
-				settled.Add(1)
+			if obj := srv.persistedObject(name); obj != nil {
+				msg := obj.GetCondition(prv1.TypeSynced).Message
+				if strings.Contains(msg, "waiting for capacity") && !strings.Contains(msg, "host-") && !strings.Contains(msg, name) {
+					deferredLocal.Add(1)
+					settled.Add(1)
+				}
 			}
 		})
 	}
-	for deadline := time.Now().Add(5 * time.Second); settled.Load() < workers && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(5 * time.Second); settled.Load() < int64(objects) && time.Now().Before(deadline); {
 		time.Sleep(5 * time.Millisecond)
 	}
 	close(releaseObserve)
 	wg.Wait()
+	return maxIn.Load(), deferredLocal.Load()
+}
 
-	if got := maxInObserve.Load(); got != workers/2 {
-		t.Errorf("at most %d Observe bodies ran at once, want %d: local capacity must bound concurrent gated calls", got, workers/2)
+// local bounds the work inside gated calls: with local capacity 2 (slow start
+// after one clean sample) and 8 objects on 8 different keys, at most 2 Observe
+// bodies run at once, and the rest are deferred by the local capacity with a
+// message that names no key. This is why a provider's expensive work must
+// happen inside Connect and the ExternalClient methods: work done before them,
+// in the provider's own code, is not bounded by local.
+func TestLocalCapacityBoundsConcurrentObserveBodies(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g := startedGovernor(t, ctx, 8)
+
+	maxIn, deferred := boundedObserve(t, ctx, g, 8, true)
+	if maxIn != 2 {
+		t.Errorf("at most %d Observe bodies ran at once, want 2: local capacity must bound concurrent gated calls", maxIn)
 	}
-	if got := saturated.Load(); got != workers/2 {
-		t.Errorf("%d passes were deferred as saturated, want %d", got, workers/2)
+	if deferred != 6 {
+		t.Errorf("%d passes were deferred by the local capacity with a keyless message, want 6", deferred)
+	}
+}
+
+// Saturation applies to every gated call, keyer or not: a provider that
+// implements no RateLimitKeyer is still bounded by local.
+func TestProviderWithoutKeyerIsBoundedByLocal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g := startedGovernor(t, ctx, 8)
+
+	maxIn, deferred := boundedObserve(t, ctx, g, 8, false)
+	if maxIn != 2 {
+		t.Errorf("at most %d Observe bodies of a keyless provider ran at once, want 2: saturation must bound calls without a keyer", maxIn)
+	}
+	if deferred != 6 {
+		t.Errorf("%d keyless passes were deferred by the local capacity, want 6", deferred)
+	}
+}
+
+// Without saturation, a provider without a keyer is not gated at all.
+func TestProviderWithoutKeyerIsUngatedWithoutSaturation(t *testing.T) {
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 1})
+	srv := newAPIServer(map[string]string{"a": "", "b": ""})
+	calls := &clientCalls{}
+	held := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	r := newRateLimitedReconciler(srv, WithRateLimitGovernor(g),
+		WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+			c := countingClient(calls, func(ctx context.Context, mg resource.Managed) (ExternalObservation, error) {
+				entered <- struct{}{}
+				<-held
+				return upToDate(ctx, mg)
+			})
+			return &c, nil
+		})))
+	var wg sync.WaitGroup
+	for _, name := range []string{"a", "b"} {
+		wg.Go(func() { _, _ = r.Reconcile(context.Background(), request(name)) })
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both keyless Observes should run at once with saturation off and a ceiling of 1")
+		}
+	}
+	close(held)
+	wg.Wait()
+}
+
+// A deferral that would write the object back unchanged skips the status
+// update: two consecutive at-capacity deferrals produce one write. A throttled
+// deferral that names a new deadline still writes.
+func TestIdenticalDeferralSkipsTheStatusWrite(t *testing.T) {
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 1})
+	srv := newAPIServer(map[string]string{"repo": "api.github.com"}, fixedReady)
+	srv.sticky = true
+	calls := &clientCalls{}
+	conn := &keyedConnector{key: keyFromAnnotation, connect: func(context.Context, resource.Managed) (ExternalClient, error) {
+		c := countingClient(calls, upToDate)
+		return &c, nil
+	}}
+	r := newRateLimitedReconciler(srv, WithExternalConnecter(conn), WithRateLimitGovernor(g))
+
+	// At capacity: the key's only slot is taken.
+	held, d := g.Acquire(context.Background(), "api.github.com")
+	if d != nil {
+		t.Fatal(d)
+	}
+	for pass := 1; pass <= 2; pass++ {
+		got, err := r.Reconcile(context.Background(), request("repo"))
+		if err != nil || got.RequeueAfter <= 0 {
+			t.Fatalf("pass %d: Reconcile = %+v, %v; want a RequeueAfter with a nil error", pass, got, err)
+		}
+	}
+	if n := srv.statusUpdateCount(); n != 1 {
+		t.Fatalf("two identical at-capacity deferrals made %d status updates, want 1", n)
+	}
+	held()
+
+	// Throttled: a deadline the object doesn't show yet writes; the same
+	// deadline again doesn't; a later deadline does.
+	g.Observe(ratelimit.Signal{Key: "api.github.com", Throttled: true, RetryAfter: 30 * time.Second})
+	for range 2 {
+		if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := srv.statusUpdateCount(); n != 2 {
+		t.Fatalf("a throttled deferral with a new deadline, then the same again: %d status updates in all, want 2", n)
+	}
+	g.Observe(ratelimit.Signal{Key: "api.github.com", Throttled: true, RetryAfter: 10 * time.Minute})
+	if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.statusUpdateCount(); n != 3 {
+		t.Errorf("a throttled deferral with a later deadline made %d status updates in all, want 3: a new deadline must be written", n)
+	}
+	if calls.total() != 0 {
+		t.Errorf("deferred passes called the client %d times", calls.total())
 	}
 }
 

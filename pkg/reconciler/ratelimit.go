@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
@@ -23,14 +24,17 @@ const reasonReconcileDeferred = event.Reason(prv1.ReasonReconcileDeferred)
 // quota is per identity. It must not do I/O: it is called before every gated
 // call, including when the endpoint is throttled.
 //
-// Implement it on the ExternalConnecter, the ExternalClient, or both. With a
-// Governor configured (WithRateLimitGovernor):
+// It is needed only for per-endpoint API rate limits. Implement it on the
+// ExternalConnecter, the ExternalClient, or both. With a Governor configured
+// (WithRateLimitGovernor):
 //
 //   - Connect is gated on the connecter's key, when the connecter implements
 //     it.
 //   - Observe, Create, Update and Delete are gated on the client's key, or on
 //     the connecter's when only the connecter implements it.
-//   - A connecter and client that implement neither are never gated.
+//   - A connecter and client that implement neither are not gated per
+//     endpoint. With saturation enabled, their calls still need a slot in the
+//     process-wide local capacity: saturation bounds every gated call.
 //
 // Key on the credential's reference (for example the Secret's namespace and
 // name), never its value: credentials rotate, and a key that changes on
@@ -39,8 +43,10 @@ const reasonReconcileDeferred = event.Reason(prv1.ReasonReconcileDeferred)
 // HTTP API, httpsignal.HostKey of its base URL), or signals throttle a key no
 // call is gated on.
 //
-// An empty key means the object's calls are not gated. An error is a provider
-// defect: the call proceeds ungated, and the runtime logs it once per object.
+// An empty key means the object's calls are not gated per endpoint. An error
+// is a provider defect: the call proceeds without per-endpoint gating (still
+// bounded by saturation when that is on), and the runtime logs it once per
+// object.
 type RateLimitKeyer interface {
 	RateLimitKey(mg resource.Managed) (string, error)
 }
@@ -86,38 +92,54 @@ type keyErrorLog struct {
 	logged sync.Map // types.UID -> struct{}
 }
 
-// gate asks the governor to let one call for mg through, keyed by k. It returns
-// the release to call when the call returns, or a Deferral. A nil governor or
-// keyer, an empty key, or a keyer error lets the call through ungated.
+// gate asks the governor to let one call for mg through. It returns the
+// release to call when the call returns, or a Deferral.
+//
+// The key comes from k. With no keyer, an empty key, or a keyer error, the
+// call has no key: it is not gated per endpoint, but with saturation enabled it
+// still needs a local slot, because saturation bounds every gated call. With
+// no governor, or no key and saturation off, the call goes through ungated.
 func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k RateLimitKeyer, mg resource.Managed) (func(), *ratelimit.Deferral) {
-	if r.governor == nil || k == nil {
+	if r.governor == nil {
 		return noRelease, nil
 	}
-	key, err := k.RateLimitKey(mg)
-	if err != nil {
-		if _, seen := r.keyErrors.logged.LoadOrStore(mg.GetUID(), struct{}{}); !seen {
-			log.Error(err, "Cannot determine the rate-limit key; proceeding ungated. This is a provider defect: RateLimitKey must not fail",
-				"kind", r.kind, "namespace", mg.GetNamespace(), "name", mg.GetName())
+	var key string
+	if k != nil {
+		var err error
+		key, err = k.RateLimitKey(mg)
+		if err != nil {
+			if _, seen := r.keyErrors.logged.LoadOrStore(mg.GetUID(), struct{}{}); !seen {
+				log.Error(err, "Cannot determine the rate-limit key; proceeding without per-endpoint gating. This is a provider defect: RateLimitKey must not fail",
+					"kind", r.kind, "namespace", mg.GetNamespace(), "name", mg.GetName())
+			}
+			key = ""
+		} else {
+			r.keyErrors.logged.Delete(mg.GetUID())
 		}
-		return noRelease, nil
 	}
-	r.keyErrors.logged.Delete(mg.GetUID())
-	if key == "" {
+	if key == "" && !r.governor.SaturationEnabled() {
 		return noRelease, nil
 	}
 	return r.governor.Acquire(ctx, key)
 }
 
-// deferReconcile ends a pass whose next external call was deferred. It writes
+// deferReconcile ends a pass whose next external call was deferred. It sets
 // Synced=False/ReconcileDeferred with the deferral's message and nothing else
-// (Ready is left as it is), in one resourceVersion-guarded status update, and
-// requeues after the deferral's delay with a nil error: controller-runtime then
-// forgets the item's failure backoff, because a deferral is not a failure.
+// (Ready is left as it is), writes it in one resourceVersion-guarded status
+// update, and requeues after the deferral's delay with a nil error:
+// controller-runtime then forgets the item's failure backoff, because a
+// deferral is not a failure.
+//
+// When the object would be written exactly as it was read (pristine, a copy
+// taken after the Get), the update is skipped and the pass only requeues. An
+// at-capacity deferral repeats every second or so with the same message, and
+// each identical write would be load on the API server for nothing. A
+// throttled deferral with a new deadline has a new message, so it writes.
 //
 // A Normal event is recorded, through the throttled recorder, when the object
 // enters a deferral or a throttled deferral names a new deadline, so a long
 // window does not flood events.
-func (r *Reconciler) deferReconcile(log logging.Logger, mg resource.Managed, d *ratelimit.Deferral, statusUpdate func() error) (reconcile.Result, error) {
+func (r *Reconciler) deferReconcile(log logging.Logger, mg, pristine resource.Managed, d *ratelimit.Deferral, statusUpdate func() error) (reconcile.Result, error) {
 	prev := mg.GetCondition(prv1.TypeSynced)
 	cond := prv1.ReconcileDeferred(d.Message())
 	newWindow := prev.Reason != prv1.ReasonReconcileDeferred ||
@@ -128,6 +150,10 @@ func (r *Reconciler) deferReconcile(log logging.Logger, mg resource.Managed, d *
 		r.throttledRecorder.Event(mg, event.Normal(reasonReconcileDeferred, actionProcessEvent, cond.Message))
 	}
 	mg.SetConditions(cond)
+	if pristine != nil && equality.Semantic.DeepEqual(pristine, mg) {
+		log.Debug("Deferral changes nothing on the object; skipping the status update")
+		return reconcile.Result{RequeueAfter: d.RequeueAfter}, nil
+	}
 	if err := statusUpdate(); err != nil {
 		return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 	}

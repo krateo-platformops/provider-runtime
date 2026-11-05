@@ -99,15 +99,15 @@ func TestRateLimitMetrics(t *testing.T) {
 	if got := points(t, rm, "provider_runtime.ratelimit.seconds_to_reset", "key"); got["api.github.com"] < 59 || got["dev.azure.com"] != 0 {
 		t.Errorf("seconds_to_reset by key = %v, want ~60 for the throttled key and 0 for the other", got)
 	}
-	if got := points(t, rm, "provider_runtime.ratelimit.local.capacity", "none"); got[""] != 4 {
-		t.Errorf("local capacity = %v, want 4", got)
+	if got := points(t, rm, "provider_runtime.ratelimit.local.capacity", "none"); got[""] != 2 {
+		t.Errorf("local capacity = %v, want 2: it starts at 1 and the one clean sample adds 1", got)
 	}
 
 	// No memory limit: the working-set input is disabled, and says so, rather
 	// than reporting a value of 0 that reads as healthy.
 	enabled := points(t, rm, "provider_runtime.ratelimit.saturation.input.enabled", "input")
-	if enabled["cpu_pressure"] != 1 || enabled["memory_pressure"] != 1 || enabled["memory_working_set"] != 0 {
-		t.Errorf("input enabled = %v, want cpu and memory pressure 1, memory_working_set 0", enabled)
+	if enabled["cpu_pressure"] != 1 || enabled["memory_working_set"] != 0 || len(enabled) != 2 {
+		t.Errorf("input enabled = %v, want cpu_pressure 1 and memory_working_set 0, and no other input", enabled)
 	}
 	values := points(t, rm, "provider_runtime.ratelimit.saturation.input", "input")
 	if _, ok := values["memory_working_set"]; ok {

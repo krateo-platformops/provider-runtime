@@ -15,40 +15,40 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
-// Saturation defaults (design §7).
+// Saturation defaults (design §7). Decided by the user on 2026-11-05 from the
+// kind measurement in docs/configuration.md.
 //
-// The two pressure thresholds are PROVISIONAL (design open question 5). The
-// kind measurement in docs/configuration.md supports 50 for CPU. It could not
-// measure memory pressure, which stayed at 0 up to every OOMKill, so 10 is
-// unmeasured. The working-set ratios are the design's; that measurement found
-// 0.90 too close to the limit for calls that each hold about 5% of it, where
-// 0.80 was clean.
+// The CPU pressure threshold is PROVISIONAL: the measurement supports 50, and
+// core-provider is validating it. The working-set ratios and the sample
+// period are decided: with 16 MiB calls against a 256Mi limit, 0.90/0.95 at
+// 1s let calls admitted between two samples cross the limit; 0.80/0.90 at
+// 250ms leave room for several such calls and see the growth four times as
+// often.
 const (
 	// DefaultSamplePeriod is how often the sampler reads the cgroup files.
-	DefaultSamplePeriod = time.Second
+	DefaultSamplePeriod = 250 * time.Millisecond
 	// DefaultCPUPressureThreshold is the cpu.pressure "some avg10" percentage
 	// above which the controller counts as CPU-saturated. PROVISIONAL.
 	DefaultCPUPressureThreshold = 50.0
-	// DefaultMemoryPressureThreshold is the memory.pressure "full avg10"
-	// percentage above which the controller counts as memory-saturated.
-	// PROVISIONAL.
-	DefaultMemoryPressureThreshold = 10.0
 	// DefaultWorkingSetSoftRatio is the working-set share of memory.max at
 	// which local capacity halves.
-	DefaultWorkingSetSoftRatio = 0.90
+	DefaultWorkingSetSoftRatio = 0.80
 	// DefaultWorkingSetHardRatio is the working-set share of memory.max at
 	// which local capacity drops straight to 1.
-	DefaultWorkingSetHardRatio = 0.95
+	DefaultWorkingSetHardRatio = 0.90
 )
 
 // Saturation inputs, as named in the metrics.
 const (
 	InputCPUPressure      = "cpu_pressure"
-	InputMemoryPressure   = "memory_pressure"
 	InputMemoryWorkingSet = "memory_working_set"
 )
 
-var allInputs = []string{InputCPUPressure, InputMemoryPressure, InputMemoryWorkingSet}
+// allInputs are the inputs the sampler reads. memory.pressure is not one of
+// them: on the kind measurement it read 0.00 up to every OOMKill, because a Go
+// controller's anonymous memory, with no swap, gives the kernel nothing to
+// reclaim and so nothing to stall on (design §11).
+var allInputs = []string{InputCPUPressure, InputMemoryWorkingSet}
 
 const (
 	defaultCgroupMount = "/sys/fs/cgroup"
@@ -56,7 +56,11 @@ const (
 )
 
 // SaturationOptions configures the local input: the controller's own CPU and
-// memory saturation, read from its container's cgroup v2 files.
+// memory saturation, read from its container's cgroup v2 files. With it
+// enabled, every gated call (Connect and each ExternalClient method) needs a
+// slot in the process-wide local capacity, whether or not the provider
+// implements a RateLimitKeyer. Local capacity starts at 1 and rises by one per
+// clean sample up to the ceiling.
 type SaturationOptions struct {
 	// Enabled turns the local input on, independently of the rate-limit input.
 	Enabled bool
@@ -68,7 +72,10 @@ type SaturationOptions struct {
 	// container's own).
 	CgroupDir string
 
-	// SamplePeriod is how often the files are read. Defaults to 1s.
+	// SamplePeriod is how often the files are read, and how fast local
+	// capacity ramps up: +1 per clean sample. Defaults to 250ms. A shorter
+	// period makes the working-set input react faster; it doesn't make CPU
+	// pressure react faster, because "avg10" is already a 10-second average.
 	SamplePeriod time.Duration
 
 	// CPUPressureThreshold is the cpu.pressure "some avg10" percentage (0-100)
@@ -76,18 +83,13 @@ type SaturationOptions struct {
 	// DefaultCPUPressureThreshold (provisional).
 	CPUPressureThreshold float64
 
-	// MemoryPressureThreshold is the memory.pressure "full avg10" percentage
-	// (0-100) above which the controller is saturated. Defaults to
-	// DefaultMemoryPressureThreshold (provisional).
-	MemoryPressureThreshold float64
-
 	// WorkingSetSoftRatio is the share of memory.max (0-1) at or above which
 	// the working set (memory.current minus inactive_file) halves local
-	// capacity. Defaults to 0.90.
+	// capacity. Defaults to 0.80.
 	WorkingSetSoftRatio float64
 
 	// WorkingSetHardRatio is the share of memory.max (0-1) at or above which
-	// local capacity drops straight to 1. Defaults to 0.95.
+	// local capacity drops straight to 1. Defaults to 0.90.
 	WorkingSetHardRatio float64
 }
 
@@ -97,9 +99,6 @@ func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 	}
 	if o.CPUPressureThreshold == 0 {
 		o.CPUPressureThreshold = DefaultCPUPressureThreshold
-	}
-	if o.MemoryPressureThreshold == 0 {
-		o.MemoryPressureThreshold = DefaultMemoryPressureThreshold
 	}
 	if o.WorkingSetSoftRatio == 0 {
 		o.WorkingSetSoftRatio = DefaultWorkingSetSoftRatio
@@ -112,8 +111,6 @@ func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 		return o, errors.Errorf("ratelimit: saturation SamplePeriod must be positive, got %s", o.SamplePeriod)
 	case o.CPUPressureThreshold < 0 || o.CPUPressureThreshold > 100:
 		return o, errors.Errorf("ratelimit: saturation CPUPressureThreshold must be a percentage in (0, 100], got %v", o.CPUPressureThreshold)
-	case o.MemoryPressureThreshold < 0 || o.MemoryPressureThreshold > 100:
-		return o, errors.Errorf("ratelimit: saturation MemoryPressureThreshold must be a percentage in (0, 100], got %v", o.MemoryPressureThreshold)
 	case o.WorkingSetSoftRatio < 0 || o.WorkingSetHardRatio > 1 || o.WorkingSetSoftRatio > o.WorkingSetHardRatio:
 		return o, errors.Errorf("ratelimit: saturation working-set ratios must satisfy 0 < soft (%v) <= hard (%v) <= 1",
 			o.WorkingSetSoftRatio, o.WorkingSetHardRatio)
@@ -134,17 +131,14 @@ func disabled(why string) reading { return reading{disabledBecause: why} }
 
 // cgroupSample is one read of the cgroup files.
 type cgroupSample struct {
-	cpuPressure    reading
-	memoryPressure reading
-	workingSet     reading
+	cpuPressure reading
+	workingSet  reading
 }
 
 func (s cgroupSample) byInput(input string) reading {
 	switch input {
 	case InputCPUPressure:
 		return s.cpuPressure
-	case InputMemoryPressure:
-		return s.memoryPressure
 	default:
 		return s.workingSet
 	}
@@ -166,8 +160,7 @@ type saturation struct {
 	last atomic.Pointer[cgroupSample]
 
 	// Owned by the sampler goroutine.
-	lastBad, lastRaise time.Time
-	loggedDisabled     map[string]bool
+	loggedDisabled map[string]bool
 }
 
 func newSaturation(o SaturationOptions, log logging.Logger) (*saturation, error) {
@@ -202,28 +195,25 @@ func (s *saturation) read() cgroupSample {
 //   - working set at or above the hard ratio: capacity 1 at once;
 //   - any input over its threshold: capacity halves, minimum 1. step runs once
 //     per sample, so this halves at most once per sample period;
-//   - otherwise, after a whole clean RecoveryInterval since the last saturated
-//     sample and since the last raise: capacity +1, up to ceiling.
-func (s *saturation) step(now time.Time, smp cgroupSample, cur localState, ceiling int, recovery time.Duration) localState {
+//   - otherwise, a clean sample: capacity +1, up to ceiling. Local capacity
+//     starts at 1 (slow start), so a controller restarted after an OOMKill
+//     ramps into its backlog instead of meeting all of it at once.
+//
+// cause names what made the last sample saturated, and is cleared by a clean
+// one.
+func (s *saturation) step(smp cgroupSample, cur localState, ceiling int) localState {
 	hard, saturated, cause := s.evaluate(smp)
 	next := cur
 	switch {
 	case hard:
 		next.capacity = capacityFloor
 		next.cause = cause
-		s.lastBad = now
 	case saturated:
 		next.capacity = max(capacityFloor, cur.capacity/2)
 		next.cause = cause
-		s.lastBad = now
 	default:
-		if cur.capacity < ceiling && now.Sub(s.lastBad) >= recovery && now.Sub(s.lastRaise) >= recovery {
-			next.capacity = cur.capacity + 1
-			s.lastRaise = now
-		}
-		if next.capacity >= ceiling {
-			next.cause = ""
-		}
+		next.capacity = min(ceiling, cur.capacity+1)
+		next.cause = ""
 	}
 	return next
 }
@@ -234,9 +224,6 @@ func (s *saturation) evaluate(smp cgroupSample) (hard, saturated bool, cause str
 	var causes []string
 	if r := smp.cpuPressure; r.enabled && r.percent > s.opts.CPUPressureThreshold {
 		causes = append(causes, "CPU pressure "+formatPercent(r.percent)+" (some avg10)")
-	}
-	if r := smp.memoryPressure; r.enabled && r.percent > s.opts.MemoryPressureThreshold {
-		causes = append(causes, "memory pressure "+formatPercent(r.percent)+" (full avg10)")
 	}
 	if r := smp.workingSet; r.enabled && r.percent >= s.opts.WorkingSetSoftRatio*100 {
 		causes = append(causes, "memory working set "+formatPercent(r.percent)+" of limit")
@@ -289,19 +276,18 @@ func (c cgroupFiles) read() cgroupSample {
 	root, err := os.OpenRoot(c.dir)
 	if err != nil {
 		why := "no cgroup v2 directory at " + c.dir + ": " + err.Error()
-		return cgroupSample{cpuPressure: disabled(why), memoryPressure: disabled(why), workingSet: disabled(why)}
+		return cgroupSample{cpuPressure: disabled(why), workingSet: disabled(why)}
 	}
 	defer func() { _ = root.Close() }()
 
 	return cgroupSample{
-		cpuPressure:    readPressure(root, "cpu.pressure", "some"),
-		memoryPressure: readPressure(root, "memory.pressure", "full"),
-		workingSet:     readWorkingSet(root),
+		cpuPressure: readPressure(root, "cpu.pressure", "some"),
+		workingSet:  readWorkingSet(root),
 	}
 }
 
 // readPressure returns avg10 of the given line ("some" or "full") of a PSI
-// file, such as
+// file, such as cpu.pressure:
 //
 //	some avg10=1.53 avg60=0.87 avg300=0.24 total=1234567
 //	full avg10=0.00 avg60=0.00 avg300=0.00 total=0
