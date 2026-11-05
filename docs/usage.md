@@ -28,7 +28,7 @@ runs on the version your `go.mod` selects, and at `go 1.26.0` that reports
 standard-library findings your patched build doesn't have.
 
 ```sh
-go get github.com/krateo-platformops/provider-runtime@v1.9.0
+go get github.com/krateo-platformops/provider-runtime@v1.9.1
 ```
 
 If your provider also uses `github.com/krateo-platformops/audit` (v0.3.0+),

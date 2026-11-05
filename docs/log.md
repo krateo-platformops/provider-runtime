@@ -12,7 +12,7 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## 2026-11-05 — telemetry.Config.ServiceName works
+## 2026-11-05 — v1.9.1: telemetry.Config.ServiceName works
 - **The field now sets `service.name`**, unless `OTEL_SERVICE_NAME` or
   `OTEL_RESOURCE_ATTRIBUTES` name one. It never had any effect before. The
   unused `provider-runtime` default is gone, because applying it would have
