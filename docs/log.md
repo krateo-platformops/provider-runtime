@@ -34,8 +34,11 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   `pkg/ratelimit/httpsignal` (GitHub and Azure DevOps headers);
   `reconcilertest.AssertReportsRateLimits` and the recorded vendor
   responses; `provider_runtime.ratelimit.*` metrics.
-- The CPU and memory pressure thresholds are provisional until measured
-  (see [configuration](./configuration.md#the-pressure-thresholds-are-provisional)).
+- The pressure thresholds are still provisional. A kind measurement on the
+  example provider supports 50% for CPU. It couldn't measure memory pressure,
+  which stayed at 0 up to every OOMKill. It found the 90% working-set soft
+  ratio too close to the limit for calls that each hold about 5% of it: 80%
+  was clean. See [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
 
 ## 2026-11-04 — docs: errors become readable status
 - overview.md now states that every error a provider returns is written

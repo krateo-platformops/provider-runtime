@@ -17,11 +17,12 @@ import (
 
 // Saturation defaults (design §7).
 //
-// The two pressure thresholds are PROVISIONAL. The design (open question 5)
-// requires them to be measured on a kind cluster with a provider under
-// synthetic load before they are fixed; see docs/configuration.md for the
-// measurement this repo has, and treat these as starting points until
-// then. The working-set ratios are the design's.
+// The two pressure thresholds are PROVISIONAL (design open question 5). The
+// kind measurement in docs/configuration.md supports 50 for CPU. It could not
+// measure memory pressure, which stayed at 0 up to every OOMKill, so 10 is
+// unmeasured. The working-set ratios are the design's; that measurement found
+// 0.90 too close to the limit for calls that each hold about 5% of it, where
+// 0.80 was clean.
 const (
 	// DefaultSamplePeriod is how often the sampler reads the cgroup files.
 	DefaultSamplePeriod = time.Second

@@ -453,3 +453,16 @@ Where the implementation made a choice this design leaves open:
 10. **§7 refers to "the CPU and memory pressure thresholds in this
     document", but gives none.** The provisional defaults are 50%
     (`cpu.pressure` `some avg10`) and 10% (`memory.pressure` `full avg10`).
+11. **What the kind measurement (open question 5) found against this design.**
+    It is recorded in
+    [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
+    Three findings need a design decision rather than a default:
+    - With anonymous memory and no swap, `memory.pressure` stayed at 0 up to
+      the OOMKill. The working-set ratios are the input that acts.
+    - A 1s sample can't stop calls admitted between two samples. The soft
+      ratio's headroom has to hold several of the provider's largest calls:
+      90% was too close at about 5% of the limit per call, and 80% was clean.
+    - `local` starts at the ceiling, so a controller restarted after an
+      OOMKill meets its whole backlog at full concurrency and can crash-loop.
+      Starting low and recovering, or a first sample before any call is let
+      through, would be a design change.

@@ -125,13 +125,72 @@ negative interval. Leaving a field unset never errors.
 
 ### The pressure thresholds are provisional
 
-<!-- MEASUREMENT -->
-The CPU and memory pressure defaults (50% and 10%) are provisional starting
-points. The design (open question 5) requires them to be measured on a kind
-cluster with a provider under synthetic load before they are fixed. This
-paragraph will record that measurement: the workload, the limits, and where
-slowing down prevented an OOMKill or probe failure without idling the
-controller. Until then, treat the two values as unmeasured.
+The CPU and memory pressure defaults (50% and 10%) are still provisional. The
+measurement below (design open question 5) supports 50% for CPU. It could not
+measure the memory-pressure threshold at all, and it shows the working-set
+ratios matter more than either. core-provider is validating these numbers on
+its side.
+
+**Setup.** A kind cluster (node `kindest/node:v1.36.4`, Docker Desktop's
+LinuxKit 7.0.12 kernel, cgroup v2 with PSI, 8 CPUs) ran one replica of a
+measurement build of [greeting-controller](../examples/greeting-controller/README.md).
+It had the same wiring, governor and keyer, with a synthetic-load `Observe`
+and a per-second log of its own cgroup files. It ran 16 workers, so the
+ceiling was 16, with a liveness probe on `/healthz` (period 2s, timeout 1s,
+3 failures to restart). Each run lasted 120 to 240s.
+
+**CPU.** Limit 250m. 64 Greetings polled every 1s. Each `Observe` does a fixed
+amount of CPU work (3000 sha256 rounds over 64 KiB, about 100ms of CPU).
+
+| Run | `cpu.pressure` some avg10 | Observes/s | Mean `local` | Liveness failures | Restarts |
+|---|---|---|---|---|---|
+| governor off (2 runs) | 74%, 80% | 1.6, 2.7 | — | 3, 1 | 0, 0 |
+| threshold 25 | 42% | 1.8 | 1.0 | 1 | 0 |
+| threshold 50 (default) | 42% | 2.0 | 1.1 | 0 | 0 |
+| threshold 75 | 55% | 2.4 | 2.4 | 0 | 0 |
+
+- With a CPU limit below one core, a single busy call already puts
+  `some avg10` at about 40 to 45%. A threshold below that pins `local` at 1 for
+  as long as there is work.
+- 50 and 75 both removed the probe failures without lowering throughput.
+  Throughput is CPU-bound here and varied between runs (1.6 and 2.7 Observes/s
+  with the governor off).
+- No run restarted, so this workload doesn't bound the threshold from above.
+  50 stays the default.
+
+**Memory.** Limit 256Mi. Each `Observe` holds 16 MiB (6% of the limit) for 1s.
+The poll interval is 500ms. Greetings are added 2 every 5s, so the memory in
+flight grows over minutes.
+
+| Run | Restarts (OOMKilled) in 240s | Observes/s |
+|---|---|---|
+| governor off | 5 (first OOMKill at about 31s, working set 85%, 5 to 8 calls in flight; then a crash loop) | — |
+| defaults: soft 0.90, hard 0.95 (5 runs; memory-pressure threshold 10, 5 or 20) | 0, 0, 1, 5, 5 | 2.1 to 2.8 in the clean runs |
+| soft ratio 0.80, hard 0.95 (2 runs) | 0, 0 | 2.1, 2.2 |
+
+- **`memory.pressure` `full avg10` stayed at 0.00 in every run, up to the
+  OOMKill.** Anonymous memory with no swap gives the kernel nothing to
+  reclaim, so there is no stall to measure before the OOM killer acts. The
+  memory-pressure threshold therefore never engaged: 5, 10 and 20 behaved the
+  same, and 10 is unmeasured. It may still matter for a working set dominated
+  by page cache.
+- **The working-set ratios did all the work, and 90% was too close.** The OOMs
+  under the defaults came between two 1s samples. The last sample before each
+  one showed 85% with all 16 slots open, and the calls admitted in the next
+  second crossed the limit. At 6% of the limit per call, 10% of headroom is
+  less than two calls. A soft ratio of 80% was clean in both runs.
+- **A crash restarts at full capacity.** `local` starts at the ceiling, so after
+  an OOMKill the restarted controller meets its whole backlog at once and can
+  crash-loop. Saturation can't protect a cold start.
+- **The working set lags.** Go keeps freed heap for a while, so after a cut the
+  working set stays high for several samples and halves `local` again, down to
+  1. Recovery is then +1 per 30s, so the controller ran at 1 to 4 calls while
+  16 would have fit at the working set it settled at (30 to 55%).
+
+What this means for a provider: set `WorkingSetSoftRatio` so that the headroom
+above it holds several of the provider's largest calls. For calls that each
+hold about 5% of the memory limit, 0.80 measured clean where 0.90 did not.
+The defaults stay the design's 0.90 and 0.95 until the design is revised.
 
 ### Metrics
 
