@@ -4,7 +4,7 @@ title: provider-runtime — release
 description: How a provider-runtime version actually ships — an annotated git tag consumed via the Go module proxy; no images, no charts, no OCI artifacts.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, release, go-module]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 ---
 
 # Release
@@ -28,8 +28,10 @@ chart repos use never fired here; release notes start at v1.5.3 (#16).
 One workflow, `.github/workflows/run-tests.yaml` (**Test and coverage**),
 runs on every pull request to `main`: `go test -race -coverprofile=…
 -covermode=atomic ./...` plus a Codecov upload (needs the `CODECOV_TOKEN`
-secret). The `lint-docs` job (this standard's conformance check) runs
-alongside it, and `security.yml` runs the org's shared security checks.
+secret). The `lint` job runs golangci-lint at the version that job pins, and
+`make lint` uses whichever `golangci-lint` is on `PATH`, so install the same
+version locally. The `lint-docs` job (this standard's conformance check) runs
+alongside them, and `security.yml` runs the org's shared security checks.
 
 On a tag push, `.github/workflows/release-notes.yaml` calls the org's shared
 release-notes workflow. It creates the GitHub Release and writes generated

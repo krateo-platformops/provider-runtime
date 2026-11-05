@@ -22,5 +22,22 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # The org's shared workflows have no golangci-lint job: component-go-checks
+  # runs only go vet and gofmt. This is the same check as `make lint`.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      # go.mod, not 'stable': a pinned linter on a floating Go isn't pinned.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+
   lint-docs:
     uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@main
