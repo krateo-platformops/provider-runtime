@@ -113,6 +113,10 @@ func (d *Deferral) Message() string {
 		return fmt.Sprintf("reconciliation deferred: controller ramping up after a start (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
 			d.Capacity)
 	}
+	if d.Local && d.Cause != "" {
+		return fmt.Sprintf("reconciliation deferred: %s; waiting for capacity (%d call(s) in flight allowed); no server deadline was given",
+			d.Cause, d.Capacity)
+	}
 	if d.Local {
 		return fmt.Sprintf("reconciliation deferred: controller recovering its local concurrency limit (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
 			d.Capacity)
@@ -230,6 +234,10 @@ type Governor struct {
 	local atomic.Pointer[localState]
 	// sat is nil when saturation is disabled.
 	sat *saturation
+	// samplerStarted is set by Start. Until then nothing raises local capacity,
+	// so a deferral must not pass for the quiet startup ramp: a Governor that
+	// was never added to the manager would stay at 1 with no sign on any object.
+	samplerStarted atomic.Bool
 }
 
 // New returns a Governor. It returns an error if MaxConcurrentReconciles is
@@ -414,6 +422,10 @@ func (g *Governor) rampLeftLocked(capacity int) time.Duration {
 	return time.Duration(g.ceilingLocked()-capacity) * step
 }
 
+// causeSamplerNotStarted is the cause of a local deferral on a Governor whose
+// sampler isn't running. It is a provider defect, and it must show on the object.
+const causeSamplerNotStarted = "saturation sampler is not running: add the Governor to the manager"
+
 func (g *Governor) acquire(key string) *Deferral {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -436,9 +448,11 @@ func (g *Governor) acquire(key string) *Deferral {
 		switch {
 		case local.cause != "":
 			d.Reason = DeferSaturated
-		case local.ramping:
+		case local.ramping && g.samplerStarted.Load():
 			d.Reason = DeferRamping
 			d.RequeueAfter = g.jitter(min(g.recovery, g.rampLeftLocked(local.capacity)))
+		case local.ramping:
+			d.Cause = causeSamplerNotStarted
 		}
 		return d
 	}
@@ -515,6 +529,7 @@ func (g *Governor) Start(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
+	g.samplerStarted.Store(true)
 	g.log.Info("Saturation sampler started", "cgroup", g.sat.dir, "samplePeriod", g.sat.opts.SamplePeriod.String())
 	g.sample()
 	t := time.NewTicker(g.sat.opts.SamplePeriod)

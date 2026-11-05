@@ -70,6 +70,19 @@ func TestRateLimitMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { _ = g.Start(ctx) }()
+	// A deferral is Ramping only once the sampler runs: wait for its first sample.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		sampled := false
+		for _, in := range g.Snapshot().Inputs {
+			sampled = sampled || in.Enabled
+		}
+		if sampled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sampler never took its first sample")
+		}
+	}
 
 	g.Observe(ratelimit.Signal{Key: "api.github.com", Throttled: true, RetryAfter: time.Minute})
 	g.Observe(ratelimit.Signal{Key: "dev.azure.com", HasQuota: true, Limit: 200, Remaining: 0})

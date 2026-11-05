@@ -19,11 +19,13 @@ const testRecovery = 30 * time.Second
 // ticker.
 func saturationGovernor(t *testing.T, ceiling int, dir string, memory bool) (*Governor, *clock) {
 	t.Helper()
-	return testGovernor(t, Options{
+	g, c := testGovernor(t, Options{
 		MaxConcurrentReconciles: ceiling,
 		RecoveryInterval:        testRecovery,
 		Saturation:              SaturationOptions{Enabled: true, CgroupDir: fixture(dir), ExperimentalMemoryWorkingSet: memory},
 	})
+	g.samplerStarted.Store(true) // these tests drive sample() by hand
+	return g, c
 }
 
 func fixture(dir string) string { return filepath.Join("testdata", dir) }
@@ -120,6 +122,24 @@ func TestMemoryInputIsOffByDefault(t *testing.T) {
 // Slow start: a fresh governor's local capacity is 1, and it rises by 1 per
 // StartupRampInterval until the first cut, whatever the sample period: sampled
 // four times a second, it still takes 2s a step, so 16 workers take 30s.
+// A Governor nobody started stays at 1, because only the sampler raises local
+// capacity. That must not pass for the quiet startup ramp: a provider that
+// calls New without adding it to the manager would crawl at one call with no
+// sign on any object.
+func TestUnstartedSamplerIsNotAQuietRamp(t *testing.T) {
+	g, _ := saturationGovernor(t, 16, "healthy", false)
+	g.samplerStarted.Store(false)
+	held := mustAcquire(t, g, "a")
+	defer held()
+	_, d := g.Acquire(context.Background(), "b")
+	if d == nil || d.Reason != DeferAtCapacity || !d.Local {
+		t.Fatalf("deferral = %+v, want a visible local AtCapacity one", d)
+	}
+	if !strings.Contains(d.Message(), "saturation sampler is not running") {
+		t.Errorf("message %q must say the sampler isn't running", d.Message())
+	}
+}
+
 func TestLocalCapacitySlowStartsAndRampsPerStartupStep(t *testing.T) {
 	const ceiling = 16
 	g, c := saturationGovernor(t, ceiling, "healthy", false)
@@ -486,6 +506,7 @@ func TestRampingRequeueIsBoundedByTheRampLeft(t *testing.T) {
 	slow, _ := testGovernor(t, Options{MaxConcurrentReconciles: 4, Saturation: SaturationOptions{
 		Enabled: true, CgroupDir: fixture("healthy"), SamplePeriod: 5 * time.Second,
 	}})
+	slow.samplerStarted.Store(true)
 	heldSlow := mustAcquire(t, slow, "")
 	defer heldSlow()
 	if most := maxDelay(slow); most <= 6*time.Second || most > 15*time.Second {

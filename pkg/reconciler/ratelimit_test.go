@@ -567,9 +567,34 @@ func TestKeyerErrorProceedsUngatedAndLogsOncePerObject(t *testing.T) {
 	}
 }
 
-// saturatedGovernor returns a governor with saturation on and its sampler not
-// started, so local capacity stays at its starting value of 1.
+// saturatedGovernor returns a governor with saturation on whose sampler ran
+// once and stopped, so local capacity stays at its starting value of 1 and the
+// governor is on its startup ramp.
 func saturatedGovernor(t *testing.T, workers int) *ratelimit.Governor {
+	t.Helper()
+	g := unstartedSaturatedGovernor(t, workers)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.Start(ctx) }()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if s := g.Snapshot(); len(s.Inputs) > 0 && s.Inputs[0].Enabled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sampler never took its first sample")
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// unstartedSaturatedGovernor returns a governor with saturation on whose
+// sampler never started: what a provider gets from ratelimit.New without adding
+// it to the manager.
+func unstartedSaturatedGovernor(t *testing.T, workers int) *ratelimit.Governor {
 	t.Helper()
 	return newGovernor(t, ratelimit.Options{
 		MaxConcurrentReconciles: workers,
@@ -578,6 +603,33 @@ func saturatedGovernor(t *testing.T, workers int) *ratelimit.Governor {
 			CgroupDir: filepath.Join("..", "ratelimit", "testdata", "healthy"),
 		},
 	})
+}
+
+// A governor whose sampler never started stays at capacity 1. That is a provider
+// defect, so it must show on the object instead of passing for the quiet ramp.
+func TestUnstartedSamplerShowsOnTheObject(t *testing.T) {
+	g := unstartedSaturatedGovernor(t, 16)
+	srv := newAPIServer(map[string]string{"repo": ""}, fixedReady)
+	conn := ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+		c := countingClient(&clientCalls{}, upToDate)
+		return &c, nil
+	})
+	r := newRateLimitedReconciler(srv, WithExternalConnecter(conn), WithRateLimitGovernor(g))
+	held, d := g.Acquire(context.Background(), "")
+	if d != nil {
+		t.Fatal(d)
+	}
+	defer held()
+	if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.statusUpdateCount(); n != 1 {
+		t.Fatalf("status updates = %d, want 1: this deferral must not be quiet", n)
+	}
+	synced := srv.persistedObject("repo").GetCondition(prv1.TypeSynced)
+	if synced.Reason != prv1.ReasonReconcileDeferred || !strings.Contains(synced.Message, "saturation sampler is not running") {
+		t.Errorf("Synced = %s %q, want ReconcileDeferred naming the stopped sampler", synced.Reason, synced.Message)
+	}
 }
 
 // boundedObserve runs one reconcile per object concurrently against conn's

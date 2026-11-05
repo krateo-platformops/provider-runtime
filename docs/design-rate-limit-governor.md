@@ -311,6 +311,11 @@ updates, 200 at `ReconcileDeferred` and 0 provider calls. The rules:
   usual 1s to `RecoveryInterval` could hold it past the end of a short ramp.
 - The `deferrals` metric counts these under their own cause, `ramping`, so a
   restart is visible there while status stays quiet.
+- Quiet needs a running sampler. Only the sampler raises `local`, so a Governor
+  whose sampler never started stays at 1, and that must not pass for the ramp.
+  Until `Start` runs, a local deferral writes `Synced=False/ReconcileDeferred`
+  and says the sampler isn't running. `SetupRateLimitGovernor` adds the Governor
+  to the manager; a provider calling `ratelimit.New` must do that itself.
 
 **When the input isn't there, the input is off, not the controller.**
 

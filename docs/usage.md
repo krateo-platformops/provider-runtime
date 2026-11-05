@@ -223,7 +223,10 @@ For Krateo, that's core-provider#310.
     If the pass already ran `Observe`, what `Observe` learned is still written.
     The restart shows in `provider_runtime.ratelimit.deferrals` under cause
     `ramping`. Throttled, per-key at-capacity and saturated deferrals, and
-    at-capacity after a cut, still write, also during the ramp.
+    at-capacity after a cut, still write, also during the ramp. Quiet needs a
+    running sampler: if you call `ratelimit.New` yourself, add the Governor to
+    the manager. Otherwise deferrals show `saturation sampler is not running`
+    on the object, because nothing would ever raise `local`.
   - *Memory is not protected.* The saturation flag reads CPU only. The working
     set is a separate input,
     `o.RateLimit.Saturation.ExperimentalMemoryWorkingSet`, off by default and
