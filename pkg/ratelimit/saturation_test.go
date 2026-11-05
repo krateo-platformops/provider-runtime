@@ -269,6 +269,11 @@ func TestOwnCgroupDirFollowsProcSelfCgroup(t *testing.T) {
 	if got := ownCgroupDir(fixture("does-not-exist"), "/sys/fs/cgroup"); got != "/sys/fs/cgroup" {
 		t.Errorf("without /proc/self/cgroup, ownCgroupDir = %q, want the mount", got)
 	}
+	// A path that climbs out of the mount stays under it: here it names no
+	// directory there, so the mount itself is used.
+	if got := ownCgroupDir(fixture("proc-escape"), fixture("cgroup-mount")); got != fixture("cgroup-mount") {
+		t.Errorf("with a cgroup path climbing out of the mount, ownCgroupDir = %q, want the mount", got)
+	}
 }
 
 func TestStartStopsWithItsContext(t *testing.T) {

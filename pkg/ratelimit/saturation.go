@@ -394,28 +394,41 @@ func missingWhy(file string, err error) string {
 }
 
 // ownCgroupDir finds the process's own cgroup v2 directory: the "0::<path>"
-// line of <proc>/cgroup joined to mount, when that directory exists, else mount.
+// line of <proc>/cgroup under mount, when that directory exists, else mount.
+//
+// The path comes from a file's contents, so it is looked up through an
+// os.Root opened at mount: it can name a directory under the cgroup mount and
+// nothing outside it, whatever "..", absolute or symlinked components it holds.
 func ownCgroupDir(proc, mount string) string {
-	root, err := os.OpenRoot(proc)
+	procRoot, err := os.OpenRoot(proc)
 	if err != nil {
 		return mount
 	}
-	defer func() { _ = root.Close() }()
-	b, err := root.ReadFile("cgroup")
+	defer func() { _ = procRoot.Close() }()
+	b, err := procRoot.ReadFile("cgroup")
 	if err != nil {
 		return mount
 	}
+
+	var rel string
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
-		p, ok := strings.CutPrefix(sc.Text(), "0::")
-		if !ok {
-			continue
+		if p, ok := strings.CutPrefix(sc.Text(), "0::"); ok {
+			rel = strings.TrimPrefix(filepath.Clean("/"+p), "/")
+			break
 		}
-		candidate := filepath.Join(mount, filepath.Clean("/"+p))
-		if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
-			return candidate
-		}
-		break
 	}
-	return mount
+	if rel == "" {
+		return mount
+	}
+
+	mountRoot, err := os.OpenRoot(mount)
+	if err != nil {
+		return mount
+	}
+	defer func() { _ = mountRoot.Close() }()
+	if fi, err := mountRoot.Stat(rel); err != nil || !fi.IsDir() {
+		return mount
+	}
+	return filepath.Join(mount, rel)
 }
