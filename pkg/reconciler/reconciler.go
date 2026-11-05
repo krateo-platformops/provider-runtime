@@ -97,9 +97,6 @@ const (
 	actionUpdateExternalResource  event.Action = "UpdateExternalResource"
 	actionDeleteExternalResource  event.Action = "DeleteExternalResource"
 	actionObserveExternalResource event.Action = "ObserveExternalResource"
-
-	actionFetchManagedResource  event.Action = "FetchManagedResource"
-	actionUpdateManagedResource event.Action = "UpdateManagedResource"
 )
 
 // ControllerName returns the recommended name for controllers that use this
@@ -780,7 +777,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			switch {
 			case result.RequeueAfter > 0:
 				r.metrics.IncReconcileRequeueAfter(ctx)
-			case result.Requeue:
+			case isRateLimitedRequeue(result):
 				r.metrics.IncReconcileRequeueImmediate(ctx)
 			}
 		}()
@@ -834,7 +831,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// backoff.
 			log.Error(err, "Cannot remove managed resource finalizer")
 			if kerrors.IsConflict(err) {
-				return reconcile.Result{Requeue: true}, nil
+				return rateLimitedRequeue(), nil
 			}
 			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
 			if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
@@ -848,7 +845,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// controller that added a finalizer to this resource then it should no
 		// longer exist and thus there is no point trying to update its status.
 		log.Info("Successfully deleted managed resource")
-		return reconcile.Result{Requeue: false}, nil
+		return reconcile.Result{}, nil
 	}
 
 	// We started creating an external resource but never recorded the outcome, so we may have lost
@@ -896,7 +893,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// backoff.
 		log.Error(err, "Cannot connect to provider")
 		if kerrors.IsConflict(err) {
-			return reconcile.Result{Requeue: true}, nil
+			return rateLimitedRequeue(), nil
 		}
 		throttledRecorder.Event(managed, event.Warning(reasonCannotConnect, actionProcessEvent, err))
 		// Without a client nothing was observed, so the last Ready can no longer be vouched for.
@@ -938,7 +935,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// trigger backoff.
 		log.Error(err, "Cannot observe external resource")
 		if kerrors.IsConflict(err) {
-			return reconcile.Result{Requeue: true}, nil
+			return rateLimitedRequeue(), nil
 		}
 		throttledRecorder.Event(managed, event.Warning(reasonCannotObserve, actionObserveExternalResource, err))
 		werr := errors.Wrap(err, errReconcileObserve)
@@ -1046,7 +1043,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			if err := r.client.Update(ctx, managed); err != nil {
 				if kerrors.IsConflict(err) {
 					// Someone else wrote first; re-read and retry rather than fight over it.
-					return reconcile.Result{Requeue: true}, nil
+					return rateLimitedRequeue(), nil
 				}
 				log.Error(err, errUpdateManagedAnnotations)
 				throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, errors.Wrap(err, errUpdateManagedAnnotations)))
@@ -1074,7 +1071,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	if !observation.ResourceExists && meta.ExternalCreateSucceededDuring(managed, r.creationGracePeriod) {
 		log.Debug("Waiting for external resource existence to be confirmed")
 		record.Event(managed, event.Normal(reasonPending, actionProcessEvent, "Waiting for external resource existence to be confirmed"))
-		return reconcile.Result{Requeue: true}, nil
+		return rateLimitedRequeue(), nil
 	}
 
 	if meta.WasDeleted(managed) {
@@ -1121,7 +1118,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
 				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 			}
-			return reconcile.Result{Requeue: true}, nil
+			return rateLimitedRequeue(), nil
 		}
 
 		started = time.Now()
@@ -1134,7 +1131,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// backoff.
 			log.Error(err, "Cannot remove managed resource finalizer")
 			if kerrors.IsConflict(err) {
-				return reconcile.Result{Requeue: true}, nil
+				return rateLimitedRequeue(), nil
 			}
 			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
 			if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
@@ -1148,7 +1145,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// added a finalizer to this resource then it should no longer exist and
 		// thus there is no point trying to update its status.
 		log.Info("Successfully deleted managed resource")
-		return reconcile.Result{Requeue: false}, nil
+		return reconcile.Result{}, nil
 	}
 
 	started = time.Now()
@@ -1160,7 +1157,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// not, we requeue explicitly, which will trigger backoff.
 		log.Error(err, "Cannot add managed resource finalizer")
 		if kerrors.IsConflict(err) {
-			return reconcile.Result{Requeue: true}, nil
+			return rateLimitedRequeue(), nil
 		}
 		managed.SetConditions(prv1.ReconcileError(err))
 		if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
@@ -1190,7 +1187,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		if err := r.client.Update(ctx, managed); err != nil {
 			log.Error(err, "Cannot update managed resource")
 			if kerrors.IsConflict(err) {
-				return reconcile.Result{Requeue: true}, nil
+				return rateLimitedRequeue(), nil
 			}
 			throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, errors.Wrap(err, errUpdateManaged)))
 			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(errors.Wrap(err, errUpdateManaged)))
@@ -1239,7 +1236,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// A conflict is transient: someone else wrote the object first. Retry promptly rather
 			// than report it as a create failure; the next pass observes before it creates again.
 			if kerrors.IsConflict(err) {
-				return reconcile.Result{Requeue: true}, nil
+				return rateLimitedRequeue(), nil
 			}
 			throttledRecorder.Event(managed, event.Warning(reasonCannotCreate, actionCreateExternalResource, err))
 
@@ -1285,7 +1282,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
 			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 		}
-		return reconcile.Result{Requeue: true}, nil
+		return rateLimitedRequeue(), nil
 	}
 
 	if observation.ResourceLateInitialized {
@@ -1301,7 +1298,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// late-initialize again from a fresh read, as every other write to the managed resource
 			// does, rather than report a ReconcileError and wait out error backoff.
 			if kerrors.IsConflict(err) {
-				return reconcile.Result{Requeue: true}, nil
+				return rateLimitedRequeue(), nil
 			}
 			log.Error(err, "Cannot update managed resource")
 			throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, err))

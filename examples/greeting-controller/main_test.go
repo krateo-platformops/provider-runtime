@@ -32,7 +32,7 @@ func TestObserveSetsReady(t *testing.T) {
 			}
 			e := &external{log: logging.NewNopLogger(), store: tc.store}
 
-			reconcilertest.AssertObserveSetsReady(t, context.Background(), e, g)
+			_, _ = reconcilertest.AssertObserveSetsReady(t, context.Background(), e, g)
 		})
 	}
 }

@@ -71,8 +71,8 @@ func (g *Greeting) SetConditions(c ...prv1.Condition) {
 // DeepCopyObject satisfies runtime.Object.
 func (g *Greeting) DeepCopyObject() runtime.Object {
 	out := &Greeting{TypeMeta: g.TypeMeta, Spec: g.Spec}
-	g.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-	if cs := g.Status.ConditionedStatus.DeepCopy(); cs != nil {
+	g.DeepCopyInto(&out.ObjectMeta)
+	if cs := g.Status.DeepCopy(); cs != nil {
 		out.Status.ConditionedStatus = *cs
 	}
 	return out
@@ -88,7 +88,7 @@ type GreetingList struct {
 // DeepCopyObject satisfies runtime.Object.
 func (gl *GreetingList) DeepCopyObject() runtime.Object {
 	out := &GreetingList{TypeMeta: gl.TypeMeta}
-	gl.ListMeta.DeepCopyInto(&out.ListMeta)
+	gl.DeepCopyInto(&out.ListMeta)
 	out.Items = make([]Greeting, len(gl.Items))
 	for i := range gl.Items {
 		out.Items[i] = *gl.Items[i].DeepCopyObject().(*Greeting)

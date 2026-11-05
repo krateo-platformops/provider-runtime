@@ -133,9 +133,9 @@ func TestNewSlogLogger(t *testing.T) {
 
 func TestLoggerInterface(t *testing.T) {
 	// Test that all implementations satisfy the Logger interface
-	var _ Logger = NewNopLogger()
-	var _ Logger = NewLogrLogger(logr.Discard())
-	var _ Logger = NewSlogLogger(*slog.Default())
+	var _ Logger = nopLogger{}
+	var _ Logger = logrLogger{}
+	var _ Logger = slogLogger{}
 }
 
 func parseLogTokens(s string) map[string]string {

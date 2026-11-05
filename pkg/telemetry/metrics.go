@@ -100,9 +100,12 @@ func Setup(ctx context.Context, log logging.Logger, cfg Config) (*Metrics, func(
 		return nil, func(context.Context) error { return nil }, nil
 	}
 
+	// serviceName never reaches the resource below, so cfg.ServiceName has no
+	// effect (see the note in docs/configuration.md). Applying it would change
+	// the service.name every provider exports, so that gets a change of its own.
 	serviceName := cfg.ServiceName
 	if serviceName == "" {
-		serviceName = defaultServiceName
+		serviceName = defaultServiceName //nolint:ineffassign // Known bug, explained above; applying serviceName removes this directive.
 	}
 
 	exportInterval := cfg.ExportInterval

@@ -132,7 +132,7 @@ func TestReconciler(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{RemoveFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
 				},
 			},
-			want: want{result: reconcile.Result{Requeue: false}},
+			want: want{result: reconcile.Result{}},
 		},
 		"ExternalCreatePending": {
 			reason: "A RECENT unresolved create should keep refusing and re-observe, not recreate: an external API that is eventually consistent may not be showing a create that did land, and recreating inside that window would duplicate it.",
@@ -196,7 +196,7 @@ func TestReconciler(t *testing.T) {
 			// Requeue rather than the old terminal false: having cleared the marker we fall through
 			// to the normal create path, which requeues to observe what it just created. The
 			// difference from the old behaviour is the whole point — the resource moves again.
-			want: want{result: reconcile.Result{Requeue: true}},
+			want: want{result: rateLimitedRequeue()},
 		},
 		// krateo-core-provider#110: the guard used to refuse BEFORE Connect/Observe, with
 		// Requeue:false — terminal, so the object could only ever be freed by a human deleting the
@@ -277,7 +277,7 @@ func TestReconciler(t *testing.T) {
 					})),
 				},
 			},
-			want: want{result: reconcile.Result{Requeue: false}},
+			want: want{result: reconcile.Result{}},
 		},
 		"ExternalConnectError": {
 			reason: "Errors connecting to the provider should trigger a requeue after a short wait.",
@@ -391,7 +391,7 @@ func TestReconciler(t *testing.T) {
 							want := &fake.Managed{}
 							meta.SetExternalCreatePending(want, now.Time)
 							want.SetConditions(prv1.NotObserved(), prv1.ReconcileError(errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve),
-								errFmtCreateWaitsOnObserve, now.Time.Format(time.RFC3339))))
+								errFmtCreateWaitsOnObserve, now.Format(time.RFC3339))))
 							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {
 								reason := "An Observe error on an unresolved create should name the pending create in the conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
@@ -412,7 +412,7 @@ func TestReconciler(t *testing.T) {
 					})),
 				},
 			},
-			want: want{err: errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve), errFmtCreateWaitsOnObserve, now.Time.Format(time.RFC3339))},
+			want: want{err: errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve), errFmtCreateWaitsOnObserve, now.Format(time.RFC3339))},
 		},
 		"CreationGracePeriod": {
 			reason: "If our resource appears not to exist during the creation grace period we should return early.",
@@ -439,7 +439,7 @@ func TestReconciler(t *testing.T) {
 					})),
 				},
 			},
-			want: want{result: reconcile.Result{Requeue: true}},
+			want: want{result: rateLimitedRequeue()},
 		},
 		"ExternalDeleteError": {
 			reason: "Errors deleting the external resource should trigger a requeue after a short wait.",
@@ -533,7 +533,7 @@ func TestReconciler(t *testing.T) {
 					})),
 				},
 			},
-			want: want{result: reconcile.Result{Requeue: true}},
+			want: want{result: rateLimitedRequeue()},
 		},
 		"RemoveFinalizerErrorDeletionPolicyDelete": {
 			reason: "Errors removing the managed resource finalizer should trigger a requeue after a short wait.",
@@ -609,7 +609,7 @@ func TestReconciler(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{RemoveFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
 				},
 			},
-			want: want{result: reconcile.Result{Requeue: false}},
+			want: want{result: reconcile.Result{}},
 		},
 		"AddFinalizerError": {
 			reason: "Errors adding a finalizer should trigger a requeue after a short wait.",
@@ -788,7 +788,7 @@ func TestReconciler(t *testing.T) {
 					WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
 				},
 			},
-			want: want{result: reconcile.Result{Requeue: true}},
+			want: want{result: rateLimitedRequeue()},
 		},
 		"LateInitializeUpdateError": {
 			reason: "Errors updating a managed resource to persist late initialized fields should trigger a requeue after a short wait.",
@@ -1196,7 +1196,7 @@ func TestLateInitializeConflictRequeues(t *testing.T) {
 	if err != nil {
 		t.Errorf("r.Reconcile(...): a late-init conflict must not return an error (that means error backoff); got %v", err)
 	}
-	if diff := cmp.Diff(reconcile.Result{Requeue: true}, got); diff != "" {
+	if diff := cmp.Diff(rateLimitedRequeue(), got); diff != "" {
 		t.Errorf("r.Reconcile(...): -want, +got:\n%s", diff)
 	}
 	if statusUpdates != 0 {
@@ -1217,8 +1217,8 @@ func TestCreateErrorClosesHandshake(t *testing.T) {
 		wantResult reconcile.Result
 		wantErr    bool
 	}{
-		"Conflict":        {createErr: conflict, wantResult: reconcile.Result{Requeue: true}},
-		"WrappedConflict": {createErr: errors.Wrap(conflict, "cannot update status"), wantResult: reconcile.Result{Requeue: true}},
+		"Conflict":        {createErr: conflict, wantResult: rateLimitedRequeue()},
+		"WrappedConflict": {createErr: errors.Wrap(conflict, "cannot update status"), wantResult: rateLimitedRequeue()},
 		"PlainError":      {createErr: errors.New("boom"), wantErr: true},
 	}
 

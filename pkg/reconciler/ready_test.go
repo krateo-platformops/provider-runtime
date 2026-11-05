@@ -463,7 +463,7 @@ func TestReadyUntouchedOnObserveConflict(t *testing.T) {
 	if run.err != nil {
 		t.Errorf("r.Reconcile(...): a conflict must not return an error (that means error backoff); got %v", run.err)
 	}
-	if run.result != (reconcile.Result{Requeue: true}) {
+	if run.result != rateLimitedRequeue() {
 		t.Errorf("r.Reconcile(...): want Requeue, got %+v", run.result)
 	}
 	if run.statusUpdates != 0 {
