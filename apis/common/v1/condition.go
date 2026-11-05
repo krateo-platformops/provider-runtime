@@ -41,6 +41,18 @@ const (
 	ReasonReconcileSuccess ConditionReason = "ReconcileSuccess"
 	ReasonReconcileError   ConditionReason = "ReconcileError"
 	ReasonReconcilePaused  ConditionReason = "ReconcilePaused"
+
+	// ReasonReconcileDeferred means the runtime chose not to call the
+	// provider this pass: an endpoint the object's calls belong to is
+	// rate-limited, or the controller is saturated. Nothing about the external
+	// resource was learned, so Ready is left as it was; the message says why
+	// and, when the server named one, until when.
+	//
+	// The string is a consumer contract, shared with unstructured-runtime's
+	// condition.ReasonReconcileDeferred: readers match it by equality, and two
+	// runtimes deferring against one endpoint must report it in the same word.
+	// Do not change it. See TestReasonReconcileDeferredIsAConsumerContract.
+	ReasonReconcileDeferred ConditionReason = "ReconcileDeferred"
 )
 
 // A Condition that may apply to a resource.
@@ -258,6 +270,21 @@ func ReconcileError(err error) Condition {
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonReconcileError,
 		Message:            err.Error(),
+	}
+}
+
+// ReconcileDeferred returns a Synced condition for a pass the runtime chose
+// not to make, with msg saying why (for example "reconciliation deferred:
+// api.github.com is rate-limited by the server; next attempt
+// 2026-11-05T10:00:31Z"). Synced is False: nothing is converging the object
+// right now. It does not touch Ready, and callers must not either.
+func ReconcileDeferred(msg string) Condition {
+	return Condition{
+		Type:               TypeSynced,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonReconcileDeferred,
+		Message:            msg,
 	}
 }
 

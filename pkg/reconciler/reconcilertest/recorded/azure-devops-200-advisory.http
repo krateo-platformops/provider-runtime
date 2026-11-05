@@ -1,0 +1,23 @@
+HTTP/1.1 200 OK
+Cache-Control: no-cache, no-store, must-revalidate
+Pragma: no-cache
+Content-Type: application/json; charset=utf-8; api-version=7.1
+Expires: -1
+X-TFS-ProcessId: 1089fe83-05b8-40e1-9f3a-f7c0bd176d72
+ActivityId: 1f71faf3-4f44-4589-b030-f30b02def653
+X-VSS-E2EID: 1f71faf3-4f44-4589-b030-f30b02def653
+X-FRAME-OPTIONS: SAMEORIGIN
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Content-Type-Options: nosniff
+X-Cache: CONFIG_NOCACHE
+Date: Wed, 04 Nov 2026 23:49:25 GMT
+Retry-After: 10
+X-RateLimit-Resource: ATCommandsPerUser
+X-RateLimit-Delay: 0.512
+X-RateLimit-Limit: 200
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1793836465
+X-RateLimit-Cost: 1.25000
+Content-Length: 105
+
+{"count":1,"value":[{"id":"6ce954b1-ce1f-45d1-b94d-e6bf2464ba2c","name":"example","state":"wellFormed"}]}

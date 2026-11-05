@@ -1,0 +1,21 @@
+HTTP/1.1 429 Too Many Requests
+Cache-Control: no-cache, no-store, must-revalidate
+Pragma: no-cache
+Content-Type: application/json; charset=utf-8
+Expires: -1
+X-TFS-ProcessId: 1089fe83-05b8-40e1-9f3a-f7c0bd176d72
+ActivityId: 1f71faf3-4f44-4589-b030-f30b02def653
+X-VSS-E2EID: 1f71faf3-4f44-4589-b030-f30b02def653
+X-FRAME-OPTIONS: SAMEORIGIN
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Content-Type-Options: nosniff
+X-Cache: CONFIG_NOCACHE
+Date: Wed, 04 Nov 2026 23:49:25 GMT
+Retry-After: 30
+X-RateLimit-Resource: ATCommandsPerUser
+X-RateLimit-Limit: 200
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1793836465
+Content-Length: 326
+
+{"$id":"1","innerException":null,"message":"TF400733: The request has been canceled: Request was blocked due to exceeding usage of resource 'ATCommandsPerUser' in namespace 'User'.","typeName":"Microsoft.TeamFoundation.Framework.Server.RequestBlockedException","typeKey":"RequestBlockedException","errorCode":0,"eventId":3000}

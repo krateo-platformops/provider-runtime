@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,6 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/krateo-platformops/plumbing/env"
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/controller"
@@ -108,6 +111,16 @@ func (c *connector) Connect(_ context.Context, _ resource.Managed) (reconciler.E
 	return &external{log: c.log, store: c.store}, nil
 }
 
+// RateLimitKey satisfies reconciler.RateLimitKeyer, which opts this provider's
+// calls into the rate-limit governor when it is enabled. Every Greeting talks
+// to the same external store, so there is one key. A provider for an HTTP API
+// returns the endpoint host (httpsignal.HostKey of its base URL), or
+// host|credential-reference when the quota is per identity. It must not do
+// I/O.
+func (c *connector) RateLimitKey(_ resource.Managed) (string, error) {
+	return "greeting-store", nil
+}
+
 // external satisfies reconciler.ExternalClient against the fake store.
 type external struct {
 	log   logging.Logger
@@ -179,6 +192,20 @@ func main() {
 		logging.NewOTelJSONHandler(slog.LevelDebug, os.Stderr,
 			logging.ServiceNameAttr("greeting-controller")...)))
 
+	o := controller.DefaultOptions()
+	o.Logger = log
+
+	// The rate-limit governor, off unless the chart turns it on. One flag (or
+	// its env) enables each input; every other setting has a working default.
+	// See docs/configuration.md for the full table.
+	flag.BoolVar(&o.RateLimit.Enabled, "rate-limit-governor",
+		env.Bool("GREETING_PROVIDER_RATE_LIMIT_GOVERNOR", false),
+		"Slow reconciles down automatically when the external API signals a rate limit.")
+	flag.BoolVar(&o.RateLimit.Saturation.Enabled, "saturation-governor",
+		env.Bool("GREETING_PROVIDER_SATURATION_GOVERNOR", false),
+		"Slow reconciles down automatically when this container is CPU- or memory-saturated.")
+	flag.Parse()
+
 	scheme := runtime.NewScheme()
 	scheme.AddKnownTypes(GroupVersion, &Greeting{}, &GreetingList{})
 	metav1.AddToGroupVersion(scheme, GroupVersion)
@@ -189,13 +216,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	o := controller.DefaultOptions()
-	o.Logger = log
+	if err := o.SetupRateLimitGovernor(mgr); err != nil {
+		log.Error(err, "unable to set up the rate-limit governor")
+		os.Exit(1)
+	}
 
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(GroupVersion.WithKind("Greeting")),
 		reconciler.WithExternalConnecter(&connector{log: log, store: externalStore{}}),
 		reconciler.WithLogger(log.WithValues("controller", "greeting")),
+		// A no-op when the governor is off (o.RateLimitGovernor is nil).
+		reconciler.WithRateLimitGovernor(o.RateLimitGovernor),
 	)
 
 	if err := ctrl.NewControllerManagedBy(mgr).
