@@ -108,7 +108,7 @@ example provider declares `--rate-limit-governor` /
 | `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, every gated call (`Connect` and each `ExternalClient` method) needs a local slot, whether or not the provider implements `RateLimitKeyer`. |
 | `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemoryWorkingSet` | `false` | yes (off) | **Experimental, and not OOM protection.** Adds the memory working set to the local input. It [did not prevent OOMKills](#re-measurement-of-the-memory-input): 0 of 19 runs clean on an overcommitted workload. |
 | `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. Local capacity halves at most once per sample. A shorter period only matters to the experimental memory input: CPU pressure's `avg10` is already a 10-second average, so sampling it faster gains nothing and costs CPU in the container it protects. |
-| `--saturation-startup-ramp-interval` / `<NAME>_PROVIDER_SATURATION_STARTUP_RAMP_INTERVAL` | `RateLimit.Saturation.StartupRampInterval` | `2s` | yes | Local capacity starts at 1 and rises by one per this interval until its first cut, so 16 workers are all admitted after about 30s. Not tied to the sample period. After any cut, `RecoveryInterval` applies instead. |
+| `--saturation-startup-ramp-interval` / `<NAME>_PROVIDER_SATURATION_STARTUP_RAMP_INTERVAL` | `RateLimit.Saturation.StartupRampInterval` | `2s` | yes | Local capacity starts at 1 and rises by one per this interval until its first cut, so 16 workers are all admitted after about 30s. Not tied to the sample period. After any cut, `RecoveryInterval` applies instead. A call deferred on the ramp requeues in 1s to the time the ramp still needs, capped at `RecoveryInterval`. |
 | `--saturation-cpu-pressure-threshold` / `<NAME>_PROVIDER_SATURATION_CPU_PRESSURE_THRESHOLD` | `RateLimit.Saturation.CPUPressureThreshold` | `50` (**provisional**) | yes | `cpu.pressure` `some avg10` percentage above which the controller counts as saturated. |
 | `--saturation-working-set-soft-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_SOFT_RATIO` | `RateLimit.Saturation.WorkingSetSoftRatio` | `0.80` (**provisional**) | yes | Experimental memory input only. Working set (`memory.current` minus `inactive_file`) as a share of `memory.max` at which local capacity halves. |
 | `--saturation-working-set-hard-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_HARD_RATIO` | `RateLimit.Saturation.WorkingSetHardRatio` | `0.90` (**provisional**) | yes | Experimental memory input only. Working-set share at which local capacity drops straight to 1. |
@@ -145,6 +145,9 @@ protection.** The user decided what follows from the kind measurements below
   first cut. After any cut, it rises by 1 per clean `RecoveryInterval` (30s),
   the same as API limits.
 - `local` never goes below 1: one call always keeps going.
+- A deferral on the startup ramp is quiet: `Synced` stays as it was, with no
+  event, and only the `deferrals` metric shows it, under cause `ramping`. A
+  restart otherwise turned every healthy object `Synced=False`.
 - `memory.pressure` is no longer an input. It read 0.00 up to every OOMKill.
 - Saturation bounds every gated call, with or without a keyer.
 
@@ -172,7 +175,15 @@ Means are from 40s on, after the startup ramp.
   This is the behaviour CPU 50 was first measured with (2.0 Observes/s, 42%).
 - The host was shared and busy, and the governor-off control is a single run,
   so read the throughput as a direction.
-- The threshold stays provisional, and these runs did not retune it.
+- With a 1s sample, each 2s step lands on a tick, and these runs stepped about
+  every 2.5s, so the ramp to 16 takes closer to 37s than 30s.
+- These runs did not retune the threshold.
+
+**The CPU threshold stays 50, decided by the user.** Under a CPU limit below one
+core, a single busy call reads about 40 to 45%, so a controller there runs
+close to one call at a time. In the runs above that was 1.4 to 2.1 Observes/s
+against 2.6 with the governor off, from one control on a busy host. If that's
+too slow, raise the threshold or the CPU limit.
 
 The sampler's own cost is below, with [the re-measurement](#re-measurement-of-the-memory-input).
 
@@ -354,7 +365,7 @@ Recorded when `RateLimit.Metrics` is set (meter
 
 | Instrument | Kind | Attributes | Meaning |
 |---|---|---|---|
-| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`, `saturated`) | External calls the governor deferred. `key` is empty for a call deferred only by the local capacity with no key (a provider without `RateLimitKeyer`). |
+| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`, `saturated`, `ramping`) | External calls the governor deferred. `ramping` is a deferral on the startup ramp, which is quiet on the object, so this is where a restart shows. `key` is empty for a call deferred only by the local capacity with no key (a provider without `RateLimitKeyer`). |
 | `provider_runtime.ratelimit.signals` | counter | `key`, `kind` (`throttled`, `advisory`) | Signals providers reported that changed a key's state. Healthy quota reports are not counted. |
 | `provider_runtime.ratelimit.capacity` | observable gauge | `key` | Current concurrency the governor allows for the key: the number operators used to tune by hand. |
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |

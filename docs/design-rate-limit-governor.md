@@ -83,7 +83,11 @@ against the same GitHub Enterprise report the same state in the same words:
   and a message naming the key and the next attempt as an RFC 3339 time.
   `Ready` is left unchanged. It writes no assessment, so no `NotObserved`
   and no `ReconcileError`. It doesn't stay silent either, so no healthy state
-  goes stale without anyone being able to tell.
+  goes stale without anyone being able to tell. **One exception, decided by the
+  user:** a deferral on `local`'s startup ramp (§7) is quiet. The ramp lasts
+  about 30s and isn't a state of the object, and reporting it turned every
+  healthy object `Synced=False` on every restart. unstructured-runtime has no
+  `local`, so this doesn't change what the two share.
 - **A deferral is not a failure.** It doesn't touch the item's failure
   backoff.
 - **Off by default.** With no governor configured, behaviour is identical to
@@ -110,7 +114,7 @@ mechanics differ from unstructured-runtime's own priority queue:
 |---|---|
 | Workers | `MaxConcurrentReconciles`, fixed when the controller starts. The governor limits how many reconciles are *inside a provider call* for a key, not the goroutine count. |
 | Requeue on deferral | `return reconcile.Result{RequeueAfter: until - now}, nil`. A nil error means controller-runtime calls `Forget`, so the per-item failure backoff isn't consumed and the requeue happens exactly when the server said. |
-| Status write | The deferral sets `Synced=ReconcileDeferred` and writes status once, through the same resourceVersion-guarded `Status().Update` as every other path. A conflict requeues, as today. When the object would be written back exactly as it was read (an at-capacity deferral repeats the same message every pass), the write is skipped and the pass only requeues. A throttled deferral that names a new deadline still writes. |
+| Status write | The deferral sets `Synced=ReconcileDeferred` and writes status once, through the same resourceVersion-guarded `Status().Update` as every other path. A conflict requeues, as today. A deferral on `local`'s startup ramp sets nothing (§7). When the object would be written back exactly as it was read (an at-capacity deferral repeats the same message every pass), the write is skipped and the pass only requeues. A throttled deferral that names a new deadline still writes. |
 | Where the gate sits | Around **`Connect` and every `ExternalClient` call** (`Observe`, `Create`, `Update`, `Delete`). `Connect` counts too, because some providers call the vendor there: alert-provider calls HyperDX, and git-provider loads credentials. |
 
 ## 4. The key must be known before the call: `RateLimitKeyer`
@@ -281,11 +285,32 @@ side is the provider's to keep.
 `RequeueAfter` with a nil error, and uses the jittered "waiting for
 capacity" interval from §5. The message names the cause and no key, for
 example `controller saturated: CPU pressure 63% (some avg10)`, or
-`controller ramping up its local concurrency limit (2 call(s) in flight
-allowed); waiting for capacity`, so an operator can tell a full or starting
-controller from a throttling vendor. It gets no new reason. A
-consumer that knows `ReconcileDeferred` already reads it correctly: the object
-was not assessed this pass, and it says why.
+`controller recovering its local concurrency limit (2 call(s) in flight
+allowed); waiting for capacity`, so an operator can tell a full controller from
+a throttling vendor. It gets no new reason. A consumer that knows
+`ReconcileDeferred` already reads it correctly: the object was not assessed
+this pass, and it says why.
+
+**The exception: a startup-ramp deferral is quiet (decided by the user).** While
+`local` is on its startup ramp, before its first cut and with nothing saturated,
+a pass deferred by the local capacity requeues with a nil error and changes
+nothing: no `Synced`, no event, and no status write made for the deferral. The
+ramp lasts about 30s and says nothing about the object. Without this, a restart
+turned the whole fleet `Synced=False`: 200 healthy objects made 200 status
+updates, 200 at `ReconcileDeferred` and 0 provider calls. The rules:
+
+- It applies only to that case, carried as its own reason, `DeferRamping`. These
+  still write `Synced=False/ReconcileDeferred`: throttled, per-key at-capacity,
+  saturated, and at-capacity after a cut, also during the ramp if a key is
+  throttled.
+- Quiet means no write *for the deferral*, not dropping an assessment. A pass
+  deferred after `Observe` doesn't set the deferred condition, but if the object
+  differs from what was read, as with a fresh `Ready`, it is written.
+- The requeue is 1s to the time the ramp still needs, capped at the
+  `RecoveryInterval`, so a deferred object is back before the ramp ends. The
+  usual 1s to `RecoveryInterval` could hold it past the end of a short ramp.
+- The `deferrals` metric counts these under their own cause, `ramping`, so a
+  restart is visible there while status stays quiet.
 
 **When the input isn't there, the input is off, not the controller.**
 
@@ -333,7 +358,7 @@ question 5.
   prefix: per-key capacity, deferrals, seconds to reset, and signals by
   kind.
   Saturation (§7) adds `local` capacity, each input's current value, and
-  deferrals by cause (`throttled`, `capacity`, `saturated`). A disabled
+  deferrals by cause (`throttled`, `capacity`, `saturated`, `ramping`). A disabled
   input reports as disabled, not as zero, since zero reads as healthy.
 - **An event:** a Normal `ReconcileDeferred` event on the first deferral of an
   object per throttle window. It goes through the throttled recorder, so a
@@ -555,10 +580,17 @@ Where the implementation made a choice this design leaves open:
       call landed on Go's retained heap. Holding it back would trade the
       OOMKill for a stall, and CPU saturation needs the floor to keep finishing
       deletions.
-    - **Checked at the final code:** threshold 50 at 1s ran 3 of 3 without a
+    - **Decided: the CPU threshold stays 50**, still provisional until
+      core-provider validates it. At the final code it ran 3 of 3 without a
       restart, at 40 to 47% pressure against 78% with the governor off, and at
-      1.4 to 2.1 Observes/s against 2.6. A CPU limit below one core keeps
-      `local` near 1 at this threshold. No retune.
+      1.4 to 2.1 Observes/s against 2.6 (one control, on a busy host). A CPU
+      limit below one core keeps `local` near 1 at this threshold, and
+      configuration.md tells operators what to do about that.
+    - **Decided: startup-ramp deferrals are quiet** (§7), because a restart
+      otherwise turned every healthy object `Synced=False`: 200 objects, 200
+      status updates, 200 at `ReconcileDeferred`, 0 provider calls, measured
+      with a test in review. With the fix the same restart makes 0 status
+      updates and 0 events, and each pass requeues with a nil error.
 
 The rest of this section is the follow-up for the memory input. It is filed
 here and isn't built. The memory input stays experimental until item 16's

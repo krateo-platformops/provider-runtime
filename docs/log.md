@@ -38,8 +38,10 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 - **It ships rate-limit and CPU slow-down, not memory protection.** The user
   decided this from kind measurements on the example provider (see
   [configuration](./configuration.md#the-pressure-thresholds-are-provisional)):
-  - Saturation reads CPU pressure only, on a 1s sample. The threshold, 50%,
-    stays provisional until core-provider validates it.
+  - Saturation reads CPU pressure only, on a 1s sample. The threshold stays
+    50%, provisional until core-provider validates it. Under a CPU limit below
+    one core that means close to one call at a time; raise the threshold or
+    the limit if that's too slow.
   - The memory working set is experimental and off by default
     (`ExperimentalMemoryWorkingSet`). It did not prevent OOMKills in 0 of 19
     runs on an overcommitted workload. 0.80/0.90 are its provisional ratios.
@@ -50,6 +52,9 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   - Saturation bounds calls without a keyer too.
   - A deferral that would write the object back unchanged skips the status
     update.
+  - A deferral on the startup ramp is quiet: no `Synced`, no event, and only
+    the `deferrals` metric shows it, under cause `ramping`. Otherwise a restart
+    turned every healthy object `Synced=False`.
 - Follow-up for the memory input is filed in the design's §11: setting the Go
   memory limit, testing headroom under it as the input, and the re-test gates.
 

@@ -213,6 +213,17 @@ For Krateo, that's core-provider#310.
     by 1 every 2s until its first cut, so 16 workers take about 30s. A
     saturated sample halves it, never below 1, and after any cut it rises by 1
     per clean `RecoveryInterval` (30s), the same as API limits.
+  - *A restart is quiet.* While `local` is on its startup ramp, before its
+    first cut and with nothing saturated, a pass deferred by the local capacity
+    just requeues: `Synced` stays as it was, with no event and no status write
+    for the deferral. This is the one exception to "a deferred pass writes
+    `Synced=False`", decided by the user: the ramp lasts about 30s and isn't a
+    state of the object, and reporting it turned 200 healthy objects
+    `Synced=False` on a restart, with 200 status updates and 0 provider calls.
+    If the pass already ran `Observe`, what `Observe` learned is still written.
+    The restart shows in `provider_runtime.ratelimit.deferrals` under cause
+    `ramping`. Throttled, per-key at-capacity and saturated deferrals, and
+    at-capacity after a cut, still write, also during the ramp.
   - *Memory is not protected.* The saturation flag reads CPU only. The working
     set is a separate input,
     `o.RateLimit.Saturation.ExperimentalMemoryWorkingSet`, off by default and
@@ -254,7 +265,7 @@ For Krateo, that's core-provider#310.
     cause and no key, for example `reconciliation deferred: controller
     saturated: CPU pressure 63% (some avg10); waiting for capacity (1
     call(s) in flight allowed); no server deadline was given`, or
-    `reconciliation deferred: controller ramping up its local concurrency
+    `reconciliation deferred: controller recovering its local concurrency
     limit (2 call(s) in flight allowed); waiting for capacity; no server
     deadline was given`.
     A Normal `ReconcileDeferred` event is recorded, through the throttled
