@@ -205,9 +205,24 @@ For Krateo, that's core-provider#310.
     `reconciler.WithRateLimitGovernor(o.RateLimitGovernor)` to every
     reconciler. A `nil` governor is a no-op, so this is safe when the chart
     leaves the flag unset.
-  - *Keying.* Implement `reconciler.RateLimitKeyer` on the connecter, the
-    client, or both. Only calls of a connecter or client that implements it
-    are gated. Return the endpoint host (`httpsignal.HostKey` of the base
+  - *Saturation.* With `o.RateLimit.Saturation.Enabled`, every gated call
+    (`Connect` and each `ExternalClient` method) needs a slot in the
+    process-wide `local` capacity, whether or not the provider implements
+    `RateLimitKeyer`. The provider writes no code for it. `local` starts at 1
+    and rises by 1 per clean sample (every 250ms by default) up to the
+    ceiling. A saturated sample halves it, and a working set at 90% of
+    `memory.max` drops it to 1. It doesn't make a controller OOM-proof: on
+    a synthetic load where workers could fill the whole memory limit, it did
+    not prevent OOMKills or a crash loop after one (see
+    [configuration](./configuration.md#the-pressure-thresholds-are-provisional)).
+    Keep workers times the largest call well under the soft ratio. The inputs
+    are `cpu.pressure` (`some avg10`) and the working set against
+    `memory.max`.
+  - *Keying.* A keyer is needed only for per-endpoint API rate limits.
+    Implement `reconciler.RateLimitKeyer` on the connecter, the client, or
+    both. Only calls of a connecter or client that implements it are gated
+    per endpoint; each key recovers by 1 per `RecoveryInterval` (30s). Return
+    the endpoint host (`httpsignal.HostKey` of the base
     URL), or `host|credential-reference` when the quota is per identity. Key
     on the credential's reference (for example the Secret's namespace and
     name), never its value: credentials rotate, and a key that changes on
@@ -231,27 +246,37 @@ For Krateo, that's core-provider#310.
     and leaves `Ready` as it was. The message names the key and the server's
     deadline, for example `reconciliation deferred: api.github.com is
     rate-limited by the server; next attempt 2026-11-05T10:00:31Z`, or says
-    it is waiting for capacity, for example `reconciliation deferred:
-    controller saturated: memory working set 93% of limit; waiting for
-    capacity (1 call(s) in flight allowed); no server deadline was given`.
+    it is waiting for capacity. A deferral by the local capacity names the
+    cause and no key, for example `reconciliation deferred: controller
+    saturated: memory working set 83% of limit; waiting for capacity (1
+    call(s) in flight allowed); no server deadline was given`, or
+    `reconciliation deferred: controller ramping up its local concurrency
+    limit (2 call(s) in flight allowed); waiting for capacity; no server
+    deadline was given`.
     A Normal `ReconcileDeferred` event is recorded, through the throttled
     recorder, when the object enters a deferral or a throttle names a new
     deadline. The pass requeues after the deadline (or 1s to the
     RecoveryInterval) with a nil error, so it consumes no failure backoff.
+    When the deferral would write the object back exactly as it was read
+    (an at-capacity deferral repeats the same message every pass), the
+    status update is skipped and the pass only requeues. A throttled
+    deferral that names a new deadline still writes.
   - *The pass that gets the 429 is still an error.* The call failed, so that
     pass reports `ReconcileError` and consumes one backoff step, as today.
     The passes after it are deferrals until the server's deadline.
 
   **Requirement on providers: do expensive work inside the gated calls.**
   `local` throttles only the work that runs inside a gated call: `Connect`
-  and the `ExternalClient` methods (`Observe`, `Create`, `Update`, `Delete`).
+  and the `ExternalClient` methods (`Observe`, `Create`, `Update`, `Delete`),
+  with or without a keyer.
   A provider's expensive work (rendering templates, cloning repositories,
   large API reads) must happen inside those calls, not before them in the
   provider's own code. Work done outside them is not bounded by `local`.
   Don't refactor that work out of the gated call: doing so silently removes
   the throttle from exactly the work that causes saturation, and nothing fails
   to tell you. The runtime side is pinned by
-  `TestLocalCapacityBoundsConcurrentObserveBodies` in `pkg/reconciler`; the
+  `TestLocalCapacityBoundsConcurrentObserveBodies` and
+  `TestProviderWithoutKeyerIsBoundedByLocal` in `pkg/reconciler`; the
   provider side is the provider's to keep.
 
 ## Developing this library

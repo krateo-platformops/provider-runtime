@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: provider-runtime — automatic slow-down under rate limits and controller saturation
-description: Design, implemented in provider-runtime, for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU or memory is saturated, aligned with unstructured-runtime's design.
+description: Design, implemented in provider-runtime, for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU or memory is saturated, aligned with unstructured-runtime's design; its saturation settings were decided by the user from a kind measurement.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, reconciler, workqueue]
 timestamp: 2026-11-05T00:00:00Z
@@ -11,10 +11,16 @@ timestamp: 2026-11-05T00:00:00Z
 
 **Status:** implemented in provider-runtime (`pkg/ratelimit`,
 `pkg/ratelimit/httpsignal`, `pkg/reconciler`, `pkg/controller`), off by
-default. The CPU and memory pressure thresholds are provisional until the
-measurement recorded in [configuration](./configuration.md#the-pressure-thresholds-are-provisional)
-fixes them (open question 5). Where the implementation chose something this
-design leaves open, §11 says so. **Scope:** provider-runtime. The same
+default. The saturation settings were decided by the user on 2026-11-05
+from the kind measurement recorded in
+[configuration](./configuration.md#the-pressure-thresholds-are-provisional):
+`memory.pressure` dropped, a 250ms sample period, working-set ratios of 0.80
+and 0.90, and a slow start for `local`. Measured again, those settings did not
+prevent OOMKills on the synthetic workload, and §11 item 13 lists what that
+leaves to decide. The CPU pressure threshold (50%) stays provisional until
+core-provider validates it (open question 5). Where the implementation chose
+something this design leaves open, §11 says so, and marks what the user
+decided. **Scope:** provider-runtime. The same
 feature for unstructured-runtime is designed by its owner in
 [unstructured-runtime#50](https://github.com/krateo-platformops/unstructured-runtime/pull/50).
 This document reuses that design's vocabulary on purpose and only spells out
@@ -106,7 +112,7 @@ mechanics differ from unstructured-runtime's own priority queue:
 |---|---|
 | Workers | `MaxConcurrentReconciles`, fixed when the controller starts. The governor limits how many reconciles are *inside a provider call* for a key, not the goroutine count. |
 | Requeue on deferral | `return reconcile.Result{RequeueAfter: until - now}, nil`. A nil error means controller-runtime calls `Forget`, so the per-item failure backoff isn't consumed and the requeue happens exactly when the server said. |
-| Status write | The deferral sets `Synced=ReconcileDeferred` and writes status once, through the same resourceVersion-guarded `Status().Update` as every other path. A conflict requeues, as today. |
+| Status write | The deferral sets `Synced=ReconcileDeferred` and writes status once, through the same resourceVersion-guarded `Status().Update` as every other path. A conflict requeues, as today. When the object would be written back exactly as it was read (an at-capacity deferral repeats the same message every pass), the write is skipped and the pass only requeues. A throttled deferral that names a new deadline still writes. |
 | Where the gate sits | Around **`Connect` and every `ExternalClient` call** (`Observe`, `Create`, `Update`, `Delete`). `Connect` counts too, because some providers call the vendor there: alert-provider calls HyperDX, and git-provider loads credentials. |
 
 ## 4. The key must be known before the call: `RateLimitKeyer`
@@ -125,14 +131,17 @@ type RateLimitKeyer interface {
 }
 ```
 
-- A connector or external client that implements it is gated. One that
-  doesn't is never gated, so the governor is opt-in per provider as well as
-  per process.
+- A connector or external client that implements it is gated per endpoint.
+  One that doesn't is not gated per endpoint, so the per-endpoint governor is
+  opt-in per provider as well as per process. The keyer is needed only for
+  per-endpoint API limits. With saturation enabled (§7), every gated call
+  still needs a `local` slot, keyer or not.
 - A `Signal` whose `Key` differs from the keyer's key is still applied to its
   own key. A reconcile can learn about an endpoint it didn't expect, for
   example after a redirect.
 - An error from `RateLimitKey` is a provider defect. The reconcile proceeds
-  ungated and the runtime logs once per object. Failing closed would turn a
+  without per-endpoint gating (still bounded by `local` when saturation is on)
+  and the runtime logs once per object. Failing closed would turn a
   keying bug into an outage.
 - **Key on the credential's reference, never its value.** Where the quota is
   per identity, use the reference (for example the Secret's namespace and
@@ -217,25 +226,43 @@ container:
 |---|---|---|
 | CPU pressure | `cpu.pressure`, `some avg10` | Share of the last 10s in which a runnable task waited for CPU. It covers throttling by the CPU limit and contention on the node alike. |
 | Memory working set | `memory.current` minus `inactive_file` from `memory.stat`, against `memory.max` | The same working set kubelet uses for eviction and the OOM killer acts on. Page cache the kernel can drop is excluded, so a large but reclaimable cache does not slow anything down. |
-| Memory pressure | `memory.pressure`, `full avg10` | Share of time all tasks stalled on reclaim. This catches thrashing before the working set reaches the limit. |
+
+`memory.pressure` (`full avg10`) is not an input. It was in this design to
+catch thrashing before the working set reaches the limit, but on the kind
+measurement it read 0.00 up to every OOMKill. A Go controller's memory is
+anonymous, and with no swap the kernel has nothing to reclaim, so nothing
+stalls before the OOM killer acts. The user decided to drop it (§11).
 
 **Where it hooks in: the gate from §5, with a process-wide capacity.** The
 governor already keeps a capacity per key. Saturation adds one more capacity,
-`local`, which bounds in-flight gated calls across *all* keys:
+`local`, which bounds in-flight gated calls across *all* keys, and the calls
+of providers that have no key at all:
 
-- One sampler goroutine reads the files every second (default) and publishes
+- One sampler goroutine reads the files every 250ms (default) and publishes
   the result atomically. `Acquire` reads that value and does no I/O, so the
-  hot path stays as cheap as §4 requires.
-- A call needs a slot in both its key and `local`.
+  hot path stays as cheap as §4 requires. A faster sample makes the
+  working-set input react faster. It doesn't make CPU pressure react faster:
+  `avg10` is already a 10-second average.
+- A keyed call needs a slot in both its key and `local`. With saturation on,
+  a call without a key (the provider implements no `RateLimitKeyer`, or it
+  returned an empty key or an error) needs a `local` slot only.
+- *Slow start:* `local` starts at 1, not at the ceiling, so a controller
+  restarted after an OOMKill doesn't admit its whole backlog at once. It ramps
+  at 4 calls per second by default. On the kind measurement that was faster
+  than the working set reacts, and the crash loop remained (§11 item 13).
 - *Saturated* (any input over its threshold for one sample): `local`
   halves, with a minimum of 1. One call always keeps going, so a saturated
   controller still finishes deletions and still makes progress. Halving is
   rate-limited to once per sample period, so one bad second can't drive
   capacity to 1.
-- *Recovery:* +1 per clean `RecoveryInterval`, up to `MaxConcurrentReconciles`.
-  This is the same additive rule as §2, so both inputs recover in the same
-  way.
-- *Hard memory limit:* at 95% of `memory.max` by default, `local` drops to 1
+- *Ramp and recovery:* +1 per clean sample (no input over its threshold), up
+  to the ceiling. A saturated sample stops the ramp and halves. This is
+  additive like §2, but per sample rather than per `RecoveryInterval`: the
+  working set lags behind live memory, so a 30s step left the controller idle
+  at a working set where the ceiling would have fit. Per-key API recovery
+  stays +1 per `RecoveryInterval` (30s).
+- *Soft memory limit:* at 80% of `memory.max` by default, `local` halves.
+- *Hard memory limit:* at 90% of `memory.max` by default, `local` drops to 1
   at once rather than halving. Close to the limit, the next allocation can be
   the OOMKill, and one call in flight is the floor.
 
@@ -248,15 +275,18 @@ provider's own code. Work done outside them is not bounded by `local`.
 Don't refactor that work out of the gated call: doing so silently removes
 the throttle from exactly the work that causes saturation, and nothing fails
 to tell you. The runtime side is pinned by
-`TestLocalCapacityBoundsConcurrentObserveBodies` in `pkg/reconciler`; the
-provider side is the provider's to keep.
+`TestLocalCapacityBoundsConcurrentObserveBodies` and
+`TestProviderWithoutKeyerIsBoundedByLocal` in `pkg/reconciler`; the provider
+side is the provider's to keep.
 
 **A saturation deferral uses the same contract as any other.** It writes
 `Synced=False/ReconcileDeferred`, leaves `Ready` unchanged, returns
 `RequeueAfter` with a nil error, and uses the jittered "waiting for
-capacity" interval from §5. The message names the cause, for example
-`controller saturated: memory working set 93% of limit`, so an operator can
-tell a full controller from a throttling vendor. It gets no new reason. A
+capacity" interval from §5. The message names the cause and no key, for
+example `controller saturated: memory working set 83% of limit`, or
+`controller ramping up its local concurrency limit (2 call(s) in flight
+allowed); waiting for capacity`, so an operator can tell a full or starting
+controller from a throttling vendor. It gets no new reason. A
 consumer that knows `ReconcileDeferred` already reads it correctly: the object
 was not assessed this pass, and it says why.
 
@@ -267,7 +297,7 @@ was not assessed this pass, and it says why.
   Info and reports it as a metric. Failing closed would stop a controller
   because of how its node was built.
 - With no memory limit (`memory.max` is `max`), the working-set check is off
-  and memory pressure still applies.
+  and CPU pressure still applies.
 - With no CPU limit, CPU pressure still measures contention on the node,
   which is the case where slowing down helps.
 
@@ -288,14 +318,15 @@ env set by each chart and nothing in any CRD:
 
 - whether saturation is enabled at all, independently of the rate-limit
   input;
-- the sample period;
-- the CPU and memory pressure thresholds;
-- the working-set soft and hard ratios, 90% and 95% by default.
+- the sample period, 250ms by default;
+- the CPU pressure threshold, 50% by default (provisional);
+- the working-set soft and hard ratios, 80% and 90% by default.
 
-The CPU and memory pressure thresholds in this document are starting points.
-Before the defaults are fixed, the implementation PR measures them on a kind
-cluster with a provider under synthetic load, as it reports. This is
-open question 5.
+The defaults were measured on a kind cluster with a provider under synthetic
+load, and the sample period, ratios, slow start and the dropped memory
+pressure input were decided by the user from that measurement (§11). The CPU
+pressure threshold stays provisional until core-provider validates it. This
+is open question 5.
 
 ## 8. Observability and verification
 
@@ -322,10 +353,12 @@ Tests, each written so it fails without the behaviour it checks:
 | Recovery is additive | Capacity returns to the ceiling in N steps of `RecoveryInterval`, not one. |
 | Off by default | With no governor: no gate, no deferrals, and the existing suite passes unchanged. |
 | Providers really report | A conformance helper in `pkg/reconciler/reconcilertest`, alongside `AssertObserveSetsReady`: feed the provider's client a recorded 429 and a recorded Azure DevOps advisory 200, and assert that a `Signal` was reported. |
-| Saturation halves, floors at 1, recovers additively | Feed cgroup fixtures (testdata copies of `cpu.pressure`, `memory.pressure`, `memory.current`, `memory.stat`, `memory.max`). Pressure over the threshold halves `local` once per sample, never below 1. Clean samples add +1 per `RecoveryInterval`. |
+| Saturation halves, floors at 1, recovers additively | Feed cgroup fixtures (testdata copies of `cpu.pressure`, `memory.current`, `memory.stat`, `memory.max`). Pressure over the threshold halves `local` once per sample, never below 1, including mid-ramp. A fresh governor's `local` is 1 and reaches N after N-1 clean samples. |
 | The working set excludes reclaimable cache | A fixture with `memory.current` at 98% of the limit, mostly `inactive_file`, does not slow down. The same total with no `inactive_file` does. |
-| The hard memory ratio drops to 1 at once | At 95% working set, `local` goes from N to 1 in one sample. |
-| A missing input is disabled, not saturated | With no PSI files, or `memory.max` set to `max`, the controller runs at full capacity, and the metric says the input is disabled. |
+| The hard memory ratio drops to 1 at once | At 90% working set, `local` goes from N to 1 in one sample. |
+| A missing input is disabled, not saturated | With no PSI file, or `memory.max` set to `max`, the controller ramps to full capacity, and the metric says the input is disabled. |
+| Saturation bounds calls without a keyer | A provider that implements no `RateLimitKeyer` is bounded by `local`. |
+| An identical deferral writes nothing | Two consecutive at-capacity deferrals make one status update; a throttled deferral with a new deadline still writes. |
 | The hot path does no I/O | `Acquire` makes no syscalls, checked with a sampler stub that fails the test if it is read outside its tick. |
 | The reason string can't drift | A contract test pinning `"ReconcileDeferred"`, and naming its consumers. |
 
@@ -402,8 +435,11 @@ Tests, each written so it fails without the behaviour it checks:
      plugins drop the vendor's response headers before rest-dynamic-controller
      sees them. Whoever takes on Azure DevOps REST would need to move it to
      v1.x and forward the headers.
-5. **Saturation thresholds (§7).** The CPU and memory pressure defaults
-   are measured, not chosen: a kind cluster, a provider built on this
+5. **Saturation thresholds (§7).** Measured, and partly decided: the user
+   decided the sample period, the working-set ratios, the slow start and
+   dropping memory pressure (§11). The CPU pressure threshold stays
+   provisional until core-provider validates it. The defaults are measured,
+   not chosen: a kind cluster, a provider built on this
    runtime, and synthetic load until the pod is throttled or close to its
    memory limit. The implementation PR records the thresholds where
    slowing down prevented the OOMKill or probe failure without idling the
@@ -433,10 +469,14 @@ Where the implementation made a choice this design leaves open:
    `--max-reconcile-rate` workers, against one endpoint. A ceiling of one
    controller's workers would cap a healthy endpoint below today's total.
    Each `reconciler.WithRateLimitGovernor` registers one reconciler.
-5. **Calls without a keyer are not bounded by `local` either.** §4 says a
-   connecter or client that doesn't implement `RateLimitKeyer` is never
-   gated, and §7 bounds gated calls. So saturation protection also needs a
-   keyer.
+5. **Decided (the user, 2026-11-05): saturation bounds every gated call,
+   keyer or not.** With saturation enabled, `Connect` and every
+   `ExternalClient` call need a `local` slot even when the provider
+   implements no `RateLimitKeyer`. The keyer is needed only for per-endpoint
+   API limits. A local deferral's message names the cause and no key. The
+   first implementation read §4 literally (no keyer, never gated), which left
+   saturation protection to providers that had written a keyer for another
+   reason.
 6. **`X-RateLimit-Delay` on a served response becomes `RetryAfter`** when
    there is no `Retry-After`. The signal is then advisory. On a throttled
    response it is not used; only `Retry-After` and `X-RateLimit-Reset` name a
@@ -450,19 +490,64 @@ Where the implementation made a choice this design leaves open:
 9. **The `ReconcileDeferred` event** is recorded when the object enters a
    deferral, or when a throttled deferral names a new deadline. It goes
    through the throttled recorder.
-10. **§7 refers to "the CPU and memory pressure thresholds in this
-    document", but gives none.** The provisional defaults are 50%
-    (`cpu.pressure` `some avg10`) and 10% (`memory.pressure` `full avg10`).
-11. **What the kind measurement (open question 5) found against this design.**
-    It is recorded in
+10. **Decided (the user, 2026-11-05): the thresholds.** §7 referred to "the
+    CPU and memory pressure thresholds in this document" but gave none. The
+    first implementation used 50% (`cpu.pressure` `some avg10`) and 10%
+    (`memory.pressure` `full avg10`). CPU 50% stays, still provisional pending
+    core-provider's validation, because the kind measurement found it removed
+    the probe failures without idling. The memory pressure input is dropped,
+    because the kind measurement read 0.00 up to every OOMKill.
+11. **What the kind measurement (open question 5) found against this design,
+    and what was decided.** It is recorded in
     [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
-    Three findings need a design decision rather than a default:
-    - With anonymous memory and no swap, `memory.pressure` stayed at 0 up to
-      the OOMKill. The working-set ratios are the input that acts.
-    - A 1s sample can't stop calls admitted between two samples. The soft
-      ratio's headroom has to hold several of the provider's largest calls:
-      90% was too close at about 5% of the limit per call, and 80% was clean.
-    - `local` starts at the ceiling, so a controller restarted after an
-      OOMKill meets its whole backlog at full concurrency and can crash-loop.
-      Starting low and recovering, or a first sample before any call is let
-      through, would be a design change.
+    - **Decided (the user, 2026-11-05): `memory.pressure` is dropped as an
+      input**, because the kind measurement read it at 0.00 up to every
+      OOMKill. A Go controller's memory is anonymous, and with no swap there
+      is nothing to reclaim and so nothing to stall on. The working-set
+      ratios are the input that acts.
+    - **Decided (the user, 2026-11-05): a 250ms sample period, and
+      working-set ratios of 0.80 (halve) and 0.90 (straight to 1)**, because
+      the first kind measurement OOMed in 3 of 5 runs at 1s with 0.90/0.95. A
+      1s sample can't stop calls admitted between two samples, and at about
+      5% of the limit per call 10% of headroom is less than two calls. 0.80
+      was clean in 2 runs then; the re-measurement did not repeat that (item
+      13). `avg10` is a 10-second average, so the faster period helps the
+      working set, not CPU pressure.
+    - **Decided (the user, 2026-11-05): slow start for `local` only**,
+      because the kind measurement showed a controller restarted after an
+      OOMKill meeting its whole backlog at full concurrency and crash-looping.
+      `local` starts at 1, rises by 1 per clean sample up to the ceiling, and
+      halves on a saturated sample; the hard ratio still drops it to 1.
+      Per-key API recovery stays +1 per `RecoveryInterval`. The
+      re-measurement found the crash loop remains (item 13).
+12. **Decided (the user, 2026-11-05): a deferral that changes nothing writes
+    nothing.** When the object would be written back exactly as it was read,
+    the status update is skipped and the pass only requeues. At capacity the
+    requeue is 1s to the `RecoveryInterval` and the message carries no time,
+    so every pass would otherwise make the same write. A throttled deferral
+    that names a new deadline still writes.
+13. **Re-measured: the decided settings did not prevent OOMKills. Open, for
+    the user to decide.** The tables are in
+    [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
+    On the synthetic workload (16 workers holding 16 MiB each, 100% of a
+    256Mi limit), the new defaults were clean in 0 of 19 runs. In the block
+    where they alternated with the old code on the same host, they restarted
+    3, 4, 3 times and the old code 5, 0, 5. The old code is sometimes clean
+    and crash-loops harder when it isn't; the new defaults die later and
+    restart less, but always die. Cold start still crash-loops (4 restarts in
+    5 of 5 runs, against 5 with the governor off). Sampling at 250ms costs
+    1.5 to 1.8% of one core, 6 to 7% of a 250m limit. What is left to decide:
+    - **Recovery after a cut.** At +1 per clean sample, `local` is back at the
+      ceiling within 4 seconds, before the heap shrinks. A scratch build with
+      +1 per 30s after the first cut restarted 3, 1, 0 times against 4, 4, 4,
+      alternating on one host. Three runs each, so a direction, not a proof.
+    - **The floor.** In 18 of 19 runs the last sample before the first death
+      read `local=1`: the one call that "always keeps going" (§7) landed on
+      Go's retained heap. Above the hard ratio, should even that call wait?
+      That trades the OOMKill for a stall, and it would need a way to finish
+      deletions.
+    - **The cold-start ramp.** +1 per 250ms reaches 9 calls in 2 seconds.
+    - **`GOMEMLIMIT`.** §7 leaves it to charts. It tripled throughput with the
+      new defaults and cut restarts to 2 or fewer, though only 1 of 5 runs was
+      clean. Without saturation it didn't help. Charts that enable saturation
+      may need it as a requirement rather than an option.

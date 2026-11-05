@@ -356,8 +356,10 @@ func TestStartStopsWithItsContext(t *testing.T) {
 }
 
 // BenchmarkSample measures one sampler tick: reading the cgroup files and
-// publishing the new local capacity. At the default 250ms period the sampler
-// runs this four times a second, so its CPU cost per second is 4x this.
+// publishing the new local capacity, on fixture files. Real cgroup files cost
+// far more: measured in a container, a sample took about 4ms of CPU, not the
+// 0.3ms this reports (docs/configuration.md). Use it to compare changes, not to
+// estimate the cost.
 func BenchmarkSample(b *testing.B) {
 	g, err := New(Options{MaxConcurrentReconciles: 16, Saturation: SaturationOptions{Enabled: true, CgroupDir: fixture("healthy")}})
 	if err != nil {

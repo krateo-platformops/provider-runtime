@@ -18,9 +18,10 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   memory-saturated. It replaces hand-tuning `--max-reconcile-rate` and
   `--poll`. Design: [design-rate-limit-governor](./design-rate-limit-governor.md).
 - **Off by default.** With nothing configured, nothing is gated and
-  `ratelimit.Report` is a no-op. A provider turns it on with one chart flag
-  (`controller.Options.RateLimit.Enabled`), implements
-  `reconciler.RateLimitKeyer`, and reports signals.
+  `ratelimit.Report` is a no-op. A provider turns each input on with one chart
+  flag. The rate-limit input (`controller.Options.RateLimit.Enabled`) also
+  needs `reconciler.RateLimitKeyer` and reported signals. The saturation input
+  (`RateLimit.Saturation.Enabled`) bounds every gated call, keyer or not.
 - A deferred pass makes no external call, writes
   `Synced=False/ReconcileDeferred` with the key and deadline in the message,
   leaves `Ready` unchanged, and requeues with a nil error, so it consumes no
@@ -34,11 +35,21 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   `pkg/ratelimit/httpsignal` (GitHub and Azure DevOps headers);
   `reconcilertest.AssertReportsRateLimits` and the recorded vendor
   responses; `provider_runtime.ratelimit.*` metrics.
-- The pressure thresholds are still provisional. A kind measurement on the
-  example provider supports 50% for CPU. It couldn't measure memory pressure,
-  which stayed at 0 up to every OOMKill. It found the 90% working-set soft
-  ratio too close to the limit for calls that each hold about 5% of it: 80%
-  was clean. See [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
+- **Saturation settings decided by the user** from a kind measurement on
+  the example provider (see
+  [configuration](./configuration.md#the-pressure-thresholds-are-provisional)):
+  - `memory.pressure` is dropped as an input: it read 0 up to every OOMKill.
+  - The sample period is 250ms; the working-set ratios are 0.80 (halve) and
+    0.90 (straight to 1).
+  - `local` slow-starts at 1 and rises by 1 per clean sample.
+  - Saturation bounds calls without a keyer too.
+  - A deferral that would write the object back unchanged skips the status
+    update.
+  - The CPU pressure threshold, 50%, stays provisional until core-provider
+    validates it.
+- **Re-measured, those settings did not prevent OOMKills** on the synthetic
+  workload: 0 of 19 runs clean, and the crash loop after an OOMKill remains.
+  What is left to decide is in the design's §11.
 
 ## 2026-11-04 — docs: errors become readable status
 - overview.md now states that every error a provider returns is written

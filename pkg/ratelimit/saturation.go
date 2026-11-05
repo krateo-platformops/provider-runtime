@@ -20,10 +20,8 @@ import (
 //
 // The CPU pressure threshold is PROVISIONAL: the measurement supports 50, and
 // core-provider is validating it. The working-set ratios and the sample
-// period are decided: with 16 MiB calls against a 256Mi limit, 0.90/0.95 at
-// 1s let calls admitted between two samples cross the limit; 0.80/0.90 at
-// 250ms leave room for several such calls and see the growth four times as
-// often.
+// period are decided, though re-measured they did not prevent OOMKills on a
+// load whose workers can fill the whole limit (design §11, item 13).
 const (
 	// DefaultSamplePeriod is how often the sampler reads the cgroup files.
 	DefaultSamplePeriod = 250 * time.Millisecond
@@ -197,7 +195,7 @@ func (s *saturation) read() cgroupSample {
 //     per sample, so this halves at most once per sample period;
 //   - otherwise, a clean sample: capacity +1, up to ceiling. Local capacity
 //     starts at 1 (slow start), so a controller restarted after an OOMKill
-//     ramps into its backlog instead of meeting all of it at once.
+//     doesn't admit its whole backlog at once.
 //
 // cause names what made the last sample saturated, and is cleared by a clean
 // one.

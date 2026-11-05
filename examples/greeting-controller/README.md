@@ -27,8 +27,11 @@ demonstrating everything a real Krateo provider wires up:
   `reconciler.RateLimitKeyer` (every Greeting talks to one store, so one key),
   and two flags turn the inputs on —
   `--rate-limit-governor` / `GREETING_PROVIDER_RATE_LIMIT_GOVERNOR` and
-  `--saturation-governor` / `GREETING_PROVIDER_SATURATION_GOVERNOR`. Nothing
-  else needs setting; see
+  `--saturation-governor` / `GREETING_PROVIDER_SATURATION_GOVERNOR`. The
+  saturation flag turns on the local input for all of the controller's calls,
+  `Connect` and every `ExternalClient` method; it would do so even without
+  the keyer, which only matters for per-endpoint limits. Nothing else needs
+  setting; see
   [configuration](../../docs/configuration.md#rate-limit-governor-controlleroptionsratelimit).
 
 The external name lifecycle is real: on first reconcile `Observe` reports the
