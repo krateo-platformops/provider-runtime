@@ -56,7 +56,9 @@ type RateLimitKeyer interface {
 // the ratelimit sink of the context those calls receive, so ratelimit.Report
 // reaches it. A deferred call is not made: the pass writes
 // Synced=False/ReconcileDeferred, leaves Ready unchanged, and requeues after
-// the deferral's delay with a nil error, so no failure backoff is consumed.
+// the deferral's delay with a nil error, so no failure backoff is consumed. The
+// one exception is a deferral on the startup ramp, which requeues quietly; see
+// deferReconcile.
 //
 // Share one Governor across the process's reconcilers; each one registers
 // with it, which raises its ceiling by MaxConcurrentReconciles. Build it with
@@ -139,7 +141,25 @@ func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k RateLimitKe
 // A Normal event is recorded, through the throttled recorder, when the object
 // enters a deferral or a throttled deferral names a new deadline, so a long
 // window does not flood events.
+//
+// A DeferRamping is the exception: the controller has just started and is
+// easing into its queue, for about 30s, which is not a state of the object.
+// Reporting it would turn every healthy object Synced=False on every restart
+// (200 objects, 200 status updates, 200 at ReconcileDeferred, 0 provider calls,
+// before this was quiet). It sets no condition and records no event. What an
+// earlier call of this pass learned is still written: quiet means no write for
+// the deferral, not dropping an assessment.
 func (r *Reconciler) deferReconcile(log logging.Logger, mg, pristine resource.Managed, d *ratelimit.Deferral, statusUpdate func() error) (reconcile.Result, error) {
+	if d.Reason == ratelimit.DeferRamping {
+		log.Debug("Reconcile deferred quietly: the local capacity is on its startup ramp", "requeue-after", d.RequeueAfter.String())
+		if pristine == nil || !equality.Semantic.DeepEqual(pristine, mg) {
+			if err := statusUpdate(); err != nil {
+				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
+			}
+		}
+		return reconcile.Result{RequeueAfter: d.RequeueAfter}, nil
+	}
+
 	prev := mg.GetCondition(prv1.TypeSynced)
 	cond := prv1.ReconcileDeferred(d.Message())
 	newWindow := prev.Reason != prv1.ReasonReconcileDeferred ||

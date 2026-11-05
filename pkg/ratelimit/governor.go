@@ -41,10 +41,17 @@ const (
 	// DeferSaturated: the controller's own container is saturated and the
 	// process-wide local capacity is full. There is no server deadline.
 	DeferSaturated DeferReason = "Saturated"
+	// DeferRamping: the local capacity is full and still on its startup ramp,
+	// before its first cut, with nothing saturated. The controller has only
+	// just started, which says nothing about the object, so the reconciler
+	// requeues quietly: it doesn't touch Synced or record an event. It is the
+	// one deferral a provider's users don't see on the object; the deferrals
+	// metric counts it under cause "ramping".
+	DeferRamping DeferReason = "Ramping"
 )
 
 // Cause is the value of the cause attribute on the deferrals metric:
-// throttled, capacity or saturated.
+// throttled, capacity, saturated or ramping.
 func (r DeferReason) Cause() string {
 	switch r {
 	case DeferThrottled:
@@ -53,6 +60,8 @@ func (r DeferReason) Cause() string {
 		return "capacity"
 	case DeferSaturated:
 		return "saturated"
+	case DeferRamping:
+		return "ramping"
 	}
 	return string(r)
 }
@@ -67,16 +76,19 @@ type Deferral struct {
 	// the governor never invents a deadline.
 	Until time.Time
 	// RequeueAfter is how long the caller waits before it tries again. For
-	// DeferThrottled it is the time left until Until, never less. Otherwise it
-	// is a random delay between 1s and the RecoveryInterval.
+	// DeferThrottled it is the time left until Until, never less. For
+	// DeferRamping it is a random delay between 1s and the time the ramp still
+	// needs, at most the RecoveryInterval, so the object is back before the
+	// ramp ends. Otherwise it is a random delay between 1s and the
+	// RecoveryInterval.
 	RequeueAfter time.Duration
 	// Capacity is the capacity that was full: the key's, or the local one when
 	// Local is set.
 	Capacity int
 	// Local is set when the process-wide local capacity was full, rather than
 	// the key's. Its message names the cause and no key: the controller is
-	// saturated (DeferSaturated), or ramping up after a start or a saturation
-	// (DeferAtCapacity).
+	// saturated (DeferSaturated), recovering after a cut (DeferAtCapacity), or
+	// on its startup ramp (DeferRamping).
 	Local bool
 	// Cause names the saturated inputs for DeferSaturated, for example
 	// "memory working set 93% of limit".
@@ -97,9 +109,12 @@ func (d *Deferral) Message() string {
 	case DeferSaturated:
 		return fmt.Sprintf("reconciliation deferred: controller saturated: %s; waiting for capacity (%d call(s) in flight allowed); no server deadline was given",
 			d.Cause, d.Capacity)
+	case DeferRamping:
+		return fmt.Sprintf("reconciliation deferred: controller ramping up after a start (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
+			d.Capacity)
 	}
 	if d.Local {
-		return fmt.Sprintf("reconciliation deferred: controller ramping up its local concurrency limit (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
+		return fmt.Sprintf("reconciliation deferred: controller recovering its local concurrency limit (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
 			d.Capacity)
 	}
 	return fmt.Sprintf("reconciliation deferred: %s is at its concurrency limit of %d call(s); waiting for capacity; no server deadline was given",
@@ -179,9 +194,13 @@ type keyState struct {
 // atomic load.
 type localState struct {
 	capacity int
-	// cause names the inputs that last cut capacity, until it recovers to the
-	// ceiling.
+	// cause names the inputs that made the last sample saturated. A clean
+	// sample clears it.
 	cause string
+	// ramping is true from the start until the first cut, or until capacity
+	// reaches the ceiling, whichever comes first. A deferral by the local
+	// capacity is a DeferRamping only while it is true.
+	ramping bool
 }
 
 // A Governor gates external calls per endpoint key, and across all keys by the
@@ -199,7 +218,7 @@ type Governor struct {
 
 	// now and jitter are replaced in tests.
 	now    func() time.Time
-	jitter func() time.Duration
+	jitter func(hi time.Duration) time.Duration
 
 	mu            sync.Mutex
 	keys          map[string]*keyState
@@ -239,7 +258,7 @@ func New(o Options) (*Governor, error) {
 		now:           time.Now,
 		keys:          map[string]*keyState{},
 	}
-	g.jitter = func() time.Duration { return jitterBetween(cryptorand.Reader, minCapacityJitter, g.recovery) }
+	g.jitter = func(hi time.Duration) time.Duration { return jitterBetween(cryptorand.Reader, minCapacityJitter, hi) }
 
 	// Without saturation, local capacity is the ceiling and stays there. With
 	// it, local capacity starts at 1 and ramps up (see saturation.step).
@@ -250,7 +269,7 @@ func New(o Options) (*Governor, error) {
 			return nil, err
 		}
 		g.sat = sat
-		g.local.Store(&localState{capacity: capacityFloor})
+		g.local.Store(&localState{capacity: capacityFloor, ramping: true})
 	}
 
 	if g.metrics != nil {
@@ -387,6 +406,14 @@ func (g *Governor) Acquire(ctx context.Context, key string) (release func(), d *
 	}, nil
 }
 
+// rampLeftLocked is how long the startup ramp still needs to take capacity to
+// the ceiling. A step can't happen between samples, so the sample period sets
+// the pace when it is the longer of the two. The caller holds g.mu.
+func (g *Governor) rampLeftLocked(capacity int) time.Duration {
+	step := max(g.sat.opts.StartupRampInterval, g.sat.opts.SamplePeriod)
+	return time.Duration(g.ceilingLocked()-capacity) * step
+}
+
 func (g *Governor) acquire(key string) *Deferral {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -400,16 +427,20 @@ func (g *Governor) acquire(key string) *Deferral {
 			return &Deferral{Key: key, Reason: DeferThrottled, Until: st.holdUntil, RequeueAfter: st.holdUntil.Sub(now)}
 		}
 		if st.inFlight >= st.capacity {
-			return &Deferral{Key: key, Reason: DeferAtCapacity, RequeueAfter: g.jitter(), Capacity: st.capacity}
+			return &Deferral{Key: key, Reason: DeferAtCapacity, RequeueAfter: g.jitter(g.recovery), Capacity: st.capacity}
 		}
 	}
 	local := g.local.Load()
 	if g.localInFlight >= local.capacity {
-		reason := DeferAtCapacity
-		if local.cause != "" {
-			reason = DeferSaturated
+		d := &Deferral{Key: key, Reason: DeferAtCapacity, Local: true, RequeueAfter: g.jitter(g.recovery), Capacity: local.capacity, Cause: local.cause}
+		switch {
+		case local.cause != "":
+			d.Reason = DeferSaturated
+		case local.ramping:
+			d.Reason = DeferRamping
+			d.RequeueAfter = g.jitter(min(g.recovery, g.rampLeftLocked(local.capacity)))
 		}
-		return &Deferral{Key: key, Reason: reason, Local: true, RequeueAfter: g.jitter(), Capacity: local.capacity, Cause: local.cause}
+		return d
 	}
 
 	if st != nil {

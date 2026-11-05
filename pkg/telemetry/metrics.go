@@ -242,7 +242,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 
 	if m.rateLimitDeferrals, err = meter.Int64Counter("provider_runtime.ratelimit.deferrals",
-		metric.WithDescription("External calls the rate-limit governor deferred, by key and cause (throttled, capacity, saturated).")); err != nil {
+		metric.WithDescription("External calls the rate-limit governor deferred, by key and cause (throttled, capacity, saturated, ramping).")); err != nil {
 		return nil, err
 	}
 	if m.rateLimitSignals, err = meter.Int64Counter("provider_runtime.ratelimit.signals",

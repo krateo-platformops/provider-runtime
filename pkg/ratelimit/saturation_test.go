@@ -128,8 +128,8 @@ func TestLocalCapacitySlowStartsAndRampsPerStartupStep(t *testing.T) {
 	}
 	held := mustAcquire(t, g, "a")
 	_, d := g.Acquire(context.Background(), "b")
-	if d == nil || !d.Local || d.Reason != DeferAtCapacity || !strings.Contains(d.Message(), "ramping up") {
-		t.Fatalf("a second call at start got %+v, want a local AtCapacity deferral that says it is ramping up", d)
+	if d == nil || !d.Local || d.Reason != DeferRamping || !strings.Contains(d.Message(), "ramping up") {
+		t.Fatalf("a second call at start got %+v, want a local Ramping deferral that says it is ramping up", d)
 	}
 	if strings.Contains(d.Message(), " b ") {
 		t.Errorf("a local deferral's message names the key: %q", d.Message())
@@ -289,8 +289,8 @@ func TestSaturationHalvesOncePerSampleAndFloorsAtOne(t *testing.T) {
 	// Once clean the message stops saying saturated, while capacity recovers.
 	useFixture(g, "healthy")
 	g.sample()
-	if _, d := g.Acquire(context.Background(), "b"); d == nil || d.Reason != DeferAtCapacity || !strings.Contains(d.Message(), "ramping up") {
-		t.Errorf("after a clean sample at capacity 1, a second call got %+v, want a ramping-up deferral", d)
+	if _, d := g.Acquire(context.Background(), "b"); d == nil || d.Reason != DeferAtCapacity || !d.Local || !strings.Contains(d.Message(), "recovering") {
+		t.Errorf("after a clean sample at capacity 1, a second call got %+v, want a local AtCapacity deferral that says it is recovering", d)
 	}
 }
 
@@ -383,6 +383,113 @@ func TestMissingInputIsDisabledNotSaturated(t *testing.T) {
 				t.Errorf("logged %d disabled-input lines over the samples, want %d (once per input)", got, len(tc.disabled))
 			}
 		})
+	}
+}
+
+// The deferral says which state the local capacity is in, as a reason of its
+// own: on the startup ramp from the start until the first cut, and never again
+// after one, even once the samples are clean.
+func TestRampingIsADistinctReasonUntilTheFirstCut(t *testing.T) {
+	g, c := saturationGovernor(t, 8, "healthy", false)
+	held := mustAcquire(t, g, "a")
+	defer held()
+	want := func(reason DeferReason, cause string) {
+		t.Helper()
+		_, d := g.Acquire(context.Background(), "b")
+		if d == nil || d.Reason != reason || !d.Local {
+			t.Fatalf("deferral = %+v, want a local %s", d, reason)
+		}
+		if got := d.Reason.Cause(); got != cause {
+			t.Errorf("the metric cause of %s = %q, want %q", d.Reason, got, cause)
+		}
+	}
+	want(DeferRamping, "ramping")
+	g.sample()
+	want(DeferRamping, "ramping")
+
+	useFixture(g, "cpu-pressure")
+	c.add(time.Second)
+	g.sample()
+	want(DeferSaturated, "saturated")
+
+	useFixture(g, "healthy")
+	c.add(time.Second)
+	g.sample()
+	want(DeferAtCapacity, "capacity")
+}
+
+// The ramp ends at the ceiling too: a local capacity that is full at the ceiling
+// is at capacity, not ramping.
+func TestRampingEndsAtTheCeiling(t *testing.T) {
+	g, c := saturationGovernor(t, 2, "healthy", false)
+	rampToCeiling(t, g, c)
+	first, second := mustAcquire(t, g, "a"), mustAcquire(t, g, "b")
+	defer first()
+	defer second()
+	if _, d := g.Acquire(context.Background(), ""); d == nil || d.Reason != DeferAtCapacity {
+		t.Errorf("full at the ceiling, a call got %+v, want an AtCapacity deferral", d)
+	}
+}
+
+// On the ramp, a deferred object is back before the ramp ends: the delay is at
+// most the time the ramp still needs, capped at the RecoveryInterval. The
+// RecoveryInterval alone could hold it up to 30s, past the end of a shorter
+// ramp.
+func TestRampingRequeueIsBoundedByTheRampLeft(t *testing.T) {
+	const draws = 2000
+	maxDelay := func(g *Governor) (most time.Duration) {
+		t.Helper()
+		for range draws {
+			_, d := g.Acquire(context.Background(), "")
+			if d == nil || d.Reason != DeferRamping {
+				t.Fatalf("deferral = %+v, want a Ramping one", d)
+			}
+			if d.RequeueAfter < time.Second {
+				t.Fatalf("RequeueAfter = %s, below the 1s minimum", d.RequeueAfter)
+			}
+			most = max(most, d.RequeueAfter)
+		}
+		return most
+	}
+
+	// A ceiling of 4: three 2s steps left, 6s.
+	g, c := saturationGovernor(t, 4, "healthy", false)
+	held := mustAcquire(t, g, "")
+	defer held()
+	if most := maxDelay(g); most > 6*time.Second {
+		t.Errorf("with 6s of ramp left, a requeue took %s", most)
+	}
+
+	// One step taken, two left: the bound shrinks with the ramp, to 4s.
+	g.sample()
+	c.add(2 * time.Second)
+	g.sample()
+	if got := g.LocalCapacity(); got != 2 {
+		t.Fatalf("local capacity = %d, want 2", got)
+	}
+	second := mustAcquire(t, g, "")
+	defer second()
+	if most := maxDelay(g); most > 4*time.Second {
+		t.Errorf("with 4s of ramp left, a requeue took %s", most)
+	}
+
+	// A ramp longer than the RecoveryInterval is capped by it.
+	big, _ := saturationGovernor(t, 64, "healthy", false)
+	heldBig := mustAcquire(t, big, "")
+	defer heldBig()
+	if most := maxDelay(big); most > testRecovery {
+		t.Errorf("a requeue took %s, above the RecoveryInterval %s", most, testRecovery)
+	}
+
+	// A step can't happen between samples, so a longer sample period sets the
+	// pace: three steps at 5s.
+	slow, _ := testGovernor(t, Options{MaxConcurrentReconciles: 4, Saturation: SaturationOptions{
+		Enabled: true, CgroupDir: fixture("healthy"), SamplePeriod: 5 * time.Second,
+	}})
+	heldSlow := mustAcquire(t, slow, "")
+	defer heldSlow()
+	if most := maxDelay(slow); most <= 6*time.Second || most > 15*time.Second {
+		t.Errorf("with a 5s sample period and 15s of ramp left, the longest requeue was %s", most)
 	}
 }
 
