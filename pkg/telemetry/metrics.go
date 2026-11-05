@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -15,14 +16,18 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 )
 
-const (
-	defaultServiceName    = "provider-runtime"
-	defaultExportInterval = 30 * time.Second
-)
+const defaultExportInterval = 30 * time.Second
+
+// serviceNameKey is the OTel resource attribute naming the service.
+const serviceNameKey = attribute.Key("service.name")
 
 // Config controls OpenTelemetry metrics export.
 type Config struct {
-	Enabled        bool
+	Enabled bool
+	// ServiceName sets the exported service.name, unless OTEL_SERVICE_NAME or
+	// OTEL_RESOURCE_ATTRIBUTES already name one. Empty leaves it to those, or
+	// to the SDK's default. There is no library-wide default: every provider
+	// would then export the same service.name.
 	ServiceName    string
 	ExportInterval time.Duration
 }
@@ -89,6 +94,26 @@ var _ ratelimit.MetricsRecorder = (*Metrics)(nil)
 
 // Setup creates and configures an OTLP metrics pipeline.
 //
+// newResource builds the exported resource. The environment wins over
+// serviceName, so an operator's OTEL_SERVICE_NAME keeps working.
+func newResource(ctx context.Context, serviceName string) (*resource.Resource, error) {
+	// A malformed OTEL_RESOURCE_ATTRIBUTES yields a partial resource, which
+	// resource.Default tolerates too.
+	env, err := resource.New(ctx, resource.WithFromEnv())
+	if err != nil && !errors.Is(err, resource.ErrPartialResource) {
+		return nil, err
+	}
+	if serviceName != "" {
+		if _, set := env.Set().Value(serviceNameKey); !set {
+			env, err = resource.Merge(env, resource.NewSchemaless(serviceNameKey.String(serviceName)))
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return resource.Merge(resource.Default(), env)
+}
+
 // When metrics are disabled, Setup returns a nil Metrics handle and a no-op
 // shutdown function.
 func Setup(ctx context.Context, log logging.Logger, cfg Config) (*Metrics, func(context.Context) error, error) {
@@ -98,14 +123,6 @@ func Setup(ctx context.Context, log logging.Logger, cfg Config) (*Metrics, func(
 
 	if !cfg.Enabled {
 		return nil, func(context.Context) error { return nil }, nil
-	}
-
-	// serviceName never reaches the resource below, so cfg.ServiceName has no
-	// effect (see the note in docs/configuration.md). Applying it would change
-	// the service.name every provider exports, so that gets a change of its own.
-	serviceName := cfg.ServiceName
-	if serviceName == "" {
-		serviceName = defaultServiceName //nolint:ineffassign // Known bug, explained above; applying serviceName removes this directive.
 	}
 
 	exportInterval := cfg.ExportInterval
@@ -118,8 +135,7 @@ func Setup(ctx context.Context, log logging.Logger, cfg Config) (*Metrics, func(
 		return nil, nil, err
 	}
 
-	res, err := resource.Merge(resource.Default(),
-		resource.NewSchemaless())
+	res, err := newResource(ctx, cfg.ServiceName)
 	if err != nil {
 		return nil, nil, err
 	}

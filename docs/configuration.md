@@ -32,19 +32,18 @@ The library itself reads no environment variables. `telemetry.Setup` with
 | `OTEL_EXPORTER_OTLP_HEADERS`, `_TIMEOUT`, `_COMPRESSION`, `_CERTIFICATE`, … | Standard exporter tuning, per the OTel spec. |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | The exported resource attributes, via `resource.Default()`. |
 
-> Honest note: `telemetry.Config.ServiceName` is validated and defaulted to
-> `provider-runtime` (`pkg/telemetry/metrics.go:89-93`) but is **not applied**
-> to the exported OTel resource — the resource is
-> `resource.Merge(resource.Default(), resource.NewSchemaless())`, so the
-> effective `service.name` comes from `OTEL_SERVICE_NAME` (or the SDK default
-> `unknown_service:<binary>`). Set the env var, not just the struct field.
+The exported `service.name` comes, in order, from `OTEL_SERVICE_NAME`,
+`OTEL_RESOURCE_ATTRIBUTES`, `telemetry.Config.ServiceName`, and the SDK default
+`unknown_service:<binary>`. There is no library-wide default: every provider
+would then export the same `service.name`. Before v1.9.1 the struct field had
+no effect.
 
 ## `telemetry.Config`
 
 | Field | Default | Effect |
 |---|---|---|
 | `Enabled` | `false` | When false, `Setup` returns a nil `Metrics` handle and a no-op shutdown — every `Metrics` method is nil-safe, so wiring it unconditionally is fine. |
-| `ServiceName` | `provider-runtime` | See the honest note above — currently without effect on the exported resource. |
+| `ServiceName` | empty | Sets `service.name` when the environment doesn't. See the order above. |
 | `ExportInterval` | `30s` | Periodic-reader export interval for the OTLP metrics pipeline. |
 
 ## `controller.Options` (defaults from `DefaultOptions()`)
