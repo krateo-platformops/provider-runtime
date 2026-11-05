@@ -877,6 +877,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	if deferral != nil {
 		return deferred(deferral)
 	}
+	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
 	external, err := r.external.Connect(externalCtx, managed)
 	release()
@@ -917,6 +918,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	if deferral != nil {
 		return deferred(deferral)
 	}
+	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
 	observation, err := external.Observe(externalCtx, managed)
 	release()
@@ -1079,6 +1081,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			if deferral != nil {
 				return deferred(deferral)
 			}
+			defer release() // a backstop if the call panics; release is idempotent
 			started = time.Now()
 			err = external.Delete(externalCtx, managed)
 			release()
@@ -1168,7 +1171,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		if deferral != nil {
 			return deferred(deferral)
 		}
-		defer releaseCreate()
+		defer releaseCreate() // also a backstop if Create panics; release is idempotent
 
 		// We write this annotation for two reasons. Firstly, it helps
 		// us to detect the case in which we fail to persist critical
@@ -1339,6 +1342,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	if deferral != nil {
 		return deferred(deferral)
 	}
+	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
 	err = external.Update(externalCtx, managed)
 	release()

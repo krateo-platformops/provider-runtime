@@ -624,3 +624,28 @@ func TestLocalCapacityBoundsConcurrentObserveBodies(t *testing.T) {
 		t.Errorf("%d passes were deferred as saturated, want %d", got, workers/2)
 	}
 }
+
+// A provider call that panics still gives its slot back: controller-runtime
+// recovers the panic, and a leaked slot would lower the key's capacity for the
+// life of the process.
+func TestPanickingCallReleasesItsSlot(t *testing.T) {
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 1})
+	srv := newAPIServer(map[string]string{"repo": "api.github.com"})
+	conn := &keyedConnector{key: keyFromAnnotation, connect: func(context.Context, resource.Managed) (ExternalClient, error) {
+		c := countingClient(&clientCalls{}, func(context.Context, resource.Managed) (ExternalObservation, error) {
+			panic("provider bug")
+		})
+		return &c, nil
+	}}
+	r := newRateLimitedReconciler(srv, WithExternalConnecter(conn), WithRateLimitGovernor(g))
+
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = r.Reconcile(context.Background(), request("repo"))
+	}()
+	release, d := g.Acquire(context.Background(), "api.github.com")
+	if d != nil {
+		t.Fatalf("after a panicking Observe, the only slot is still taken: %+v", d)
+	}
+	release()
+}
