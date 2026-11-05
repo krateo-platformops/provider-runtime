@@ -60,6 +60,32 @@ type keyedClient struct {
 
 func (c *keyedClient) RateLimitKey(mg resource.Managed) (string, error) { return c.key(mg) }
 
+// multiKeyedConnector is an ExternalConnecter that implements
+// RateLimitKeysProvider.
+type multiKeyedConnector struct {
+	keys    func(mg resource.Managed) ([]string, error)
+	connect func(ctx context.Context, mg resource.Managed) (ExternalClient, error)
+}
+
+func (c *multiKeyedConnector) RateLimitKeys(mg resource.Managed) ([]string, error) { return c.keys(mg) }
+
+func (c *multiKeyedConnector) Connect(ctx context.Context, mg resource.Managed) (ExternalClient, error) {
+	return c.connect(ctx, mg)
+}
+
+// multiKeyedClient is an ExternalClient that implements RateLimitKeysProvider.
+type multiKeyedClient struct {
+	ExternalClientFns
+	keys func(mg resource.Managed) ([]string, error)
+}
+
+func (c *multiKeyedClient) RateLimitKeys(mg resource.Managed) ([]string, error) { return c.keys(mg) }
+
+// bothKeyers implements RateLimitKeyer and RateLimitKeysProvider.
+type bothKeyers struct{ multiKeyedClient }
+
+func (*bothKeyers) RateLimitKey(resource.Managed) (string, error) { return "single", nil }
+
 // keyAnnotation carries an object's rate-limit key in these tests.
 const keyAnnotation = "test.krateo.io/rate-limit-key"
 
@@ -1082,4 +1108,168 @@ func TestPanickingCallReleasesItsSlot(t *testing.T) {
 		t.Fatalf("after a panicking Observe, the only slot is still taken: %+v", d)
 	}
 	release()
+}
+
+// fromAndTo is the keyer of a sync between two endpoints.
+func fromAndTo(resource.Managed) ([]string, error) {
+	return []string{"source.example.com", "github.com"}, nil
+}
+
+// A sync between two endpoints stops when either one refuses it, and the object
+// says which. This is why RateLimitKeysProvider exists: gated on one key, it
+// would keep calling the other endpoint through a 429.
+func TestEitherEndpointOfAMultiKeyObjectDefersIt(t *testing.T) {
+	for _, throttled := range []string{"source.example.com", "github.com"} {
+		t.Run(throttled, func(t *testing.T) {
+			g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 2})
+			g.Observe(ratelimit.Signal{Key: throttled, Throttled: true, RetryAfter: time.Minute})
+
+			srv := newAPIServer(nil, fixedReady)
+			calls := &clientCalls{}
+			r := newRateLimitedReconciler(srv, WithRateLimitGovernor(g),
+				WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+					return &multiKeyedClient{ExternalClientFns: countingClient(calls, upToDate), keys: fromAndTo}, nil
+				})))
+
+			got, err := r.Reconcile(context.Background(), request("repo"))
+			if err != nil || got.RequeueAfter <= 0 {
+				t.Fatalf("Reconcile = %+v, %v; want a RequeueAfter with a nil error", got, err)
+			}
+			if calls.total() != 0 {
+				t.Errorf("%d external calls were made, want 0: %s refused the last one", calls.total(), throttled)
+			}
+			synced := srv.persistedObject("repo").GetCondition(prv1.TypeSynced)
+			if synced.Reason != prv1.ReasonReconcileDeferred || !strings.Contains(synced.Message, throttled) {
+				t.Errorf("Synced = %s %q, want ReconcileDeferred naming %s", synced.Reason, synced.Message, throttled)
+			}
+		})
+	}
+}
+
+// A healthy multi-key object runs, and holds nothing when the pass ends.
+func TestMultiKeyObjectReleasesEveryKey(t *testing.T) {
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 1})
+	srv := newAPIServer(nil)
+	calls := &clientCalls{}
+	r := newRateLimitedReconciler(srv, WithRateLimitGovernor(g),
+		WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+			return &multiKeyedClient{ExternalClientFns: countingClient(calls, upToDate), keys: fromAndTo}, nil
+		})))
+
+	if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+		t.Fatal(err)
+	}
+	if calls.observe.Load() != 1 {
+		t.Fatalf("Observe ran %d times, want once", calls.observe.Load())
+	}
+	release, d := g.AcquireAll(context.Background(), []string{"source.example.com", "github.com"})
+	if d != nil {
+		t.Fatalf("after the pass the keys are still held: %+v", d)
+	}
+	release()
+}
+
+// The connecter's keys gate Connect, and the client's calls when the client has
+// no keyer of its own, the same as for RateLimitKeyer.
+func TestConnecterKeysGateConnectAndTheClient(t *testing.T) {
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 2})
+	g.Observe(ratelimit.Signal{Key: "github.com", Throttled: true, RetryAfter: time.Minute})
+
+	srv := newAPIServer(nil)
+	connects := 0
+	r := newRateLimitedReconciler(srv, WithRateLimitGovernor(g), WithExternalConnecter(&multiKeyedConnector{
+		keys: fromAndTo,
+		connect: func(context.Context, resource.Managed) (ExternalClient, error) {
+			connects++
+			c := countingClient(&clientCalls{}, upToDate)
+			return &c, nil
+		},
+	}))
+
+	if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+		t.Fatal(err)
+	}
+	if connects != 0 {
+		t.Errorf("Connect ran %d times with one of its keys held, want 0", connects)
+	}
+}
+
+// RateLimitKeys wins on a type that implements both, so a provider can add it
+// without removing the single key older callers use.
+func TestRateLimitKeysWinsOverRateLimitKey(t *testing.T) {
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 2})
+	g.Observe(ratelimit.Signal{Key: "github.com", Throttled: true, RetryAfter: time.Minute})
+
+	calls := &clientCalls{}
+	srv := newAPIServer(nil)
+	r := newRateLimitedReconciler(srv, WithRateLimitGovernor(g),
+		WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+			return &bothKeyers{multiKeyedClient{ExternalClientFns: countingClient(calls, upToDate), keys: fromAndTo}}, nil
+		})))
+
+	if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+		t.Fatal(err)
+	}
+	if calls.total() != 0 {
+		t.Errorf("%d external calls were made: the single key was used instead of RateLimitKeys", calls.total())
+	}
+}
+
+// No key means not gated per endpoint, the same as an empty RateLimitKey:
+// whether the provider returned nothing, or only empty strings.
+func TestNoRateLimitKeysAreUngatedWithoutSaturation(t *testing.T) {
+	for name, keys := range map[string][]string{"nil": nil, "empty": {}, "only empty strings": {"", ""}} {
+		t.Run(name, func(t *testing.T) {
+			g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 1})
+			// The one slot is taken, so a call that went through the governor
+			// would be deferred: only an ungated call gets to Observe.
+			held, d := g.Acquire(context.Background(), "other")
+			if d != nil {
+				t.Fatalf("Acquire was deferred: %+v", d)
+			}
+			defer held()
+
+			srv := newAPIServer(nil)
+			calls := &clientCalls{}
+			r := newRateLimitedReconciler(srv, WithRateLimitGovernor(g),
+				WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+					return &multiKeyedClient{
+						ExternalClientFns: countingClient(calls, upToDate),
+						keys:              func(resource.Managed) ([]string, error) { return keys, nil },
+					}, nil
+				})))
+			if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+				t.Fatal(err)
+			}
+			if calls.observe.Load() != 1 {
+				t.Errorf("Observe ran %d times, want once", calls.observe.Load())
+			}
+		})
+	}
+}
+
+// An error from RateLimitKeys is the same provider defect as one from
+// RateLimitKey: the call proceeds without per-endpoint gating.
+func TestRateLimitKeysErrorProceedsUngated(t *testing.T) {
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 2})
+	g.Observe(ratelimit.Signal{Key: "github.com", Throttled: true, RetryAfter: time.Minute})
+
+	srv := newAPIServer(nil)
+	calls := &clientCalls{}
+	r := newRateLimitedReconciler(srv, WithRateLimitGovernor(g),
+		WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+			return &multiKeyedClient{
+				ExternalClientFns: countingClient(calls, upToDate),
+				keys: func(resource.Managed) ([]string, error) {
+					return []string{"github.com"}, errors.New("cannot name the keys")
+				},
+			}, nil
+		})))
+
+	if _, err := r.Reconcile(context.Background(), request("repo")); err != nil {
+		t.Fatal(err)
+	}
+	if calls.observe.Load() != 1 {
+		t.Errorf("Observe ran %d times, want once: the keys that came with the error must not be used", calls.observe.Load())
+	}
 }

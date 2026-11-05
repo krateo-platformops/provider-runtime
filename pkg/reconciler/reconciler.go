@@ -440,9 +440,9 @@ func defaultMRManaged(m manager.Manager) mrManaged {
 type mrExternal struct {
 	ExternalConnectDisconnecter
 
-	// keyer is the connecter's RateLimitKeyer, or nil. It is taken from the
+	// keyer names the connecter's rate-limit keys, or is nil. It is taken from the
 	// connecter the provider supplied, because NewNopDisconnecter hides it.
-	keyer RateLimitKeyer
+	keyer rateLimitKeys
 }
 
 func defaultMRExternal() mrExternal {

@@ -12,6 +12,19 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-05 — v1.10.0: one object on several rate-limited endpoints
+- **`reconciler.RateLimitKeysProvider`** names every scope an object's calls
+  reach, for objects that sync between two endpoints. A call needs a slot in
+  every key plus one local slot, all or nothing, and is deferred when any key
+  is throttled or full. Found by git-provider's Repo, whose `fromRepo` and
+  `toRepo` can be different servers with different credentials: no one key
+  could describe it honestly.
+- New API: `reconciler.RateLimitKeysProvider`, `(*ratelimit.Governor).AcquireAll`.
+  Additive: `RateLimitKeyer` and `Acquire` behave as before.
+- `Deferral.Key` is now the key that stopped the call. For a local deferral of
+  a call with several keys it is empty, and so is the `key` attribute on
+  `provider_runtime.ratelimit.deferrals`.
+
 ## 2026-11-05 — v1.9.1: telemetry.Config.ServiceName works
 - **The field now sets `service.name`**, unless `OTEL_SERVICE_NAME` or
   `OTEL_RESOURCE_ATTRIBUTES` name one. It never had any effect before. The

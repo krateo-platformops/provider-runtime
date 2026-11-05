@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -68,7 +69,9 @@ func (r DeferReason) Cause() string {
 
 // A Deferral says a call must not be made now, why, and when to try again.
 type Deferral struct {
-	// Key is the key of the call that was deferred.
+	// Key is the key that stopped the call. For a Local deferral no key stopped
+	// it: Key is then the call's key, or empty when the call has no key or
+	// several, since naming one of several would blame the wrong endpoint.
 	Key string
 	// Reason says why.
 	Reason DeferReason
@@ -392,10 +395,27 @@ func (g *Governor) maybeRaiseLocked(st *keyState, now time.Time) {
 // release is nil exactly when the Deferral is not. Calling release more than
 // once is safe.
 func (g *Governor) Acquire(ctx context.Context, key string) (release func(), d *Deferral) {
-	d = g.acquire(key)
+	return g.AcquireAll(ctx, []string{key})
+}
+
+// AcquireAll is Acquire for a call that talks to several rate-limited scopes,
+// such as a sync between two endpoints. The call needs a slot in every key
+// plus one local slot, all or nothing: it either holds them all, or holds none
+// and gets a Deferral. Nothing is held while deferred, so two calls that share
+// keys can't wait on each other.
+//
+// Empty keys are ignored and repeated keys count once, so two names for the
+// same scope take one slot. With no keys left it asks for a local slot only.
+//
+// A hold on any key outranks a full capacity, as it does for one key. With
+// several keys held the Deferral names the latest deadline: the call can't run
+// before that one lifts, so waking at an earlier one would only defer it again.
+func (g *Governor) AcquireAll(ctx context.Context, keys []string) (release func(), d *Deferral) {
+	keys = normalizeKeys(keys)
+	d = g.acquire(keys)
 	if d != nil {
 		if g.metrics != nil {
-			g.metrics.IncRateLimitDeferral(ctx, key, d.Reason)
+			g.metrics.IncRateLimitDeferral(ctx, d.Key, d.Reason)
 		}
 		return nil, d
 	}
@@ -404,14 +424,24 @@ func (g *Governor) Acquire(ctx context.Context, key string) (release func(), d *
 		once.Do(func() {
 			g.mu.Lock()
 			defer g.mu.Unlock()
-			if st, ok := g.keys[key]; key != "" && ok && st.inFlight > 0 {
-				st.inFlight--
+			for _, key := range keys {
+				if st, ok := g.keys[key]; ok && st.inFlight > 0 {
+					st.inFlight--
+				}
 			}
 			if g.localInFlight > 0 {
 				g.localInFlight--
 			}
 		})
 	}, nil
+}
+
+// normalizeKeys returns keys sorted, without empty or repeated entries, in a
+// new slice: the release func keeps it, and the caller still owns its own.
+func normalizeKeys(keys []string) []string {
+	out := slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return k == "" })
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // rampLeftLocked is how long the startup ramp still needs to take capacity to
@@ -426,24 +456,39 @@ func (g *Governor) rampLeftLocked(capacity int) time.Duration {
 // sampler isn't running. It is a provider defect, and it must show on the object.
 const causeSamplerNotStarted = "saturation sampler is not running: add the Governor to the manager"
 
-func (g *Governor) acquire(key string) *Deferral {
+// acquire takes a slot in every key of keys, which normalizeKeys has prepared,
+// and one local slot, or takes nothing and returns why. Every check runs before
+// the first slot is taken, under one hold of g.mu, so a deferred call leaves no
+// slot behind.
+func (g *Governor) acquire(keys []string) *Deferral {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	var st *keyState
-	if key != "" {
-		now := g.now()
-		st = g.state(key)
+	now := g.now()
+	states := make([]*keyState, len(keys))
+	var held *Deferral
+	for i, key := range keys {
+		st := g.state(key)
 		g.maybeRaiseLocked(st, now)
-		if now.Before(st.holdUntil) {
-			return &Deferral{Key: key, Reason: DeferThrottled, Until: st.holdUntil, RequeueAfter: st.holdUntil.Sub(now)}
+		states[i] = st
+		if now.Before(st.holdUntil) && (held == nil || st.holdUntil.After(held.Until)) {
+			held = &Deferral{Key: key, Reason: DeferThrottled, Until: st.holdUntil, RequeueAfter: st.holdUntil.Sub(now)}
 		}
+	}
+	if held != nil {
+		return held
+	}
+	for i, st := range states {
 		if st.inFlight >= st.capacity {
-			return &Deferral{Key: key, Reason: DeferAtCapacity, RequeueAfter: g.jitter(g.recovery), Capacity: st.capacity}
+			return &Deferral{Key: keys[i], Reason: DeferAtCapacity, RequeueAfter: g.jitter(g.recovery), Capacity: st.capacity}
 		}
 	}
 	local := g.local.Load()
 	if g.localInFlight >= local.capacity {
+		var key string
+		if len(keys) == 1 {
+			key = keys[0]
+		}
 		d := &Deferral{Key: key, Reason: DeferAtCapacity, Local: true, RequeueAfter: g.jitter(g.recovery), Capacity: local.capacity, Cause: local.cause}
 		switch {
 		case local.cause != "":
@@ -457,7 +502,7 @@ func (g *Governor) acquire(key string) *Deferral {
 		return d
 	}
 
-	if st != nil {
+	for _, st := range states {
 		st.inFlight++
 	}
 	g.localInFlight++
