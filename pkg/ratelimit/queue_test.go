@@ -269,7 +269,9 @@ func TestIdleWorkersHoldNoLocalSlot(t *testing.T) {
 }
 
 func idleWorkers(q *gatedQueue[string]) int {
-	q.mu.Lock()
+	if !q.mu.TryLock() {
+		return -1 // a pop stuck in inner holds the lock
+	}
 	defer q.mu.Unlock()
 	return q.idle
 }
@@ -690,7 +692,7 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 				break
 			}
 			if time.Now().After(deadline) {
-				q.mu.Lock()
+				lockWithin(t, q, "the test")
 				state := fmt.Sprintf("granted %d idle %d processing %d free %d waiting %d", q.granted, q.idle, len(q.processing), q.free, len(q.waiting))
 				q.mu.Unlock()
 				t.Fatalf("step %d (%s): never quiet: held %d, capacity %d, workers %d, available %v; queue %s", step, op, len(held), g.LocalCapacity(), nWorkers, available(), state)
@@ -830,13 +832,13 @@ func TestALateTimerDoesNothing(t *testing.T) {
 	q := newGatedQueue[string](g, "late-timer", nil, clk)
 	defer shutDownWithin(t, q)
 	q.AddAfter("k", time.Hour)
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	w, stale := q.waiting["k"], q.waiting["k"].gen
 	q.mu.Unlock()
 	q.AddAfter("k", time.Minute) // the same entry, rescheduled
 
 	q.due("k", w, stale)
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	defer q.mu.Unlock()
 	if _, ok := q.waiting["k"]; !ok || len(q.ready) != 0 {
 		t.Errorf("a stale timer made k ready: waiting %v, ready %v", q.waiting, q.ready)
@@ -855,7 +857,7 @@ func TestShutDownReturnsASlotGrantedButNotPopped(t *testing.T) {
 	eventually(t, "the worker waiting", func() bool { return idleWorkers(q) == 1 })
 
 	g.mu.Lock()
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	q.idle--
 	q.granted++
 	g.localInFlight++
@@ -887,7 +889,7 @@ func TestAShuttingDownQueueGetsNoSlot(t *testing.T) {
 	eventually(t, "the worker waiting", func() bool { return idleWorkers(q) == 1 })
 	q.Add("a") // available, but no capacity to grant it
 
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	q.shutdown = true // ShutDown's first step; its Broadcast hasn't happened yet
 	q.mu.Unlock()
 	g.setLocalCapacity(1)
@@ -895,7 +897,7 @@ func TestAShuttingDownQueueGetsNoSlot(t *testing.T) {
 		t.Errorf("%d local slots granted to a queue that is shutting down, want 0", n)
 	}
 
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	q.shutdown = false // let the real ShutDown run its whole path
 	q.mu.Unlock()
 	g.setLocalCapacity(0)
@@ -956,14 +958,14 @@ func TestKeysDueTogetherBecomeReadyTogether(t *testing.T) {
 	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(-1)}, "low")
 	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(1)}, "high")
 	q.AddWithOpts(priorityqueue.AddOpts{After: time.Hour}, "later")
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	w, gen := q.waiting["low"], q.waiting["low"].gen
 	highTimer := q.waiting["high"].timer.(*manualTimer)
 	q.mu.Unlock()
 
 	clk.advance(time.Second)
 	q.due("low", w, gen)
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	defer q.mu.Unlock()
 	if _, ok := q.waiting["later"]; len(q.waiting) != 1 || !ok || len(q.ready) != 2 || q.free != 2 {
 		t.Errorf("after one timer: waiting %v, %d ready, %d free; want only later waiting, 2 ready, 2 free", q.waiting, len(q.ready), q.free)

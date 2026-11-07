@@ -113,7 +113,7 @@ func TestDoneRacingAPopLeaksNoSlot(t *testing.T) {
 		t.Errorf("slot leaked: %d local slots in flight with nothing processing", n)
 	}
 	if _, ok := getWithin(q, time.Second); !ok {
-		q.mu.Lock()
+		lockWithin(t, q, "the test")
 		t.Errorf("an item stranded: no worker got it within 1s; free=%d ready=%v inner.Len=%d", q.free, q.ready, q.inner.Len())
 		q.mu.Unlock()
 	}
@@ -146,7 +146,7 @@ func TestAddDuringAPopIsNotLost(t *testing.T) {
 	}
 	q.Done(a)
 	if _, ok := getWithin(q, time.Second); !ok {
-		q.mu.Lock()
+		lockWithin(t, q, "the test")
 		t.Errorf("re-added k never handed out again: free=%d ready=%v inner.Len=%d", q.free, q.ready, q.inner.Len())
 		q.mu.Unlock()
 	}
@@ -190,7 +190,7 @@ func TestAddAfterDuringAPopKeepsItsDelay(t *testing.T) {
 	select {
 	case <-got:
 	case <-time.After(2 * time.Second):
-		q.mu.Lock()
+		lockWithin(t, q, "the test")
 		t.Errorf("k was not handed out after its delay: waiting=%v ready=%v free=%d inner.Len=%d", q.waiting, q.ready, q.free, q.inner.Len())
 		q.mu.Unlock()
 	}
@@ -268,7 +268,7 @@ func TestGatedQueueDrainsUnderConcurrentAddsAndDones(t *testing.T) {
 				break
 			}
 			if time.Now().After(deadline) {
-				q.mu.Lock()
+				lockWithin(t, q, "the test")
 				t.Errorf("run %d: did not drain: ready=%v processing=%v free=%d inner.Len=%d", run, q.ready, q.processing, q.free, q.inner.Len())
 				q.mu.Unlock()
 				t.Errorf("run %d: local slots in flight %d, reconciles running %d", run, g.inFlight(), running.Load())
@@ -542,7 +542,7 @@ func TestAPopTheRecordDisagreesWithIsReported(t *testing.T) {
 	q := gated(t, g, "disagreeing-record")
 	g.setLocalCapacity(0)
 	q.Add("k")
-	q.mu.Lock()
+	lockWithin(t, q, "the test")
 	q.processing["k"] = struct{}{} // the record now says k is held, inner doesn't
 	q.mu.Unlock()
 	before := brokenBooks.Load()
