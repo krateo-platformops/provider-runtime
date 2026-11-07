@@ -7,6 +7,7 @@ import (
 	"time"
 
 	utilclock "k8s.io/utils/clock"
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
 )
 
 // returnsWithin reports whether f returns within d.
@@ -23,28 +24,41 @@ func returnsWithin(d time.Duration, f func()) bool {
 
 // stuckPop makes queue a's record count one item its inner queue doesn't hold,
 // the defect a broken record would be, and starts a worker that is granted for
-// it and waits inside inner holding a's lock. unstick ends that pop by adding
-// the item to inner, and lets the worker finish.
+// it and waits inside inner holding a's lock. It returns once that pop has
+// reached inner. unstick ends the pop by adding the item to inner, and lets the
+// worker finish; it acts once however often it is called, so a test can both
+// register it as a cleanup and call it.
 func stuckPop(t *testing.T, g *Governor, a *gatedQueue[string]) (unstick func()) {
 	t.Helper()
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	h := &hookedInner{PriorityQueue: a.inner}
+	h.beforeGet = func() { enterOnce.Do(func() { close(entered) }) }
 	lockWithin(t, a, "making the record wrong")
+	a.inner = h
 	a.free++ // the defect: counts an item inner doesn't hold
 	a.mu.Unlock()
 	popped := make(chan string, 1)
 	go func() { k, _, _ := a.GetWithPriority(); popped <- k }()
-	// The pop holds a's lock, so its state can't be read: give it time to get
-	// inside inner. (No new field is read here, so this test also runs on the
-	// code before containment, where it fails.)
-	time.Sleep(300 * time.Millisecond)
+	// The hook runs with the pop holding a's lock, as it calls into inner,
+	// which holds no item for it. (No new field is read here, so this helper
+	// also runs on the code before containment, where the test fails.)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a's pop never reached inner")
+	}
+	var once sync.Once
 	return func() {
-		t.Helper()
-		a.inner.Add("unstick") // the item the record counted, straight into inner
-		select {
-		case k := <-popped:
-			a.Done(k)
-		case <-time.After(5 * time.Second):
-			t.Error("a's pop did not return after its item was added to inner")
-		}
+		once.Do(func() {
+			a.inner.Add("unstick") // the item the record counted, straight into inner
+			select {
+			case k := <-popped:
+				a.Done(k)
+			case <-time.After(5 * time.Second):
+				t.Error("a's pop did not return after its item was added to inner")
+			}
+		})
 	}
 }
 
@@ -59,7 +73,14 @@ func TestAStuckPopFreezesOnlyItsQueue(t *testing.T) {
 	a := newGatedQueue[string](g, "a", nil, utilclock.RealClock{})
 	b := newGatedQueue[string](g, "b", nil, utilclock.RealClock{})
 	before := brokenBooks.Load()
+	// Cleanups run last first: unstick a's pop, shut both queues down, then
+	// clear the report the stuck pop makes on purpose. A t.Fatal below then
+	// leaves no pop stuck behind it.
+	t.Cleanup(func() { brokenBooks.Store(before) })
+	t.Cleanup(func() { returnsWithin(5*time.Second, b.ShutDown) })
+	t.Cleanup(func() { returnsWithin(5*time.Second, a.ShutDown) })
 	unstick := stuckPop(t, g, a)
+	t.Cleanup(unstick)
 
 	const d = time.Second
 	if !returnsWithin(d, func() { b.Add("x") }) {
@@ -89,8 +110,8 @@ func TestAStuckPopFreezesOnlyItsQueue(t *testing.T) {
 
 	unstick()
 	within(t, "a's ShutDown", a.ShutDown)
-	// The stuck pop's item wasn't in the record: that pop reported it.
-	brokenBooks.Store(before)
+	// The stuck pop's item wasn't in the record: that pop reported it, and the
+	// cleanup clears that report.
 }
 
 // The watchdog: a pop still waiting inside inner after popStuckAfter is
@@ -108,16 +129,21 @@ func TestAStuckPopIsReported(t *testing.T) {
 	a := newGatedQueue[string](g, "a", nil, utilclock.RealClock{})
 	before := brokenBooks.Load()
 	unstick := stuckPop(t, g, a)
+	t.Cleanup(unstick)
 
+	// reportBrokenBooks counts, then logs: wait for both, or the log check can
+	// land between the two.
 	deadline := time.Now().Add(2 * time.Second)
-	for brokenBooks.Load() == before {
+	for {
+		counted := brokenBooks.Load() != before
+		logged := logs.count("ERROR The local capacity's records disagree") > 0
+		if counted && logged {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("a pop stuck for %s past the watchdog's %s was not reported", 2*time.Second, popStuckAfter)
+			t.Fatalf("a pop stuck for %s past the watchdog's %s was not reported (counted %v, logged as an error %v)", 2*time.Second, popStuckAfter, counted, logged)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if logs.count("ERROR The local capacity's records disagree") == 0 {
-		t.Errorf("the stuck pop was not logged as an error: %v", logs.lines)
 	}
 	unstick()
 	within(t, "a's ShutDown", a.ShutDown)
@@ -165,8 +191,9 @@ func TestAGrantSkippedDuringAPopIsGrantedAfterIt(t *testing.T) {
 	// Both idle first: a worker going idle dispatches, which would grant a2
 	// by itself and hide a lost grant.
 	eventually(t, "a's workers waiting", func() bool { return idleWorkers(a) == 2 })
-	a.Add("a1")
-	a.Add("a2")
+	// One call, so a2 is there before a1's pop starts: the slot b frees then
+	// has work waiting, whatever the timing.
+	a.AddWithOpts(priorityqueue.AddOpts{}, "a1", "a2")
 	var first heldItem
 	select {
 	case first = <-gotA:

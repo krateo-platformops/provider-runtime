@@ -58,7 +58,8 @@ type gatedQueueRef interface {
 // popStuckAfter is how long a pop may wait inside the inner queue before it is
 // reported. A pop waits there only when the record counts an item inner doesn't
 // have, which is a defect: inner hands a counted item out at once. A variable so
-// tests can lower it.
+// tests can lower it. Tests change it without a lock, which is safe only because
+// no test in this package calls t.Parallel; a test that does must not touch it.
 var popStuckAfter = 10 * time.Second
 
 // skipRaceHook, when a test sets it, runs in tryGrant between seeing a pop in
