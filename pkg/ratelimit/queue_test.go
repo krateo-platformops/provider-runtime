@@ -722,7 +722,13 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 				d = next.Sub(clk.Now())
 			}
 			op = "step " + d.String()
-			clk.Step(d)
+			stepped := make(chan struct{})
+			go func() { clk.Step(d); close(stepped) }()
+			select {
+			case <-stepped:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("step %d (%s): the clock step did not return: a timer callback is waiting for the queue's lock", step, op)
+			}
 			for wk, w := range waiting {
 				if !w.at.After(clk.Now()) {
 					delete(waiting, wk)

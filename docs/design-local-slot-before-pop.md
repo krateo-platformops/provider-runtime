@@ -311,12 +311,40 @@ possibly clean counts) and the CPU threshold.
 
 ## 10. What the build found
 
+- **The first version had two races, and an independent review caught them, not
+  this build's tests.** It called `inner.GetWithPriority` and `inner.Done` outside
+  the queue's lock and updated its record in a separate critical section, so the
+  claim then in §4, that the count stays exact, was false:
+  - *`Done` against a pop.* `inner.Done(k)` unlocked `k`; before `Done` removed
+    `k` from `processing`, another worker granted for a different item popped the
+    re-added `k`. That worker's `Done` then found `k` unrecorded and returned
+    without giving its slot back, leaking it for good: at capacity 1 that stops
+    every controller on the Governor. An item was also stranded with nothing
+    counted free.
+  - *An add during a pop.* After `inner` handed `k` out and before the pop
+    recorded it, an `Add(k)` saw `k` as ready and re-added it to `inner`; the pop
+    then deleted `k` from `ready`. `inner` held `k` and the record didn't, so the
+    event was lost. The priority branch of a delayed add had the same window and
+    could turn an `AddAfter` into an untracked immediate add.
+
+  The model test couldn't reach either, because it waits for the queue to be
+  quiet after every step. The reviewer's interleaving and stress tests failed on
+  that version (both interleavings 3 of 3 under `-race`, the stress test in most
+  runs), and they are in the package now, with a concurrent mode of the model.
+  The fix is the rule in §4, every call into `inner` under the queue's lock, not
+  the reviewer's suggestion of buffering adds during a pop: buffering would have
+  added a second record on top of the first. §4 says why holding the lock across
+  the pop can't block forever. The same review found a slot release that went
+  negative being clamped in silence; it is now reported as an error, and so is a
+  pop the record disagrees with.
 - **Delayed items that come due together are handed out together.** A timer
-  makes every key that is due ready at once, as the priority queue's
-  `handleWaitingItems` does, so items due at the same instant are handed out by
-  priority, not in the order their timers ran. It uses the fired entry's time as
-  now, because a test clock runs timer callbacks under its own lock. This is for
-  parity with upstream. It matters only in the instant between two timers due
+  makes every key that is due ready at once, and stops the timers of the other
+  keys it moves, as the priority queue's `handleWaitingItems` does, so items due
+  at the same instant are handed out by priority, not in the order their timers
+  ran. A timer callback only starts a goroutine, which takes the queue's lock, so
+  that lock is never awaited while a clock holds its own; the first version used
+  the fired entry's time as now to avoid the same inversion. This is for parity
+  with upstream. It matters only in the instant between two timers due
   together, which no test can hit from outside, so a white-box test calls the
   timer's callback directly. An earlier model-test failure that looked like this
   bug was the test's own error: it treated keys due at different times within
@@ -338,15 +366,17 @@ possibly clean counts) and the CPU threshold.
   reconciles in flight with capacity 1; three popped items requeued for local
   capacity) and 5 to 8 pass there. Test 10 belongs to the v1.10.1 fix. The model
   test (9) and the queue's own tests are new code.
-- **The model test,** 120 steps a run: 2,000 runs without the race detector and
-  5,000 under `-race` (65s), with no failure and no data race. The 5,000 runs
-  made 154,516 pops, 73,636 of them with a lower-priority key also available,
-  49,006 delayed items coming due, 35,060 re-adds while processing and 71,789
-  capacity changes.
-- **Revert check** (`hack/revert-check-local-slot.py`): 30 of 32 mutants killed
-  by assertion, none by a compile failure, panic or timeout. The two survivors
-  are equivalent: a keyless call reaching `AcquireAll`, and `AcquireAll` without
-  keys reaching `acquire`, both take nothing and return a no-op release.
+- **The model test, on the first version,** 120 steps a run: 2,000 runs without
+  the race detector and 5,000 under `-race` (65s), with no failure and no data
+  race. It passed while the two races above were there, which is why it now has
+  a concurrent mode.
+- **Upstream's priority queue drains slowly under load.** The reviewer's control,
+  the same stress on `priorityqueue.New`, missed a 2s drain deadline in 3 of 200
+  runs under `-race` at host load 55 to 65. Waiting longer showed every one
+  drained, the slowest after 2.62s. The stress tests now share a 10s deadline set
+  from that, the same for the gated queue and the control.
+- **Revert check, on the first version:** 30 of 32 mutants killed. It is rerun
+  over the fixed code; the result is in `hack/revert-check-local-slot.txt`.
 - **Local smoke** (`hack/smoke-local-slot.sh`): the example controller with
   `--saturation-governor` against envtest, no cluster: 12 of 12 Greetings Ready,
   none written `ReconcileDeferred`, no error or warning. macOS has no cgroup v2,
