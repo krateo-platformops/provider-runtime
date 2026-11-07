@@ -9,7 +9,7 @@ KILLED    containment: the watchdog never fires
 KILLED    containment: the watchdog is never stopped
           TestGatedQueueRecordStaysExactUnderConcurrency
 KILLED    containment: tryGrant waits for a popping queue's lock
-          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestAStuckPopFreezesOnlyItsQueue,TestForControllerRuntimeGatesTheQueueWithSaturation,TestForControllerRuntimeGatesTh
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestAStuckPopFreezesOnlyItsQueue
 KILLED    containment: a skip doesn't re-check popping
           TestAPopEndingDuringTheSkipLosesNoGrant
 KILLED    containment: popping isn't set at the grant
@@ -17,9 +17,9 @@ KILLED    containment: popping isn't set at the grant
 KILLED    containment: popping isn't cleared after the pop
           TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestAPanickingReconcileGivesItsSlotBack,TestAddAfterDuringAPopKeepsItsDelay,TestAddDuringAPopIsNotLost,TestCapacityR
 KILLED    containment: no dispatch after a skipped grant
-          TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
 KILLED    containment: popping cleared after the skip check
-          TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
 SURVIVED  containment: a grant handed back at shutdown leaves popping set
           
 
