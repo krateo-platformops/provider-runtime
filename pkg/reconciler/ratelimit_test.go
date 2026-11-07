@@ -126,14 +126,6 @@ var fixedReady = prv1.Condition{
 	LastTransitionTime: metav1.NewTime(time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC)),
 }
 
-// stored gives c the whole-second transition time of a condition read from the
-// API server. metav1.Now() has nanoseconds, which a JSON round trip drops, so
-// without this a fixture would differ from its own deep copy.
-func stored(c prv1.Condition) prv1.Condition {
-	c.LastTransitionTime = fixedReady.LastTransitionTime
-	return c
-}
-
 // apiServer is a mock API server: Get returns the object named in the request
 // with keyAnnotation set from keys, and status updates are counted and kept.
 type apiServer struct {

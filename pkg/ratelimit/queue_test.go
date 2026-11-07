@@ -624,7 +624,8 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 			q.mu.Lock()
 			quiet := q.granted == 0 && q.reserved == 0 && q.idle == nWorkers-len(q.processing) && len(q.processing) == len(held)
 			q.mu.Unlock()
-			if quiet && !(len(held) < g.LocalCapacity() && len(held) < nWorkers && len(available()) > 0) {
+			// Quiet, and nothing left that a free slot and an idle worker could take.
+			if quiet && (len(held) >= g.LocalCapacity() || len(held) >= nWorkers || len(available()) == 0) {
 				break
 			}
 			if time.Now().After(deadline) {

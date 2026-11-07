@@ -122,7 +122,10 @@ func runningController(t *testing.T, name string, workers int, o controller.Opti
 		stopped.Do(func() {
 			cancel()
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Errorf("the controller's Start returned %v", err)
+				}
 			case <-time.After(5 * time.Second):
 				t.Error("the controller's Start did not return within 5s of its context being cancelled")
 			}
