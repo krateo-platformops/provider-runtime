@@ -24,12 +24,23 @@ func newQueueWithWaitMetrics(controllerName string, rateLimiter workqueue.TypedR
 		return newControllerQueue(controllerName, rateLimiter, usePriorityQueue)
 	}
 
-	return &queueWaitInstrumented[reconcile.Request]{
-		queue:      newControllerQueue(controllerName, rateLimiter, usePriorityQueue),
+	return newQueueWaitInstrumented(newControllerQueue(controllerName, rateLimiter, usePriorityQueue), recorder)
+}
+
+// newQueueWaitInstrumented wraps queue with queue telemetry. When queue is a
+// priority queue the wrapper is one too, so controller-runtime keeps using
+// its priorities instead of wrapping it again at priority 0.
+func newQueueWaitInstrumented[T comparable](queue workqueue.TypedRateLimitingInterface[T], recorder QueueWaitRecorder) workqueue.TypedRateLimitingInterface[T] {
+	instrumented := &queueWaitInstrumented[T]{
+		queue:      queue,
 		recorder:   recorder,
-		enqueuedAt: make(map[reconcile.Request]time.Time),
-		startedAt:  make(map[reconcile.Request]time.Time),
+		enqueuedAt: make(map[T]time.Time),
+		startedAt:  make(map[T]time.Time),
 	}
+	if pq, ok := queue.(sigspq.PriorityQueue[T]); ok {
+		return &queueWaitInstrumentedPriority[T]{queueWaitInstrumented: instrumented, priorityQueue: pq}
+	}
+	return instrumented
 }
 
 func newControllerQueue(controllerName string, rateLimiter workqueue.TypedRateLimiter[reconcile.Request], usePriorityQueue bool) workqueue.TypedRateLimitingInterface[reconcile.Request] {
@@ -106,6 +117,31 @@ func (q *queueWaitInstrumented[T]) Forget(item T) {
 
 func (q *queueWaitInstrumented[T]) NumRequeues(item T) int {
 	return q.queue.NumRequeues(item)
+}
+
+// queueWaitInstrumentedPriority is queueWaitInstrumented over a priority
+// queue. It adds the priority methods, recording them like Add and Get.
+type queueWaitInstrumentedPriority[T comparable] struct {
+	*queueWaitInstrumented[T]
+	priorityQueue sigspq.PriorityQueue[T]
+}
+
+// AddWithOpts records each item at enqueue time, as Add, AddAfter and
+// AddRateLimited do whatever their delay.
+func (q *queueWaitInstrumentedPriority[T]) AddWithOpts(o sigspq.AddOpts, items ...T) {
+	now := time.Now()
+	for _, item := range items {
+		q.recordEnqueueAt(item, now)
+	}
+	q.priorityQueue.AddWithOpts(o, items...)
+}
+
+func (q *queueWaitInstrumentedPriority[T]) GetWithPriority() (item T, priority int, shutdown bool) {
+	item, priority, shutdown = q.priorityQueue.GetWithPriority()
+	if !shutdown {
+		q.recordDequeueAt(item, time.Now())
+	}
+	return item, priority, shutdown
 }
 
 func (q *queueWaitInstrumented[T]) recordEnqueueAt(item T, started time.Time) (bool, time.Duration) {

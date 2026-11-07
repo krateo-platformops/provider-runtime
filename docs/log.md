@@ -12,6 +12,15 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-07 — unreleased patch: queue telemetry keeps item priorities
+- **With `QueueWaitRecorder` set, the priority queue now honours priorities.**
+  The instrumented wrapper implemented only the plain workqueue interface, so
+  controller-runtime wrapped it again and ran every item at priority 0: spec
+  changes queued behind low-priority resyncs. Over a priority queue the
+  wrapper is now a `priorityqueue.PriorityQueue` too, and `AddWithOpts` and
+  `GetWithPriority` record wait, depth, oldest age and work like the other
+  methods. With `UsePriorityQueue=false` nothing changes.
+
 ## 2026-11-05 — v1.10.0: one object on several rate-limited endpoints
 - **`reconciler.RateLimitKeysProvider`** names every scope an object's calls
   reach, for objects that sync between two endpoints. A call needs a slot in
