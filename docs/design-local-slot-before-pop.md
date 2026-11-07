@@ -375,8 +375,26 @@ possibly clean counts) and the CPU threshold.
   runs under `-race` at host load 55 to 65. Waiting longer showed every one
   drained, the slowest after 2.62s. The stress tests now share a 10s deadline set
   from that, the same for the gated queue and the control.
-- **Revert check, on the first version:** 30 of 32 mutants killed. It is rerun
-  over the fixed code; the result is in `hack/revert-check-local-slot.txt`.
+- **The fix under `-race`, 200 runs each:** the review's two interleavings, the
+  delayed-add window, shutdown during a pop and a pop the record disagrees with,
+  1,000 passes in 187s; the stress test, 200 passes of 20 runs each in 1,261s;
+  upstream's control under the same load and deadline, 200 passes in 3,596s. No
+  failure and no data race. Host load ran from 4 to 71 across these.
+- **Revert check, on the first version:** 30 of 32 mutants killed.
+- **Revert check, on the fixed code** (`hack/revert-check-local-slot.txt`): 37
+  mutants, including three that put back what the review found (`Done` calling
+  `inner` outside the lock, the pop calling `inner` outside the lock, a negative
+  release clamped in silence). 35 killed by assertion, none by a compile failure,
+  panic or timeout. The two survivors are equivalent: a keyless call reaching
+  `AcquireAll` (`pkg/reconciler/ratelimit.go:158`), and `AcquireAll` without keys
+  reaching `acquire` (`pkg/ratelimit/governor.go:449-451`), both take nothing and
+  return a no-op release. The first pass on the fixed code had 8 timeouts: tests
+  hung instead of failing, because their blocking calls had no deadline. Every
+  blocking call in these tests now has one. Two mutants, an overcount and a
+  re-add counted as available, are killed by assertion and then leave a later
+  test hanging (`hack/revert-check-local-slot-rerun.txt`). That hang is the
+  deadlock an overcount causes by design: a pop stuck in `inner` holds its
+  queue's lock, and the Governor's dispatch waits on it holding the Governor's.
 - **Local smoke** (`hack/smoke-local-slot.sh`): the example controller with
   `--saturation-governor` against envtest, no cluster: 12 of 12 Greetings Ready,
   none written `ReconcileDeferred`, no error or warning. macOS has no cgroup v2,
