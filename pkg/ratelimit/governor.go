@@ -658,9 +658,12 @@ type InputSnapshot struct {
 
 // Snapshot is the governor's state, for metrics.
 type Snapshot struct {
-	Keys          []KeySnapshot
-	LocalCapacity int
-	Inputs        []InputSnapshot
+	Keys []KeySnapshot
+	// LocalCapacity is enforced only when SaturationEnabled: queues are gated
+	// on it then, and on nothing otherwise, so metrics report it only then.
+	LocalCapacity     int
+	SaturationEnabled bool
+	Inputs            []InputSnapshot
 }
 
 // Snapshot returns the governor's current state.
@@ -680,8 +683,9 @@ func (g *Governor) Snapshot() Snapshot {
 	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
 
 	return Snapshot{
-		Keys:          keys,
-		LocalCapacity: g.LocalCapacity(),
-		Inputs:        g.sat.inputs(),
+		Keys:              keys,
+		LocalCapacity:     g.LocalCapacity(),
+		SaturationEnabled: g.SaturationEnabled(),
+		Inputs:            g.sat.inputs(),
 	}
 }

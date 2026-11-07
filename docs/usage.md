@@ -221,7 +221,8 @@ For Krateo, that's core-provider#310.
   - *Nothing is written on the object for it.* The controller's own saturation
     isn't a state of the object: the item waits in the queue, with no
     `Synced=False`, no event and no status write. It shows in
-    `provider_runtime.ratelimit.local.capacity` and the input gauges. Key
+    `provider_runtime.ratelimit.local.capacity` and the input gauges (the
+    local capacity gauge reports nothing with saturation off). Key
     deferrals still write `Synced=False/ReconcileDeferred`. Before this, a full
     `local` deferred popped items and the startup ramp was a quiet special
     case; both are gone ([design](./design-local-slot-before-pop.md)).

@@ -1,0 +1,29 @@
+baseline passed
+
+only: ['shutdown:', 'gauge:'] 11 mutants
+
+KILLED    shutdown: inner is shut down under the queue's lock
+          TestShutDownDuringAPopInsideInnerReturns,TestShutDownEndsAStuckPop
+KILLED    shutdown: every ShutDown shuts inner down again
+          TestDoneAfterShutDownSkipsInner,TestGatedQueueDrainsUnderConcurrentAddsAndDones,TestShutDownTwiceAndAtOnce
+KILLED    shutdown: a pop ShutDown ends is reported as a broken record
+          TestAPopRacingShutDownReportsNoBrokenRecord,TestShutDownDuringAPopInsideInnerReturns,TestShutDownEndsAStuckPop
+KILLED    shutdown: Done calls inner after ShutDown
+          TestDoneAfterShutDownSkipsInner
+KILLED    shutdown: ShuttingDown takes the queue's lock
+          TestShutDownEndsAStuckPop
+KILLED    shutdown: Len takes the queue's lock
+          TestGatedQueueRecordStaysExactUnderConcurrency,TestGatedQueueRecordStaysExactUnderConcurrency/0,TestShutDownEndsAStuckPop
+KILLED    shutdown: Len asks inner
+          TestDoneAfterShutDownSkipsInner
+KILLED    shutdown: Len misses an add
+          TestGatedQueueRecordStaysExactUnderConcurrency,TestGatedQueueRecordStaysExactUnderConcurrency/0,TestLenCountsReadyItems
+KILLED    shutdown: Len misses a pop
+          TestGatedQueueRecordStaysExactUnderConcurrency,TestGatedQueueRecordStaysExactUnderConcurrency/0,TestLenCountsReadyItems
+KILLED    gauge: local capacity reported with saturation off
+          TestLocalCapacityReportsNothingWithSaturationOff
+KILLED    gauge: the snapshot never says saturation is on
+          TestRateLimitMetrics
+
+KILLED=11 of 11
+tree restored

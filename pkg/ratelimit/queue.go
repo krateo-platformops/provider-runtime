@@ -93,9 +93,20 @@ type gatedQueue[T comparable] struct {
 	rateLimiter workqueue.TypedRateLimiter[T]
 	clock       utilclock.WithDelayedExecution
 
+	// stopping is set when ShutDown begins, before it shuts inner down and
+	// before it takes mu: a pop waiting inside inner holds mu, and only inner's
+	// ShutDown wakes it. Once it is set, inner hands nothing out, nothing calls
+	// inner's Done, and a pop that inner ends with shutdown is no broken record.
+	// ShuttingDown reads it. See design §4, "Shutdown".
+	stopping atomic.Bool
+	// readyLen is len(ready), stored with every change to ready, so Len never
+	// waits for mu.
+	readyLen atomic.Int64
+
 	// mu guards everything below, and every call into inner is made holding
-	// it. Lock order: the Governor's lock, then this one. A clock callback
-	// never takes it while the clock holds its own lock (see scheduleLocked).
+	// it, except ShutDown's (see stopping). Lock order: the Governor's lock,
+	// then this one. A clock callback never takes it while the clock holds its
+	// own lock (see scheduleLocked).
 	mu   sync.Mutex
 	cond *sync.Cond
 	// ready holds the keys in inner, and processing the keys a worker holds:
@@ -183,6 +194,7 @@ func (q *gatedQueue[T]) addReadyLocked(key T, priority int) bool {
 		return false
 	}
 	q.ready[key] = struct{}{}
+	q.readyLen.Store(int64(len(q.ready)))
 	if _, busy := q.processing[key]; busy {
 		return false
 	}
@@ -316,8 +328,10 @@ func (q *gatedQueue[T]) GetWithPriority() (_ T, priority int, shutdown bool) {
 // GetWithPriority, so no add, pop or Done can change inner between the record
 // saying an item is free and inner handing it out. That record is exact, so
 // inner has an item to hand out at once: one that is ready and not
-// processing. inner is shut down only by ShutDown, under q.mu, which the
-// caller checked, so a shutdown here is a broken record too; it reports false.
+// processing. It reports false when inner ends the pop with shutdown: inner
+// may then have handed the item out too, but the queue is going away and the
+// record no longer has to match. Only ShutDown shuts inner down, and it sets
+// stopping first, so a shutdown without stopping is a broken record.
 //
 // A watchdog on the real clock reports a pop that is still waiting after
 // popStuckAfter. Its callback takes no lock: the pop holds this queue's lock.
@@ -329,7 +343,9 @@ func (q *gatedQueue[T]) popLocked() (T, int, bool) {
 	key, priority, shutdown := q.inner.GetWithPriority()
 	watchdog.Stop()
 	if shutdown {
-		reportBrokenBooks(q.gov.log, "the inner queue was shut down while the gated queue was not")
+		if !q.stopping.Load() {
+			reportBrokenBooks(q.gov.log, "the inner queue was shut down while the gated queue was not")
+		}
 		var zero T
 		return zero, 0, false
 	}
@@ -342,6 +358,7 @@ func (q *gatedQueue[T]) popLocked() (T, int, bool) {
 		q.free--
 	}
 	delete(q.ready, key)
+	q.readyLen.Store(int64(len(q.ready)))
 	q.processing[key] = struct{}{}
 	return key, priority, true
 }
@@ -354,14 +371,19 @@ func (q *gatedQueue[T]) Get() (item T, shutdown bool) {
 // Done marks key processed and gives back its local slot. A key re-added while
 // it was processed becomes available again. Done for a key no worker holds does
 // nothing. inner learns of it in the same critical section as the record, so no
-// worker can pop key between the two.
+// worker can pop key between the two. Once ShutDown has begun inner doesn't:
+// it hands nothing out by then, and its Done can wait forever on a lock its
+// own hand-out was left holding (design §4, "Shutdown"). The slot is given
+// back either way.
 func (q *gatedQueue[T]) Done(key T) {
 	q.mu.Lock()
 	if _, ok := q.processing[key]; !ok {
 		q.mu.Unlock()
 		return
 	}
-	q.inner.Done(key)
+	if !q.stopping.Load() {
+		q.inner.Done(key)
+	}
 	delete(q.processing, key)
 	if _, ok := q.ready[key]; ok {
 		q.free++
@@ -400,24 +422,34 @@ func (q *gatedQueue[T]) tryGrant() bool {
 func (q *gatedQueue[T]) Forget(item T)          { q.rateLimiter.Forget(item) }
 func (q *gatedQueue[T]) NumRequeues(item T) int { return q.rateLimiter.NumRequeues(item) }
 
-// Len returns the number of items in inner, as the priority queue counts them:
-// ready ones, including those being processed again, and not delayed ones.
+// Len returns the number of items the priority queue would count: ready ones,
+// including those being processed again, and not delayed ones. It reads them
+// from the record, which holds exactly the keys in inner, and takes no lock, so
+// it never waits on a pop. It doesn't ask inner: inner's Len takes a lock that
+// inner's hand-out can be left holding after a shutdown (design §4,
+// "Shutdown"). Nothing in provider-runtime or controller-runtime calls it.
 func (q *gatedQueue[T]) Len() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.inner.Len()
+	return int(q.readyLen.Load())
 }
 
+// ShuttingDown reports whether ShutDown has begun. It takes no lock.
 func (q *gatedQueue[T]) ShuttingDown() bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.shutdown
+	return q.stopping.Load()
 }
 
 // ShutDown wakes every waiting worker, which returns shutdown=true, and gives
 // back any slot granted to one of them. Running reconciles keep their slots
 // until their Done.
+//
+// It shuts inner down first, without mu: a pop waiting inside inner holds mu,
+// and only inner's ShutDown ends that pop. Normally that wait is short, but
+// when the record is broken it never ends, and graceful shutdown would hang on
+// mu. stopping, set first, makes inner's ShutDown happen once (a second one
+// panics) and tells the pop it ends that it isn't a broken record.
 func (q *gatedQueue[T]) ShutDown() {
+	if q.stopping.CompareAndSwap(false, true) {
+		q.inner.ShutDown()
+	}
 	q.mu.Lock()
 	if q.shutdown {
 		q.mu.Unlock()
@@ -428,7 +460,6 @@ func (q *gatedQueue[T]) ShutDown() {
 		w.timer.Stop()
 		delete(q.waiting, key)
 	}
-	q.inner.ShutDown()
 	q.cond.Broadcast()
 	q.mu.Unlock()
 	q.gov.removeQueue(q)

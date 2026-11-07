@@ -17,6 +17,7 @@ Q = "pkg/ratelimit/queue.go"
 GOV = "pkg/ratelimit/governor.go"
 REC = "pkg/reconciler/ratelimit.go"
 OPT = "pkg/controller/options.go"
+TEL = "pkg/telemetry/metrics.go"
 PKGS = ["./pkg/ratelimit/", "./pkg/controller/", "./pkg/reconciler/", "./pkg/telemetry/"]
 
 MUTANTS = [
@@ -66,6 +67,32 @@ MUTANTS = [
      "\tq.popping.Store(false)\n\tq.mu.Unlock()\n\tif q.skipped.Swap(false) {\n\t\tq.gov.dispatch()\n\t}\n",
      "\tq.mu.Unlock()\n\tif q.skipped.Swap(false) {\n\t\tq.gov.dispatch()\n\t}\n\tq.popping.Store(false)\n"),
     ("containment: a grant handed back at shutdown leaves popping set", Q, "\t\t\tq.granted--\n\t\t\tq.popping.Store(false)\n", "\t\t\tq.granted--\n"),
+    # Shutdown, after core-provider's review.
+    ("shutdown: inner is shut down under the queue's lock", Q,
+     "\tif q.stopping.CompareAndSwap(false, true) {\n\t\tq.inner.ShutDown()\n\t}\n\tq.mu.Lock()\n\tif q.shutdown {",
+     "\tq.mu.Lock()\n\tif q.stopping.CompareAndSwap(false, true) {\n\t\tq.inner.ShutDown()\n\t}\n\tif q.shutdown {"),
+    ("shutdown: every ShutDown shuts inner down again", Q,
+     "\tif q.stopping.CompareAndSwap(false, true) {\n\t\tq.inner.ShutDown()",
+     "\tif q.stopping.Store(true); true {\n\t\tq.inner.ShutDown()"),
+    ("shutdown: a pop ShutDown ends is reported as a broken record", Q,
+     "\t\tif !q.stopping.Load() {\n\t\t\treportBrokenBooks(q.gov.log, \"the inner queue was shut down",
+     "\t\tif true {\n\t\t\treportBrokenBooks(q.gov.log, \"the inner queue was shut down"),
+    ("shutdown: Done calls inner after ShutDown", Q, "\tif !q.stopping.Load() {\n\t\tq.inner.Done(key)\n\t}\n", "\tq.inner.Done(key)\n"),
+    ("shutdown: ShuttingDown takes the queue's lock", Q,
+     "func (q *gatedQueue[T]) ShuttingDown() bool {\n\treturn q.stopping.Load()\n}",
+     "func (q *gatedQueue[T]) ShuttingDown() bool {\n\tq.mu.Lock()\n\tdefer q.mu.Unlock()\n\treturn q.shutdown\n}"),
+    ("shutdown: Len takes the queue's lock", Q,
+     "func (q *gatedQueue[T]) Len() int {\n\treturn int(q.readyLen.Load())\n}",
+     "func (q *gatedQueue[T]) Len() int {\n\tq.mu.Lock()\n\tdefer q.mu.Unlock()\n\treturn int(q.readyLen.Load())\n}"),
+    ("shutdown: Len asks inner", Q,
+     "func (q *gatedQueue[T]) Len() int {\n\treturn int(q.readyLen.Load())\n}",
+     "func (q *gatedQueue[T]) Len() int {\n\treturn q.inner.Len()\n}"),
+    ("shutdown: Len misses an add", Q, "\tq.ready[key] = struct{}{}\n\tq.readyLen.Store(int64(len(q.ready)))\n", "\tq.ready[key] = struct{}{}\n"),
+    ("shutdown: Len misses a pop", Q, "\tdelete(q.ready, key)\n\tq.readyLen.Store(int64(len(q.ready)))\n", "\tdelete(q.ready, key)\n"),
+    ("gauge: local capacity reported with saturation off", TEL,
+     "\tif snap.SaturationEnabled {\n\t\tobserver.ObserveInt64(m.rateLimitLocalCapacity",
+     "\tif true {\n\t\tobserver.ObserveInt64(m.rateLimitLocalCapacity"),
+    ("gauge: the snapshot never says saturation is on", GOV, "SaturationEnabled: g.SaturationEnabled(),", "SaturationEnabled: false,"),
     # The governor.
     ("grants go to the same queue first", GOV, "\t\t\t\tg.nextQueue = (idx + 1) % n\n", ""),
     ("grants exceed capacity", GOV, "for g.localInFlight < g.local.Load().capacity {", "for g.localInFlight <= g.local.Load().capacity {"),
@@ -93,7 +120,7 @@ def go_test():
 
 def digest():
     h = hashlib.sha256()
-    for f in (Q, GOV, REC, OPT):
+    for f in (Q, GOV, REC, OPT, TEL):
         h.update(open(os.path.join(ROOT, f), "rb").read())
     return h.hexdigest()
 

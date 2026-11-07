@@ -566,7 +566,11 @@ func (m *Metrics) observeRateLimit(observer metric.Observer) {
 		observer.ObserveInt64(m.rateLimitCapacity, int64(k.Capacity), attrs)
 		observer.ObserveFloat64(m.rateLimitSecondsToReset, k.SecondsToReset, attrs)
 	}
-	observer.ObserveInt64(m.rateLimitLocalCapacity, int64(snap.LocalCapacity))
+	// With saturation off nothing is gated on the local capacity: a value
+	// would read as a limit that isn't there.
+	if snap.SaturationEnabled {
+		observer.ObserveInt64(m.rateLimitLocalCapacity, int64(snap.LocalCapacity))
+	}
 	for _, in := range snap.Inputs {
 		attrs := metric.WithAttributes(attribute.String("input", in.Input))
 		enabled := int64(0)

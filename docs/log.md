@@ -25,7 +25,9 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   nothing on the object. `DeferSaturated`, `DeferRamping`, `Deferral.Local`,
   `Deferral.Cause` and the quiet startup ramp are gone, and a call without a key
   is no longer gated. The `deferrals` metric loses its `saturated` and `ramping`
-  causes. `ratelimit.local.capacity` and the input gauges are unchanged.
+  causes. The input gauges are unchanged. `ratelimit.local.capacity` now reports
+  nothing with saturation off, as core-provider's does, because nothing
+  enforces a local capacity then.
 - New API: `ratelimit.NewGatedQueue`, `(*Governor).RegisterGatedController`.
   Saturation with `UsePriorityQueue=false` is now an error from
   `SetupRateLimitGovernor`. `Start` logs an error when a reconciler's controller

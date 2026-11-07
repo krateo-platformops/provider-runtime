@@ -131,6 +131,33 @@ func TestRateLimitMetrics(t *testing.T) {
 	}
 }
 
+// With saturation off nothing is gated on the local capacity, so its gauge
+// reports nothing, as core-provider's does: a value would read as a limit.
+// The per-key gauges still report.
+func TestLocalCapacityReportsNothingWithSaturationOff(t *testing.T) {
+	reader := metric.NewManualReader()
+	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	m, err := newMetrics(provider.Meter("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := ratelimit.New(ratelimit.Options{MaxConcurrentReconciles: 4, Metrics: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Observe(ratelimit.Signal{Key: "api.github.com", Throttled: true, RetryAfter: time.Minute})
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	if got := points(t, rm, "provider_runtime.ratelimit.local.capacity", "none"); len(got) != 0 {
+		t.Errorf("local capacity = %v with saturation off, want no point", got)
+	}
+	if got := points(t, rm, "provider_runtime.ratelimit.capacity", "key"); got["api.github.com"] != 1 {
+		t.Errorf("capacity by key = %v, want api.github.com 1: the key gauges report with saturation off", got)
+	}
+}
+
 func TestRateLimitMetricsAreNilSafe(t *testing.T) {
 	var m *Metrics
 	m.IncRateLimitDeferral(context.Background(), "k", ratelimit.DeferThrottled)

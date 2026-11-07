@@ -80,25 +80,43 @@ func boundWorkers(q priorityqueue.PriorityQueue[string], n int) (<-chan heldItem
 
 // within runs f and fails the test when it hasn't returned after 5s. A test of
 // the gated queue must fail by its own assertion, not hang until go test's
-// timeout: the revert check counts a hang as nothing.
+// timeout: the revert check counts a hang as nothing. A panic in f fails the
+// test too, rather than ending the whole package's run.
 func within(t *testing.T, what string, f func()) {
 	t.Helper()
 	done := make(chan struct{})
-	go func() { f(); close(done) }()
+	var panicked any
+	go func() {
+		defer close(done)
+		defer func() { panicked = recover() }()
+		f()
+	}()
 	select {
 	case <-done:
+		if panicked != nil {
+			t.Errorf("%s panicked: %v", what, panicked)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("%s did not return within 5s", what)
 	}
 }
 
-// shutDownWithin shuts q down, and reports when that hangs, for cleanups.
+// shutDownWithin shuts q down, and reports when that hangs or panics, for
+// cleanups.
 func shutDownWithin(t *testing.T, q *gatedQueue[string]) {
 	t.Helper()
 	done := make(chan struct{})
-	go func() { q.ShutDown(); close(done) }()
+	var panicked any
+	go func() {
+		defer close(done)
+		defer func() { panicked = recover() }()
+		q.ShutDown()
+	}()
 	select {
 	case <-done:
+		if panicked != nil {
+			t.Errorf("ShutDown panicked: %v", panicked)
+		}
 	case <-time.After(5 * time.Second):
 		t.Error("ShutDown did not return within 5s: something holds the queue's lock")
 	}

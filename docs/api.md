@@ -68,7 +68,7 @@ Annotation keys (`AnnotationKeyExternalName`, `…ExternalCreatePending/Succeede
 - `Options` (`MaxConcurrentReconciles`, `IgnoreSignals`, `RecoveryInterval`, `Saturation`, `Logger`, `Metrics`), `SaturationOptions` (`Enabled` (CPU only), `ExperimentalMemoryWorkingSet` (experimental, off, not OOM protection), `CgroupDir`, `SamplePeriod` (default 1s), `StartupRampInterval` (default 2s), `CPUPressureThreshold` (default 50, provisional), `WorkingSetSoftRatio` and `WorkingSetHardRatio` (0.80 and 0.90, provisional, experimental input only)) and the `Default…` constants.
 - `NewGatedQueue[T](g, name, rateLimiter) priorityqueue.PriorityQueue[T]`: a controller queue whose workers take a local slot before they pop and give it back in `Done`; `controller.Options.ForControllerRuntime` builds one per controller when saturation is on.
 - `Deferral` (`Key`, `Reason`, `Until`, `RequeueAfter`, `Capacity`) with `Message()`; `DeferReason` (`DeferThrottled`, `DeferAtCapacity`) with `Cause()`. Removed: `Deferral.Local`, `Deferral.Cause`, `DeferSaturated` and `DeferRamping`, because the local capacity no longer defers a call.
-- `MetricsRecorder` (satisfied by `*telemetry.Metrics`), `Snapshot`, `KeySnapshot`, `InputSnapshot`, and the input names `InputCPUPressure` and `InputMemoryWorkingSet`. `memory.pressure` is not an input (see the design's §11).
+- `MetricsRecorder` (satisfied by `*telemetry.Metrics`), `Snapshot` (its `SaturationEnabled` says whether `LocalCapacity` is enforced; metrics report the local capacity only then), `KeySnapshot`, `InputSnapshot`, and the input names `InputCPUPressure` and `InputMemoryWorkingSet`. `memory.pressure` is not an input (see the design's §11).
 
 ## `pkg/ratelimit/httpsignal` (unreleased)
 

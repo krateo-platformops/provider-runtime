@@ -139,18 +139,22 @@ removes the key from `processing` and, if the key was re-added meanwhile, counts
 it available again, all in one critical section. It then gives the slot back to
 the governor, which grants it on. controller-runtime defers `Done`, so the slot is
 released on return, error and panic, and covers the whole reconcile. A `Done` for
-a key no worker holds does nothing.
+a key no worker holds does nothing. Once `ShutDown` has begun, `Done` no longer
+calls `inner.Done`, but still gives the slot back (see "Shutdown" below).
 
 **Capacity changes.** A rise from the sampler grants new slots the same way. A
 cut lets running reconciles keep their slots and grants none until in-use falls
 below the new capacity.
 
-**Shutdown.** `ShutDown` marks the queue shut, removes it from the governor's
-list, wakes every waiting worker (idle or granted) and shuts `inner` down. A
-waiting worker returns `shutdown=true`, so `processNextWorkItem` returns false and
-it exits (`controller.go:422-425`). A slot granted to a worker that finds the
-queue shut is released before returning. Running reconciles finish; their `Done`
-releases their slots.
+**Shutdown.** `ShutDown` sets `stopping` and shuts `inner` down, both before it
+takes the queue's lock. It then marks the queue shut, wakes every waiting worker
+(idle or granted) and removes the queue from the governor's list. A waiting
+worker returns `shutdown=true`, so `processNextWorkItem` returns false and it
+exits (`controller.go:422-425`). A slot granted to a worker that finds the queue
+shut, or whose pop `inner` ends with shutdown, is released before returning.
+Running reconciles finish; their `Done` releases their slots. Why `inner` is shut
+down outside the lock, and why that is safe, is under "Shutdown, outside the
+lock" below.
 
 **Never lost, never held.** An item is popped only after its slot is taken, in the
 same critical section that counted it, so nothing popped waits for a slot. A ready,
@@ -164,7 +168,9 @@ the queue. A timer callback only starts a goroutine, which then takes the queue'
 lock, so the queue's lock is never awaited under the clock's.
 
 **Why the record stays exact.** `inner` changes only through calls the queue makes
-under its lock, and each one updates the record in the same critical section. So
+under its lock, and each one updates the record in the same critical section;
+the one exception, `inner.ShutDown`, comes when the record stops mattering (see
+"Shutdown, outside the lock"). So
 the record can't drift by interleaving: an add, a pop and a `Done` are each one
 step. It could only be wrong through a mistake in how it models `inner`, which the
 model test (test 9) and the concurrent test exist to rule out. A pop that finds
@@ -192,13 +198,11 @@ anything the pop is holding. It does (references to `CR/pkg/controller/priorityq
   signals (`:467-473`). The record counts such a key as not free until the queue's
   own `Done`, which calls `inner.Done` in the same critical section first. So the
   record never counts a locked key as available.
-- **Shutdown while a pop waits inside `inner`.** The queue's `ShutDown` needs the
-  lock, so it waits for the pop. Nothing it does is needed to wake the pop:
-  `handleReadyItems` stops only when `inner`'s `done` channel closes (`:362-364`),
-  and only `inner.ShutDown` (`:475-479`) closes it, which the queue calls under
-  the same lock. So `inner`'s dispatcher is running for as long as the pop waits,
-  hands the counted item over the `get` channel (`:400`), and the pop returns. Then
-  `ShutDown` runs. A test pins this: `TestShutDownDuringAPopInsideInnerReturns`.
+- **Shutdown while a pop waits inside `inner`.** `ShutDown` shuts `inner` down
+  before it takes the lock, so the pop returns either the item, if `inner`
+  handed it out first, or `shutdown` (`:436-444`). Either way it returns, and
+  then `ShutDown` takes the lock. `TestShutDownDuringAPopInsideInnerReturns` and
+  `TestAPopRacingShutDownReportsNoBrokenRecord` pin it.
 
 The one way it could block is a record that counts an item `inner` can't hand
 out. That is a defect, not a state the queue reaches by timing. The tests above
@@ -263,7 +267,77 @@ controller reconciles nothing more, and the slots it holds, the stuck pop's and
 those its other reconciles are using, out of the shared local capacity. Every
 other controller, `Acquire`, `Snapshot` and shutdown go on, and the watchdog
 reports it. `TestAStuckPopFreezesOnlyItsQueue` and `TestAStuckPopIsReported`
-pin both.
+pin both. Until core-provider's review, the stuck queue's own `ShutDown` hung,
+and so did graceful shutdown, together with its `Len` and `ShuttingDown`; the
+next section fixes that.
+
+**Shutdown, outside the lock.** core-provider's review of #40 found that
+`ShutDown` took the queue's lock before calling `inner.ShutDown()`. A stuck pop
+holds that lock inside `inner.GetWithPriority()`, and only `inner.ShutDown()`
+wakes it (`:436-444`). So in exactly the case the watchdog exists for, graceful
+shutdown hung, and `Len` and `ShuttingDown`, which took the lock too, blocked as
+well. Now:
+
+- `ShutDown` first sets `stopping`, an atomic, with a compare-and-swap, and only
+  the call that sets it calls `inner.ShutDown()`. That call closes a channel, and
+  a second one would panic. Both steps come before the lock, so a pop waiting
+  inside `inner` returns `shutdown`. Then `ShutDown` takes the lock and does the
+  rest as before.
+- A pop that `inner` ends with `shutdown` is a broken record only when
+  `stopping` isn't set. `stopping` is stored before `inner.ShutDown()`, which
+  closes `done` before the pop can see it, so a pop ended by a shutdown always
+  sees the flag. That pop gives its grant's slot back.
+- `ShuttingDown` reads `stopping` and takes no lock.
+- `Len` reads `len(ready)` from an atomic stored with every change to `ready`,
+  and takes no lock. `ready` holds exactly the keys in `inner`, so this is the
+  number upstream's `Len` reports: ready items, including those being processed
+  again, and no delayed ones. It doesn't ask `inner`, because `inner.Len` can
+  wait forever after a shutdown (below). Nothing calls `Len` today, in
+  provider-runtime or in controller-runtime v0.23.3's `pkg/`. The record's count
+  is the clearest answer that can't block, and matches `inner`'s whenever the
+  record is right.
+
+This breaks the rule that every call into `inner` happens under the queue's lock,
+and here is why that's safe. Once `inner` is shut down it hands nothing out:
+`GetWithPriority` returns at once (`:425-428`) and `AddWithOpts` drops the item
+(`:153-156`). The record exists so that a grant always finds an item to hand
+out, and after shutdown no grant is honoured, so it no longer has to match
+anything. Each operation racing a shutdown:
+
+- **A grant** made before the queue is marked shut wakes a worker. That worker
+  either finds the queue shut and hands the slot back, or pops, gets `shutdown`
+  from `inner` and releases the slot. Either way the slot is released once.
+- **A pop** inside `inner` either gets the item, a normal pop, or `shutdown`.
+  Upstream can also return the item together with `shutdown=true` (`:445-446`).
+  The queue then drops it, without reporting, and releases the slot.
+- **`Done`** still gives the slot back after a shutdown. It doesn't call
+  `inner.Done`, for a reason found while building this. If `done` closes while
+  upstream's hand-out goroutine is sending to the pop on the unbuffered `get`
+  channel (`:400`), the pop can leave on `done`. The goroutine then blocks
+  forever, holding `w.lock` and `w.lockedLock` (`:369-383`), and every later
+  `inner.Done` (`:468`) and `inner.Len` (`:490`) waits for good. That wasn't
+  reachable before, because no pop could be inside `inner` at `ShutDown`. It is
+  now. On v0.23.3's own queue, with a shutdown racing a hand-out, `Done` never
+  returned in 2,788 of 200,000 runs
+  (`hack/review-2026-11-07/upstream_shutdown_wedge_test.go.txt`). Skipping
+  `inner.Done` once `stopping` is set is sound. The pop that could leave the
+  hand-out stuck held the queue's lock and saw `done` closed, which comes after
+  `stopping` was set, so any `Done` that takes the lock after it sees `stopping`.
+  After shutdown `inner`'s record of processing keys is never read again. One
+  cost: `inner`'s own unfinished-work metric keeps those keys, on a queue that
+  is going away.
+
+The tests:
+- `TestShutDownEndsAStuckPop`: a stuck pop, then `ShuttingDown`, `Len` and
+  `ShutDown` must each return within a deadline, with no broken record reported
+  and the slot given back. It fails on `22df378` on all three counts.
+- `TestAPopRacingShutDownReportsNoBrokenRecord`: 200 races per run. Both outcomes
+  occur, no broken record, every slot given back, and `Done` after shutdown
+  returns.
+- `TestDoneAfterShutDownSkipsInner`: an `inner` that wedges as upstream can.
+  `Done` and `Len` must not touch it after shutdown. It fails on `22df378`.
+- `TestShutDownTwiceAndAtOnce` and `TestLenCountsReadyItems` cover the rest, and
+  the record check compares `Len` with `ready` throughout.
 
 **The `QueueWaitRecorder` wrapper.** At `d0632f1` it lacked `AddWithOpts` and
 `GetWithPriority`, so controller-runtime wrapped it and every item ran at
@@ -314,7 +388,9 @@ no status write. Key deferrals, throttled and at capacity, don't change. What
 shows instead:
 
 - `provider_runtime.ratelimit.local.capacity` and the saturation input gauges,
-  names unchanged;
+  names unchanged. With saturation off, the local capacity gauge reports nothing:
+  nothing is gated on it then, and a value would read as a limit. core-provider's
+  runtime does the same, so dashboards read alike for both;
 - the `deferrals` counter keeps its name and its `throttled` and `capacity` causes
   for keys; `saturated` and `ramping` stop appearing;
 - the existing log line when capacity is cut.
@@ -448,6 +524,25 @@ possibly clean counts) and the CPU threshold.
   the new lines (`hack/revert-check-local-slot-containment.txt`) killed 9 of 10;
   the survivor, a grant handed back at shutdown leaving `popping` set, is
   equivalent, because a shut queue is granted nothing either way.
+- **core-provider's review of #40** found three things. (1) `ShutDown` couldn't
+  wake a stuck pop, so graceful shutdown hung in the watchdog's case. (2) `Len`
+  and `ShuttingDown` blocked behind a stuck pop. (3) The local capacity gauge
+  reported a value with saturation off, when nothing enforces one. The fixes
+  are in §4, "Shutdown, outside the lock", and §6. Building (1) found that
+  shutting `inner` down while a pop is inside it makes an upstream hazard
+  reachable: `inner`'s `Done` and `Len` can then wait forever. On v0.23.3 that
+  happened in 2,788 of 200,000 runs. So `Done` skips `inner` once shutdown has
+  begun, and `Len` reads the record.
+  `TestShutDownEndsAStuckPop` and `TestDoneAfterShutDownSkipsInner` fail on
+  `22df378` and pass after. `TestShutDownDuringAPopInsideInnerReturns` now
+  expects the pop to return `shutdown`, not the item. Test helpers that run
+  code in a goroutine now report a panic as a failure, so a mutant that panics
+  is killed by assertion instead of ending the package's run. The revert check
+  over the new lines (`hack/revert-check-local-slot-shutdown.txt`) killed 11 of
+  11 by assertion. Under `-race`, the containment, shutdown and interleaving
+  tests passed 50 times each (700 in 57s; the racing test runs 200 races a
+  pass), and the stress and concurrent record tests 50 times each (620s). No
+  failure and no data race.
 - **The fix under `-race`, 200 runs each:** the review's two interleavings, the
   delayed-add window, shutdown during a pop and a pop the record disagrees with,
   1,000 passes in 187s; the stress test, 200 passes of 20 runs each in 1,261s;

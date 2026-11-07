@@ -2,7 +2,9 @@ package ratelimit
 
 import (
 	"context"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,13 +12,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
 )
 
-// returnsWithin reports whether f returns within d.
+// returnsWithin reports whether f returns, without panicking, within d. A
+// panic counts as not returning, so it fails the caller's check rather than
+// ending the package's run.
 func returnsWithin(d time.Duration, f func()) bool {
 	done := make(chan struct{})
-	go func() { f(); close(done) }()
+	ok := false
+	go func() {
+		defer close(done)
+		defer func() { _ = recover() }()
+		f()
+		ok = true
+	}()
 	select {
 	case <-done:
-		return true
+		return ok
 	case <-time.After(d):
 		return false
 	}
@@ -250,5 +260,191 @@ func TestAPopEndingDuringTheSkipLosesNoGrant(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("the grant was lost: k waits with a slot free (in flight %d)", g.inFlight())
+	}
+}
+
+// ShutDown ends a stuck pop: it shuts inner down before it takes the queue's
+// lock, which the pop holds, and inner's ShutDown is what wakes the pop. Before,
+// graceful shutdown hung in exactly the case the watchdog exists for.
+// ShuttingDown and Len take no lock, so they answer meanwhile. The pop that
+// ShutDown ends is no broken record, and it gives back its grant's slot.
+func TestShutDownEndsAStuckPop(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(4)
+	a := newGatedQueue[string](g, "a", nil, utilclock.RealClock{})
+	before := brokenBooks.Load()
+	t.Cleanup(func() { brokenBooks.Store(before) })
+	t.Cleanup(func() { returnsWithin(5*time.Second, a.ShutDown) })
+	unstick := stuckPop(t, g, a)
+	t.Cleanup(unstick)
+
+	const d = time.Second
+	var shutting bool
+	if !returnsWithin(d, func() { shutting = a.ShuttingDown() }) {
+		t.Error("ShuttingDown did not return while a pop was stuck")
+	} else if shutting {
+		t.Error("ShuttingDown reported true before ShutDown")
+	}
+	if !returnsWithin(d, func() { a.Len() }) {
+		t.Error("Len did not return while a pop was stuck")
+	}
+	if !returnsWithin(2*time.Second, a.ShutDown) {
+		t.Fatal("ShutDown did not return while a pop was stuck: graceful shutdown hangs")
+	}
+	if !a.ShuttingDown() {
+		t.Error("ShuttingDown reported false after ShutDown")
+	}
+	if got := brokenBooks.Load() - before; got != 0 {
+		t.Errorf("the pop ShutDown ended was reported as a broken record (%d reports)", got)
+	}
+	eventually(t, "the stuck pop's slot given back", func() bool { return g.inFlight() == 0 })
+}
+
+// A normal pop racing ShutDown: inner either hands the item out or ends the pop
+// with shutdown, and neither is a broken record. A popped item's Done after the
+// shutdown still gives its slot back, and no slot stays in flight.
+func TestAPopRacingShutDownReportsNoBrokenRecord(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(1)
+	before := brokenBooks.Load()
+	gotItem, gotShutdown := 0, 0
+	for i := range 200 {
+		q := newGatedQueue[string](g, "race", nil, utilclock.RealClock{})
+		h := &hookedInner{PriorityQueue: q.inner}
+		q.inner = h
+		shutDown := make(chan struct{})
+		// ShutDown starts as the pop enters inner, a little later each run, so
+		// some runs end the pop inside inner and some find it handed out.
+		h.beforeGet = func() {
+			go func() {
+				for range i % 40 {
+					runtime.Gosched()
+				}
+				q.ShutDown()
+				close(shutDown)
+			}()
+		}
+		q.Add("k")
+		type result struct {
+			key  string
+			shut bool
+		}
+		res := make(chan result, 1)
+		go func() { k, _, s := q.GetWithPriority(); res <- result{k, s} }()
+		var r result
+		select {
+		case r = <-res:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: the pop racing ShutDown never returned", i)
+		}
+		select {
+		case <-shutDown:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: ShutDown racing a pop never returned", i)
+		}
+		if r.shut {
+			gotShutdown++
+		} else {
+			gotItem++
+			if !returnsWithin(time.Second, func() { q.Done(r.key) }) {
+				t.Fatalf("run %d: Done after ShutDown did not return", i)
+			}
+		}
+		if n := g.inFlight(); n != 0 {
+			t.Fatalf("run %d: %d slots in flight after the pop and its Done (popped %v)", i, n, !r.shut)
+		}
+		if got := brokenBooks.Load() - before; got != 0 {
+			t.Fatalf("run %d: a pop racing ShutDown was reported as a broken record (popped %v)", i, !r.shut)
+		}
+	}
+	t.Logf("200 runs: the pop got the item %d times, shutdown %d times", gotItem, gotShutdown)
+}
+
+// wedgingInner stands for upstream's priority queue after a shutdown that
+// raced a hand-out: its hand-out goroutine sends on the unbuffered get channel
+// holding the locks Done and Len take (priorityqueue.go:369-400), the pop it
+// was for has left on done (:436-444), and the send never completes. From then
+// on its Done and Len never return.
+type wedgingInner struct {
+	priorityqueue.PriorityQueue[string]
+	shut   atomic.Bool
+	wedged chan struct{}
+}
+
+func (w *wedgingInner) ShutDown() { w.shut.Store(true); w.PriorityQueue.ShutDown() }
+
+func (w *wedgingInner) Done(key string) {
+	if w.shut.Load() {
+		<-w.wedged
+	}
+	w.PriorityQueue.Done(key)
+}
+
+func (w *wedgingInner) Len() int {
+	if w.shut.Load() {
+		<-w.wedged
+	}
+	return w.PriorityQueue.Len()
+}
+
+// Once ShutDown has begun the queue calls neither inner's Done nor its Len, so
+// a worker that finishes after the shutdown gives its slot back and returns.
+func TestDoneAfterShutDownSkipsInner(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(1)
+	q := gated(t, g, "wedge")
+	w := &wedgingInner{PriorityQueue: q.inner, wedged: make(chan struct{})}
+	t.Cleanup(func() { close(w.wedged) })
+	q.inner = w
+	got, _ := workers(q, 1)
+	q.Add("k")
+	k := receive(t, got)
+	within(t, "ShutDown", q.ShutDown)
+	if !returnsWithin(time.Second, func() { q.Done(k.key) }) {
+		t.Fatal("Done after ShutDown waited on inner")
+	}
+	if n := g.inFlight(); n != 0 {
+		t.Errorf("%d slots in flight after the held item's Done", n)
+	}
+	if !returnsWithin(time.Second, func() { q.Len() }) {
+		t.Error("Len after ShutDown waited on inner")
+	}
+}
+
+// ShutDown may be called more than once, and at once: inner's ShutDown, which
+// panics the second time, runs once.
+func TestShutDownTwiceAndAtOnce(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	q := gated(t, g, "twice")
+	shut := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("ShutDown panicked: %v", r)
+			}
+		}()
+		q.ShutDown()
+	}
+	var wg sync.WaitGroup
+	wg.Go(shut)
+	wg.Go(shut)
+	within(t, "two ShutDowns at once", wg.Wait)
+	within(t, "a third ShutDown", shut)
+}
+
+// Len counts what the priority queue counts, ready items and not delayed ones,
+// from the record.
+func TestLenCountsReadyItems(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(1)
+	q := gated(t, g, "len")
+	q.AddWithOpts(priorityqueue.AddOpts{}, "a", "b")
+	q.AddAfter("later", time.Hour)
+	if got := q.Len(); got != 2 {
+		t.Errorf("Len = %d with two ready items and one delayed, want 2", got)
+	}
+	got, _ := workers(q, 1)
+	receive(t, got)
+	if got := q.Len(); got != 1 {
+		t.Errorf("Len = %d after one was popped, want 1", got)
 	}
 }

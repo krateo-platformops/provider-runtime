@@ -328,6 +328,8 @@ func checkBooks(q *gatedQueue[string]) error {
 		return fmt.Errorf("granted %d, idle %d, free %d", q.granted, q.idle, q.free)
 	case q.inner.Len() != len(q.ready):
 		return fmt.Errorf("inner holds %d ready items, the record %d", q.inner.Len(), len(q.ready))
+	case q.Len() != len(q.ready):
+		return fmt.Errorf("Len = %d, the record holds %d ready keys", q.Len(), len(q.ready))
 	}
 	return nil
 }
@@ -493,9 +495,11 @@ func TestReleasingASlotThatIsNotHeldIsReported(t *testing.T) {
 	brokenBooks.Store(before) // this one was on purpose
 }
 
-// A pop waits inside inner, holding the queue's lock, while ShutDown is called:
-// ShutDown waits for the lock, inner's own dispatcher still hands the counted
-// item out, the pop returns it, and then ShutDown runs. Neither hangs.
+// A pop enters inner, holding the queue's lock, while ShutDown is called:
+// ShutDown shuts inner down without waiting for that lock, so the pop returns
+// shutdown rather than the item, reports no broken record, and gives back its
+// slot. Neither hangs. (Before core-provider's review ShutDown waited for the
+// lock and the pop returned the item; design §4, "Shutdown".)
 func TestShutDownDuringAPopInsideInnerReturns(t *testing.T) {
 	g, _ := saturationGovernor(t, 4, "healthy", false)
 	q := newGatedQueue[string](g, "shutdown-in-pop", nil, clocktesting.NewFakeClock(time.Now()))
@@ -510,28 +514,36 @@ func TestShutDownDuringAPopInsideInnerReturns(t *testing.T) {
 			close(shutdownDone)
 		}()
 		<-shutdownCalled
-		time.Sleep(100 * time.Millisecond) // ShutDown is now waiting for the lock
+		// ShutDown then waits for the lock this pop holds; inner is shut down
+		// first, before the pop calls it.
+		for deadline := time.Now().Add(5 * time.Second); !h.ShuttingDown(); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				return // the pop then waits on inner, and the test's deadline reports it
+			}
+		}
 	}
+	before := brokenBooks.Load()
 	q.Add("k")
-	popped := make(chan string, 1)
-	go func() { k, _, _ := q.GetWithPriority(); popped <- k }()
-	var k string
+	type result struct {
+		key  string
+		shut bool
+	}
+	popped := make(chan result, 1)
+	go func() { k, _, s := q.GetWithPriority(); popped <- result{k, s} }()
+	var r result
 	select {
-	case k = <-popped:
+	case r = <-popped:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the pop did not return while ShutDown was waiting")
+		t.Fatal("the pop did not return after ShutDown")
 	}
-	if k != "k" {
-		t.Errorf("popped %q, want k", k)
+	if !r.shut || r.key != "" {
+		t.Errorf("popped %q (shutdown %v), want shutdown: inner was shut down before it handed k out", r.key, r.shut)
 	}
-	select {
-	case <-shutdownDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("ShutDown did not return after the pop")
+	if got := brokenBooks.Load() - before; got != 0 {
+		t.Errorf("the pop ShutDown ended was reported as a broken record (%d reports)", got)
 	}
-	q.Done(k)
 	if n := g.inFlight(); n != 0 {
-		t.Errorf("%d local slots in flight after Done, want 0", n)
+		t.Errorf("%d local slots in flight after the pop ShutDown ended, want 0", n)
 	}
 }
 
