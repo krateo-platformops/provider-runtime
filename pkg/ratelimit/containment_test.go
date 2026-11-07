@@ -142,18 +142,38 @@ func TestAGrantSkippedDuringAPopIsGrantedAfterIt(t *testing.T) {
 	h.beforeGet = func() {
 		once.Do(func() {
 			// While a pops a1, b finishes and frees its slot. Only a has work.
+			// The pop waits here, holding a's lock, until b's Done has returned,
+			// so the freed slot's dispatch happens during the pop. Without
+			// containment that Done would wait for a's lock; the 1s bound keeps
+			// the test from deadlocking then.
+			returned := make(chan struct{})
 			go func() {
 				start := time.Now()
 				b.Done(bItem.key)
 				doneReturned <- time.Since(start)
+				close(returned)
 			}()
-			time.Sleep(300 * time.Millisecond)
+			select {
+			case <-returned:
+			case <-time.After(time.Second):
+			}
 		})
 	}
-	gotA, _ := workers(a, 2)
+	// Bound workers, as controller-runtime's are: the one that popped a1 keeps
+	// it until released, so it doesn't come back and dispatch by itself.
+	gotA, _ := boundWorkers(a, 2)
+	// Both idle first: a worker going idle dispatches, which would grant a2
+	// by itself and hide a lost grant.
+	eventually(t, "a's workers waiting", func() bool { return idleWorkers(a) == 2 })
 	a.Add("a1")
 	a.Add("a2")
-	first := receive(t, gotA)
+	var first heldItem
+	select {
+	case first = <-gotA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a1 was never popped")
+	}
+	defer close(first.release)
 	select {
 	case took := <-doneReturned:
 		if took > 200*time.Millisecond {
@@ -164,6 +184,7 @@ func TestAGrantSkippedDuringAPopIsGrantedAfterIt(t *testing.T) {
 	}
 	select {
 	case second := <-gotA:
+		defer close(second.release)
 		if second.key == first.key {
 			t.Errorf("popped %s twice", second.key)
 		}
