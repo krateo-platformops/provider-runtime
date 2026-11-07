@@ -482,10 +482,9 @@ func TestAReconcilerWithoutAGatedQueueLogsAnError(t *testing.T) {
 // slots taken than capacity allows, and every pop the highest priority
 // available.
 //
-// RLGOV_MODEL_RUNS sets the number of runs (default defaultModelRuns: 200, or 20
-// under the race detector), each of 120 steps.
+// RLGOV_MODEL_RUNS sets the number of runs (default 200), each of 120 steps.
 func TestGatedQueueMatchesTheModel(t *testing.T) {
-	runs := defaultModelRuns
+	runs := 200
 	if v, err := strconv.Atoi(os.Getenv("RLGOV_MODEL_RUNS")); err == nil && v > 0 {
 		runs = v
 	}
