@@ -475,9 +475,10 @@ func TestAReconcilerWithoutAGatedQueueLogsAnError(t *testing.T) {
 // slots taken than capacity allows, and every pop the highest priority
 // available.
 //
-// RLGOV_MODEL_RUNS sets the number of runs (default 200), each of 120 steps.
+// RLGOV_MODEL_RUNS sets the number of runs (default defaultModelRuns: 200, or 20
+// under the race detector), each of 120 steps.
 func TestGatedQueueMatchesTheModel(t *testing.T) {
-	runs := 200
+	runs := defaultModelRuns
 	if v, err := strconv.Atoi(os.Getenv("RLGOV_MODEL_RUNS")); err == nil && v > 0 {
 		runs = v
 	}
@@ -489,7 +490,7 @@ func TestGatedQueueMatchesTheModel(t *testing.T) {
 	t.Logf("%d runs: %d pops, %d of them while another key was available at a lower priority, %d delayed items came due, %d re-adds while processing, %d capacity changes, %d Done",
 		runs, total.pops, total.contested, total.due, total.reAdds, total.capacityChanges, total.dones)
 	// The test proves nothing if the interesting cases never happen.
-	if runs >= 50 && (total.contested == 0 || total.due == 0 || total.reAdds == 0 || total.capacityChanges == 0) {
+	if runs >= 20 && (total.contested == 0 || total.due == 0 || total.reAdds == 0 || total.capacityChanges == 0) {
 		t.Errorf("the runs never exercised a case: %+v", total)
 	}
 }

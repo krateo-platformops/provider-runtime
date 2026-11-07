@@ -12,6 +12,8 @@ docs/design-rate-limit-governor.md: design (implemented, off by default) for slo
 pkg/ratelimit/signal.go: the rate-limit Signal, Report and the context sink
 pkg/ratelimit/governor.go: the per-key governor and its non-blocking Acquire
 pkg/ratelimit/saturation.go: the cgroup v2 saturation sampler (local capacity)
+pkg/ratelimit/queue.go: the gated queue: the local slot is taken before the pop and given back in Done
+docs/design-local-slot-before-pop.md: design (implemented) for taking the local slot before the pop
 pkg/ratelimit/httpsignal/httpsignal.go: http.RoundTripper reporting GitHub and Azure DevOps rate-limit headers
 pkg/reconciler/ratelimit.go: RateLimitKeyer, RateLimitKeysProvider, WithRateLimitGovernor and the deferral path
 pkg/reconciler/reconcilertest/ratelimit.go: AssertReportsRateLimits, the conformance helper for providers

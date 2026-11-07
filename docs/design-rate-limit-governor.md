@@ -4,7 +4,7 @@ title: provider-runtime — automatic slow-down under rate limits and controller
 description: Design, implemented in provider-runtime, for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU is saturated, with an experimental memory input, aligned with unstructured-runtime's design.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, reconciler, workqueue]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 # Automatic slow-down under rate limits and controller saturation
@@ -136,8 +136,8 @@ type RateLimitKeyer interface {
 - A connector or external client that implements it is gated per endpoint.
   One that doesn't is not gated per endpoint, so the per-endpoint governor is
   opt-in per provider as well as per process. The keyer is needed only for
-  per-endpoint API limits. With saturation enabled (§7), every gated call
-  still needs a `local` slot, keyer or not.
+  per-endpoint API limits. With saturation enabled (§7), every reconcile
+  still needs a `local` slot, keyer or not, taken by the queue before the pop.
 - A `Signal` whose `Key` differs from the keyer's key is still applied to its
   own key. A reconcile can learn about an endpoint it didn't expect, for
   example after a redirect.
@@ -244,86 +244,70 @@ measurement it read 0.00 up to every OOMKill. A Go controller's memory is
 anonymous, and with no swap the kernel has nothing to reclaim, so nothing
 stalls before the OOM killer acts. The user decided to drop it (§11).
 
-**Where it hooks in: the gate from §5, with a process-wide capacity.** The
-governor already keeps a capacity per key. Saturation adds one more capacity,
-`local`, which bounds in-flight gated calls across *all* keys, and the calls
-of providers that have no key at all:
+**Where it hooks in: the queue, with a process-wide capacity.** The governor
+already keeps a capacity per key. Saturation adds one more capacity, `local`,
+which bounds the reconciles in flight across every controller sharing the
+governor. It is taken before the pop, not inside the reconcile: low capacity
+then behaves like fewer workers, the queue's order is the order work runs in,
+and nothing is popped that can't run. The first implementation gated each call
+inside the reconcile, so a popped item that found `local` full was deferred for
+1s to 30s and slept through any slot that freed meanwhile, while whatever came
+next in the queue took it: the inversion core-provider found in
+unstructured-runtime#72. The design of the fix is
+[design-local-slot-before-pop](./design-local-slot-before-pop.md):
 
+- `ForControllerRuntime` builds each controller's queue as a gated queue
+  (`ratelimit.NewGatedQueue`) when saturation is on. A worker asks for a slot
+  only when its queue has an item to hand out, so an idle worker holds nothing,
+  and one controller's idle workers can't starve another's backlog. The slot is
+  given back in `Done`, which controller-runtime calls when the reconcile
+  returns, on every path including a panic, so it covers the whole reconcile.
+- When several queues have work, freed slots go round-robin across them.
 - One sampler goroutine reads the files every second (default) and publishes
-  the result atomically. `Acquire` reads that value and does no I/O, so the
-  hot path stays as cheap as §4 requires. A faster period only matters to the
-  experimental memory input. It doesn't make CPU pressure react faster:
-  `avg10` is already a 10-second average.
-- A keyed call needs a slot in both its key and `local`. With saturation on,
-  a call without a key (the provider implements no `RateLimitKeyer`, or it
-  returned an empty key or an error) needs a `local` slot only.
+  the result atomically. Neither `Acquire` nor the queues do I/O. A faster
+  period only matters to the experimental memory input. It doesn't make CPU
+  pressure react faster: `avg10` is already a 10-second average.
+- A call inside the reconcile needs a slot in its keys only. A call without a
+  key isn't gated in the reconciler at all.
 - *Slow start:* `local` starts at 1, not at the ceiling, and rises by 1 per
   `StartupRampInterval` (2s by default, not tied to the sample period) until
   its first cut, so 16 workers are all admitted after about 30s.
 - *Saturated* (any input over its threshold for one sample): `local`
-  halves, with a minimum of 1. One call always keeps going, so a saturated
+  halves, with a minimum of 1. One reconcile always keeps going, so a saturated
   controller still finishes deletions and still makes progress. Halving is
   rate-limited to once per sample period, so one bad second can't drive
-  capacity to 1.
+  capacity to 1. Reconciles already running keep their slots.
 - *Recovery:* one rule, whichever input made the cut. After any cut, +1 per
   clean `RecoveryInterval` (30s by default), up to the ceiling: the same as §2
   for API limits. A saturated sample during recovery halves again and restarts
-  the interval, and one at the floor counts as a cut too.
+  the interval, and one at the floor counts as a cut too. A rise is granted to
+  a waiting worker at once.
 - *Experimental memory input, soft ratio:* at 80% of `memory.max` by default
   (provisional), `local` halves.
 - *Experimental memory input, hard ratio:* at 90% of `memory.max` by default
-  (provisional), `local` drops to 1 at once rather than halving. The one-call
-  floor still applies, and that call can be the OOMKill (§11).
+  (provisional), `local` drops to 1 at once rather than halving. The one-reconcile
+  floor still applies, and that reconcile can be the OOMKill (§11).
 
-**Requirement on providers: do expensive work inside the gated calls.**
-`local` throttles only the work that runs inside a gated call: `Connect`
-and the `ExternalClient` methods (`Observe`, `Create`, `Update`, `Delete`).
-A provider's expensive work (rendering templates, cloning repositories,
-large API reads) must happen inside those calls, not before them in the
-provider's own code. Work done outside them is not bounded by `local`.
-Don't refactor that work out of the gated call: doing so silently removes
-the throttle from exactly the work that causes saturation, and nothing fails
-to tell you. The runtime side is pinned by
-`TestLocalCapacityBoundsConcurrentObserveBodies` and
-`TestProviderWithoutKeyerIsBoundedByLocal` in `pkg/reconciler`; the provider
-side is the provider's to keep.
+**No requirement on providers.** The slot covers the whole reconcile, so a
+provider's expensive work is bounded wherever it happens. The first
+implementation bounded only the work inside the gated calls and had to require
+providers to keep it there.
 
-**A saturation deferral uses the same contract as any other.** It writes
-`Synced=False/ReconcileDeferred`, leaves `Ready` unchanged, returns
-`RequeueAfter` with a nil error, and uses the jittered "waiting for
-capacity" interval from §5. The message names the cause and no key, for
-example `controller saturated: CPU pressure 63% (some avg10)`, or
-`controller recovering its local concurrency limit (2 call(s) in flight
-allowed); waiting for capacity`, so an operator can tell a full controller from
-a throttling vendor. It gets no new reason. A consumer that knows
-`ReconcileDeferred` already reads it correctly: the object was not assessed
-this pass, and it says why.
+**The controller's own saturation is not written on the object.** It isn't a
+state of the object, so a full `local` defers nothing: the item waits in the
+queue, with no `Synced=False/ReconcileDeferred`, no event and no status write.
+It shows in `provider_runtime.ratelimit.local.capacity` and the input gauges.
+Key deferrals, throttled and at capacity, keep the contract of §5.
 
-**The exception: a startup-ramp deferral is quiet (decided by the user).** While
-`local` is on its startup ramp, before its first cut and with nothing saturated,
-a pass deferred by the local capacity requeues with a nil error and changes
-nothing: no `Synced`, no event, and no status write made for the deferral. The
-ramp lasts about 30s and says nothing about the object. Without this, a restart
-turned the whole fleet `Synced=False`: 200 healthy objects made 200 status
-updates, 200 at `ReconcileDeferred` and 0 provider calls. The rules:
-
-- It applies only to that case, carried as its own reason, `DeferRamping`. These
-  still write `Synced=False/ReconcileDeferred`: throttled, per-key at-capacity,
-  saturated, and at-capacity after a cut, also during the ramp if a key is
-  throttled.
-- Quiet means no write *for the deferral*, not dropping an assessment. A pass
-  deferred after `Observe` doesn't set the deferred condition, but if the object
-  differs from what was read, as with a fresh `Ready`, it is written.
-- The requeue is 1s to the time the ramp still needs, capped at the
-  `RecoveryInterval`, so a deferred object is back before the ramp ends. The
-  usual 1s to `RecoveryInterval` could hold it past the end of a short ramp.
-- The `deferrals` metric counts these under their own cause, `ramping`, so a
-  restart is visible there while status stays quiet.
-- Quiet needs a running sampler. Only the sampler raises `local`, so a Governor
-  whose sampler never started stays at 1, and that must not pass for the ramp.
-  Until `Start` runs, a local deferral writes `Synced=False/ReconcileDeferred`
-  and says the sampler isn't running. `SetupRateLimitGovernor` adds the Governor
-  to the manager; a provider calling `ratelimit.New` must do that itself.
+**The trap that stays: a sampler that never started.** Only the sampler raises
+`local`, so a Governor whose sampler never ran stays at 1 and runs one reconcile
+at a time, now with no sign on the object. Until the first sample every input
+reports as disabled, so `saturation.input.enabled` is 0.
+`SetupRateLimitGovernor` adds the Governor to the manager; a provider calling
+`ratelimit.New` must do that itself. `Start` logs an error when more
+reconcilers registered than controllers had their queue gated, which catches a
+controller built without `ForControllerRuntime`, and warns when a second
+Governor with saturation runs in the same process.
 
 **When the input isn't there, the input is off, not the controller.**
 
@@ -352,7 +336,8 @@ updates, 200 at `ReconcileDeferred` and 0 provider calls. The rules:
 env set by each chart and nothing in any CRD:
 
 - whether saturation is enabled at all, independently of the rate-limit
-  input;
+  input; with it on, `UsePriorityQueue=false` is an error, because the gated
+  queue is a priority queue;
 - the sample period, 1s by default;
 - the startup ramp interval, 2s by default;
 - the CPU pressure threshold, 50% by default (provisional);
@@ -371,7 +356,7 @@ question 5.
   prefix: per-key capacity, deferrals, seconds to reset, and signals by
   kind.
   Saturation (§7) adds `local` capacity, each input's current value, and
-  deferrals by cause (`throttled`, `capacity`, `saturated`, `ramping`). A disabled
+  deferrals by cause (`throttled`, `capacity`). A disabled
   input reports as disabled, not as zero, since zero reads as healthy.
 - **An event:** a Normal `ReconcileDeferred` event on the first deferral of an
   object per throttle window. It goes through the throttled recorder, so a
@@ -506,8 +491,8 @@ Where the implementation made a choice this design leaves open:
    `--max-reconcile-rate` workers, against one endpoint. A ceiling of one
    controller's workers would cap a healthy endpoint below today's total.
    Each `reconciler.WithRateLimitGovernor` registers one reconciler.
-5. **Decided (the user, 2026-11-05): saturation bounds every gated call,
-   keyer or not.** With saturation enabled, `Connect` and every
+5. **Decided (the user, 2026-11-05), then replaced by item 18: saturation bounds
+   every gated call, keyer or not.** With saturation enabled, `Connect` and every
    `ExternalClient` call need a `local` slot even when the provider
    implements no `RateLimitKeyer`. The keyer is needed only for per-endpoint
    API limits. A local deferral's message names the cause and no key. The
@@ -664,3 +649,14 @@ gates are met.
       endpoints from every method.
     - unstructured-runtime doesn't need this unless one of its objects spans
       two scopes. `Signal`, `Classify` and the deferral wording are unchanged.
+18. **Built: the local slot is taken before the pop. Decided by the user on
+    2026-11-07,** after core-provider found the inversion in
+    unstructured-runtime#72 and the same shape here by reading. The design,
+    its options and the decisions are in
+    [design-local-slot-before-pop](./design-local-slot-before-pop.md). It
+    replaces items 5 and 13's local deferrals and the quiet startup ramp:
+    `DeferSaturated`, `DeferRamping`, `Deferral.Local` and `Deferral.Cause` are
+    gone, a keyless call isn't gated, and nothing is written on the object for
+    the controller's own saturation. It changes user-visible behaviour of an
+    off-by-default feature, so it is a minor release. Both measurement blocks of
+    item 16 measured the old gate and are repeated on the combined code.
