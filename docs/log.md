@@ -12,7 +12,7 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## 2026-11-07 — unreleased patch: queue telemetry keeps item priorities
+## 2026-11-07 — v1.10.1: queue telemetry keeps item priorities
 - **With `QueueWaitRecorder` set, the priority queue now honours priorities.**
   The instrumented wrapper implemented only the plain workqueue interface, so
   controller-runtime wrapped it again and ran every item at priority 0: spec
