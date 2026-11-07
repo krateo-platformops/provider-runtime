@@ -1,0 +1,69 @@
+baseline passed
+
+KILLED    a slot is granted with no item to hand out
+          TestDoneGivesBackOneSlotPerPop,TestFreedSlotsGoRoundRobinAcrossQueues,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0,TestGatedQueuePopsOnlyWithAL
+KILLED    a slot is granted with no idle worker
+          TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0
+KILLED    a shut queue is granted slots
+          TestAShuttingDownQueueGetsNoSlot
+KILLED    Done gives no slot back
+          TestAPanickingReconcileGivesItsSlotBack,TestDoneGivesBackOneSlotPerPop,TestForControllerRuntimeGatesTheQueueWithSaturation,TestForControllerRuntimeGatesTheQueue
+KILLED    Done for an unknown key gives a slot back
+          TestDoneGivesBackOneSlotPerPop
+KILLED    a key re-added while processing never comes back
+          TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0,TestReAddWhileProcessingRunsAfterDone
+KILLED    a re-add while processing counts as available
+          TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0
+KILLED    an idle worker doesn't ask for a slot
+          TestAPanickingReconcileGivesItsSlotBack,TestCapacityRiseWakesAWaitingWorker,TestDoneGivesBackOneSlotPerPop,TestForControllerRuntimeGatesTheQueueWithSaturation,T
+KILLED    an add doesn't ask for a slot
+          TestFreedSlotsGoRoundRobinAcrossQueues,TestGatedQueueDelaysAndRateLimits,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0,TestIdleWorkersHoldNoLoca
+KILLED    a delayed key's priority is lost when added now
+          TestGatedQueueDelaysAndRateLimits,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0
+KILLED    a delayed add of a ready key delays it
+          TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0
+KILLED    a delay is never shortened
+          TestALateTimerDoesNothing,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
+KILLED    a delayed key's higher priority is dropped
+          TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
+KILLED    keys due together come due one by one
+          TestKeysDueTogetherBecomeReadyTogether
+KILLED    a late timer runs a rescheduled entry
+          TestALateTimerDoesNothing
+KILLED    rate-limited adds ignore the limiter
+          TestGatedQueueDelaysAndRateLimits,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/0
+KILLED    shutdown doesn't wake waiting workers
+          TestAShuttingDownQueueGetsNoSlot,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1,TestHighPriorityRunsNextWhenTheLocalSlotFrees,TestIdleWorkersOfOn
+KILLED    shutdown keeps a granted slot
+          TestShutDownReturnsASlotGrantedButNotPopped
+KILLED    a pop that finds the queue shut keeps its slot
+          TestAPopOnAShutQueueGivesTheSlotBack
+KILLED    grants go to the same queue first
+          TestFreedSlotsGoRoundRobinAcrossQueues
+KILLED    grants exceed capacity
+          TestAShuttingDownQueueGetsNoSlot,TestCapacityRiseWakesAWaitingWorker,TestForControllerRuntimeGatesTheQueueWithSaturation,TestForControllerRuntimeGatesTheQueueWi
+KILLED    a released slot isn't granted on
+          TestForControllerRuntimeGatesTheQueueWithSaturation,TestForControllerRuntimeGatesTheQueueWithSaturation/no_recorder,TestForControllerRuntimeGatesTheQueueWithSat
+KILLED    a capacity rise isn't granted
+          TestCapacityRiseWakesAWaitingWorker
+KILLED    no warning for a second sampler
+          TestASecondSaturationGovernorWarns
+KILLED    no error for an ungated reconciler
+          TestAReconcilerWithoutAGatedQueueLogsAnError,TestAReconcilerWithoutAGatedQueueLogsAnError/2_reconcilers,_1_gated,TestForControllerRuntimeRegistersTheGatedContro
+KILLED    calls take a local slot again
+          TestCallsTakeNoLocalSlot
+SURVIVED  a keyless call goes to the governor (expected equivalent: AcquireAll gates nothing without keys)
+          
+SURVIVED  AcquireAll without keys asks the governor (expected equivalent: acquire with no keys takes nothing)
+          
+KILLED    ForControllerRuntime doesn't gate
+          TestForControllerRuntimeGatesTheQueueWithSaturation,TestForControllerRuntimeGatesTheQueueWithSaturation/no_recorder,TestForControllerRuntimeGatesTheQueueWithSat
+KILLED    ForControllerRuntime doesn't register the controller
+          TestForControllerRuntimeRegistersTheGatedController,TestForControllerRuntimeRegistersTheGatedController/gated
+KILLED    the recorder isn't applied to a gated queue
+          TestForControllerRuntimeGatesTheQueueWithSaturation,TestForControllerRuntimeGatesTheQueueWithSaturation/with_a_QueueWaitRecorder
+KILLED    saturation with UsePriorityQueue=false is accepted
+          TestSaturationWithUsePriorityQueueOffIsAnError
+
+KILLED=30 SURVIVED=2 of 32
+tree restored
