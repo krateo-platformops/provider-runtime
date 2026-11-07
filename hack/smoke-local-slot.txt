@@ -1,0 +1,22 @@
+# greetings: name ready synced-reason
+g00 True ReconcileSuccess
+g01 True ReconcileSuccess
+g02 True ReconcileSuccess
+g03 True ReconcileSuccess
+g04 True ReconcileSuccess
+g05 True ReconcileSuccess
+g06 True ReconcileSuccess
+g07 True ReconcileSuccess
+g08 True ReconcileSuccess
+g09 True ReconcileSuccess
+g10 True ReconcileSuccess
+g11 True ReconcileSuccess
+# ready: 12 of 12
+# ReconcileDeferred: 0
+# controller still running: yes
+# governor lines, and every ERROR or WARN line, from the controller's log:
+# error and warn lines: 0
+{"timestamp":"2026-11-07T13:28:01.222331Z","level":"INFO","msg":"Saturation sampler started","service.name":"greeting-controller","service":"greeting-controller","logger":"ratelimit","cgroup":"/sys/fs/cgroup","samplePeriod":"1s","SeverityNumber":9}
+{"timestamp":"2026-11-07T13:28:01.222425Z","level":"INFO","msg":"Saturation input disabled; the other inputs still apply","service.name":"greeting-controller","service":"greeting-controller","logger":"ratelimit","input":"cpu_pressure","reason":"no cgroup v2 directory at /sys/fs/cgroup: open /sys/fs/
+{"timestamp":"2026-11-07T13:28:01.222433Z","level":"INFO","msg":"Saturation input disabled; the other inputs still apply","service.name":"greeting-controller","service":"greeting-controller","logger":"ratelimit","input":"memory_working_set","reason":"no cgroup v2 directory at /sys/fs/cgroup: open /s
+# stopped
