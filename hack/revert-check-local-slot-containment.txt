@@ -1,6 +1,6 @@
 baseline passed
 
-only: ['containment:', 'the pop calls inner outside'] 10 mutants
+only: ['containment', 'second race'] 10 mutants
 
 KILLED    the pop calls inner outside the lock (the review's second race)
           TestAddAfterDuringAPopKeepsItsDelay,TestAddDuringAPopIsNotLost,TestGatedQueueDrainsUnderConcurrentAddsAndDones,TestGatedQueueRecordStaysExactUnderConcurrency,Te
