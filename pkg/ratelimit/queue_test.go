@@ -78,6 +78,63 @@ func boundWorkers(q priorityqueue.PriorityQueue[string], n int) (<-chan heldItem
 	return out, wg.Wait
 }
 
+// within runs f and fails the test when it hasn't returned after 5s. A test of
+// the gated queue must fail by its own assertion, not hang until go test's
+// timeout: the revert check counts a hang as nothing.
+func within(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { f(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return within 5s", what)
+	}
+}
+
+// shutDownWithin shuts q down, and reports when that hangs, for cleanups.
+func shutDownWithin(t *testing.T, q *gatedQueue[string]) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { q.ShutDown(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("ShutDown did not return within 5s: something holds the queue's lock")
+	}
+}
+
+// stepWithin advances clk, failing when a timer callback blocks the step.
+func stepWithin(t *testing.T, clk *clocktesting.FakeClock, d time.Duration) {
+	t.Helper()
+	within(t, "the clock step", func() { clk.Step(d) })
+}
+
+// popWithin pops one item from q, failing when none comes within 5s.
+func popWithin(t *testing.T, q *gatedQueue[string]) string {
+	t.Helper()
+	ch := make(chan string, 1)
+	go func() { k, _, _ := q.GetWithPriority(); ch <- k }()
+	select {
+	case k := <-ch:
+		return k
+	case <-time.After(5 * time.Second):
+		t.Fatal("no item was popped within 5s")
+		return ""
+	}
+}
+
+// lockWithin takes q's lock, failing when it can't within 5s: a pop stuck in
+// inner holds it.
+func lockWithin(t *testing.T, q *gatedQueue[string], what string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !q.mu.TryLock(); time.Sleep(100 * time.Microsecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: the queue's lock was not free within 5s", what)
+		}
+	}
+}
+
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
@@ -124,7 +181,7 @@ func (g *Governor) setLocalCapacity(c int) {
 func gated(t *testing.T, g *Governor, name string) *gatedQueue[string] {
 	t.Helper()
 	q := newGatedQueue[string](g, name, nil, clocktesting.NewFakeClock(time.Now()))
-	t.Cleanup(q.ShutDown)
+	t.Cleanup(func() { shutDownWithin(t, q) })
 	return q
 }
 
@@ -321,14 +378,14 @@ func TestGatedQueueDelaysAndRateLimits(t *testing.T) {
 	g.setLocalCapacity(4)
 	clk := clocktesting.NewFakeClock(time.Now())
 	q := newGatedQueue[string](g, "delays", workqueue.NewTypedItemExponentialFailureRateLimiter[string](time.Second, time.Minute), clk)
-	defer q.ShutDown()
+	defer shutDownWithin(t, q)
 	got, _ := workers(q, 1)
 
 	q.AddAfter("later", 10*time.Second)
 	none(t, got)
-	clk.Step(9 * time.Second)
+	stepWithin(t, clk, 9*time.Second)
 	none(t, got)
-	clk.Step(time.Second)
+	stepWithin(t, clk, time.Second)
 	q.Done(receive(t, got).key)
 
 	q.AddWithOpts(priorityqueue.AddOpts{After: time.Hour, Priority: ptrTo(5)}, "folded")
@@ -337,16 +394,16 @@ func TestGatedQueueDelaysAndRateLimits(t *testing.T) {
 		t.Errorf("popped %+v, want folded at the delayed add's priority 5, now", p)
 	}
 	q.Done("folded")
-	clk.Step(time.Hour)
+	stepWithin(t, clk, time.Hour)
 	none(t, got)
 
 	q.AddRateLimited("limited") // first failure: 1s
 	if q.NumRequeues("limited") != 1 {
 		t.Errorf("NumRequeues = %d, want 1", q.NumRequeues("limited"))
 	}
-	clk.Step(999 * time.Millisecond)
+	stepWithin(t, clk, 999*time.Millisecond)
 	none(t, got)
-	clk.Step(time.Millisecond)
+	stepWithin(t, clk, time.Millisecond)
 	q.Done(receive(t, got).key)
 	q.Forget("limited")
 	if q.NumRequeues("limited") != 0 {
@@ -366,7 +423,7 @@ func TestShutDownWakesEveryWaitingWorker(t *testing.T) {
 	q.Add("waiting")
 	running := receive(t, got)
 	q.AddAfter("delayed", time.Hour)
-	q.ShutDown()
+	within(t, "ShutDown", q.ShutDown)
 	done := make(chan struct{})
 	go func() { wait(); close(done) }()
 	select {
@@ -374,7 +431,9 @@ func TestShutDownWakesEveryWaitingWorker(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a worker did not return after ShutDown")
 	}
-	if _, _, shutdown := q.GetWithPriority(); !shutdown {
+	var after bool
+	within(t, "GetWithPriority after ShutDown", func() { _, _, after = q.GetWithPriority() })
+	if !after {
 		t.Error("GetWithPriority after ShutDown did not report shutdown")
 	}
 	q.Done(running.key)
@@ -623,7 +682,7 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 					drained = true
 				}
 			}
-			q.mu.Lock()
+			lockWithin(t, q, fmt.Sprintf("step %d (%s)", step, op))
 			quiet := q.granted == 0 && q.idle == nWorkers-len(q.processing) && len(q.processing) == len(held) && len(q.waiting) == len(waiting)
 			q.mu.Unlock()
 			// Quiet, and nothing left that a free slot and an idle worker could take.
@@ -650,7 +709,7 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 			t.Fatalf("step %d (%s): %d local slots in flight, %d items held", step, op, n, len(held))
 		}
 		// The queue's view is the model's.
-		q.mu.Lock()
+		lockWithin(t, q, fmt.Sprintf("step %d (%s)", step, op))
 		defer q.mu.Unlock()
 		if q.free != len(available()) {
 			t.Fatalf("step %d (%s): free = %d, model has %d available", step, op, q.free, len(available()))
@@ -745,7 +804,7 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 		settle(step, op)
 	}
 
-	q.ShutDown()
+	within(t, "ShutDown", q.ShutDown)
 	for _, h := range held {
 		close(h.release)
 		<-h.done
@@ -769,7 +828,7 @@ func TestALateTimerDoesNothing(t *testing.T) {
 	g.setLocalCapacity(0)
 	clk := clocktesting.NewFakeClock(time.Now())
 	q := newGatedQueue[string](g, "late-timer", nil, clk)
-	defer q.ShutDown()
+	defer shutDownWithin(t, q)
 	q.AddAfter("k", time.Hour)
 	q.mu.Lock()
 	w, stale := q.waiting["k"], q.waiting["k"].gen
@@ -803,7 +862,7 @@ func TestShutDownReturnsASlotGrantedButNotPopped(t *testing.T) {
 	q.mu.Unlock()
 	g.mu.Unlock()
 
-	q.ShutDown()
+	within(t, "ShutDown", q.ShutDown)
 	done := make(chan struct{})
 	go func() { wait(); close(done) }()
 	select {
@@ -840,7 +899,7 @@ func TestAShuttingDownQueueGetsNoSlot(t *testing.T) {
 	q.shutdown = false // let the real ShutDown run its whole path
 	q.mu.Unlock()
 	g.setLocalCapacity(0)
-	q.ShutDown()
+	within(t, "ShutDown", q.ShutDown)
 	done := make(chan struct{})
 	go func() { wait(); close(done) }()
 	select {
@@ -893,7 +952,7 @@ func TestKeysDueTogetherBecomeReadyTogether(t *testing.T) {
 	g.setLocalCapacity(0) // nothing is handed out, so the test sees the queue's state
 	clk := &manualClock{now: time.Unix(1_000_000, 0)}
 	q := newGatedQueue[string](g, "due-together", nil, clk)
-	defer q.ShutDown()
+	defer shutDownWithin(t, q)
 	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(-1)}, "low")
 	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(1)}, "high")
 	q.AddWithOpts(priorityqueue.AddOpts{After: time.Hour}, "later")

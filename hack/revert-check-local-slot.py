@@ -43,7 +43,7 @@ MUTANTS = [
     ("a delayed add of a ready key delays it", Q, "\tif _, ok := q.ready[key]; ok {\n\t\tq.inner.AddWithOpts(priorityqueue.AddOpts{Priority: &priority}, key)\n\t\treturn\n\t}\n\tat := ", "\tat := "),
     ("a delay is never shortened", Q, "\tif at.Before(w.at) {\n\t\tw.timer.Stop()", "\tif false {\n\t\tw.timer.Stop()"),
     ("a delayed key's higher priority is dropped", Q, "\tw.priority = max(w.priority, priority)\n\tif at.Before", "\tif at.Before"),
-    ("keys due together come due one by one", Q, "\t\tif wi.at.After(now) && wi != w {", "\t\tif wi != w {"),
+    ("keys due together come due one by one", Q, "\t\tif wi.at.After(now) && wi != w {", "\t\tif wi != w && (true || wi.at.After(now)) {"),
     ("due leaves the moved keys' timers running", Q, "\t\tif wi != w {\n\t\t\twi.timer.Stop()\n\t\t}\n", ""),
     ("a timer callback waits for the queue's lock under the clock's", Q, "func() { go q.due(key, w, gen) }", "func() { q.due(key, w, gen) }"),
     ("a late timer runs a rescheduled entry", Q, "q.waiting[key] != w || w.gen != gen", "q.waiting[key] != w"),
@@ -90,7 +90,13 @@ def classify(r):
         return "BUILD", ""
     if "panic: test timed out" in out:
         m = re.search(r"running tests:\n((?:\t\t.*\n)+)", out)
-        return "TIMEOUT", (m.group(1).strip().replace("\n", " ").replace("\t", "") if m else "")[:160]
+        hung = (m.group(1).strip().replace("\n", " ").replace("\t", "") if m else "")[:120]
+        failed = sorted(set(re.findall(r"^\s*--- FAIL: (\S+)", out, re.M)))
+        if failed:
+            # A test failed by its own assertion before another one hung: the
+            # assertion killed the mutant. Listed apart in the summary.
+            return "KILLED", ",".join(failed)[:120] + " (then hung: " + hung + ")"
+        return "TIMEOUT", hung
     if re.search(r"^panic:|\[recovered\]", out, re.M):
         m = re.search(r"panic: .*", out)
         return "PANIC", m.group(0)[:90] if m else ""

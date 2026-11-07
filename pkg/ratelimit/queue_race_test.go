@@ -86,7 +86,7 @@ func TestDoneRacingAPopLeaksNoSlot(t *testing.T) {
 	q.inner = h
 
 	q.Add("k")
-	a, _, _ := q.GetWithPriority()
+	a := popWithin(t, q)
 	if a != "k" {
 		t.Fatalf("A popped %q", a)
 	}
@@ -138,7 +138,7 @@ func TestAddDuringAPopIsNotLost(t *testing.T) {
 	}
 
 	q.Add("k")
-	a, _, _ := q.GetWithPriority()
+	a := popWithin(t, q)
 	select {
 	case <-added:
 	case <-time.After(2 * time.Second):
@@ -160,7 +160,7 @@ func TestAddAfterDuringAPopKeepsItsDelay(t *testing.T) {
 	g.setLocalCapacity(1)
 	clk := clocktesting.NewFakeClock(time.Now())
 	q := newGatedQueue[string](g, "add-after-race", nil, clk)
-	defer q.ShutDown()
+	defer shutDownWithin(t, q)
 	h := &hookedInner{PriorityQueue: q.inner}
 	q.inner = h
 	added := make(chan struct{})
@@ -173,7 +173,7 @@ func TestAddAfterDuringAPopKeepsItsDelay(t *testing.T) {
 	}
 
 	q.Add("k")
-	a, _, _ := q.GetWithPriority()
+	a := popWithin(t, q)
 	select {
 	case <-added:
 	case <-time.After(2 * time.Second):
@@ -186,7 +186,7 @@ func TestAddAfterDuringAPopKeepsItsDelay(t *testing.T) {
 		t.Fatalf("%s was handed out at once: the AddAfter lost its delay", p.key)
 	case <-time.After(200 * time.Millisecond):
 	}
-	clk.Step(time.Minute)
+	stepWithin(t, clk, time.Minute)
 	select {
 	case <-got:
 	case <-time.After(2 * time.Second):
@@ -206,7 +206,7 @@ const drainDeadline = 10 * time.Second
 // stressLoad runs workers that pop, hold briefly and call Done, and adders that
 // re-add a few keys, for a while; then it stops the adders. Every worker runs as
 // controller-runtime's do. It returns when the adders have stopped.
-func stressLoad(q priorityqueue.PriorityQueue[string], workerCount int, running *atomic.Int32) (stopWorkers func()) {
+func stressLoad(q priorityqueue.PriorityQueue[string], workerCount int, running *atomic.Int32) (stopWorkers func(t *testing.T)) {
 	var wg sync.WaitGroup
 	for range workerCount {
 		wg.Go(func() {
@@ -243,7 +243,10 @@ func stressLoad(q priorityqueue.PriorityQueue[string], workerCount int, running 
 	time.Sleep(300 * time.Millisecond)
 	close(stop)
 	adders.Wait()
-	return func() { q.ShutDown(); wg.Wait() }
+	return func(t *testing.T) {
+		t.Helper()
+		within(t, "stopping the workers", func() { q.ShutDown(); wg.Wait() })
+	}
 }
 
 // No hooks: 8 workers, 4 adders re-adding 6 keys, capacity 4. After the adds
@@ -258,7 +261,7 @@ func TestGatedQueueDrainsUnderConcurrentAddsAndDones(t *testing.T) {
 		stopWorkers := stressLoad(q, 8, &running)
 		deadline := time.Now().Add(drainDeadline)
 		for {
-			q.mu.Lock()
+			lockWithin(t, q, "draining")
 			drained := len(q.ready) == 0 && len(q.processing) == 0 && q.inner.Len() == 0
 			q.mu.Unlock()
 			if drained && g.inFlight() == 0 {
@@ -273,7 +276,10 @@ func TestGatedQueueDrainsUnderConcurrentAddsAndDones(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		stopWorkers()
+		stopWorkers(t)
+		if t.Failed() {
+			break // the next runs would only repeat it
+		}
 	}
 }
 
@@ -291,7 +297,10 @@ func TestUpstreamPriorityQueueDrainsUnderTheSameLoad(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		stopWorkers()
+		stopWorkers(t)
+		if t.Failed() {
+			break // the next runs would only repeat it
+		}
 	}
 }
 
@@ -299,7 +308,11 @@ func TestUpstreamPriorityQueueDrainsUnderTheSameLoad(t *testing.T) {
 // ready keys not processing, a grant is for a free item, and inner holds exactly
 // the ready keys.
 func checkBooks(q *gatedQueue[string]) error {
-	q.mu.Lock()
+	for deadline := time.Now().Add(5 * time.Second); !q.mu.TryLock(); time.Sleep(100 * time.Microsecond) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the queue's lock was not free within 5s")
+		}
+	}
 	defer q.mu.Unlock()
 	free := 0
 	for k := range q.ready {
@@ -429,7 +442,7 @@ func concurrentRun(t *testing.T, run int) {
 	g.setLocalCapacity(2)
 	deadline := time.Now().Add(drainDeadline)
 	for {
-		q.mu.Lock()
+		lockWithin(t, q, "draining")
 		drained := len(q.waiting) == 0 && len(q.ready) == 0 && len(q.processing) == 0 && q.free == 0 && q.granted == 0 && q.inner.Len() == 0
 		state := fmt.Sprintf("waiting %d ready %v processing %v free %d granted %d inner.Len %d", len(q.waiting), q.ready, q.processing, q.free, q.granted, q.inner.Len())
 		q.mu.Unlock()
@@ -447,7 +460,7 @@ func concurrentRun(t *testing.T, run int) {
 	if checked.Load() == 0 {
 		t.Error("the record was never checked while the load ran")
 	}
-	q.ShutDown()
+	within(t, "ShutDown", q.ShutDown)
 	done := make(chan struct{})
 	go func() { workers.Wait(); close(done) }()
 	select {
@@ -519,4 +532,36 @@ func TestShutDownDuringAPopInsideInnerReturns(t *testing.T) {
 	if n := g.inFlight(); n != 0 {
 		t.Errorf("%d local slots in flight after Done, want 0", n)
 	}
+}
+
+// A pop that finds the record disagreeing with what inner handed out is
+// reported. Here the record is made wrong on purpose: k is free in inner, but
+// the record says a worker holds it.
+func TestAPopTheRecordDisagreesWithIsReported(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	q := gated(t, g, "disagreeing-record")
+	g.setLocalCapacity(0)
+	q.Add("k")
+	q.mu.Lock()
+	q.processing["k"] = struct{}{} // the record now says k is held, inner doesn't
+	q.mu.Unlock()
+	before := brokenBooks.Load()
+	got, _ := workers(q, 1)
+	eventually(t, "the worker waiting", func() bool { return idleWorkers(q) == 1 })
+	g.mu.Lock()
+	if !q.tryGrant() { // q.free still counts k, so the grant goes through
+		g.mu.Unlock()
+		t.Fatal("no grant")
+	}
+	g.localInFlight++
+	g.mu.Unlock()
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing was popped")
+	}
+	if n := brokenBooks.Load() - before; n != 1 {
+		t.Errorf("reported %d broken records, want 1", n)
+	}
+	brokenBooks.Store(before) // this one was on purpose
 }
