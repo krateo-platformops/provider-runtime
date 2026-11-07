@@ -858,7 +858,13 @@ func TestAShuttingDownQueueGetsNoSlot(t *testing.T) {
 	q.mu.Unlock()
 	g.setLocalCapacity(0)
 	q.ShutDown()
-	wait()
+	done := make(chan struct{})
+	go func() { wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker did not return after ShutDown")
+	}
 }
 
 // A worker whose grant was consumed but whose pop finds the queue shut gives the
