@@ -307,8 +307,17 @@ func TestAPopRacingShutDownReportsNoBrokenRecord(t *testing.T) {
 	g, _ := saturationGovernor(t, 4, "healthy", false)
 	g.setLocalCapacity(1)
 	before := brokenBooks.Load()
-	gotItem, gotShutdown := 0, 0
-	for i := range 200 {
+	// Keep racing until both outcomes have been seen at least minRuns times in
+	// all, so the "popped, then Done after shutdown" half can never pass by
+	// testing nothing. The cap turns a race that never takes a branch into a
+	// failure instead of a hang.
+	const minRuns, maxRuns = 200, 5000
+	gotItem, gotShutdown, runs := 0, 0, 0
+	for i := 0; runs < minRuns || gotItem == 0 || gotShutdown == 0; i++ {
+		if runs == maxRuns {
+			t.Fatalf("after %d runs the race never took both branches: item %d, shutdown %d", runs, gotItem, gotShutdown)
+		}
+		runs++
 		q := newGatedQueue[string](g, "race", nil, utilclock.RealClock{})
 		h := &hookedInner{PriorityQueue: q.inner}
 		q.inner = h
@@ -357,7 +366,7 @@ func TestAPopRacingShutDownReportsNoBrokenRecord(t *testing.T) {
 			t.Fatalf("run %d: a pop racing ShutDown was reported as a broken record (popped %v)", i, !r.shut)
 		}
 	}
-	t.Logf("200 runs: the pop got the item %d times, shutdown %d times", gotItem, gotShutdown)
+	t.Logf("%d runs: the pop got the item %d times, shutdown %d times", runs, gotItem, gotShutdown)
 }
 
 // wedgingInner stands for upstream's priority queue after a shutdown that
