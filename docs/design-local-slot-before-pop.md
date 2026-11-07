@@ -441,6 +441,13 @@ possibly clean counts) and the CPU threshold.
   queue's hand-off in normal use. A watchdog and containment followed (§4). The
   containment as first proposed had a window, the moment between a worker's
   wake and its setting `popping`, which setting `popping` at the grant closes.
+  `TestAStuckPopFreezesOnlyItsQueue` fails on the code before containment
+  (`c42e676`: another queue's `Add` didn't return) and passes after. Under
+  `-race`, the nine interleaving and containment tests passed 200 times each
+  (1,800 in 319s) and the stress test 200 times (1,309s). The revert check over
+  the new lines (`hack/revert-check-local-slot-containment.txt`) killed 9 of 10;
+  the survivor, a grant handed back at shutdown leaving `popping` set, is
+  equivalent, because a shut queue is granted nothing either way.
 - **The fix under `-race`, 200 runs each:** the review's two interleavings, the
   delayed-add window, shutdown during a pop and a pop the record disagrees with,
   1,000 passes in 187s; the stress test, 200 passes of 20 runs each in 1,261s;
