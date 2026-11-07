@@ -23,7 +23,7 @@ MUTANTS = [
     # The gated queue.
     ("a slot is granted with no item to hand out", Q, "q.idle == 0 || q.free-q.reserved <= 0", "q.idle == 0 || q.free-q.reserved < 0"),
     ("a slot is granted with no idle worker", Q, "q.idle == 0 || q.free-q.reserved <= 0", "q.free-q.reserved <= 0"),
-    ("a shut queue is granted slots", Q, "if q.shutdown || q.idle == 0", "if q.idle == 0"),
+    ("a shut queue is granted slots (expected equivalent: a woken worker that sees shutdown returns the grant)", Q, "if q.shutdown || q.idle == 0", "if q.idle == 0"),
     ("Done gives no slot back", Q, "\tdelete(q.processing, key)\n\tif _, ok := q.ready[key]; ok {\n\t\tq.free++\n\t}\n\tq.mu.Unlock()\n\tq.gov.releaseLocal()\n",
      "\tdelete(q.processing, key)\n\tif _, ok := q.ready[key]; ok {\n\t\tq.free++\n\t}\n\tq.mu.Unlock()\n"),
     ("Done for an unknown key gives a slot back", Q, "\tif _, ok := q.processing[key]; !ok {\n\t\tq.mu.Unlock()\n\t\treturn\n\t}\n\tdelete(q.processing, key)",
@@ -54,7 +54,10 @@ MUTANTS = [
     ("no error for an ungated reconciler", GOV, "\tif reconcilers > gated {", "\tif reconcilers > gated+1000 {"),
     ("calls take a local slot again", GOV, "\tfor _, st := range states {\n\t\tst.inFlight++\n\t}\n\treturn nil\n}", "\tfor _, st := range states {\n\t\tst.inFlight++\n\t}\n\tg.localInFlight++\n\treturn nil\n}"),
     # The reconciler and the controller options.
-    ("a keyless call is gated", REC, "\tif !slices.ContainsFunc(keys, func(key string) bool { return key != \"\" }) {\n\t\treturn noRelease, nil\n\t}\n", ""),
+    ("a keyless call goes to the governor (expected equivalent: AcquireAll gates nothing without keys)", REC,
+     "\tif !slices.ContainsFunc(keys, func(key string) bool { return key != \"\" }) {", "\tif false && !slices.ContainsFunc(keys, func(key string) bool { return key != \"\" }) {"),
+    ("AcquireAll without keys asks the governor (expected equivalent: acquire with no keys takes nothing)", GOV,
+     "\tif len(keys) == 0 {\n\t\treturn func() {}, nil\n\t}\n\td = g.acquire(keys)", "\td = g.acquire(keys)"),
     ("ForControllerRuntime doesn't gate", OPT, "\tgated := g != nil && g.SaturationEnabled()", "\tgated := false && g != nil"),
     ("ForControllerRuntime doesn't register the controller", OPT, "\tif gated {\n\t\tg.RegisterGatedController()\n\t}\n", ""),
     ("the recorder isn't applied to a gated queue", OPT, "\t\tif o.QueueWaitRecorder == nil {\n\t\t\treturn queue\n\t\t}\n", "\t\tif true {\n\t\t\treturn queue\n\t\t}\n"),
@@ -80,7 +83,8 @@ def classify(r):
     if "build failed" in out or "[setup failed]" in out:
         return "BUILD", ""
     if "panic: test timed out" in out:
-        return "TIMEOUT", ""
+        m = re.search(r"running tests:\n((?:\t\t.*\n)+)", out)
+        return "TIMEOUT", (m.group(1).strip().replace("\n", " ").replace("\t", "") if m else "")[:160]
     if re.search(r"^panic:|\[recovered\]", out, re.M):
         m = re.search(r"panic: .*", out)
         return "PANIC", m.group(0)[:90] if m else ""

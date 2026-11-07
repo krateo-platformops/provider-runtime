@@ -258,9 +258,16 @@ func TestAPanickingReconcileGivesItsSlotBack(t *testing.T) {
 	q := gated(t, g, "panic")
 	q.Add("a")
 	q.Add("b")
+	first := make(chan string, 1)
+	go func() { key, _, _ := q.GetWithPriority(); first <- key }()
+	var key string
+	select {
+	case key = <-first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no item was popped within 5s")
+	}
 	func() {
 		defer func() { _ = recover() }()
-		key, _, _ := q.GetWithPriority()
 		defer q.Done(key)
 		panic("provider bug")
 	}()
@@ -485,7 +492,9 @@ func TestGatedQueueMatchesTheModel(t *testing.T) {
 	var total modelStats
 	for run := range runs {
 		seed := uint64(run)*7919 + 17
-		t.Run(strconv.Itoa(run), func(t *testing.T) { total.add(modelRun(t, seed, 120)) })
+		if !t.Run(strconv.Itoa(run), func(t *testing.T) { total.add(modelRun(t, seed, 120)) }) {
+			break
+		}
 	}
 	t.Logf("%d runs: %d pops, %d of them while another key was available at a lower priority, %d delayed items came due, %d re-adds while processing, %d capacity changes, %d Done",
 		runs, total.pops, total.contested, total.due, total.reAdds, total.capacityChanges, total.dones)
@@ -634,6 +643,10 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 				}
 			}
 		}
+		// The governor's count first: its lock comes before the queue's.
+		if n := g.inFlight(); n != len(held) {
+			t.Fatalf("step %d (%s): %d local slots in flight, %d items held", step, op, n, len(held))
+		}
 		// The queue's view is the model's.
 		q.mu.Lock()
 		defer q.mu.Unlock()
@@ -656,9 +669,6 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 		}
 		if n := q.inner.Len(); n != len(ready) {
 			t.Fatalf("step %d (%s): the inner queue holds %d ready items, model %d", step, op, n, len(ready))
-		}
-		if n := g.inFlight(); n != len(held) {
-			t.Fatalf("step %d (%s): %d local slots in flight, %d items held", step, op, n, len(held))
 		}
 	}
 
@@ -743,4 +753,82 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 		t.Fatalf("%d local slots in flight after shutdown and the last Done, want 0", n)
 	}
 	return stats
+}
+
+// Every key due by the time a timer fires becomes ready in that one step, not
+// one per timer: items due together are handed out by priority. Two timers due
+// at the same instant can't be ordered from outside, so this calls the timer's
+// callback directly.
+func TestKeysDueTogetherBecomeReadyTogether(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(0) // nothing is handed out, so the test sees the queue's state
+	clk := clocktesting.NewFakeClock(time.Now())
+	q := newGatedQueue[string](g, "due-together", nil, clk)
+	defer q.ShutDown()
+	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(-1)}, "low")
+	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(1)}, "high")
+	q.mu.Lock()
+	w, gen := q.waiting["low"], q.waiting["low"].gen
+	q.mu.Unlock()
+
+	q.due("low", w, gen)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.waiting) != 0 || len(q.ready) != 2 || q.free != 2 {
+		t.Errorf("after one timer: %d waiting, %d ready, %d free; want 0, 2, 2", len(q.waiting), len(q.ready), q.free)
+	}
+}
+
+// A timer from before a delay was shortened does nothing when it fires late.
+func TestALateTimerDoesNothing(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(0)
+	clk := clocktesting.NewFakeClock(time.Now())
+	q := newGatedQueue[string](g, "late-timer", nil, clk)
+	defer q.ShutDown()
+	q.AddAfter("k", time.Hour)
+	q.mu.Lock()
+	w, stale := q.waiting["k"], q.waiting["k"].gen
+	q.mu.Unlock()
+	q.AddAfter("k", time.Minute) // the same entry, rescheduled
+
+	q.due("k", w, stale)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.waiting["k"]; !ok || len(q.ready) != 0 {
+		t.Errorf("a stale timer made k ready: waiting %v, ready %v", q.waiting, q.ready)
+	}
+}
+
+// A worker that was granted a slot but hadn't popped when the queue shut down
+// gives the slot back. Between a grant and its pop is too short to hit from
+// outside, so this puts a waiting worker in that state the way dispatchLocked
+// does, without the signal, and then shuts the queue down.
+func TestShutDownReturnsASlotGrantedButNotPopped(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(0)
+	q := newGatedQueue[string](g, "granted-at-shutdown", nil, clocktesting.NewFakeClock(time.Now()))
+	_, wait := workers(q, 1)
+	eventually(t, "the worker waiting", func() bool { return idleWorkers(q) == 1 })
+
+	g.mu.Lock()
+	q.mu.Lock()
+	q.idle--
+	q.granted++
+	q.reserved++
+	g.localInFlight++
+	q.mu.Unlock()
+	g.mu.Unlock()
+
+	q.ShutDown()
+	done := make(chan struct{})
+	go func() { wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker did not return after ShutDown")
+	}
+	if n := g.inFlight(); n != 0 {
+		t.Errorf("%d local slots in flight, want 0: the granted slot was kept", n)
+	}
 }

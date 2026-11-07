@@ -272,13 +272,21 @@ possibly clean counts) and the CPU threshold.
 
 ## 10. What the build found
 
-- **Delayed items that come due together are handed out together.** The first
-  build made each delayed key ready from its own timer, one after another, so a
-  lower-priority key could be popped before a higher-priority key due at the
-  same moment had even been added. The model test caught it. A timer now makes
-  every key that is due ready at once, as the priority queue's
-  `handleWaitingItems` does. It uses the fired entry's time as now, because a
-  test clock runs timer callbacks under its own lock.
+- **Delayed items that come due together are handed out together.** A timer
+  makes every key that is due ready at once, as the priority queue's
+  `handleWaitingItems` does, so items due at the same instant are handed out by
+  priority, not in the order their timers ran. It uses the fired entry's time as
+  now, because a test clock runs timer callbacks under its own lock. This is for
+  parity with upstream. It matters only in the instant between two timers due
+  together, which no test can hit from outside, so a white-box test calls the
+  timer's callback directly. An earlier model-test failure that looked like this
+  bug was the test's own error: it treated keys due at different times within
+  one clock step as due together, when handing out the earlier one first is
+  right. The model now steps the clock to one deadline at a time.
+- **The model test had a deadlock of its own.** It read the governor's count
+  while holding the queue's lock, the reverse of the code's lock order
+  (governor, then queue), and hung about once in a few hundred runs. The code's
+  lock order was right.
 - **One difference from the priority queue stays:** among items of one priority,
   a delayed item is ordered by when it became ready, not by when it was added.
 - **The registration count is taken at setup, not when the queue is built.**
