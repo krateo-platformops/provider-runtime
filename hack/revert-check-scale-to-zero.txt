@@ -1,0 +1,81 @@
+baseline passed
+
+KILLED    a nil selector is accepted
+          TestExistsNilSelectorIsAnError,TestExistsRejectsBadArguments,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_nil_selector_at_0,TestReconcileErrorChangesNothing/a_nil_selector_at_1,TestReconcileErrorCh
+KILLED    the selector isn't applied
+          TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/no_instance_behind_two_empty_pages,TestExistsIsFalseWhenNoneMatch,TestExistsListsMetadataOnlyAcrossNamespaces,TestExistsWithACac
+KILLED    one namespace is listed, not all
+          TestExistsDeletedCRDIsAnError,TestExistsEverything,TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/an_instance_behind_two_empty_pages,TestExistsIncludesTerminatingInstances,Tes
+KILLED    no Limit
+          TestExistsListsMetadataOnlyAcrossNamespaces
+KILLED    full objects, not metadata-only
+          TestExistsListsMetadataOnlyAcrossNamespaces
+KILLED    an empty page with a continue token is taken as the end
+          TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/an_instance_behind_two_empty_pages,TestExistsFollowsEmptyPagesWithAContinueToken/no_instance_behind_two_empty_pages,TestExistsLi
+KILLED    the continue token isn't sent
+          TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/an_instance_behind_two_empty_pages,TestExistsFollowsEmptyPagesWithAContinueToken/no_instance_behind_two_empty_pages
+KILLED    a repeated continue token isn't caught
+          TestExistsRepeatedContinueTokenIsAnError
+KILLED    terminating instances are skipped
+          TestExistsIncludesTerminatingInstances
+KILLED    a no-match (missing CRD, unserved version) is false
+          TestExistsNoMatchIsAnError,TestExistsNoMatchIsAnError/a_missing_CRD,TestExistsNoMatchIsAnError/a_missing_group,TestExistsNoMatchIsAnError/an_unserved_version,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNoth
+KILLED    a NotFound LIST (CRD deleted) is false
+          TestExistsDeletedCRDIsAnError
+KILLED    a LIST error is swallowed as false
+          TestExistsDeletedCRDIsAnError,TestExistsListErrorIsAnError,TestExistsListErrorIsAnError/page_1_of_3,TestExistsListErrorIsAnError/page_2_of_3,TestExistsListErrorIsAnError/page_3_of_3,TestExistsNoMatchIsAnError,TestExistsN
+KILLED    an instance doesn't keep it up
+          TestDecide,TestDecide/an_instance_keeps_it_up,TestDecide/an_instance_keeps_it_up_even_with_a_lastSeen_far_in_the_past,TestDecide/an_instance_keeps_it_up_with_a_zero_lastSeen,TestReconcile,TestReconcile/a_running_count_ab
+KILLED    Decide accepts a holdDown <= 0
+          TestDecide,TestDecide/a_negative_holdDown_never_scales_down,TestDecide/a_zero_holdDown_never_scales_down
+KILLED    first sight scales down at once
+          TestDecide,TestDecide/first_sight_of_an_empty_Kind_starts_the_hold-down,TestReconcile,TestReconcile/empty_on_first_sight_at_zero_wakes_it_for_the_hold-down,TestReconcile/empty_on_first_sight_starts_the_hold-down
+KILLED    a clock gone backwards isn't handled
+          TestDecide,TestDecide/a_clock_gone_backwards_stays_up_for_one_hold-down,TestDecide/a_lastSeen_far_in_the_future_stays_up_and_looks_again_within_one_hold-down,TestReconcile,TestReconcile/a_future_lastSeen_stays_up_and_is_
+KILLED    the hold-down's end is exclusive
+          TestDecide,TestDecide/empty_for_exactly_the_hold-down_scales_to_zero
+KILLED    requeue waits the whole hold-down, not the rest
+          TestDecide,TestDecide/empty_a_nanosecond_before_the_end_waits_a_nanosecond,TestDecide/empty_within_the_hold-down_waits_the_rest_of_it,TestReconcile,TestReconcile/empty_within_the_hold-down_leaves_3_alone,TestReconcile/em
+KILLED    an instance doesn't refresh lastSeen
+          TestNextLastSeen,TestNextLastSeen/an_instance_moves_a_future_lastSeen_to_now,TestNextLastSeen/an_instance_moves_lastSeen_to_now,TestReconcile,TestReconcile/a_running_count_above_active_is_left_alone,TestReconcile/a_runni
+KILLED    first sight doesn't start the hold-down
+          TestNextLastSeen,TestNextLastSeen/first_sight_of_an_empty_Kind_starts_the_hold-down_now,TestReconcile,TestReconcile/empty_on_first_sight_at_zero_wakes_it_for_the_hold-down,TestReconcile/empty_on_first_sight_starts_the_ho
+KILLED    a future lastSeen is reset to now
+          TestNextLastSeen,TestNextLastSeen/an_empty_Kind_keeps_a_future_lastSeen,TestReconcile,TestReconcile/a_future_lastSeen_stays_up_and_is_kept
+KILLED    Reconcile accepts a holdDown <= 0
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_negative_holdDown_at_0,TestReconcileErrorChangesNothing/a_negative_holdDown_at_1,TestReconcileErrorChangesNothing/a_negative_holdDown_at_3,TestReconcile
+KILLED    Reconcile accepts an active < 1
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_negative_active_at_0,TestReconcileErrorChangesNothing/a_negative_active_at_1,TestReconcileErrorChangesNothing/a_negative_active_at_3,TestReconcileErrorC
+KILLED    a failed LIST is taken as empty
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+KILLED    a failed LIST is taken as active
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+KILLED    an error passes back lastSeen = now
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+KILLED    an error reads as 0 replicas
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+KILLED    an error reports the current replicas even at 0
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_failed_scale_patch_at_0,TestReconcileErrorChangesNothing/a_missing_CRD_at_0,TestReconcileErrorChanges
+KILLED    an error ignores the current replicas
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a_failed_scale_patch_at_1,TestReconcileErrorChangesN
+KILLED    an error with active < 1 reports it
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_negative_active_at_0,TestReconcileErrorChangesNothing/a_zero_active_at_0,TestReconcileRejectsBadArguments
+KILLED    an error has no Unknown reason
+          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+KILLED    it patches on every call
+          TestReconcile,TestReconcile/a_future_lastSeen_stays_up_and_is_kept,TestReconcile/a_running_count_above_active_is_left_alone,TestReconcile/a_running_count_below_active_is_left_alone,TestReconcile/an_instance_keeps_it_up_w
+KILLED    a running controller is patched to active
+          TestReconcile,TestReconcile/a_running_count_above_active_is_left_alone,TestReconcile/a_running_count_below_active_is_left_alone,TestReconcile/empty_within_the_hold-down_leaves_3_alone
+KILLED    waking goes to 1, not active
+          TestReconcile,TestReconcile/an_instance_wakes_it_from_zero_to_active,TestReconcile/empty_on_first_sight_at_zero_wakes_it_for_the_hold-down
+KILLED    idle isn't scaled to 0
+          TestReconcile,TestReconcile/empty_past_the_hold-down_scales_3_down_to_0,TestReconcile/empty_past_the_hold-down_scales_down,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_failed_scale_patch_at_1,TestR
+KILLED    replicas are read from the Deployment's spec
+          TestReconcileNeedsOnlyTheScaleSubresource
+KILLED    the Deployment is patched, not its scale
+          TestReconcile,TestReconcile/an_instance_wakes_it_from_zero_to_active,TestReconcile/an_instance_wakes_it_from_zero_to_an_active_of_1,TestReconcile/empty_on_first_sight_at_zero_wakes_it_for_the_hold-down,TestReconcile/empt
+SURVIVED  the patch is computed from the Scale (omitempty claim)
+          
+
+KILLED=37 SURVIVED=1 of 38
+tree restored
