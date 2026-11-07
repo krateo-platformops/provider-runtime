@@ -60,7 +60,7 @@ reconcile. Per-key gating stays after the pop, because a key needs the object.
   (`CR/pkg/controller/priorityqueue/priorityqueue.go:39-43`). Delayed and
   rate-limited items turn ready in its own goroutine (`handleWaitingItems`, `:309`).
   `Len` counts ready items including those it can't hand out because their key is
-  processing (`:486-497`; `handleReadyItems` skips them, `:385-388`). Its metrics
+  processing (`:486-497`; `handleReadyItems` skips them, `:390-393`). Its metrics
   go through an internal package (`priorityqueue.go:15`, `CR/pkg/internal/metrics`),
   so a queue of our own can't emit the same `workqueue_*` series.
 - **Several controllers share one governor.** `SetupRateLimitGovernor` builds one
@@ -104,10 +104,12 @@ saturation on, `ForControllerRuntime` sets `NewQueue` whether or not a
 **State**, per queue, under its lock:
 
 - `inner`, a controller-runtime priority queue that only receives immediate adds,
-  so every change to its contents is caused by a call of ours;
+  so every change to its contents is caused by a call of ours. **Every call into
+  `inner` is made holding the queue's lock, in the same critical section that
+  updates the record below.** The first version didn't, and had two races (§10);
 - `ready` (keys ready in `inner`) and `processing` (keys a worker holds).
   Available = `ready` minus `processing`, which is exactly what `inner` can hand
-  out (`priorityqueue.go:385-388`);
+  out (`priorityqueue.go:390-393`);
 - `waiting`, delayed keys with ready time and priority, each with a timer; a
   timer that fires makes every due key ready at once (§10). Upstream's rules apply: the earlier time and higher priority win
   (`:228-246`), and an immediate add cancels the wait (`:254-257`);
@@ -126,17 +128,18 @@ stored priority. `Forget` and `NumRequeues` go to the rate limiter.
 **Get.** A worker counts itself idle and waits on the queue's condition. It never
 asks for a slot while nothing is available, so an idle worker holds nothing. The
 governor grants a slot only to a queue with an idle worker and an available item.
-Under its lock and then the queue's, it takes a slot, takes one from the
-available count, moves one worker from idle to granted, and signals. The woken
-worker calls `inner.GetWithPriority()`, which returns at once with the
-highest-priority available item, because one was counted. It moves the key to
-`processing` and records the slot's release under the key.
+Under its lock and then the queue's, it takes a slot, counts one more grant
+against the available items, moves one worker from idle to granted, and signals.
+The woken worker, still holding the queue's lock, calls `inner.GetWithPriority()`
+and records the key it gets as `processing` in the same critical section. No add,
+pop or `Done` can change `inner` in between.
 
-**Done.** `Done(key)` calls `inner.Done(key)`, removes the key from
-`processing`, and releases its slot. A key re-added while processing is in
-`ready` and becomes available again. Both changes go to the governor, which
-grants the freed slot. controller-runtime defers `Done`, so the slot is released
-on return, error and panic, and covers the whole reconcile. Release is idempotent.
+**Done.** `Done(key)` takes the queue's lock, then calls `inner.Done(key)`,
+removes the key from `processing` and, if the key was re-added meanwhile, counts
+it available again, all in one critical section. It then gives the slot back to
+the governor, which grants it on. controller-runtime defers `Done`, so the slot is
+released on return, error and panic, and covers the whole reconcile. A `Done` for
+a key no worker holds does nothing.
 
 **Capacity changes.** A rise from the sampler grants new slots the same way. A
 cut lets running reconciles keep their slots and grants none until in-use falls
@@ -154,16 +157,52 @@ same critical section that counted it, so nothing popped waits for a slot. A rea
 unprocessed item stays in `inner` until popped, so nothing is lost while waiting.
 A slot is taken only with an available item and a worker, so none is held idle.
 
-**Lock order:** governor, then queue. A queue never takes the governor's lock
-while holding its own: an add or `Done` updates the queue, unlocks, then tells the
-governor.
+**Lock order:** governor, then queue, then `inner`'s own locks and the clock's. A
+queue never takes the governor's lock while holding its own: an add or `Done`
+updates the queue, unlocks, then tells the governor. `inner` never calls back into
+the queue. A timer callback only starts a goroutine, which then takes the queue's
+lock, so the queue's lock is never awaited under the clock's.
 
-**Why the count stays exact.** `inner` changes only through our immediate adds,
-pops and `Done`s, and upstream applies a buffered add before handing anything out
-(`priorityqueue.go:371-375`). If the count ran high, a granted worker would block
-in `inner` holding a slot until something arrived: core-provider's behaviour, and
-shutdown still wakes it. If it ran low, items would wait while workers idle: the
-failure the model test (test 9) must rule out.
+**Why the record stays exact.** `inner` changes only through calls the queue makes
+under its lock, and each one updates the record in the same critical section. So
+the record can't drift by interleaving: an add, a pop and a `Done` are each one
+step. It could only be wrong through a mistake in how it models `inner`, which the
+model test (test 9) and the concurrent test exist to rule out. A pop that finds
+the record disagreeing with what `inner` handed out, or a slot released with none
+in flight, is counted and logged as an error, and the package's tests fail on it.
+
+**Why the pop can't block forever while holding the queue's lock.** The reviewer of
+the first version warned against holding it across `inner.GetWithPriority()`,
+because a pop with nothing to hand out would wait inside `inner` and keep every
+other caller out. A pop is made only after a grant, and a grant only when the
+record shows an item that is ready and not processing. With every change to
+`inner` made under the same lock, nothing changes between the grant's count and
+the pop. What remains is whether `inner` hands that item out without needing
+anything the pop is holding. It does (references to `CR/pkg/controller/priorityqueue/priorityqueue.go`):
+
+- **Buffered adds.** `AddWithOpts` only appends to `addBuffer` and signals
+  (`:153-170`). The buffer is flushed by `inner`'s own goroutines: `handleAddBuffer`
+  (`:172-184`), and `handleReadyItems`, which flushes before it hands anything out
+  (`:376`). `GetWithPriority` counts itself a waiter and signals
+  `handleReadyItems` (`:424-436`), which takes only `inner`'s locks, never ours.
+  So an item added before the pop is in the ready tree by the time it is handed
+  out.
+- **A key re-added while it is processing.** `inner` keeps it in the ready tree
+  but skips it while the key is locked (`:390-393`), until `Done` unlocks it and
+  signals (`:467-473`). The record counts such a key as not free until the queue's
+  own `Done`, which calls `inner.Done` in the same critical section first. So the
+  record never counts a locked key as available.
+- **Shutdown while a pop waits inside `inner`.** The queue's `ShutDown` needs the
+  lock, so it waits for the pop. Nothing it does is needed to wake the pop:
+  `handleReadyItems` stops only when `inner`'s `done` channel closes (`:362-364`),
+  and only `inner.ShutDown` (`:475-479`) closes it, which the queue calls under
+  the same lock. So `inner`'s dispatcher is running for as long as the pop waits,
+  hands the counted item over the `get` channel (`:400`), and the pop returns. Then
+  `ShutDown` runs. A test pins this: `TestShutDownDuringAPopInsideInnerReturns`.
+
+The one way it could block is a record that counts an item `inner` can't hand
+out. That is a defect, not a state the queue reaches by timing, and it has no
+timeout: the tests above are what rule it out.
 
 **The `QueueWaitRecorder` wrapper.** At `d0632f1` it lacked `AddWithOpts` and
 `GetWithPriority`, so controller-runtime wrapped it and every item ran at

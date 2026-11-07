@@ -348,10 +348,14 @@ func (g *Governor) dispatch() {
 }
 
 // releaseLocal gives back one local slot and grants it on.
+// A release with no slot in flight means a queue gave back a slot twice, which
+// must never happen: it is reported, not hidden, and the count stays at 0.
 func (g *Governor) releaseLocal() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.localInFlight > 0 {
+	if g.localInFlight == 0 {
+		reportBrokenBooks(g.log, "a local slot was released with none in flight")
+	} else {
 		g.localInFlight--
 	}
 	g.dispatchLocked()

@@ -1,0 +1,59 @@
+package ratelimit
+
+import (
+	"math/rand/v2"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/go-logr/logr"
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
+)
+
+// Control: the same load on controller-runtime's priority queue drains.
+func TestReviewStressUpstreamControl(t *testing.T) {
+	for run := range 20 {
+		q := priorityqueue.New[string]("ctl"+strconv.Itoa(run), func(o *priorityqueue.Opts[string]) { o.Log = logr.Discard() })
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Go(func() {
+				for {
+					k, _, shut := q.GetWithPriority()
+					if shut {
+						return
+					}
+					time.Sleep(time.Duration(rand.IntN(50)) * time.Microsecond)
+					q.Done(k)
+				}
+			})
+		}
+		stop := make(chan struct{})
+		var adders sync.WaitGroup
+		for range 4 {
+			adders.Go(func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					q.Add("k" + strconv.Itoa(rand.IntN(6)))
+				}
+			})
+		}
+		time.Sleep(300 * time.Millisecond)
+		close(stop)
+		adders.Wait()
+		deadline := time.Now().Add(2 * time.Second)
+		for q.Len() != 0 {
+			if time.Now().After(deadline) {
+				t.Errorf("run %d: upstream did not drain: Len=%d", run, q.Len())
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		q.ShutDown()
+		wg.Wait()
+	}
+}

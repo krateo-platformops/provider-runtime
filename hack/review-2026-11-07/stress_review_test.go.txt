@@ -1,0 +1,72 @@
+package ratelimit
+
+import (
+	"math/rand/v2"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// No hooks: controller-runtime-shaped workers and event goroutines re-adding
+// keys. After the adds stop, everything must drain and every slot come back.
+func TestReviewStressDrains(t *testing.T) {
+	for run := range 20 {
+		g, _ := saturationGovernor(t, 8, "healthy", false)
+		g.setLocalCapacity(4)
+		q := gated(t, g, "stress"+strconv.Itoa(run))
+		var running atomic.Int32
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				for {
+					k, _, shut := q.GetWithPriority()
+					if shut {
+						return
+					}
+					running.Add(1)
+					time.Sleep(time.Duration(rand.IntN(50)) * time.Microsecond)
+					running.Add(-1)
+					q.Done(k)
+				}
+			})
+		}
+		stop := make(chan struct{})
+		var adders sync.WaitGroup
+		for range 4 {
+			adders.Go(func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					q.Add("k" + strconv.Itoa(rand.IntN(6)))
+				}
+			})
+		}
+		time.Sleep(300 * time.Millisecond)
+		close(stop)
+		adders.Wait()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			q.mu.Lock()
+			drained := len(q.ready) == 0 && len(q.processing) == 0 && q.inner.Len() == 0
+			q.mu.Unlock()
+			if drained && g.inFlight() == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				q.mu.Lock()
+				t.Errorf("run %d: did not drain: ready=%v processing=%v free=%d inner.Len=%d", run, q.ready, q.processing, q.free, q.inner.Len())
+				q.mu.Unlock()
+				t.Errorf("run %d: local slots in flight %d, reconciles running %d", run, g.inFlight(), running.Load())
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		q.ShutDown()
+		wg.Wait()
+	}
+}

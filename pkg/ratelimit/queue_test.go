@@ -9,10 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
+	utilclock "k8s.io/utils/clock"
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
 
@@ -622,7 +624,7 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 				}
 			}
 			q.mu.Lock()
-			quiet := q.granted == 0 && q.reserved == 0 && q.idle == nWorkers-len(q.processing) && len(q.processing) == len(held)
+			quiet := q.granted == 0 && q.idle == nWorkers-len(q.processing) && len(q.processing) == len(held) && len(q.waiting) == len(waiting)
 			q.mu.Unlock()
 			// Quiet, and nothing left that a free slot and an idle worker could take.
 			if quiet && (len(held) >= g.LocalCapacity() || len(held) >= nWorkers || len(available()) == 0) {
@@ -630,7 +632,7 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 			}
 			if time.Now().After(deadline) {
 				q.mu.Lock()
-				state := fmt.Sprintf("granted %d reserved %d idle %d processing %d free %d", q.granted, q.reserved, q.idle, len(q.processing), q.free)
+				state := fmt.Sprintf("granted %d idle %d processing %d free %d waiting %d", q.granted, q.idle, len(q.processing), q.free, len(q.waiting))
 				q.mu.Unlock()
 				t.Fatalf("step %d (%s): never quiet: held %d, capacity %d, workers %d, available %v; queue %s", step, op, len(held), g.LocalCapacity(), nWorkers, available(), state)
 			}
@@ -755,30 +757,6 @@ func modelRun(t *testing.T, seed uint64, steps int) (stats modelStats) {
 	return stats
 }
 
-// Every key due by the time a timer fires becomes ready in that one step, not
-// one per timer: items due together are handed out by priority. Two timers due
-// at the same instant can't be ordered from outside, so this calls the timer's
-// callback directly.
-func TestKeysDueTogetherBecomeReadyTogether(t *testing.T) {
-	g, _ := saturationGovernor(t, 4, "healthy", false)
-	g.setLocalCapacity(0) // nothing is handed out, so the test sees the queue's state
-	clk := clocktesting.NewFakeClock(time.Now())
-	q := newGatedQueue[string](g, "due-together", nil, clk)
-	defer q.ShutDown()
-	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(-1)}, "low")
-	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(1)}, "high")
-	q.mu.Lock()
-	w, gen := q.waiting["low"], q.waiting["low"].gen
-	q.mu.Unlock()
-
-	q.due("low", w, gen)
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.waiting) != 0 || len(q.ready) != 2 || q.free != 2 {
-		t.Errorf("after one timer: %d waiting, %d ready, %d free; want 0, 2, 2", len(q.waiting), len(q.ready), q.free)
-	}
-}
-
 // A timer from before a delay was shortened does nothing when it fires late.
 func TestALateTimerDoesNothing(t *testing.T) {
 	g, _ := saturationGovernor(t, 4, "healthy", false)
@@ -815,7 +793,6 @@ func TestShutDownReturnsASlotGrantedButNotPopped(t *testing.T) {
 	q.mu.Lock()
 	q.idle--
 	q.granted++
-	q.reserved++
 	g.localInFlight++
 	q.mu.Unlock()
 	g.mu.Unlock()
@@ -867,25 +844,66 @@ func TestAShuttingDownQueueGetsNoSlot(t *testing.T) {
 	}
 }
 
-// A worker whose grant was consumed but whose pop finds the queue shut gives the
-// slot back. This is the window between a worker taking its grant and popping,
-// with ShutDown in between: it puts the queue there and pops.
-func TestAPopOnAShutQueueGivesTheSlotBack(t *testing.T) {
-	g, _ := saturationGovernor(t, 4, "healthy", false)
-	g.setLocalCapacity(0)
-	q := newGatedQueue[string](g, "pop-after-shutdown", nil, clocktesting.NewFakeClock(time.Now()))
-	g.mu.Lock()
-	q.mu.Lock()
-	q.reserved++ // a granted slot, consumed by the worker that is about to pop
-	g.localInFlight++
-	q.mu.Unlock()
-	g.mu.Unlock()
-	q.ShutDown()
+// manualClock is a clock whose time moves only when the test says, and whose
+// timers never fire: the test calls the queue's timer callback itself.
+type manualClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
 
-	if _, _, shutdown := q.pop(); !shutdown {
-		t.Fatal("pop on a shut queue did not report shutdown")
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+func (c *manualClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+func (c *manualClock) Since(t time.Time) time.Duration                 { return c.Now().Sub(t) }
+func (c *manualClock) After(time.Duration) <-chan time.Time            { return nil }
+func (c *manualClock) NewTimer(time.Duration) utilclock.Timer          { return &manualTimer{} }
+func (c *manualClock) Sleep(time.Duration)                             {}
+func (c *manualClock) Tick(time.Duration) <-chan time.Time             { return nil }
+func (c *manualClock) AfterFunc(time.Duration, func()) utilclock.Timer { return &manualTimer{} }
+
+// manualTimer records whether it was stopped.
+type manualTimer struct{ stopped atomic.Bool }
+
+func (t *manualTimer) C() <-chan time.Time { return nil }
+func (t *manualTimer) Stop() bool          { return !t.stopped.Swap(true) }
+func (t *manualTimer) Reset(time.Duration) bool {
+	t.stopped.Store(false)
+	return true
+}
+
+// Every key due when a timer fires becomes ready in that one step, not one per
+// timer, so items due together are handed out by priority; and the timers of
+// the other keys it moved are stopped. Two timers due at the same instant can't
+// be ordered from outside, so this calls the timer's callback itself.
+func TestKeysDueTogetherBecomeReadyTogether(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(0) // nothing is handed out, so the test sees the queue's state
+	clk := &manualClock{now: time.Unix(1_000_000, 0)}
+	q := newGatedQueue[string](g, "due-together", nil, clk)
+	defer q.ShutDown()
+	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(-1)}, "low")
+	q.AddWithOpts(priorityqueue.AddOpts{After: time.Second, Priority: ptrTo(1)}, "high")
+	q.AddWithOpts(priorityqueue.AddOpts{After: time.Hour}, "later")
+	q.mu.Lock()
+	w, gen := q.waiting["low"], q.waiting["low"].gen
+	highTimer := q.waiting["high"].timer.(*manualTimer)
+	q.mu.Unlock()
+
+	clk.advance(time.Second)
+	q.due("low", w, gen)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.waiting["later"]; len(q.waiting) != 1 || !ok || len(q.ready) != 2 || q.free != 2 {
+		t.Errorf("after one timer: waiting %v, %d ready, %d free; want only later waiting, 2 ready, 2 free", q.waiting, len(q.ready), q.free)
 	}
-	if n := g.inFlight(); n != 0 {
-		t.Errorf("%d local slots in flight, want 0: the pop kept its slot", n)
+	if !highTimer.stopped.Load() {
+		t.Error("high's timer was not stopped when the first timer made high ready")
 	}
 }
