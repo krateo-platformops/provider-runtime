@@ -432,7 +432,7 @@ func concurrentRun(t *testing.T, run int) {
 	})
 	time.Sleep(200 * time.Millisecond)
 	close(stop)
-	load.Wait()
+	within(t, "stopping the load", load.Wait)
 	select {
 	case err := <-checkErr:
 		t.Fatalf("while running: %v", err)

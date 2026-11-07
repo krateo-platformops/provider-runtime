@@ -110,6 +110,13 @@ if base.returncode != 0:
     sys.exit(1)
 print("baseline passed\n")
 
+# RLGOV_MUTANTS, when set, runs only the mutants whose names contain one of its
+# comma-separated parts: for rerunning a few after a fix.
+only = [m for m in os.environ.get("RLGOV_MUTANTS", "").split(",") if m]
+if only:
+    MUTANTS = [m for m in MUTANTS if any(o in m[0] for o in only)]
+    print("only:", only, len(MUTANTS), "mutants\n")
+
 counts = {}
 for name, path, old, new in MUTANTS:
     full = os.path.join(ROOT, path)

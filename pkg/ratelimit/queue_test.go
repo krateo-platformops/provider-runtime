@@ -164,15 +164,33 @@ func none(t *testing.T, ch <-chan popped) {
 	}
 }
 
+// lockGovernorWithin takes g.mu, giving up after 5s: a pop stuck in inner holds
+// a queue's lock, and a dispatch waiting for it holds the Governor's. Tests
+// then fail by assertion instead of hanging.
+func lockGovernorWithin(g *Governor) bool {
+	for deadline := time.Now().Add(5 * time.Second); !g.mu.TryLock(); time.Sleep(100 * time.Microsecond) {
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
+	return true
+}
+
+// inFlight returns the local slots in flight, or -1 when the Governor's lock
+// isn't free within 5s.
 func (g *Governor) inFlight() int {
-	g.mu.Lock()
+	if !lockGovernorWithin(g) {
+		return -1
+	}
 	defer g.mu.Unlock()
 	return g.localInFlight
 }
 
 // setLocalCapacity stands in for the sampler.
 func (g *Governor) setLocalCapacity(c int) {
-	g.mu.Lock()
+	if !lockGovernorWithin(g) {
+		return // the caller's next check fails: the Governor's lock is stuck
+	}
 	defer g.mu.Unlock()
 	g.local.Store(&localState{capacity: c})
 	g.dispatchLocked()
