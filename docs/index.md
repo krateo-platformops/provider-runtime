@@ -26,4 +26,5 @@ It is consumed as a plain Go module — no image, no chart, no CRDs shipped.
 - [examples](./examples.md) — index of runnable examples
 - [release](./release.md) — how a version ships (git tag, Go module proxy)
 - [log](./log.md) — curated history
+- [design: scale to zero](./design-scale-to-zero.md) — a helper owners call to run a per-Kind controller Deployment at 0 replicas while its Kind is empty (implemented, unreleased)
 - [design: rate-limit governor](./design-rate-limit-governor.md) — automatic slow-down under server-side rate limits and controller CPU saturation (implemented, off by default; CPU threshold provisional; memory input experimental)
