@@ -832,3 +832,54 @@ func TestShutDownReturnsASlotGrantedButNotPopped(t *testing.T) {
 		t.Errorf("%d local slots in flight, want 0: the granted slot was kept", n)
 	}
 }
+
+// A queue that is shutting down gets no slot, even while a worker of its hasn't
+// woken yet: between ShutDown setting the flag and that worker running, a grant
+// to it would hold capacity another queue could use. This puts the queue in that
+// window, as ShutDown does before its Broadcast, and frees a slot.
+func TestAShuttingDownQueueGetsNoSlot(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(0)
+	q := newGatedQueue[string](g, "shutting-down", nil, clocktesting.NewFakeClock(time.Now()))
+	_, wait := workers(q, 1)
+	eventually(t, "the worker waiting", func() bool { return idleWorkers(q) == 1 })
+	q.Add("a") // available, but no capacity to grant it
+
+	q.mu.Lock()
+	q.shutdown = true // ShutDown's first step; its Broadcast hasn't happened yet
+	q.mu.Unlock()
+	g.setLocalCapacity(1)
+	if n := g.inFlight(); n != 0 {
+		t.Errorf("%d local slots granted to a queue that is shutting down, want 0", n)
+	}
+
+	q.mu.Lock()
+	q.shutdown = false // let the real ShutDown run its whole path
+	q.mu.Unlock()
+	g.setLocalCapacity(0)
+	q.ShutDown()
+	wait()
+}
+
+// A worker whose grant was consumed but whose pop finds the queue shut gives the
+// slot back. This is the window between a worker taking its grant and popping,
+// with ShutDown in between: it puts the queue there and pops.
+func TestAPopOnAShutQueueGivesTheSlotBack(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(0)
+	q := newGatedQueue[string](g, "pop-after-shutdown", nil, clocktesting.NewFakeClock(time.Now()))
+	g.mu.Lock()
+	q.mu.Lock()
+	q.reserved++ // a granted slot, consumed by the worker that is about to pop
+	g.localInFlight++
+	q.mu.Unlock()
+	g.mu.Unlock()
+	q.ShutDown()
+
+	if _, _, shutdown := q.pop(); !shutdown {
+		t.Fatal("pop on a shut queue did not report shutdown")
+	}
+	if n := g.inFlight(); n != 0 {
+		t.Errorf("%d local slots in flight, want 0: the pop kept its slot", n)
+	}
+}

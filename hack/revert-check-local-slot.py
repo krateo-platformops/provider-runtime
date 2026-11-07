@@ -23,7 +23,7 @@ MUTANTS = [
     # The gated queue.
     ("a slot is granted with no item to hand out", Q, "q.idle == 0 || q.free-q.reserved <= 0", "q.idle == 0 || q.free-q.reserved < 0"),
     ("a slot is granted with no idle worker", Q, "q.idle == 0 || q.free-q.reserved <= 0", "q.free-q.reserved <= 0"),
-    ("a shut queue is granted slots (expected equivalent: a woken worker that sees shutdown returns the grant)", Q, "if q.shutdown || q.idle == 0", "if q.idle == 0"),
+    ("a shut queue is granted slots", Q, "if q.shutdown || q.idle == 0", "if q.idle == 0"),
     ("Done gives no slot back", Q, "\tdelete(q.processing, key)\n\tif _, ok := q.ready[key]; ok {\n\t\tq.free++\n\t}\n\tq.mu.Unlock()\n\tq.gov.releaseLocal()\n",
      "\tdelete(q.processing, key)\n\tif _, ok := q.ready[key]; ok {\n\t\tq.free++\n\t}\n\tq.mu.Unlock()\n"),
     ("Done for an unknown key gives a slot back", Q, "\tif _, ok := q.processing[key]; !ok {\n\t\tq.mu.Unlock()\n\t\treturn\n\t}\n\tdelete(q.processing, key)",
