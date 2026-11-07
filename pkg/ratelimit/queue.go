@@ -55,6 +55,12 @@ type gatedQueueRef interface {
 	tryGrant() bool
 }
 
+// popStuckAfter is how long a pop may wait inside the inner queue before it is
+// reported. A pop waits there only when the record counts an item inner doesn't
+// have, which is a defect: inner hands a counted item out at once. A variable so
+// tests can lower it.
+var popStuckAfter = 10 * time.Second
+
 // brokenBooks counts the times the gated queues' or the Governor's own records
 // were found to disagree with what happened, which must never be. Each one is
 // logged as an error; the package's tests fail when it is not zero.
@@ -76,6 +82,7 @@ type waitingItem struct {
 
 type gatedQueue[T comparable] struct {
 	gov         *Governor
+	name        string
 	inner       priorityqueue.PriorityQueue[T]
 	rateLimiter workqueue.TypedRateLimiter[T]
 	clock       utilclock.WithDelayedExecution
@@ -98,6 +105,14 @@ type gatedQueue[T comparable] struct {
 	// items, so free-granted is what a new grant may take.
 	idle, granted int
 	shutdown      bool
+
+	// popping is set from a grant until its pop has finished: the queue's lock
+	// may then be held for as long as inner takes to hand the item out. While
+	// it is set, tryGrant skips the queue instead of waiting for its lock, so a
+	// Governor dispatch never waits on another queue's pop, and records the skip
+	// in skipped; the pop dispatches again when it is done. They are read
+	// without the lock. See design §4, "Containment".
+	popping, skipped atomic.Bool
 }
 
 func newGatedQueue[T comparable](g *Governor, name string, rateLimiter workqueue.TypedRateLimiter[T], clk utilclock.WithDelayedExecution) *gatedQueue[T] {
@@ -107,6 +122,7 @@ func newGatedQueue[T comparable](g *Governor, name string, rateLimiter workqueue
 	}
 	q := &gatedQueue[T]{
 		gov:         g,
+		name:        name,
 		inner:       priorityqueue.New(name, func(o *priorityqueue.Opts[T]) { o.Log = logr.Discard() }),
 		rateLimiter: rateLimiter,
 		clock:       clk,
@@ -259,10 +275,12 @@ func (q *gatedQueue[T]) GetWithPriority() (_ T, priority int, shutdown bool) {
 		q.cond.Wait()
 	}
 	if q.shutdown {
-		// Each waiting worker is either idle or granted.
+		// Each waiting worker is either idle or granted. A grant that is
+		// handed back ends its pop before it starts.
 		release := q.granted > 0
 		if release {
 			q.granted--
+			q.popping.Store(false)
 		} else {
 			q.idle--
 		}
@@ -274,7 +292,13 @@ func (q *gatedQueue[T]) GetWithPriority() (_ T, priority int, shutdown bool) {
 	}
 	q.granted--
 	key, priority, ok := q.popLocked()
+	// In this order: clear popping, unlock, then dispatch if a grant was
+	// skipped meanwhile (design §4, "Containment").
+	q.popping.Store(false)
 	q.mu.Unlock()
+	if q.skipped.Swap(false) {
+		q.gov.dispatch()
+	}
 	if !ok {
 		q.gov.releaseLocal()
 		return zero, 0, true
@@ -288,8 +312,16 @@ func (q *gatedQueue[T]) GetWithPriority() (_ T, priority int, shutdown bool) {
 // inner has an item to hand out at once: one that is ready and not
 // processing. inner is shut down only by ShutDown, under q.mu, which the
 // caller checked, so a shutdown here is a broken record too; it reports false.
+//
+// A watchdog on the real clock reports a pop that is still waiting after
+// popStuckAfter. Its callback takes no lock: the pop holds this queue's lock.
 func (q *gatedQueue[T]) popLocked() (T, int, bool) {
+	watchdog := time.AfterFunc(popStuckAfter, func() {
+		reportBrokenBooks(q.gov.log, "a pop has waited in the inner queue longer than it can: the record counts an item the inner queue doesn't hold, and this controller's queue is stuck",
+			"queue", q.name, "after", popStuckAfter.String())
+	})
 	key, priority, shutdown := q.inner.GetWithPriority()
+	watchdog.Stop()
 	if shutdown {
 		reportBrokenBooks(q.gov.log, "the inner queue was shut down while the gated queue was not")
 		var zero T
@@ -332,8 +364,18 @@ func (q *gatedQueue[T]) Done(key T) {
 	q.gov.releaseLocal()
 }
 
-// tryGrant implements gatedQueueRef.
+// tryGrant implements gatedQueueRef. A queue with a grant whose pop hasn't
+// finished is skipped without taking its lock, so the Governor never waits on
+// it; the skip is recorded, and that pop dispatches again when it is done. One
+// grant at a time per queue: pops are one at a time under the queue's lock
+// anyway.
 func (q *gatedQueue[T]) tryGrant() bool {
+	if q.popping.Load() {
+		q.skipped.Store(true)
+		if q.popping.Load() {
+			return false
+		}
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.shutdown || q.idle == 0 || q.free-q.granted <= 0 {
@@ -341,6 +383,7 @@ func (q *gatedQueue[T]) tryGrant() bool {
 	}
 	q.idle--
 	q.granted++
+	q.popping.Store(true)
 	q.cond.Signal()
 	return true
 }

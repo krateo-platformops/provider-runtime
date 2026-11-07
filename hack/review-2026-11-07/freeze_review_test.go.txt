@@ -1,0 +1,43 @@
+package ratelimit
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	utilclock "k8s.io/utils/clock"
+)
+
+func rvWithin(d time.Duration, f func()) bool {
+	done := make(chan struct{})
+	go func() { f(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// Simulate one overcount defect in queue A (free one too high) and look at
+// what else on the Governor still works.
+func TestReviewOvercountBlastRadius(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(4)
+	a := newGatedQueue[string](g, "a", nil, utilclock.RealClock{})
+	b := newGatedQueue[string](g, "b", nil, utilclock.RealClock{})
+	before := brokenBooks.Load()
+
+	a.mu.Lock()
+	a.free++ // the defect: counts an item inner doesn't hold
+	a.mu.Unlock()
+	go a.GetWithPriority() // granted, pops, waits in inner holding a.mu
+	time.Sleep(200 * time.Millisecond)
+
+	t.Logf("b.Add returns: %v", rvWithin(time.Second, func() { b.Add("x") }))
+	t.Logf("b pops x: %v", rvWithin(time.Second, func() { b.GetWithPriority() }))
+	t.Logf("Acquire on an unrelated key returns: %v", rvWithin(time.Second, func() { g.Acquire(context.Background(), "endpoint") }))
+	t.Logf("Snapshot (metrics callback) returns: %v", rvWithin(time.Second, func() { g.Snapshot() }))
+	t.Logf("b.ShutDown returns: %v", rvWithin(time.Second, func() { b.ShutDown() }))
+	t.Logf("broken-books reports so far: %d", brokenBooks.Load()-before)
+}
