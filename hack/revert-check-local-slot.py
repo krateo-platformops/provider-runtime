@@ -77,7 +77,7 @@ def go_test():
 
 def digest():
     h = hashlib.sha256()
-    for f in sorted({m[1] for m in MUTANTS}):
+    for f in (Q, GOV, REC, OPT):
         h.update(open(os.path.join(ROOT, f), "rb").read())
     return h.hexdigest()
 

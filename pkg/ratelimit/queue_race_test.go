@@ -206,7 +206,8 @@ const drainDeadline = 10 * time.Second
 // stressLoad runs workers that pop, hold briefly and call Done, and adders that
 // re-add a few keys, for a while; then it stops the adders. Every worker runs as
 // controller-runtime's do. It returns when the adders have stopped.
-func stressLoad(q priorityqueue.PriorityQueue[string], workerCount int, running *atomic.Int32) (stopWorkers func(t *testing.T)) {
+func stressLoad(t *testing.T, q priorityqueue.PriorityQueue[string], workerCount int, running *atomic.Int32) (stopWorkers func(t *testing.T)) {
+	t.Helper()
 	var wg sync.WaitGroup
 	for range workerCount {
 		wg.Go(func() {
@@ -242,7 +243,7 @@ func stressLoad(q priorityqueue.PriorityQueue[string], workerCount int, running 
 	}
 	time.Sleep(300 * time.Millisecond)
 	close(stop)
-	adders.Wait()
+	within(t, "stopping the adders", adders.Wait)
 	return func(t *testing.T) {
 		t.Helper()
 		within(t, "stopping the workers", func() { q.ShutDown(); wg.Wait() })
@@ -258,7 +259,7 @@ func TestGatedQueueDrainsUnderConcurrentAddsAndDones(t *testing.T) {
 		g.setLocalCapacity(4)
 		q := gated(t, g, "stress"+strconv.Itoa(run))
 		var running atomic.Int32
-		stopWorkers := stressLoad(q, 8, &running)
+		stopWorkers := stressLoad(t, q, 8, &running)
 		deadline := time.Now().Add(drainDeadline)
 		for {
 			lockWithin(t, q, "draining")
@@ -288,7 +289,7 @@ func TestGatedQueueDrainsUnderConcurrentAddsAndDones(t *testing.T) {
 func TestUpstreamPriorityQueueDrainsUnderTheSameLoad(t *testing.T) {
 	for run := range 20 {
 		q := priorityqueue.New[string]("ctl"+strconv.Itoa(run), func(o *priorityqueue.Opts[string]) { o.Log = logr.Discard() })
-		stopWorkers := stressLoad(q, 4, nil)
+		stopWorkers := stressLoad(t, q, 4, nil)
 		deadline := time.Now().Add(drainDeadline)
 		for q.Len() != 0 {
 			if time.Now().After(deadline) {
