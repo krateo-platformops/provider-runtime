@@ -299,3 +299,16 @@ possibly clean counts) and the CPU threshold.
   reconciles in flight with capacity 1; three popped items requeued for local
   capacity) and 5 to 8 pass there. Test 10 belongs to the v1.10.1 fix. The model
   test (9) and the queue's own tests are new code.
+- **The model test,** 120 steps a run: 2,000 runs without the race detector and
+  5,000 under `-race` (65s), with no failure and no data race. The 5,000 runs
+  made 154,516 pops, 73,636 of them with a lower-priority key also available,
+  49,006 delayed items coming due, 35,060 re-adds while processing and 71,789
+  capacity changes.
+- **Revert check** (`hack/revert-check-local-slot.py`): 30 of 32 mutants killed
+  by assertion, none by a compile failure, panic or timeout. The two survivors
+  are equivalent: a keyless call reaching `AcquireAll`, and `AcquireAll` without
+  keys reaching `acquire`, both take nothing and return a no-op release.
+- **Local smoke** (`hack/smoke-local-slot.sh`): the example controller with
+  `--saturation-governor` against envtest, no cluster: 12 of 12 Greetings Ready,
+  none written `ReconcileDeferred`, no error or warning. macOS has no cgroup v2,
+  so this checks the wiring, not saturation.
