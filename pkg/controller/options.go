@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
@@ -42,7 +43,8 @@ type Options struct {
 
 	// UsePriorityQueue controls whether controller-runtime should use its
 	// priority queue implementation when queue wait telemetry is enabled.
-	// Defaults to true.
+	// Defaults to true. With RateLimit.Saturation enabled the queue is always a
+	// priority queue, so false is an error from SetupRateLimitGovernor.
 	UsePriorityQueue *bool
 
 	// QueueWaitRecorder records how long requests spend waiting in the
@@ -56,9 +58,10 @@ type Options struct {
 
 	// RateLimitGovernor is the governor SetupRateLimitGovernor built, or nil
 	// when RateLimit enables nothing. Controllers pass it to their reconciler
-	// with reconciler.WithRateLimitGovernor, which is a no-op for nil.
-	// ForControllerRuntime does not read it: the governor gates calls inside
-	// the reconciler, not the queue.
+	// with reconciler.WithRateLimitGovernor, which is a no-op for nil, and it
+	// gates calls per key there. With saturation on, ForControllerRuntime also
+	// gates the controller's queue on its local capacity
+	// (ratelimit.NewGatedQueue).
 	RateLimitGovernor *ratelimit.Governor
 }
 
@@ -100,11 +103,18 @@ type RunnableAdder interface {
 //
 // The governor's ceiling comes from o.MaxConcurrentReconciles (at least 1),
 // times the reconcilers that register with it.
+//
+// With saturation on, UsePriorityQueue set to false is an error: each
+// controller's queue is gated on the local capacity, and the gated queue is a
+// priority queue.
 func (o *Options) SetupRateLimitGovernor(mgr RunnableAdder) error {
 	rl := o.RateLimit
 	if !rl.Enabled && !rl.Saturation.Enabled {
 		o.RateLimitGovernor = nil
 		return nil
+	}
+	if rl.Saturation.Enabled && o.UsePriorityQueue != nil && !*o.UsePriorityQueue {
+		return errors.New("controller: UsePriorityQueue=false conflicts with RateLimit.Saturation: the queue that takes the local slot before the pop is a priority queue")
 	}
 	logger := o.Logger
 	if logger == nil {
@@ -128,23 +138,43 @@ func (o *Options) SetupRateLimitGovernor(mgr RunnableAdder) error {
 	return nil
 }
 
-// ForControllerRuntime extracts options for controller-runtime.
+// ForControllerRuntime extracts options for controller-runtime. Call it once
+// per controller.
+//
+// With a RateLimitGovernor that has saturation on, the controller's queue is
+// gated on the governor's local capacity (ratelimit.NewGatedQueue), and the
+// governor counts the controller, so it can tell a reconciler whose controller
+// was built without this.
 func (o Options) ForControllerRuntime() controller.Options {
 	controllerOptions := controller.TypedOptions[reconcile.Request]{
 		MaxConcurrentReconciles: o.MaxConcurrentReconciles,
 		RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](1*time.Second, 60*time.Second),
 	}
 
-	if o.QueueWaitRecorder != nil {
-		usePriorityQueue := true
-		if o.UsePriorityQueue != nil {
-			usePriorityQueue = *o.UsePriorityQueue
-		}
-
-		controllerOptions.NewQueue = func(controllerName string, rateLimiter workqueue.TypedRateLimiter[reconcile.Request]) workqueue.TypedRateLimitingInterface[reconcile.Request] {
-			return newQueueWithWaitMetrics(controllerName, rateLimiter, usePriorityQueue, o.QueueWaitRecorder)
-		}
+	g := o.RateLimitGovernor
+	gated := g != nil && g.SaturationEnabled()
+	if gated {
+		g.RegisterGatedController()
+	}
+	if o.QueueWaitRecorder == nil && !gated {
+		return controllerOptions
 	}
 
+	usePriorityQueue := true
+	if o.UsePriorityQueue != nil {
+		usePriorityQueue = *o.UsePriorityQueue
+	}
+	controllerOptions.NewQueue = func(controllerName string, rateLimiter workqueue.TypedRateLimiter[reconcile.Request]) workqueue.TypedRateLimitingInterface[reconcile.Request] {
+		if !gated {
+			return newQueueWithWaitMetrics(controllerName, rateLimiter, usePriorityQueue, o.QueueWaitRecorder)
+		}
+		queue := ratelimit.NewGatedQueue(g, controllerName, rateLimiter)
+		if o.QueueWaitRecorder == nil {
+			return queue
+		}
+		// The gated queue is a priority queue, so the wrapper is one too and
+		// controller-runtime keeps its priorities.
+		return newQueueWaitInstrumented[reconcile.Request](queue, o.QueueWaitRecorder)
+	}
 	return controllerOptions
 }

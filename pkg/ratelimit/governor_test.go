@@ -288,10 +288,6 @@ func TestDeferralMessages(t *testing.T) {
 	if !strings.Contains(capacity, "waiting for capacity") || strings.Contains(capacity, "0001-01-01") {
 		t.Errorf("capacity message %q must say waiting for capacity and carry no date", capacity)
 	}
-	saturated := (&Deferral{Reason: DeferSaturated, Capacity: 1, Cause: "memory working set 93% of limit"}).Message()
-	if !strings.Contains(saturated, "controller saturated: memory working set 93% of limit") || !strings.Contains(saturated, "waiting for capacity") {
-		t.Errorf("saturated message %q must name the cause and say waiting for capacity", saturated)
-	}
 }
 
 func TestReportIsANoOpWithoutASink(t *testing.T) {
@@ -424,9 +420,6 @@ func TestAcquireAllHoldsNothingWhileDeferred(t *testing.T) {
 	if st := g.keys["a"]; st.inFlight != 0 {
 		t.Errorf("a has %d calls in flight, want 0: deferred calls leaked its slots", st.inFlight)
 	}
-	if g.localInFlight != 1 {
-		t.Errorf("%d local slots in flight, want 1, the held call's", g.localInFlight)
-	}
 }
 
 // Every key is released, once, however many times release runs.
@@ -442,9 +435,6 @@ func TestAcquireAllReleasesEveryKey(t *testing.T) {
 	release()
 	if a, b := g.keys["a"].inFlight, g.keys["b"].inFlight; a != 1 || b != 0 {
 		t.Errorf("after two releases in flight a=%d b=%d, want 1 and 0: release must count once on every key", a, b)
-	}
-	if g.localInFlight != 1 {
-		t.Errorf("%d local slots in flight, want 1, the other call's", g.localInFlight)
 	}
 }
 
@@ -548,36 +538,23 @@ func TestAcquireAllNormalizesKeys(t *testing.T) {
 	}
 }
 
-// One call takes one local slot, however many keys it has. Local bounds calls,
-// not keys, so a two-endpoint sync must not count as two.
-func TestAcquireAllTakesOneLocalSlot(t *testing.T) {
+// A gated call takes no local slot, keyed or not: the gated queue took one
+// before the reconcile started, and it covers every call in it. A call with no
+// key is not gated at all, and creates no key state.
+func TestCallsTakeNoLocalSlot(t *testing.T) {
 	g, _ := saturationGovernor(t, 4, "healthy", false)
 	release := mustAcquireAll(t, g, "a", "b")
 	defer release()
-	if g.localInFlight != 1 {
-		t.Errorf("%d local slots in flight, want 1", g.localInFlight)
+	keyless := mustAcquire(t, g, "")
+	defer keyless()
+	if g.localInFlight != 0 {
+		t.Errorf("%d local slots in flight, want 0: calls don't take local slots", g.localInFlight)
 	}
-}
-
-// A full local capacity stops a multi-key call before it takes any key slot.
-// No key stopped it, so the deferral names none: picking one would tell an
-// operator that a healthy endpoint is the problem.
-func TestAcquireAllDeferredByLocalNamesNoKey(t *testing.T) {
-	g, _ := saturationGovernor(t, 4, "healthy", false)
-	g.local.Store(&localState{capacity: 1})
-	held := mustAcquire(t, g, "other")
-	defer held()
-
-	_, d := g.AcquireAll(context.Background(), []string{"a", "b"})
-	if d == nil || !d.Local || d.Key != "" {
-		t.Fatalf("deferral = %+v, want a Local one with no key", d)
+	if _, ok := g.keys[""]; ok {
+		t.Error("a keyless call created key state")
 	}
-	if _, single := g.Acquire(context.Background(), "a"); single == nil || !single.Local || single.Key != "a" {
-		t.Errorf("single-key deferral = %+v, want it to keep its key as before", single)
-	}
-	g.local.Store(&localState{capacity: 4})
-	release := mustAcquireAll(t, g, "a", "b")
-	release()
+	// A second keyless call at local capacity 1 still goes through.
+	mustAcquire(t, g, "")()
 }
 
 // Calls on the same two keys, in either order, never get stuck: nothing blocks,

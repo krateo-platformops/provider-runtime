@@ -35,43 +35,27 @@ const (
 	// DeferThrottled: the server refused a call for this key and named a
 	// deadline. Deferral.Until is that deadline.
 	DeferThrottled DeferReason = "Throttled"
-	// DeferAtCapacity: the key, or the local capacity while it ramps up after
-	// a start or a saturation, has as many calls in flight as it allows. There
+	// DeferAtCapacity: the key has as many calls in flight as it allows. There
 	// is no server deadline.
 	DeferAtCapacity DeferReason = "AtCapacity"
-	// DeferSaturated: the controller's own container is saturated and the
-	// process-wide local capacity is full. There is no server deadline.
-	DeferSaturated DeferReason = "Saturated"
-	// DeferRamping: the local capacity is full and still on its startup ramp,
-	// before its first cut, with nothing saturated. The controller has only
-	// just started, which says nothing about the object, so the reconciler
-	// requeues quietly: it doesn't touch Synced or record an event. It is the
-	// one deferral a provider's users don't see on the object; the deferrals
-	// metric counts it under cause "ramping".
-	DeferRamping DeferReason = "Ramping"
 )
 
-// Cause is the value of the cause attribute on the deferrals metric:
-// throttled, capacity, saturated or ramping.
+// Cause is the value of the cause attribute on the deferrals metric: throttled
+// or capacity. The controller's own saturation defers nothing: it holds work
+// in the queue (NewGatedQueue), so it has no cause here.
 func (r DeferReason) Cause() string {
 	switch r {
 	case DeferThrottled:
 		return "throttled"
 	case DeferAtCapacity:
 		return "capacity"
-	case DeferSaturated:
-		return "saturated"
-	case DeferRamping:
-		return "ramping"
 	}
 	return string(r)
 }
 
 // A Deferral says a call must not be made now, why, and when to try again.
 type Deferral struct {
-	// Key is the key that stopped the call. For a Local deferral no key stopped
-	// it: Key is then the call's key, or empty when the call has no key or
-	// several, since naming one of several would blame the wrong endpoint.
+	// Key is the key that stopped the call.
 	Key string
 	// Reason says why.
 	Reason DeferReason
@@ -79,23 +63,11 @@ type Deferral struct {
 	// the governor never invents a deadline.
 	Until time.Time
 	// RequeueAfter is how long the caller waits before it tries again. For
-	// DeferThrottled it is the time left until Until, never less. For
-	// DeferRamping it is a random delay between 1s and the time the ramp still
-	// needs, at most the RecoveryInterval, so the object is back before the
-	// ramp ends. Otherwise it is a random delay between 1s and the
-	// RecoveryInterval.
+	// DeferThrottled it is the time left until Until, never less. Otherwise it
+	// is a random delay between 1s and the RecoveryInterval.
 	RequeueAfter time.Duration
-	// Capacity is the capacity that was full: the key's, or the local one when
-	// Local is set.
+	// Capacity is the key's capacity that was full, for DeferAtCapacity.
 	Capacity int
-	// Local is set when the process-wide local capacity was full, rather than
-	// the key's. Its message names the cause and no key: the controller is
-	// saturated (DeferSaturated), recovering after a cut (DeferAtCapacity), or
-	// on its startup ramp (DeferRamping).
-	Local bool
-	// Cause names the saturated inputs for DeferSaturated, for example
-	// "memory working set 93% of limit".
-	Cause string
 }
 
 // Message is the Synced condition message for a deferred pass. It names the
@@ -109,20 +81,6 @@ func (d *Deferral) Message() string {
 	case DeferThrottled:
 		return fmt.Sprintf("reconciliation deferred: %s is rate-limited by the server; next attempt %s",
 			d.Key, formatDeadline(d.Until))
-	case DeferSaturated:
-		return fmt.Sprintf("reconciliation deferred: controller saturated: %s; waiting for capacity (%d call(s) in flight allowed); no server deadline was given",
-			d.Cause, d.Capacity)
-	case DeferRamping:
-		return fmt.Sprintf("reconciliation deferred: controller ramping up after a start (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
-			d.Capacity)
-	}
-	if d.Local && d.Cause != "" {
-		return fmt.Sprintf("reconciliation deferred: %s; waiting for capacity (%d call(s) in flight allowed); no server deadline was given",
-			d.Cause, d.Capacity)
-	}
-	if d.Local {
-		return fmt.Sprintf("reconciliation deferred: controller recovering its local concurrency limit (%d call(s) in flight allowed); waiting for capacity; no server deadline was given",
-			d.Capacity)
 	}
 	return fmt.Sprintf("reconciliation deferred: %s is at its concurrency limit of %d call(s); waiting for capacity; no server deadline was given",
 		d.Key, d.Capacity)
@@ -197,17 +155,13 @@ type keyState struct {
 }
 
 // localState is the process-wide local capacity the saturation sampler
-// publishes. It is replaced, never mutated, so Acquire reads it with one
-// atomic load.
+// publishes. It is replaced, never mutated, so readers take it with one atomic
+// load.
 type localState struct {
 	capacity int
 	// cause names the inputs that made the last sample saturated. A clean
 	// sample clears it.
 	cause string
-	// ramping is true from the start until the first cut, or until capacity
-	// reaches the ceiling, whichever comes first. A deferral by the local
-	// capacity is a DeferRamping only while it is true.
-	ramping bool
 }
 
 // A Governor gates external calls per endpoint key, and across all keys by the
@@ -227,21 +181,30 @@ type Governor struct {
 	now    func() time.Time
 	jitter func(hi time.Duration) time.Duration
 
-	mu            sync.Mutex
-	keys          map[string]*keyState
+	mu   sync.Mutex
+	keys map[string]*keyState
+	// localInFlight counts the local slots gated queues hold: one per reconcile
+	// a worker popped and hasn't called Done for.
 	localInFlight int
+	// queues are the gated queues waiting on local capacity, and nextQueue is
+	// where the next round-robin grant starts.
+	queues    []gatedQueueRef
+	nextQueue int
 	// reconcilers is how many reconcilers registered; see ceilingLocked.
 	reconcilers int
+	// gatedControllers is how many controllers' queues ForControllerRuntime
+	// gated; see Start.
+	gatedControllers int
 
 	// local is written under mu and read without it.
 	local atomic.Pointer[localState]
 	// sat is nil when saturation is disabled.
 	sat *saturation
-	// samplerStarted is set by Start. Until then nothing raises local capacity,
-	// so a deferral must not pass for the quiet startup ramp: a Governor that
-	// was never added to the manager would stay at 1 with no sign on any object.
-	samplerStarted atomic.Bool
 }
+
+// runningSamplers counts the saturation samplers running in this process. Two
+// Governors with saturation each allow their full capacity on the same cgroup.
+var runningSamplers atomic.Int32
 
 // New returns a Governor. It returns an error if MaxConcurrentReconciles is
 // below 1 or a saturation setting is out of range: a governor that silently
@@ -280,7 +243,7 @@ func New(o Options) (*Governor, error) {
 			return nil, err
 		}
 		g.sat = sat
-		g.local.Store(&localState{capacity: capacityFloor, ramping: true})
+		g.local.Store(&localState{capacity: capacityFloor})
 	}
 
 	if g.metrics != nil {
@@ -343,8 +306,79 @@ func (g *Governor) RegisterReconciler() {
 }
 
 // SaturationEnabled reports whether the local (saturation) input is on, in
-// which case every gated call needs a local slot, keyed or not.
+// which case controller.Options.ForControllerRuntime gates each controller's
+// queue on the local capacity.
 func (g *Governor) SaturationEnabled() bool { return g.sat != nil }
+
+// RegisterGatedController records that one more controller's queue is gated on
+// this Governor. controller.Options.ForControllerRuntime calls it when it
+// builds a gated queue's constructor, at setup, so Start can tell a reconciler
+// whose controller was built without it: that reconciler would run with no
+// local bound at all.
+func (g *Governor) RegisterGatedController() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.gatedControllers++
+}
+
+// addQueue makes q eligible for local slots.
+func (g *Governor) addQueue(q gatedQueueRef) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.queues = append(g.queues, q)
+}
+
+// removeQueue stops granting q slots: it is shutting down.
+func (g *Governor) removeQueue(q gatedQueueRef) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if i := slices.Index(g.queues, q); i >= 0 {
+		g.queues = slices.Delete(g.queues, i, i+1)
+		if g.nextQueue > i {
+			g.nextQueue--
+		}
+	}
+}
+
+// dispatch grants free local slots to queues that have work.
+func (g *Governor) dispatch() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.dispatchLocked()
+}
+
+// releaseLocal gives back one local slot and grants it on.
+func (g *Governor) releaseLocal() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.localInFlight > 0 {
+		g.localInFlight--
+	}
+	g.dispatchLocked()
+}
+
+// dispatchLocked hands free local slots, one at a time, to queues with an idle
+// worker and an item to give it, round-robin from where the last grant left
+// off. Inside a queue the order is the queue's; across queues a queue waits at
+// most one grant per other queue with work. The caller holds g.mu.
+func (g *Governor) dispatchLocked() {
+	for g.localInFlight < g.local.Load().capacity {
+		n := len(g.queues)
+		granted := false
+		for i := range n {
+			idx := (g.nextQueue + i) % n
+			if g.queues[idx].tryGrant() {
+				g.localInFlight++
+				g.nextQueue = (idx + 1) % n
+				granted = true
+				break
+			}
+		}
+		if !granted {
+			return
+		}
+	}
+}
 
 // Ceiling reports the capacity every key and the local capacity recover to.
 func (g *Governor) Ceiling() int {
@@ -383,10 +417,10 @@ func (g *Governor) maybeRaiseLocked(st *keyState, now time.Time) {
 }
 
 // Acquire asks to make one gated call for key. It never blocks and does no
-// I/O: it either grants a slot in both the key's capacity and the local
-// capacity, returning the release func to call when the call returns, or it
-// returns a Deferral at once. An empty key asks for a local slot only: the
-// call of a provider without a RateLimitKeyer, which saturation still bounds.
+// I/O: it either grants a slot in the key's capacity, returning the release
+// func to call when the call returns, or it returns a Deferral at once. An empty
+// key gates nothing. The local capacity isn't asked here: a gated queue takes
+// its slot before the reconcile starts (NewGatedQueue).
 //
 // A blocking gate would park workers: with MaxConcurrentReconciles workers and
 // one throttled key, every worker could end up waiting on that key while
@@ -399,19 +433,22 @@ func (g *Governor) Acquire(ctx context.Context, key string) (release func(), d *
 }
 
 // AcquireAll is Acquire for a call that talks to several rate-limited scopes,
-// such as a sync between two endpoints. The call needs a slot in every key
-// plus one local slot, all or nothing: it either holds them all, or holds none
-// and gets a Deferral. Nothing is held while deferred, so two calls that share
-// keys can't wait on each other.
+// such as a sync between two endpoints. The call needs a slot in every key,
+// all or nothing: it either holds them all, or holds none and gets a Deferral.
+// Nothing is held while deferred, so two calls that share keys can't wait on
+// each other.
 //
 // Empty keys are ignored and repeated keys count once, so two names for the
-// same scope take one slot. With no keys left it asks for a local slot only.
+// same scope take one slot. With no keys left it gates nothing.
 //
 // A hold on any key outranks a full capacity, as it does for one key. With
 // several keys held the Deferral names the latest deadline: the call can't run
 // before that one lifts, so waking at an earlier one would only defer it again.
 func (g *Governor) AcquireAll(ctx context.Context, keys []string) (release func(), d *Deferral) {
 	keys = normalizeKeys(keys)
+	if len(keys) == 0 {
+		return func() {}, nil
+	}
 	d = g.acquire(keys)
 	if d != nil {
 		if g.metrics != nil {
@@ -429,9 +466,6 @@ func (g *Governor) AcquireAll(ctx context.Context, keys []string) (release func(
 					st.inFlight--
 				}
 			}
-			if g.localInFlight > 0 {
-				g.localInFlight--
-			}
 		})
 	}, nil
 }
@@ -444,22 +478,9 @@ func normalizeKeys(keys []string) []string {
 	return slices.Compact(out)
 }
 
-// rampLeftLocked is how long the startup ramp still needs to take capacity to
-// the ceiling. A step can't happen between samples, so the sample period sets
-// the pace when it is the longer of the two. The caller holds g.mu.
-func (g *Governor) rampLeftLocked(capacity int) time.Duration {
-	step := max(g.sat.opts.StartupRampInterval, g.sat.opts.SamplePeriod)
-	return time.Duration(g.ceilingLocked()-capacity) * step
-}
-
-// causeSamplerNotStarted is the cause of a local deferral on a Governor whose
-// sampler isn't running. It is a provider defect, and it must show on the object.
-const causeSamplerNotStarted = "saturation sampler is not running: add the Governor to the manager"
-
 // acquire takes a slot in every key of keys, which normalizeKeys has prepared,
-// and one local slot, or takes nothing and returns why. Every check runs before
-// the first slot is taken, under one hold of g.mu, so a deferred call leaves no
-// slot behind.
+// or takes nothing and returns why. Every check runs before the first slot is
+// taken, under one hold of g.mu, so a deferred call leaves no slot behind.
 func (g *Governor) acquire(keys []string) *Deferral {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -483,29 +504,9 @@ func (g *Governor) acquire(keys []string) *Deferral {
 			return &Deferral{Key: keys[i], Reason: DeferAtCapacity, RequeueAfter: g.jitter(g.recovery), Capacity: st.capacity}
 		}
 	}
-	local := g.local.Load()
-	if g.localInFlight >= local.capacity {
-		var key string
-		if len(keys) == 1 {
-			key = keys[0]
-		}
-		d := &Deferral{Key: key, Reason: DeferAtCapacity, Local: true, RequeueAfter: g.jitter(g.recovery), Capacity: local.capacity, Cause: local.cause}
-		switch {
-		case local.cause != "":
-			d.Reason = DeferSaturated
-		case local.ramping && g.samplerStarted.Load():
-			d.Reason = DeferRamping
-			d.RequeueAfter = g.jitter(min(g.recovery, g.rampLeftLocked(local.capacity)))
-		case local.ramping:
-			d.Cause = causeSamplerNotStarted
-		}
-		return d
-	}
-
 	for _, st := range states {
 		st.inFlight++
 	}
-	g.localInFlight++
 	return nil
 }
 
@@ -568,13 +569,31 @@ func (g *Governor) LocalCapacity() int {
 
 // Start runs the saturation sampler until ctx is done, when saturation is
 // enabled; otherwise it waits for ctx. It satisfies manager.Runnable, so add
-// the Governor to the manager with mgr.Add.
+// the Governor to the manager with mgr.Add. Until it runs, local capacity stays
+// at 1 and every saturation input reports as disabled.
+//
+// It logs an error once when more reconcilers registered with the Governor than
+// controllers had their queue gated: such a reconciler's controller was built
+// without controller.Options.ForControllerRuntime and has no local bound. It
+// warns when another Governor's sampler is already running in the process,
+// because each would allow its full capacity on the same container.
 func (g *Governor) Start(ctx context.Context) error {
 	if g.sat == nil {
 		<-ctx.Done()
 		return nil
 	}
-	g.samplerStarted.Store(true)
+	if runningSamplers.Add(1) > 1 {
+		g.log.Warn("Another Governor with saturation is already running in this process: each allows its full local capacity on the same container. Share one Governor (controller.Options.SetupRateLimitGovernor, called once)")
+	}
+	defer runningSamplers.Add(-1)
+	g.mu.Lock()
+	reconcilers, gated := g.reconcilers, g.gatedControllers
+	g.mu.Unlock()
+	if reconcilers > gated {
+		g.log.Error(errors.New("a reconciler has no local bound"),
+			"More reconcilers use this Governor than controllers have a gated queue. Build every controller that uses it with controller.Options.ForControllerRuntime",
+			"reconcilers", reconcilers, "gatedControllers", gated)
+	}
 	g.log.Info("Saturation sampler started", "cgroup", g.sat.dir, "samplePeriod", g.sat.opts.SamplePeriod.String())
 	g.sample()
 	t := time.NewTicker(g.sat.opts.SamplePeriod)
@@ -592,9 +611,10 @@ func (g *Governor) Start(ctx context.Context) error {
 // NeedLeaderElection is false: every replica samples its own container.
 func (g *Governor) NeedLeaderElection() bool { return false }
 
-// sample takes one saturation sample and publishes the new local capacity.
-// Only the sampler goroutine calls it (tests call it directly instead). The
-// files are read before g.mu is taken, so Acquire never waits on I/O.
+// sample takes one saturation sample, publishes the new local capacity, and
+// grants any slot a rise freed. Only the sampler goroutine calls it (tests call
+// it directly instead). The files are read before g.mu is taken, so Acquire and
+// the gated queues never wait on I/O.
 func (g *Governor) sample() {
 	smp := g.sat.read()
 	g.mu.Lock()
@@ -603,6 +623,7 @@ func (g *Governor) sample() {
 	if next != *cur {
 		g.local.Store(&next)
 	}
+	g.dispatchLocked()
 	g.mu.Unlock()
 	if next.capacity < cur.capacity {
 		g.log.Info("Controller saturated: lowering local capacity", "from", cur.capacity, "to", next.capacity, "cause", next.cause)

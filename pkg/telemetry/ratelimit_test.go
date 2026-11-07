@@ -89,16 +89,6 @@ func TestRateLimitMetrics(t *testing.T) {
 	if _, d := g.Acquire(ctx, "api.github.com"); d == nil {
 		t.Fatal("expected a throttled deferral")
 	}
-	// A restart is quiet on the object, so the metric is where it shows.
-	held, d := g.Acquire(ctx, "dev.azure.com")
-	if d != nil {
-		t.Fatalf("the only local slot wasn't free: %+v", d)
-	}
-	if _, d := g.Acquire(ctx, "ghe.example.com"); d == nil || d.Reason != ratelimit.DeferRamping {
-		t.Fatalf("deferral = %+v, want a Ramping one", d)
-	}
-	held()
-
 	var rm metricdata.ResourceMetrics
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		rm = metricdata.ResourceMetrics{}
@@ -110,8 +100,8 @@ func TestRateLimitMetrics(t *testing.T) {
 		}
 	}
 
-	if got := points(t, rm, "provider_runtime.ratelimit.deferrals", "cause"); got["throttled"] != 1 || got["ramping"] != 1 {
-		t.Errorf("deferrals by cause = %v, want throttled: 1 and ramping: 1", got)
+	if got := points(t, rm, "provider_runtime.ratelimit.deferrals", "cause"); got["throttled"] != 1 || len(got) != 1 {
+		t.Errorf("deferrals by cause = %v, want throttled: 1 and nothing else: local capacity defers nothing", got)
 	}
 	if got := points(t, rm, "provider_runtime.ratelimit.signals", "kind"); got["throttled"] != 1 || got["advisory"] != 1 {
 		t.Errorf("signals by kind = %v, want one throttled and one advisory", got)
