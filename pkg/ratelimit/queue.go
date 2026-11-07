@@ -61,6 +61,11 @@ type gatedQueueRef interface {
 // tests can lower it.
 var popStuckAfter = 10 * time.Second
 
+// skipRaceHook, when a test sets it, runs in tryGrant between seeing a pop in
+// progress and recording the skip: the one interleaving the re-check of
+// popping exists for, which no test could otherwise reach. Unset in production.
+var skipRaceHook atomic.Pointer[func()]
+
 // brokenBooks counts the times the gated queues' or the Governor's own records
 // were found to disagree with what happened, which must never be. Each one is
 // logged as an error; the package's tests fail when it is not zero.
@@ -371,6 +376,9 @@ func (q *gatedQueue[T]) Done(key T) {
 // anyway.
 func (q *gatedQueue[T]) tryGrant() bool {
 	if q.popping.Load() {
+		if hook := skipRaceHook.Load(); hook != nil {
+			(*hook)()
+		}
 		q.skipped.Store(true)
 		if q.popping.Load() {
 			return false

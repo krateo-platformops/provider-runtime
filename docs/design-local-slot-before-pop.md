@@ -201,8 +201,69 @@ anything the pop is holding. It does (references to `CR/pkg/controller/priorityq
   `ShutDown` runs. A test pins this: `TestShutDownDuringAPopInsideInnerReturns`.
 
 The one way it could block is a record that counts an item `inner` can't hand
-out. That is a defect, not a state the queue reaches by timing, and it has no
-timeout: the tests above are what rule it out.
+out. That is a defect, not a state the queue reaches by timing. The tests above
+are what rule it out, and the two measures below limit what it costs if one
+slips through.
+
+**What a stuck pop costs, and the watchdog.** Without containment, a stuck pop
+froze the whole process, silently. The pop holds its queue's lock, and every
+Governor dispatch that reached that queue waited for the lock while holding the
+Governor's. So every other controller's adds blocked, and with them the event
+handlers. Their pops blocked too, and so did every reconcile's `Acquire`, the
+metrics callback (`Snapshot`) and the manager's shutdown. Health checks stayed
+green, and nothing was reported. The reviewer's test showed all of that
+(`hack/review-2026-11-07/freeze_review_test.go.txt`), and
+`TestAStuckPopFreezesOnlyItsQueue` fails on the code before containment. In
+normal use there was a smaller cost of the same shape: a dispatch that reached a
+popping queue waited for that pop's hand-off holding the Governor's lock, and
+that hand-off grows with scheduling delay under the CPU saturation this feature
+exists for.
+
+So, first, a **watchdog**. A pop that has waited inside `inner` longer than
+`popStuckAfter` (10s) is reported as a broken record and logged as an error,
+naming the queue. It runs on the real clock, and its callback takes no lock.
+
+**Containment.** A queue has two flags, read without its lock:
+- `popping`, set from a grant until that grant's pop has finished;
+- `skipped`, set when a grant was skipped because of it.
+
+`tryGrant` skips a popping queue without touching its lock. A dispatch therefore
+never waits on another queue's pop, and the pop dispatches again when it's done.
+
+- **The pop's side,** in `GetWithPriority`: (1) pop, (2) `popping = false`,
+  (3) unlock, (4) if `skipped.Swap(false)` is true, dispatch.
+- **`tryGrant`'s side:** (a) if `popping` is false, take the lock and grant as
+  usual. Otherwise (b) set `skipped = true`, then (c) read `popping` again; if
+  it is still true, return false without the lock, and if it is now false,
+  take the lock and grant as usual.
+- **No grant is lost.** Go's atomics are sequentially consistent, so all of
+  these operations fall in one total order consistent with each goroutine's
+  program order. If (c) reads true, (2) comes after (c), so (4) comes after (b),
+  and its `Swap` sees `skipped` set and dispatches again, after the unlock in
+  (3). If (c) reads false, `tryGrant` grants as usual. A `skipped` left set
+  when (c) reads false only causes one extra dispatch later. Only one pop per
+  queue can be pending (below), so no other pop's `Swap` can consume the skip.
+- **Set at the grant, not at the pop.** As first proposed, the worker set
+  `popping` itself, after waking with the queue's lock. In the moment between
+  its wake and that store, a `tryGrant` could read `popping` as false and block
+  on `Lock`, holding the Governor's lock, while that pop went on to stick: the
+  freeze again. So `tryGrant` sets `popping` when it grants, holding both locks.
+  `tryGrant` calls are serialized by the Governor's lock, so none can read
+  `false` while a grant's pop is pending. The cost is one outstanding grant per
+  queue; pops are one at a time under the queue's lock anyway. A grant handed
+  back at shutdown clears `popping`.
+- **The tests.** `TestAGrantSkippedDuringAPopIsGrantedAfterIt` frees, during a
+  pop, a slot only the popping queue can use, and checks it is granted after the
+  pop. `TestAPopEndingDuringTheSkipLosesNoGrant` runs the pop's end between (a)
+  and (b) through a test hook, `skipRaceHook`, which is unset in production; no
+  outside test can reach that interleaving.
+
+**What a stuck pop still costs, with containment:** that one queue, so that
+controller reconciles nothing more, and the slots it holds, the stuck pop's and
+those its other reconciles are using, out of the shared local capacity. Every
+other controller, `Acquire`, `Snapshot` and shutdown go on, and the watchdog
+reports it. `TestAStuckPopFreezesOnlyItsQueue` and `TestAStuckPopIsReported`
+pin both.
 
 **The `QueueWaitRecorder` wrapper.** At `d0632f1` it lacked `AddWithOpts` and
 `GetWithPriority`, so controller-runtime wrapped it and every item ran at
@@ -375,6 +436,11 @@ possibly clean counts) and the CPU threshold.
   runs under `-race` at host load 55 to 65. Waiting longer showed every one
   drained, the slowest after 2.62s. The stress tests now share a 10s deadline set
   from that, the same for the gated queue and the control.
+- **A second review found that a broken record froze the whole process
+  silently,** wider than §4 then said, and that a dispatch waited on any popping
+  queue's hand-off in normal use. A watchdog and containment followed (§4). The
+  containment as first proposed had a window, the moment between a worker's
+  wake and its setting `popping`, which setting `popping` at the grant closes.
 - **The fix under `-race`, 200 runs each:** the review's two interleavings, the
   delayed-add window, shutdown during a pop and a pop the record disagrees with,
   1,000 passes in 187s; the stress test, 200 passes of 20 runs each in 1,261s;

@@ -171,3 +171,36 @@ func TestAGrantSkippedDuringAPopIsGrantedAfterIt(t *testing.T) {
 		t.Fatalf("the slot b freed during a's pop was never granted to a: a's second item waits with a slot free (in flight %d)", g.inFlight())
 	}
 }
+
+// The re-check in tryGrant: the pop finishes, and finds no skip to act on,
+// between tryGrant seeing it in progress and recording the skip. tryGrant must
+// then see the pop is over and grant, or the grant is lost: nobody dispatches
+// again. The hook runs the pop's ending at exactly that point.
+func TestAPopEndingDuringTheSkipLosesNoGrant(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(0)
+	q := gated(t, g, "skip-race")
+	got, _ := workers(q, 1)
+	eventually(t, "the worker waiting", func() bool { return idleWorkers(q) == 1 })
+	q.Add("k")            // available, but no capacity yet
+	q.popping.Store(true) // a pop in progress, as far as tryGrant can tell
+	hook := func() {
+		// The pop ends now: clear, unlock, then look for a skip; there is none yet.
+		q.popping.Store(false)
+		if q.skipped.Swap(false) {
+			t.Error("the pop found a skip before tryGrant recorded one")
+		}
+		skipRaceHook.Store(nil) // once
+	}
+	skipRaceHook.Store(&hook)
+	t.Cleanup(func() { skipRaceHook.Store(nil) })
+	g.setLocalCapacity(1) // dispatch: tryGrant sees the pop, the hook ends it
+	select {
+	case p := <-got:
+		if p.key != "k" {
+			t.Errorf("popped %s, want k", p.key)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the grant was lost: k waits with a slot free (in flight %d)", g.inFlight())
+	}
+}
