@@ -76,3 +76,44 @@ func TestSetupRateLimitGovernor(t *testing.T) {
 		}
 	})
 }
+
+// MaxHold reaches the governor: unset is the 1h cap, 0 is no cap, a value is
+// that cap, and a negative value is an error.
+func TestSetupRateLimitGovernorMaxHold(t *testing.T) {
+	cases := map[string]struct {
+		maxHold *time.Duration
+		want    time.Duration
+	}{
+		"unset caps at 1h": {want: ratelimit.DefaultMaxHold},
+		"0 is no cap":      {maxHold: new(time.Duration(0)), want: 24 * time.Hour},
+		"10m caps at 10m":  {maxHold: new(10 * time.Minute), want: 10 * time.Minute},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			o := Options{RateLimit: RateLimitOptions{Enabled: true, MaxHold: tc.maxHold}}
+			if err := o.SetupRateLimitGovernor(&runnables{}); err != nil {
+				t.Fatal(err)
+			}
+			g := o.RateLimitGovernor
+			g.Observe(ratelimit.Signal{Key: "h", Throttled: true, RetryAfter: 24 * time.Hour})
+			_, d := g.Acquire(context.Background(), "h")
+			if d == nil {
+				t.Fatal("a throttled key let a call through")
+			}
+			// RequeueAfter is measured against the wall clock: allow a second.
+			if d.RequeueAfter > tc.want || d.RequeueAfter < tc.want-time.Second {
+				t.Errorf("RequeueAfter = %v, want about %v", d.RequeueAfter, tc.want)
+			}
+		})
+	}
+
+	t.Run("negative is an error", func(t *testing.T) {
+		o := Options{RateLimit: RateLimitOptions{Enabled: true, MaxHold: new(-time.Minute)}}
+		if err := o.SetupRateLimitGovernor(&runnables{}); err == nil {
+			t.Error("SetupRateLimitGovernor accepted a negative MaxHold")
+		}
+		if o.RateLimitGovernor != nil {
+			t.Error("a governor was built from a negative MaxHold")
+		}
+	})
+}

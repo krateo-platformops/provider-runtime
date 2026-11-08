@@ -81,6 +81,7 @@ type Metrics struct {
 	// Rate-limit governor (pkg/ratelimit).
 	rateLimitDeferrals         metric.Int64Counter
 	rateLimitSignals           metric.Int64Counter
+	rateLimitHoldClamped       metric.Int64Counter
 	rateLimitCapacity          metric.Int64ObservableGauge
 	rateLimitSecondsToReset    metric.Float64ObservableGauge
 	rateLimitLocalCapacity     metric.Int64ObservableGauge
@@ -266,6 +267,10 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	}
 	if m.rateLimitSignals, err = meter.Int64Counter("provider_runtime.ratelimit.signals",
 		metric.WithDescription("Rate-limit signals providers reported, by key and kind (throttled, advisory).")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitHoldClamped, err = meter.Int64Counter("provider_runtime.ratelimit.hold_clamped",
+		metric.WithDescription("Throttled signals whose deadline was past the governor's MaxHold and was cut to it, by key.")); err != nil {
 		return nil, err
 	}
 	if m.rateLimitCapacity, err = meter.Int64ObservableGauge("provider_runtime.ratelimit.capacity",
@@ -544,6 +549,15 @@ func (m *Metrics) IncRateLimitSignal(ctx context.Context, key string, kind ratel
 	}
 	m.rateLimitSignals.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("key", key), attribute.String("kind", string(kind))))
+}
+
+// IncRateLimitHoldClamped counts one throttled signal for key whose deadline
+// was cut to the governor's MaxHold.
+func (m *Metrics) IncRateLimitHoldClamped(ctx context.Context, key string) {
+	if m == nil {
+		return
+	}
+	m.rateLimitHoldClamped.Add(ctx, 1, metric.WithAttributes(attribute.String("key", key)))
 }
 
 // ObserveRateLimit makes snapshot the source of the rate-limit gauges.

@@ -55,6 +55,27 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   but a fake `recorder.Provider` must change. `WebhookBuilder.WithCustomPath`
   is removed and the scheme builder is deprecated. The `go` floor stays 1.26.0.
   envtest moves to 1.37.0, with setup-envtest from release-0.25.
+- **Behaviour change: a server's hold is capped at `RateLimit.MaxHold`,
+  default 1h.** Before, a refusal held its key for as long as the server
+  asked, with no bound, so a broken or hostile server sending
+  `Retry-After: 86400`, or a reset time a year away, froze every object on the
+  key for that long, deletions included: the finalizer needs `Connect` and
+  `Observe`, which are gated. A mock-429 probe on a test cluster found it. Now
+  a deadline past now+`MaxHold` is cut to it. After the cut hold one call goes
+  through; if the server still refuses, the key is held again. With the
+  default, a server that asks for longer than 1h gets one call per hour
+  instead of a full hold: a hold longer than `MaxHold` is retried at `MaxHold`
+  intervals, so a server asking for 6h receives 6 requests instead of 1. Set
+  it to 0 to honour any hold in full, which restores the old unbounded hold.
+  Negative is an error.
+- New API: `RateLimitOptions.MaxHold` and `ratelimit.Options.MaxHold`
+  (`*time.Duration`: `nil` is 1h, 0 is no cap), `ratelimit.DefaultMaxHold`,
+  and `MetricsRecorder.IncRateLimitHoldClamped`, which a custom
+  `MetricsRecorder` must now implement. Suggested flag and env:
+  `--rate-limit-max-hold` / `<NAME>_PROVIDER_RATE_LIMIT_MAX_HOLD`; the example
+  provider declares them. The first cut per key is logged at Info, once until
+  the key goes a whole `RecoveryInterval` clean, and every cut is counted in
+  the new `provider_runtime.ratelimit.hold_clamped{key}` counter.
 
 ## 2026-11-08 — v1.11.0: scale idle controllers to zero
 - **`pkg/scaletozero`**, for owners that run one controller Deployment per

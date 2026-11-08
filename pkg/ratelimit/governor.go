@@ -20,6 +20,12 @@ import (
 // cut, must go clean before its capacity rises by one.
 const DefaultRecoveryInterval = 30 * time.Second
 
+// DefaultMaxHold is the longest the governor holds a key after a refusal when
+// Options.MaxHold is unset. A server's Retry-After or reset time beyond it is
+// cut to it, so a broken or hostile server can't freeze every object on a key,
+// deletions included, for a day or a year.
+const DefaultMaxHold = time.Hour
+
 // capacityFloor is 1, never 0. One call in flight is how a throttled key finds
 // out the limit has lifted, and how a saturated controller still finishes
 // deletions.
@@ -59,8 +65,9 @@ type Deferral struct {
 	Key string
 	// Reason says why.
 	Reason DeferReason
-	// Until is the server's own deadline. It is set only for DeferThrottled;
-	// the governor never invents a deadline.
+	// Until is the server's own deadline, cut to MaxHold after the refusal
+	// when the server asked for longer. It is set only for DeferThrottled. The
+	// governor never invents a deadline: it only shortens one past MaxHold.
 	Until time.Time
 	// RequeueAfter is how long the caller waits before it tries again. For
 	// DeferThrottled it is the time left until Until, never less. Otherwise it
@@ -103,6 +110,9 @@ type MetricsRecorder interface {
 	IncRateLimitDeferral(ctx context.Context, key string, reason DeferReason)
 	// IncRateLimitSignal counts one throttled or advisory signal for key.
 	IncRateLimitSignal(ctx context.Context, key string, kind SignalKind)
+	// IncRateLimitHoldClamped counts one throttled signal for key whose
+	// deadline was past MaxHold and was cut to it.
+	IncRateLimitHoldClamped(ctx context.Context, key string)
 	// ObserveRateLimit registers snapshot as the source of the governor's
 	// gauges: per-key capacity and seconds to reset, local capacity, and each
 	// saturation input.
@@ -132,6 +142,18 @@ type Options struct {
 	// also the upper bound of the at-capacity requeue delay. Defaults to 30s.
 	RecoveryInterval time.Duration
 
+	// MaxHold is the longest a Throttled signal holds its key: a deadline past
+	// now+MaxHold is cut to now+MaxHold. After the cut hold one call goes
+	// through, and if the server still refuses it the key is held again. nil
+	// means DefaultMaxHold (1h). A pointer to 0 means no cap: the server's
+	// deadline holds in full, however far away. A negative value is an error.
+	//
+	// It is a pointer because unset and 0 differ: unset is the 1h cap, and 0
+	// turns the cap off. The first cut for a key is logged at Info, and not
+	// again until the key has gone a whole RecoveryInterval clean. Every cut is
+	// counted (MetricsRecorder.IncRateLimitHoldClamped).
+	MaxHold *time.Duration
+
 	// Saturation configures the local input (design §7). Off unless Enabled.
 	Saturation SaturationOptions
 
@@ -146,12 +168,18 @@ type Options struct {
 type keyState struct {
 	capacity int
 	inFlight int
-	// holdUntil is the server's deadline; the gate is closed before it.
+	// holdUntil is the server's deadline, cut to MaxHold; the gate is closed
+	// before it.
 	holdUntil time.Time
 	// lastReduce is when a throttled or advisory signal last cut capacity.
 	lastReduce time.Time
 	// lastRaise is when capacity last rose by one.
 	lastRaise time.Time
+	// clampLogged is set once a cut to MaxHold has been logged for the key.
+	// The first throttled signal after the key has gone a whole
+	// RecoveryInterval clean clears it, so a server that keeps asking for too
+	// long is logged once, not once per hold.
+	clampLogged bool
 }
 
 // localState is the process-wide local capacity the saturation sampler
@@ -174,8 +202,10 @@ type Governor struct {
 	perController int
 	ignoreSignals bool
 	recovery      time.Duration
-	log           logging.Logger
-	metrics       MetricsRecorder
+	// maxHold caps a hold; 0 is no cap.
+	maxHold time.Duration
+	log     logging.Logger
+	metrics MetricsRecorder
 
 	// now and jitter are replaced in tests.
 	now    func() time.Time
@@ -219,6 +249,13 @@ func New(o Options) (*Governor, error) {
 	if o.RecoveryInterval == 0 {
 		o.RecoveryInterval = DefaultRecoveryInterval
 	}
+	maxHold := DefaultMaxHold
+	if o.MaxHold != nil {
+		maxHold = *o.MaxHold
+	}
+	if maxHold < 0 {
+		return nil, errors.Errorf("ratelimit: MaxHold must not be negative, got %s", maxHold)
+	}
 	if o.Logger == nil {
 		o.Logger = logging.NewNopLogger()
 	}
@@ -227,6 +264,7 @@ func New(o Options) (*Governor, error) {
 		perController: o.MaxConcurrentReconciles,
 		ignoreSignals: o.IgnoreSignals,
 		recovery:      o.RecoveryInterval,
+		maxHold:       maxHold,
 		log:           o.Logger,
 		metrics:       o.Metrics,
 		now:           time.Now,
@@ -406,18 +444,26 @@ func (g *Governor) state(key string) *keyState {
 // RecoveryInterval clean, counted from the later of its last cut and the end of
 // its hold, and at most once per interval. The caller holds g.mu.
 func (g *Governor) maybeRaiseLocked(st *keyState, now time.Time) {
-	if st.capacity >= g.ceilingLocked() || now.Before(st.holdUntil) {
+	if st.capacity >= g.ceilingLocked() || !g.cleanLocked(st, now) || now.Sub(st.lastRaise) < g.recovery {
 		return
+	}
+	st.capacity++
+	st.lastRaise = now
+}
+
+// cleanLocked reports whether the key has gone a whole RecoveryInterval clean
+// at now: it isn't held, and a whole RecoveryInterval has passed since the
+// later of its last throttled or advisory signal and the end of its hold. The
+// caller holds g.mu.
+func (g *Governor) cleanLocked(st *keyState, now time.Time) bool {
+	if now.Before(st.holdUntil) {
+		return false
 	}
 	cleanSince := st.lastReduce
 	if st.holdUntil.After(cleanSince) {
 		cleanSince = st.holdUntil
 	}
-	if now.Sub(cleanSince) < g.recovery || now.Sub(st.lastRaise) < g.recovery {
-		return
-	}
-	st.capacity++
-	st.lastRaise = now
+	return now.Sub(cleanSince) >= g.recovery
 }
 
 // Acquire asks to make one gated call for key. It never blocks and does no
@@ -519,8 +565,10 @@ func (g *Governor) acquire(keys []string) *Deferral {
 // its own key, even when that differs from the key the call was gated on.
 //
 //   - Throttled: capacity drops to 1 and the gate closes until the signal's
-//     deadline, max(RetryAfter, ResetAt). A later deadline extends the hold; an
-//     earlier one never shortens it.
+//     deadline, max(RetryAfter, ResetAt), cut to now+MaxHold when it is later
+//     than that. A later deadline extends the hold; an earlier one never
+//     shortens it. Every cut is counted, and the first is logged at Info, not
+//     again until the key has gone a whole RecoveryInterval clean.
 //   - Advisory: capacity halves, with a minimum of 1.
 //   - Either restarts the key's clean RecoveryInterval.
 //   - Anything else (a healthy quota report) changes nothing.
@@ -534,12 +582,26 @@ func (g *Governor) Observe(s Signal) {
 		return
 	}
 
+	var requested, limit time.Time
+	clamped, logClamp := false, false
+
 	g.mu.Lock()
 	st := g.state(s.Key)
 	switch kind {
 	case SignalThrottled:
+		// Checked before lastReduce moves to now, which makes no key clean.
+		if st.clampLogged && g.cleanLocked(st, now) {
+			st.clampLogged = false
+		}
 		st.capacity = capacityFloor
-		if d := s.Deadline(now); d.After(st.holdUntil) {
+		d := s.Deadline(now)
+		if limit = now.Add(g.maxHold); g.maxHold > 0 && d.After(limit) {
+			requested, clamped = d, true
+			logClamp = !st.clampLogged
+			st.clampLogged = true
+			d = limit
+		}
+		if d.After(st.holdUntil) {
 			st.holdUntil = d
 		}
 	case SignalAdvisory:
@@ -548,8 +610,18 @@ func (g *Governor) Observe(s Signal) {
 	st.lastReduce = now
 	g.mu.Unlock()
 
+	if logClamp {
+		g.log.Info("Server asked to hold a rate-limit key past the maximum hold: capping the hold",
+			"key", s.Key,
+			"requestedDeadline", formatDeadline(requested),
+			"maxHold", g.maxHold.String(),
+			"holdUntil", formatDeadline(limit))
+	}
 	if g.metrics != nil {
 		g.metrics.IncRateLimitSignal(context.Background(), s.Key, kind)
+		if clamped {
+			g.metrics.IncRateLimitHoldClamped(context.Background(), s.Key)
+		}
 	}
 }
 

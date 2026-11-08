@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,6 +32,7 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/controller"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/reconciler"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 )
@@ -185,6 +187,26 @@ func (e *external) Delete(_ context.Context, mg resource.Managed) error {
 	return nil
 }
 
+// rateLimitFlags declares the rate-limit governor's flags on fs, each defaulting
+// to its env. The governor is off unless the chart turns it on. One flag (or
+// its env) enables each input; every other setting has a working default. See
+// docs/configuration.md for the full table.
+func rateLimitFlags(fs *flag.FlagSet, o *controller.RateLimitOptions) {
+	fs.BoolVar(&o.Enabled, "rate-limit-governor",
+		env.Bool("GREETING_PROVIDER_RATE_LIMIT_GOVERNOR", false),
+		"Slow reconciles down automatically when the external API signals a rate limit.")
+	o.MaxHold = new(time.Duration)
+	fs.DurationVar(o.MaxHold, "rate-limit-max-hold",
+		env.Duration("GREETING_PROVIDER_RATE_LIMIT_MAX_HOLD", ratelimit.DefaultMaxHold),
+		"The longest a server's refusal holds its key, however long the server asks for. 0 means no cap.")
+	fs.BoolVar(&o.Saturation.Enabled, "saturation-governor",
+		env.Bool("GREETING_PROVIDER_SATURATION_GOVERNOR", false),
+		"Slow reconciles down automatically when this container is CPU-saturated.")
+	fs.BoolVar(&o.Saturation.ExperimentalMemoryWorkingSet, "saturation-experimental-memory",
+		env.Bool("GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY", false),
+		"EXPERIMENTAL: also read the memory working set. It is not OOM protection; see docs/configuration.md.")
+}
+
 func main() {
 	// OTel-model JSON logs on stderr (timestamp, SeverityText/Number,
 	// service.name, trace/span ids when a span is in context).
@@ -195,18 +217,7 @@ func main() {
 	o := controller.DefaultOptions()
 	o.Logger = log
 
-	// The rate-limit governor, off unless the chart turns it on. One flag (or
-	// its env) enables each input; every other setting has a working default.
-	// See docs/configuration.md for the full table.
-	flag.BoolVar(&o.RateLimit.Enabled, "rate-limit-governor",
-		env.Bool("GREETING_PROVIDER_RATE_LIMIT_GOVERNOR", false),
-		"Slow reconciles down automatically when the external API signals a rate limit.")
-	flag.BoolVar(&o.RateLimit.Saturation.Enabled, "saturation-governor",
-		env.Bool("GREETING_PROVIDER_SATURATION_GOVERNOR", false),
-		"Slow reconciles down automatically when this container is CPU-saturated.")
-	flag.BoolVar(&o.RateLimit.Saturation.ExperimentalMemoryWorkingSet, "saturation-experimental-memory",
-		env.Bool("GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY", false),
-		"EXPERIMENTAL: also read the memory working set. It is not OOM protection; see docs/configuration.md.")
+	rateLimitFlags(flag.CommandLine, &o.RateLimit)
 	flag.Parse()
 
 	scheme := runtime.NewScheme()

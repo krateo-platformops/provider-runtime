@@ -33,7 +33,9 @@ demonstrating everything a real Krateo provider wires up:
   so even without the keyer, which only matters for per-endpoint limits. A
   third flag, `--saturation-experimental-memory` /
   `GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY`, adds the experimental
-  memory input, which is not OOM protection. Nothing else needs setting; see
+  memory input, which is not OOM protection. `--rate-limit-max-hold` /
+  `GREETING_PROVIDER_RATE_LIMIT_MAX_HOLD` caps how long a refusal holds the
+  key (default 1h, 0 for no cap). Nothing else needs setting; see
   [configuration](../../docs/configuration.md#rate-limit-governor-controlleroptionsratelimit).
 
 The external name lifecycle is real: on first reconcile `Observe` reports the
