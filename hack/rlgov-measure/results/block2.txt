@@ -1,0 +1,185 @@
+setup: Greeting CRD established on gke_integration-test-431120_us-central1-a_rlgov-measure
+2026-11-08T12:42:27Z block2-start gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-1
+done b2-ramp-new-1: # restarts=0 # lastTerminated=
+2026-11-08T12:47:18Z after-b2-ramp-new-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-1
+done b2-ramp-ctrl-1: # restarts=4 # lastTerminated=OOMKilled
+2026-11-08T12:51:57Z after-b2-ramp-ctrl-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-2
+done b2-ramp-ctrl-2: # restarts=4 # lastTerminated=OOMKilled
+2026-11-08T12:56:37Z after-b2-ramp-ctrl-2 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-2
+done b2-ramp-new-2: # restarts=0 # lastTerminated=
+2026-11-08T13:01:28Z after-b2-ramp-new-2 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-3
+done b2-ramp-new-3: # restarts=0 # lastTerminated=
+2026-11-08T13:06:19Z after-b2-ramp-new-3 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-3
+done b2-ramp-ctrl-3: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T13:11:07Z after-b2-ramp-ctrl-3 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-4
+done b2-ramp-ctrl-4: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T13:15:53Z after-b2-ramp-ctrl-4 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-4
+done b2-ramp-new-4: # restarts=0 # lastTerminated=
+2026-11-08T13:20:44Z after-b2-ramp-new-4 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-5
+done b2-ramp-new-5: # restarts=0 # lastTerminated=
+2026-11-08T13:25:35Z after-b2-ramp-new-5 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-5
+done b2-ramp-ctrl-5: # restarts=3 # lastTerminated=OOMKilled
+2026-11-08T13:30:19Z after-b2-ramp-ctrl-5 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-6
+done b2-ramp-ctrl-6: # restarts=4 # lastTerminated=OOMKilled
+2026-11-08T13:35:01Z after-b2-ramp-ctrl-6 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-6
+done b2-ramp-new-6: # restarts=0 # lastTerminated=
+2026-11-08T13:39:52Z after-b2-ramp-new-6 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-7
+done b2-ramp-new-7: # restarts=0 # lastTerminated=
+2026-11-08T13:44:43Z after-b2-ramp-new-7 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-7
+done b2-ramp-ctrl-7: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T13:49:31Z after-b2-ramp-ctrl-7 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-8
+done b2-ramp-ctrl-8: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T13:54:20Z after-b2-ramp-ctrl-8 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-8
+done b2-ramp-new-8: # restarts=0 # lastTerminated=
+2026-11-08T13:59:11Z after-b2-ramp-new-8 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-9
+done b2-ramp-new-9: # restarts=0 # lastTerminated=
+2026-11-08T14:04:02Z after-b2-ramp-new-9 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-9
+done b2-ramp-ctrl-9: # restarts=0 # lastTerminated=
+2026-11-08T14:08:52Z after-b2-ramp-ctrl-9 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-10
+done b2-ramp-ctrl-10: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T14:13:42Z after-b2-ramp-ctrl-10 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-10
+done b2-ramp-new-10: # restarts=0 # lastTerminated=
+2026-11-08T14:18:33Z after-b2-ramp-new-10 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-11
+done b2-ramp-new-11: # restarts=0 # lastTerminated=
+2026-11-08T14:23:24Z after-b2-ramp-new-11 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-11
+done b2-ramp-ctrl-11: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T14:28:10Z after-b2-ramp-ctrl-11 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-12
+done b2-ramp-ctrl-12: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T14:32:55Z after-b2-ramp-ctrl-12 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-12
+done b2-ramp-new-12: # restarts=0 # lastTerminated=
+2026-11-08T14:37:46Z after-b2-ramp-new-12 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-13
+done b2-ramp-new-13: # restarts=0 # lastTerminated=
+2026-11-08T14:42:36Z after-b2-ramp-new-13 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-13
+done b2-ramp-ctrl-13: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T14:47:25Z after-b2-ramp-ctrl-13 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-14
+done b2-ramp-ctrl-14: # restarts=2 # lastTerminated=OOMKilled
+2026-11-08T14:52:13Z after-b2-ramp-ctrl-14 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-14
+done b2-ramp-new-14: # restarts=0 # lastTerminated=
+2026-11-08T14:57:04Z after-b2-ramp-new-14 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-15
+done b2-ramp-new-15: # restarts=0 # lastTerminated=
+2026-11-08T15:01:54Z after-b2-ramp-new-15 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-15
+done b2-ramp-ctrl-15: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T15:06:39Z after-b2-ramp-ctrl-15 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-16
+done b2-ramp-ctrl-16: # restarts=0 # lastTerminated=
+2026-11-08T15:11:26Z after-b2-ramp-ctrl-16 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-16
+done b2-ramp-new-16: # restarts=0 # lastTerminated=
+2026-11-08T15:16:16Z after-b2-ramp-new-16 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-17
+done b2-ramp-new-17: # restarts=0 # lastTerminated=
+2026-11-08T15:21:07Z after-b2-ramp-new-17 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-17
+done b2-ramp-ctrl-17: # restarts=2 # lastTerminated=OOMKilled
+2026-11-08T15:25:54Z after-b2-ramp-ctrl-17 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-18
+done b2-ramp-ctrl-18: # restarts=2 # lastTerminated=OOMKilled
+2026-11-08T15:30:40Z after-b2-ramp-ctrl-18 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-18
+done b2-ramp-new-18: # restarts=0 # lastTerminated=
+2026-11-08T15:35:32Z after-b2-ramp-new-18 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-19
+done b2-ramp-new-19: # restarts=0 # lastTerminated=
+2026-11-08T15:40:22Z after-b2-ramp-new-19 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-19
+done b2-ramp-ctrl-19: # restarts=2 # lastTerminated=OOMKilled
+2026-11-08T15:45:09Z after-b2-ramp-ctrl-19 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-ctrl-20
+done b2-ramp-ctrl-20: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T15:49:56Z after-b2-ramp-ctrl-20 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-ramp-new-20
+done b2-ramp-new-20: # restarts=0 # lastTerminated=
+2026-11-08T15:54:46Z after-b2-ramp-new-20 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-1
+done b2-cold-new-1: # restarts=0 # lastTerminated=
+2026-11-08T16:00:01Z after-b2-cold-new-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-1
+done b2-cold-ctrl-1: # restarts=0 # lastTerminated=
+2026-11-08T16:05:25Z after-b2-cold-ctrl-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-2
+done b2-cold-ctrl-2: # restarts=0 # lastTerminated=
+2026-11-08T16:11:02Z after-b2-cold-ctrl-2 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-2
+done b2-cold-new-2: # restarts=0 # lastTerminated=
+2026-11-08T16:16:20Z after-b2-cold-new-2 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-3
+done b2-cold-new-3: # restarts=0 # lastTerminated=
+2026-11-08T16:21:37Z after-b2-cold-new-3 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-3
+done b2-cold-ctrl-3: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T16:27:06Z after-b2-cold-ctrl-3 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-4
+done b2-cold-ctrl-4: # restarts=0 # lastTerminated=
+2026-11-08T16:32:28Z after-b2-cold-ctrl-4 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-4
+done b2-cold-new-4: # restarts=0 # lastTerminated=
+2026-11-08T16:37:43Z after-b2-cold-new-4 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-5
+done b2-cold-new-5: # restarts=0 # lastTerminated=
+2026-11-08T16:42:58Z after-b2-cold-new-5 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-5
+done b2-cold-ctrl-5: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T16:48:21Z after-b2-cold-ctrl-5 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-6
+done b2-cold-ctrl-6: # restarts=0 # lastTerminated=
+2026-11-08T16:53:45Z after-b2-cold-ctrl-6 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-6
+done b2-cold-new-6: # restarts=0 # lastTerminated=
+2026-11-08T16:58:58Z after-b2-cold-new-6 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-7
+done b2-cold-new-7: # restarts=0 # lastTerminated=
+2026-11-08T17:04:17Z after-b2-cold-new-7 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-7
+done b2-cold-ctrl-7: # restarts=0 # lastTerminated=
+2026-11-08T17:09:39Z after-b2-cold-ctrl-7 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-8
+done b2-cold-ctrl-8: # restarts=1 # lastTerminated=OOMKilled
+2026-11-08T17:15:02Z after-b2-cold-ctrl-8 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-8
+done b2-cold-new-8: # restarts=0 # lastTerminated=
+2026-11-08T17:20:19Z after-b2-cold-new-8 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-9
+done b2-cold-new-9: # restarts=0 # lastTerminated=
+2026-11-08T17:25:41Z after-b2-cold-new-9 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-9
+done b2-cold-ctrl-9: # restarts=0 # lastTerminated=
+2026-11-08T17:31:13Z after-b2-cold-ctrl-9 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-ctrl-10
+done b2-cold-ctrl-10: # restarts=0 # lastTerminated=
+2026-11-08T17:36:42Z after-b2-cold-ctrl-10 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned b2-cold-new-10
+done b2-cold-new-10: # restarts=0 # lastTerminated=
+2026-11-08T17:42:05Z after-b2-cold-new-10 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+2026-11-08T17:42:06Z block2-end gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+BLOCK-DONE
+block exit 0
