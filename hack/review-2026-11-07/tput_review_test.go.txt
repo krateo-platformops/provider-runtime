@@ -1,0 +1,100 @@
+package ratelimit
+
+import (
+	"sort"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
+	utilclock "k8s.io/utils/clock"
+)
+
+func rvMedian(d []time.Duration) time.Duration {
+	sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
+	return d[len(d)/2]
+}
+
+// Fill: capacity c, c idle workers, c items added in one call: how long until
+// all c are popped (each worker holds its item).
+func TestReviewFillLatency(t *testing.T) {
+	for _, c := range []int{8, 32} {
+		var runs []time.Duration
+		for range 30 {
+			g, _ := saturationGovernor(t, 64, "healthy", false)
+			g.setLocalCapacity(c)
+			q := newGatedQueue[string](g, "fill", nil, utilclock.RealClock{})
+			var popped sync.WaitGroup
+			popped.Add(c)
+			release := make(chan struct{})
+			var wg sync.WaitGroup
+			for range c {
+				wg.Go(func() {
+					for {
+						k, _, shut := q.GetWithPriority()
+						if shut {
+							return
+						}
+						popped.Done()
+						<-release
+						q.Done(k)
+					}
+				})
+			}
+			for idleWorkers(q) != c {
+				time.Sleep(time.Millisecond)
+			}
+			keys := make([]string, c)
+			for i := range keys {
+				keys[i] = strconv.Itoa(i)
+			}
+			start := time.Now()
+			q.AddWithOpts(priorityqueue.AddOpts{}, keys...)
+			popped.Wait()
+			runs = append(runs, time.Since(start))
+			q.ShutDown()
+			close(release)
+			wg.Wait()
+		}
+		t.Logf("fill %d slots: median %s", c, rvMedian(runs))
+	}
+}
+
+// Steady state: capacity 32, 32 workers, 3000 items, each reconcile 1ms.
+func TestReviewSteadyThroughput(t *testing.T) {
+	var runs []time.Duration
+	for range 5 {
+		g, _ := saturationGovernor(t, 64, "healthy", false)
+		g.setLocalCapacity(32)
+		q := newGatedQueue[string](g, "steady", nil, utilclock.RealClock{})
+		const n = 3000
+		var left sync.WaitGroup
+		left.Add(n)
+		var wg sync.WaitGroup
+		for range 32 {
+			wg.Go(func() {
+				for {
+					k, _, shut := q.GetWithPriority()
+					if shut {
+						return
+					}
+					time.Sleep(time.Millisecond)
+					q.Done(k)
+					left.Done()
+				}
+			})
+		}
+		keys := make([]string, n)
+		for i := range keys {
+			keys[i] = strconv.Itoa(i)
+		}
+		start := time.Now()
+		q.AddWithOpts(priorityqueue.AddOpts{}, keys...)
+		left.Wait()
+		runs = append(runs, time.Since(start))
+		q.ShutDown()
+		wg.Wait()
+	}
+	t.Logf("3000 items x 1ms on 32 slots: median %s (ideal ~94ms)", rvMedian(runs))
+}

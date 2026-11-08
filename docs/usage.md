@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 # Usage
@@ -201,32 +201,37 @@ For Krateo, that's core-provider#310.
   [the design](./design-rate-limit-governor.md) for why it works this way.
   - *Wiring.* Set `o.RateLimit.Enabled` (and `o.RateLimit.Saturation.Enabled`
     for the saturation input) from one chart flag each, call
-    `o.SetupRateLimitGovernor(mgr)` once, and pass
+    `o.SetupRateLimitGovernor(mgr)` once, before the controllers, pass
     `reconciler.WithRateLimitGovernor(o.RateLimitGovernor)` to every
-    reconciler. A `nil` governor is a no-op, so this is safe when the chart
-    leaves the flag unset.
-  - *Saturation.* With `o.RateLimit.Saturation.Enabled`, every gated call
-    (`Connect` and each `ExternalClient` method) needs a slot in the
-    process-wide `local` capacity, whether or not the provider implements
-    `RateLimitKeyer`. The provider writes no code for it. It reads
-    `cpu.pressure` (`some avg10`) once a second. `local` starts at 1 and rises
-    by 1 every 2s until its first cut, so 16 workers take about 30s. A
-    saturated sample halves it, never below 1, and after any cut it rises by 1
-    per clean `RecoveryInterval` (30s), the same as API limits.
-  - *A restart is quiet.* While `local` is on its startup ramp, before its
-    first cut and with nothing saturated, a pass deferred by the local capacity
-    just requeues: `Synced` stays as it was, with no event and no status write
-    for the deferral. This is the one exception to "a deferred pass writes
-    `Synced=False`", decided by the user: the ramp lasts about 30s and isn't a
-    state of the object, and reporting it turned 200 healthy objects
-    `Synced=False` on a restart, with 200 status updates and 0 provider calls.
-    If the pass already ran `Observe`, what `Observe` learned is still written.
-    The restart shows in `provider_runtime.ratelimit.deferrals` under cause
-    `ramping`. Throttled, per-key at-capacity and saturated deferrals, and
-    at-capacity after a cut, still write, also during the ramp. Quiet needs a
-    running sampler: if you call `ratelimit.New` yourself, add the Governor to
-    the manager. Otherwise deferrals show `saturation sampler is not running`
-    on the object, because nothing would ever raise `local`.
+    reconciler, and build every controller with
+    `WithOptions(o.ForControllerRuntime())`. A `nil` governor is a no-op, so
+    this is safe when the chart leaves the flag unset.
+  - *Saturation.* With `o.RateLimit.Saturation.Enabled`, each controller's
+    queue takes a slot in the process-wide `local` capacity before every
+    reconcile and gives it back when the reconcile returns, whether or not the
+    provider implements `RateLimitKeyer`. Low capacity then behaves like fewer
+    workers: the queue's order is the order work runs in, and nothing is popped
+    that can't run. The slot covers the whole reconcile, so expensive work is
+    bounded wherever the provider does it. It reads `cpu.pressure`
+    (`some avg10`) once a second. `local` starts at 1 and rises by 1 every 2s
+    until its first cut, so 16 workers take about 30s. A saturated sample
+    halves it, never below 1, and after any cut it rises by 1 per clean
+    `RecoveryInterval` (30s), the same as API limits. Controllers sharing the
+    governor share `local`; an idle controller holds none of it.
+  - *Nothing is written on the object for it.* The controller's own saturation
+    isn't a state of the object: the item waits in the queue, with no
+    `Synced=False`, no event and no status write. It shows in
+    `provider_runtime.ratelimit.local.capacity` and the input gauges (the
+    local capacity gauge reports nothing with saturation off). Key
+    deferrals still write `Synced=False/ReconcileDeferred`. Before this, a full
+    `local` deferred popped items and the startup ramp was a quiet special
+    case; both are gone ([design](./design-local-slot-before-pop.md)).
+  - *Two things the runtime checks for you.* The governor's sampler must run:
+    `SetupRateLimitGovernor` adds it to the manager, but if you call
+    `ratelimit.New` yourself, add it. Without it `local` stays at 1 and every
+    saturation input reports as disabled. And every controller must be built
+    with `ForControllerRuntime`: the governor logs an error at start if more
+    reconcilers use it than controllers had their queue gated.
   - *Memory is not protected.* The saturation flag reads CPU only. The working
     set is a separate input,
     `o.RateLimit.Saturation.ExperimentalMemoryWorkingSet`, off by default and
@@ -292,19 +297,9 @@ For Krateo, that's core-provider#310.
     pass reports `ReconcileError` and consumes one backoff step, as today.
     The passes after it are deferrals until the server's deadline.
 
-  **Requirement on providers: do expensive work inside the gated calls.**
-  `local` throttles only the work that runs inside a gated call: `Connect`
-  and the `ExternalClient` methods (`Observe`, `Create`, `Update`, `Delete`),
-  with or without a keyer.
-  A provider's expensive work (rendering templates, cloning repositories,
-  large API reads) must happen inside those calls, not before them in the
-  provider's own code. Work done outside them is not bounded by `local`.
-  Don't refactor that work out of the gated call: doing so silently removes
-  the throttle from exactly the work that causes saturation, and nothing fails
-  to tell you. The runtime side is pinned by
-  `TestLocalCapacityBoundsConcurrentObserveBodies` and
-  `TestProviderWithoutKeyerIsBoundedByLocal` in `pkg/reconciler`; the
-  provider side is the provider's to keep.
+  **No requirement on where providers do their work.** With saturation on, the
+  local slot covers the whole reconcile, so work before `Connect` is bounded as
+  much as work inside it.
 
 - **Scale to zero** (unreleased; for owners that manage controller
   Deployments, not for the controllers themselves) — `pkg/scaletozero`

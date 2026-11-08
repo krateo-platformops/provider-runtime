@@ -89,16 +89,6 @@ func TestRateLimitMetrics(t *testing.T) {
 	if _, d := g.Acquire(ctx, "api.github.com"); d == nil {
 		t.Fatal("expected a throttled deferral")
 	}
-	// A restart is quiet on the object, so the metric is where it shows.
-	held, d := g.Acquire(ctx, "dev.azure.com")
-	if d != nil {
-		t.Fatalf("the only local slot wasn't free: %+v", d)
-	}
-	if _, d := g.Acquire(ctx, "ghe.example.com"); d == nil || d.Reason != ratelimit.DeferRamping {
-		t.Fatalf("deferral = %+v, want a Ramping one", d)
-	}
-	held()
-
 	var rm metricdata.ResourceMetrics
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		rm = metricdata.ResourceMetrics{}
@@ -110,8 +100,8 @@ func TestRateLimitMetrics(t *testing.T) {
 		}
 	}
 
-	if got := points(t, rm, "provider_runtime.ratelimit.deferrals", "cause"); got["throttled"] != 1 || got["ramping"] != 1 {
-		t.Errorf("deferrals by cause = %v, want throttled: 1 and ramping: 1", got)
+	if got := points(t, rm, "provider_runtime.ratelimit.deferrals", "cause"); got["throttled"] != 1 || len(got) != 1 {
+		t.Errorf("deferrals by cause = %v, want throttled: 1 and nothing else: local capacity defers nothing", got)
 	}
 	if got := points(t, rm, "provider_runtime.ratelimit.signals", "kind"); got["throttled"] != 1 || got["advisory"] != 1 {
 		t.Errorf("signals by kind = %v, want one throttled and one advisory", got)
@@ -138,6 +128,33 @@ func TestRateLimitMetrics(t *testing.T) {
 	}
 	if _, ok := values["cpu_pressure"]; !ok {
 		t.Errorf("the enabled cpu_pressure input reported no value: %v", values)
+	}
+}
+
+// With saturation off nothing is gated on the local capacity, so its gauge
+// reports nothing, as core-provider's does: a value would read as a limit.
+// The per-key gauges still report.
+func TestLocalCapacityReportsNothingWithSaturationOff(t *testing.T) {
+	reader := metric.NewManualReader()
+	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	m, err := newMetrics(provider.Meter("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := ratelimit.New(ratelimit.Options{MaxConcurrentReconciles: 4, Metrics: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Observe(ratelimit.Signal{Key: "api.github.com", Throttled: true, RetryAfter: time.Minute})
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	if got := points(t, rm, "provider_runtime.ratelimit.local.capacity", "none"); len(got) != 0 {
+		t.Errorf("local capacity = %v with saturation off, want no point", got)
+	}
+	if got := points(t, rm, "provider_runtime.ratelimit.capacity", "key"); got["api.github.com"] != 1 {
+		t.Errorf("capacity by key = %v, want api.github.com 1: the key gauges report with saturation off", got)
 	}
 }
 

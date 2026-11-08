@@ -1,0 +1,50 @@
+// Package hazard shows, on controller-runtime v0.23.3's priority queue, that a
+// ShutDown racing a pop that inner is handing an item to can leave the queue's
+// hand-out goroutine blocked on its unbuffered get channel, holding the locks
+// Done and Len take, so a later Done or Len never returns.
+//
+// Run on 2026-11-07, as hazard_test.go in a package of its own inside this
+// module: 200000 runs, the pop got the item 162600 times and shutdown 37400;
+// Done never returned in 2788 (565s). Each wedged run leaks its goroutines.
+// It backs design-local-slot-before-pop.md §4, "Shutdown, outside the lock".
+package hazard
+
+import (
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/go-logr/logr"
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
+)
+
+func TestShutDownRacingAHandOutCanWedgeDone(t *testing.T) {
+	const runs = 200000
+	wedged, poppedItem, poppedShutdown := 0, 0, 0
+	for i := range runs {
+		q := priorityqueue.New[string]("hazard", func(o *priorityqueue.Opts[string]) { o.Log = logr.Discard() })
+		q.Add("held") // a key a worker holds through the shutdown
+		k, _, _ := q.GetWithPriority()
+		q.Add("x")
+		got := make(chan bool, 1)
+		go func() { _, _, shut := q.GetWithPriority(); got <- shut }()
+		// Let the pop register as a waiter, then shut down while inner hands x out.
+		for range i % 7 {
+			runtime.Gosched()
+		}
+		q.ShutDown()
+		if <-got {
+			poppedShutdown++
+		} else {
+			poppedItem++
+		}
+		done := make(chan struct{})
+		go func() { q.Done(k); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			wedged++
+		}
+	}
+	t.Logf("%d runs: pop got the item %d, got shutdown %d; Done never returned in %d", runs, poppedItem, poppedShutdown, wedged)
+}

@@ -1,0 +1,117 @@
+package ratelimit
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
+)
+
+// hookedInner runs a hook right after the real inner call returns, at a point
+// where the gated queue holds no lock: it only picks one legal interleaving.
+type hookedInner struct {
+	priorityqueue.PriorityQueue[string]
+	afterGet  func(key string)
+	afterDone func(key string)
+	getOnce   sync.Once
+	doneOnce  sync.Once
+}
+
+func (h *hookedInner) GetWithPriority() (string, int, bool) {
+	k, p, s := h.PriorityQueue.GetWithPriority()
+	if h.afterGet != nil {
+		h.getOnce.Do(func() { h.afterGet(k) })
+	}
+	return k, p, s
+}
+
+func (h *hookedInner) Done(key string) {
+	h.PriorityQueue.Done(key)
+	if h.afterDone != nil {
+		h.doneOnce.Do(func() { h.afterDone(key) })
+	}
+}
+
+func getWithin(q *gatedQueue[string], d time.Duration) (string, bool) {
+	ch := make(chan string, 1)
+	go func() { k, _, _ := q.GetWithPriority(); ch <- k }()
+	select {
+	case k := <-ch:
+		return k, true
+	case <-time.After(d):
+		return "", false
+	}
+}
+
+// Worker A's Done(k) unlocks k in inner before it updates processing. Worker
+// B, granted for j, pops k in that window.
+func TestReviewDoneRacesAGrantedPop(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(2)
+	q := gated(t, g, "done-race")
+	h := &hookedInner{PriorityQueue: q.inner}
+	q.inner = h
+
+	q.Add("k")
+	a, _, _ := q.GetWithPriority()
+	if a != "k" {
+		t.Fatalf("A popped %q", a)
+	}
+	q.Add("k") // re-added while A processes it
+	q.Add("j")
+
+	var b string
+	h.afterDone = func(string) {
+		var ok bool
+		b, ok = getWithin(q, 2*time.Second)
+		if !ok {
+			t.Fatal("B got nothing")
+		}
+	}
+	q.Done("k") // A finishes
+	t.Logf("B popped %q", b)
+	q.mu.Lock()
+	_, kProcessing := q.processing[b]
+	t.Logf("after A's Done: processing[%s]=%v free=%d ready=%v inner.Len=%d inFlight(g)=?", b, kProcessing, q.free, q.ready, q.inner.Len())
+	q.mu.Unlock()
+	t.Logf("slots in flight while B runs: %d", g.inFlight())
+
+	q.Done(b) // B finishes
+	if n := g.inFlight(); n != 0 {
+		t.Errorf("slot leaked: %d local slots in flight with nothing processing", n)
+	}
+	if k, ok := getWithin(q, time.Second); !ok {
+		q.mu.Lock()
+		t.Errorf("j stranded: no worker got it within 1s; free=%d ready=%v inner.Len=%d", q.free, q.ready, q.inner.Len())
+		q.mu.Unlock()
+	} else {
+		t.Logf("C popped %q", k)
+	}
+}
+
+// An Add(k) that lands after inner handed k out but before pop records it is
+// lost from the wrapper's books while inner still holds it.
+func TestReviewAddRacesThePop(t *testing.T) {
+	g, _ := saturationGovernor(t, 4, "healthy", false)
+	g.setLocalCapacity(1)
+	q := gated(t, g, "add-race")
+	h := &hookedInner{PriorityQueue: q.inner}
+	q.inner = h
+	h.afterGet = func(key string) { q.Add(key) } // an event for k arrives now
+
+	q.Add("k")
+	a, _, _ := q.GetWithPriority()
+	q.mu.Lock()
+	_, inReady := q.ready["k"]
+	t.Logf("after pop of %q: ready has k=%v free=%d inner.Len=%d", a, inReady, q.free, q.inner.Len())
+	q.mu.Unlock()
+	q.Done(a)
+	if k, ok := getWithin(q, time.Second); !ok {
+		q.mu.Lock()
+		t.Errorf("re-added k never handed out again: free=%d ready=%v inner.Len=%d", q.free, q.ready, q.inner.Len())
+		q.mu.Unlock()
+	} else {
+		t.Logf("got %q again", k)
+	}
+}

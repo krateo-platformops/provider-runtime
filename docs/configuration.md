@@ -4,7 +4,7 @@ title: provider-runtime — configuration
 description: Everything provider-runtime reads — build tags, environment consumed via the OTel SDK, option structs and their defaults (including the rate-limit governor), and the annotation switches honored at runtime.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, configuration, otel, annotations]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 # Configuration
@@ -104,7 +104,7 @@ example provider declares `--rate-limit-governor` /
 |---|---|---|---|---|
 | `--rate-limit-governor` / `<NAME>_PROVIDER_RATE_LIMIT_GOVERNOR` | `controller.Options.RateLimit.Enabled` | `false` | yes (off) | Turns on the rate-limit input: calls are gated per key, and the signals the provider reports slow that key down. |
 | `--rate-limit-recovery-interval` / `<NAME>_PROVIDER_RATE_LIMIT_RECOVERY_INTERVAL` | `RateLimit.RecoveryInterval` | `30s` | yes | How long a key must go clean before its capacity rises by one, and the same for the local capacity after any cut. Also the upper bound of the "waiting for capacity" requeue delay (1s to this value). |
-| `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, every gated call (`Connect` and each `ExternalClient` method) needs a local slot, whether or not the provider implements `RateLimitKeyer`. |
+| `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, each controller's queue takes a local slot before every reconcile and gives it back when the reconcile returns, so low capacity behaves like fewer workers ([design](./design-local-slot-before-pop.md)). Needs the controller built with `ForControllerRuntime`, and `UsePriorityQueue` left unset or true. |
 | `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemoryWorkingSet` | `false` | yes (off) | **Experimental, and not OOM protection.** Adds the memory working set to the local input. It [did not prevent OOMKills](#re-measurement-of-the-memory-input): 0 of 19 runs clean on an overcommitted workload. |
 | `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. Local capacity halves at most once per sample. A shorter period only matters to the experimental memory input: CPU pressure's `avg10` is already a 10-second average, so sampling it faster gains nothing and costs CPU in the container it protects. |
 | `--saturation-startup-ramp-interval` / `<NAME>_PROVIDER_SATURATION_STARTUP_RAMP_INTERVAL` | `RateLimit.Saturation.StartupRampInterval` | `2s` | yes | Local capacity starts at 1 and rises by one per this interval until its first cut, so 16 workers are all admitted after about 30s. Not tied to the sample period. After any cut, `RecoveryInterval` applies instead. A call deferred on the ramp requeues in 1s to the time the ramp still needs, capped at `RecoveryInterval`. |
@@ -115,19 +115,22 @@ example provider declares `--rate-limit-governor` /
 | none | `RateLimit.Metrics` | `nil` | yes | Records the governor's metrics, for example `*telemetry.Metrics`. |
 | `--max-reconcile-rate` / `<NAME>_PROVIDER_MAX_RECONCILE_RATE` (existing) | `controller.Options.MaxConcurrentReconciles` | the provider's existing default | yes | Each controller's worker count. The governor's ceiling is this times the number of reconcilers registered with it, so enabling the governor never holds a healthy endpoint below today's total workers. Unset counts as 1. |
 | none | `controller.Options.RateLimitGovernor` | `nil` (off) | yes | Set by `SetupRateLimitGovernor`. `nil` when neither input is enabled. |
-| none | `reconciler.WithRateLimitGovernor(g)` | not set (off) | yes | Gates the reconciler's external calls through `g`. A `nil` `g` is a no-op, so passing `o.RateLimitGovernor` unconditionally is safe. |
+| none | `reconciler.WithRateLimitGovernor(g)` | not set (off) | yes | Gates the reconciler's external calls per key through `g`. A `nil` `g` is a no-op, so passing `o.RateLimitGovernor` unconditionally is safe. |
+| none | `controller.Options.ForControllerRuntime()` | — | — | With saturation on, gates the controller's queue on the local capacity. Call it once per controller: the governor logs an error at start when fewer controllers were gated than reconcilers registered. |
 
 Setting the flag is the only configuration. The saturation input needs
-nothing more from the provider's code: it bounds every gated call, keyer or
-not. The rate-limit input, which is per endpoint, also needs the provider to
+nothing more from the provider's code than building its controllers with
+`ForControllerRuntime`, which every Krateo provider already does: it bounds
+whole reconciles, keyer or not. The rate-limit input, which is per endpoint, also needs the provider to
 implement `reconciler.RateLimitKeyer` on its connecter or client (or
 `reconciler.RateLimitKeysProvider`, for objects on several endpoints) and to report
 signals with `ratelimit.Report` or the `pkg/ratelimit/httpsignal` transport.
 See [usage](./usage.md#the-pieces-you-opt-into).
 
 `SetupRateLimitGovernor` rejects contradictory values: a soft ratio above the
-hard ratio, a ratio above 1, a CPU pressure threshold outside (0, 100], or a
-negative interval. Leaving a field unset never errors.
+hard ratio, a ratio above 1, a CPU pressure threshold outside (0, 100], a
+negative interval, or saturation with `UsePriorityQueue` set to false. Leaving a
+field unset never errors.
 
 ### The pressure thresholds are provisional
 
@@ -144,12 +147,13 @@ protection.** The user decided what follows from the kind measurements below
 - `local` starts at 1 and rises by 1 per `StartupRampInterval` (2s) until its
   first cut. After any cut, it rises by 1 per clean `RecoveryInterval` (30s),
   the same as API limits.
-- `local` never goes below 1: one call always keeps going.
-- A deferral on the startup ramp is quiet: `Synced` stays as it was, with no
-  event, and only the `deferrals` metric shows it, under cause `ramping`. A
-  restart otherwise turned every healthy object `Synced=False`.
+- `local` never goes below 1: one reconcile always keeps going.
+- `local` is taken before the pop and covers the whole reconcile, so nothing is
+  written on the object for it: the item waits in the queue. This replaced the
+  first implementation's local deferrals and its quiet startup ramp (design
+  §11 item 18).
 - `memory.pressure` is no longer an input. It read 0.00 up to every OOMKill.
-- Saturation bounds every gated call, with or without a keyer.
+- Saturation bounds every reconcile, with or without a keyer.
 
 Keep workers times the largest call well under the memory limit. The governor
 can't rescue a controller whose workers can overrun it.
@@ -365,11 +369,11 @@ Recorded when `RateLimit.Metrics` is set (meter
 
 | Instrument | Kind | Attributes | Meaning |
 |---|---|---|---|
-| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`, `saturated`, `ramping`) | External calls the governor deferred. `ramping` is a deferral on the startup ramp, which is quiet on the object, so this is where a restart shows. `key` is the key that stopped the call. It is empty for a call deferred only by the local capacity with no key (a provider without a keyer) or with several keys, where no one key stopped it. |
+| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`) | External calls the governor deferred. `ramping` is a deferral on the startup ramp, which is quiet on the object, so this is where a restart shows. `key` is the key that stopped the call. It is empty for a call deferred only by the local capacity with no key (a provider without a keyer) or with several keys, where no one key stopped it. |
 | `provider_runtime.ratelimit.signals` | counter | `key`, `kind` (`throttled`, `advisory`) | Signals providers reported that changed a key's state. Healthy quota reports are not counted. |
 | `provider_runtime.ratelimit.capacity` | observable gauge | `key` | Current concurrency the governor allows for the key: the number operators used to tune by hand. |
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |
-| `provider_runtime.ratelimit.local.capacity` | observable gauge | none | Current process-wide capacity the controller's own saturation allows. With saturation on it starts at 1 and ramps up per clean sample. |
+| `provider_runtime.ratelimit.local.capacity` | observable gauge | none | Current process-wide capacity the controller's own saturation allows. With saturation on it starts at 1 and ramps up per clean sample. With saturation off it reports nothing: no local capacity is enforced then. |
 | `provider_runtime.ratelimit.saturation.input` | observable gauge (`%`) | `input` (`cpu_pressure`, `memory_working_set`) | Each enabled input's last value: `some avg10` for `cpu_pressure`, the share of `memory.max` for `memory_working_set`. A disabled input has no data point: 0 would read as healthy. |
 | `provider_runtime.ratelimit.saturation.input.enabled` | observable gauge | `input` | 1 when the input is read, 0 when it is disabled (no cgroup v2, no PSI, `memory.max` is `max`, saturation off, or, for `memory_working_set`, the experimental option unset). |
 

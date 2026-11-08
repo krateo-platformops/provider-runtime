@@ -268,7 +268,6 @@ func (s *saturation) step(now time.Time, smp cgroupSample, cur localState, ceili
 			s.lastStep = now
 		}
 	}
-	next.ramping = !s.cut && next.capacity < ceiling
 	return next
 }
 

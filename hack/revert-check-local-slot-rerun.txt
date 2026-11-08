@@ -1,0 +1,11 @@
+baseline passed
+
+only: ['a slot is granted with no item', 'a re-add while processing counts'] 2 mutants
+
+KILLED    a slot is granted with no item to hand out
+          TestAddAfterDuringAPopKeepsItsDelay,TestGatedQueueDrainsUnderConcurrentAddsAndDones,TestGatedQueuePopsOnlyWithALocalSlot (then hung: TestIdleWorkersHoldNoLocalSlot (2m15s))
+KILLED    a re-add while processing counts as available
+          TestGatedQueueDrainsUnderConcurrentAddsAndDones,TestGatedQueueRecordStaysExactUnderConcurrency,TestGatedQueueRecordStays (then hung: TestReAddWhileProcessingRunsAfterDone (2m42s))
+
+KILLED=2 of 2
+tree restored

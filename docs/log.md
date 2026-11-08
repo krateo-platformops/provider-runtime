@@ -4,13 +4,37 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-07 — unreleased: the local slot is taken before the pop
+- **With saturation on, each controller's queue takes the local slot before it
+  pops an item,** and gives it back when the reconcile returns. Low capacity
+  behaves like fewer workers: queue order is the order work runs in, and no
+  popped item sleeps through a freed slot, as a deferred one did before
+  (unstructured-runtime#72's shape). The slot covers the whole reconcile, so the
+  requirement that providers do expensive work inside the gated calls is gone.
+  An idle controller holds no slot, so controllers sharing a governor don't
+  starve each other; freed slots go round-robin across queues with work.
+- **Breaking, for an off-by-default feature:** a full local capacity writes
+  nothing on the object. `DeferSaturated`, `DeferRamping`, `Deferral.Local`,
+  `Deferral.Cause` and the quiet startup ramp are gone, and a call without a key
+  is no longer gated. The `deferrals` metric loses its `saturated` and `ramping`
+  causes. The input gauges are unchanged. `ratelimit.local.capacity` now reports
+  nothing with saturation off, as core-provider's does, because nothing
+  enforces a local capacity then.
+- New API: `ratelimit.NewGatedQueue`, `(*Governor).RegisterGatedController`.
+  Saturation with `UsePriorityQueue=false` is now an error from
+  `SetupRateLimitGovernor`. `Start` logs an error when a reconciler's controller
+  wasn't built with `ForControllerRuntime`, and warns when a second Governor with
+  saturation runs in the process.
+- Design: [design-local-slot-before-pop](./design-local-slot-before-pop.md). Not
+  measured on a cluster yet.
 
 ## 2026-11-08 — v1.11.0: scale idle controllers to zero
 - **`pkg/scaletozero`**, for owners that run one controller Deployment per

@@ -78,9 +78,12 @@ type RateLimitKeysProvider interface {
 // the ratelimit sink of the context those calls receive, so ratelimit.Report
 // reaches it. A deferred call is not made: the pass writes
 // Synced=False/ReconcileDeferred, leaves Ready unchanged, and requeues after
-// the deferral's delay with a nil error, so no failure backoff is consumed. The
-// one exception is a deferral on the startup ramp, which requeues quietly; see
-// deferReconcile.
+// the deferral's delay with a nil error, so no failure backoff is consumed.
+//
+// The controller's own saturation is not gated here. With saturation on, build
+// the controller with controller.Options.ForControllerRuntime: its queue takes
+// a local slot before each reconcile and gives it back after, so the slot
+// covers the whole reconcile and nothing is written on the object for it.
 //
 // Share one Governor across the process's reconcilers; each one registers
 // with it, which raises its ceiling by MaxConcurrentReconciles. Build it with
@@ -131,10 +134,9 @@ type keyErrorLog struct {
 // gate asks the governor to let one call for mg through. It returns the
 // release to call when the call returns, or a Deferral.
 //
-// The keys come from k. With no keyer, no non-empty key, or a keyer error, the
-// call has no key: it is not gated per endpoint, but with saturation enabled it
-// still needs a local slot, because saturation bounds every gated call. With
-// no governor, or no key and saturation off, the call goes through ungated.
+// The keys come from k. With no governor, no keyer, no non-empty key, or a
+// keyer error, the call goes through ungated: the local capacity is taken by
+// the queue, before the reconcile, not here.
 func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k rateLimitKeys, mg resource.Managed) (func(), *ratelimit.Deferral) {
 	if r.governor == nil {
 		return noRelease, nil
@@ -153,8 +155,7 @@ func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k rateLimitKe
 			r.keyErrors.logged.Delete(mg.GetUID())
 		}
 	}
-	keyed := slices.ContainsFunc(keys, func(key string) bool { return key != "" })
-	if !keyed && !r.governor.SaturationEnabled() {
+	if !slices.ContainsFunc(keys, func(key string) bool { return key != "" }) {
 		return noRelease, nil
 	}
 	return r.governor.AcquireAll(ctx, keys)
@@ -176,25 +177,7 @@ func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k rateLimitKe
 // A Normal event is recorded, through the throttled recorder, when the object
 // enters a deferral or a throttled deferral names a new deadline, so a long
 // window does not flood events.
-//
-// A DeferRamping is the exception: the controller has just started and is
-// easing into its queue, for about 30s, which is not a state of the object.
-// Reporting it would turn every healthy object Synced=False on every restart
-// (200 objects, 200 status updates, 200 at ReconcileDeferred, 0 provider calls,
-// before this was quiet). It sets no condition and records no event. What an
-// earlier call of this pass learned is still written: quiet means no write for
-// the deferral, not dropping an assessment.
 func (r *Reconciler) deferReconcile(log logging.Logger, mg, pristine resource.Managed, d *ratelimit.Deferral, statusUpdate func() error) (reconcile.Result, error) {
-	if d.Reason == ratelimit.DeferRamping {
-		log.Debug("Reconcile deferred quietly: the local capacity is on its startup ramp", "requeue-after", d.RequeueAfter.String())
-		if pristine == nil || !equality.Semantic.DeepEqual(pristine, mg) {
-			if err := statusUpdate(); err != nil {
-				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
-			}
-		}
-		return reconcile.Result{RequeueAfter: d.RequeueAfter}, nil
-	}
-
 	prev := mg.GetCondition(prv1.TypeSynced)
 	cond := prv1.ReconcileDeferred(d.Message())
 	newWindow := prev.Reason != prv1.ReasonReconcileDeferred ||

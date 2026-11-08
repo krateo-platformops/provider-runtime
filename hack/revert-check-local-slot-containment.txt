@@ -1,0 +1,27 @@
+baseline passed
+
+only: ['containment', 'second race'] 10 mutants
+
+KILLED    the pop calls inner outside the lock (the review's second race)
+          TestAddAfterDuringAPopKeepsItsDelay,TestAddDuringAPopIsNotLost,TestGatedQueueDrainsUnderConcurrentAddsAndDones,TestGatedQueueRecordStaysExactUnderConcurrency,Te
+KILLED    containment: the watchdog never fires
+          TestAStuckPopIsReported
+KILLED    containment: the watchdog is never stopped
+          TestGatedQueueRecordStaysExactUnderConcurrency
+KILLED    containment: tryGrant waits for a popping queue's lock
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestAStuckPopFreezesOnlyItsQueue
+KILLED    containment: a skip doesn't re-check popping
+          TestAPopEndingDuringTheSkipLosesNoGrant
+KILLED    containment: popping isn't set at the grant
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestAStuckPopFreezesOnlyItsQueue
+KILLED    containment: popping isn't cleared after the pop
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestAPanickingReconcileGivesItsSlotBack,TestAddAfterDuringAPopKeepsItsDelay,TestAddDuringAPopIsNotLost,TestCapacityR
+KILLED    containment: no dispatch after a skipped grant
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
+KILLED    containment: popping cleared after the skip check
+          TestAGrantSkippedDuringAPopIsGrantedAfterIt,TestGatedQueueMatchesTheModel,TestGatedQueueMatchesTheModel/1
+SURVIVED  containment: a grant handed back at shutdown leaves popping set
+          
+
+KILLED=9 SURVIVED=1 of 10
+tree restored
