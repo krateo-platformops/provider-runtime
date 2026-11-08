@@ -1112,6 +1112,11 @@ before the source has delivered the protected objects' initial state.
 - an unmappable holder or protected kind;
 - a missing owner finalizer name;
 - **an index location that disagrees with the holder CRD's** (§10.6);
+- **the Namespace informer failing to sync** (L3), as for the source
+  check below. The consent gate and §5's namespace rows depend on it. So a
+  missing `list` or `watch` on namespaces fails start with
+  `credential-use: cannot sync the Namespace informer: grant get, list and watch on namespaces`.
+  Outside runtimes get the same error from `Run`;
 - **a tracker whose `CredentialUseSource` was never started** (M4).
   controller-runtime starts a controller's sources, and waits for the
   syncing ones, before its workers, so the first `Reconcile` proves it. If the source hasn't been started by
@@ -2043,7 +2048,24 @@ not only before A2:
     A1;
   - if either does, it keeps the hold. That is the case of a stale cache,
     or of a source still syncing after a restart;
-  - **if the live read fails, it keeps the hold and requeues.**
+  - **if the live read fails, it keeps the hold and requeues**, with two
+    exceptions:
+    - **NotFound means the target is gone, not a failed read** (L1). If the
+      object, or its Namespace, is NotFound, the ref is treated as
+      **Missing** (§6.2). There is nothing left to hold, and nothing is
+      requeued for it. The record keeps the ref, as for any Missing ref,
+      and the prober watches for it to return (§10.3);
+    - **a persistent 403 on the object read** (L2, PerNamePoll mode, where
+      the read uses the provider's own read grant) means the provider no
+      longer lets the controller read that object, and Connect can't
+      either. This matches the adding direction, where a denied read means
+      not held. After **5 consecutive 403s, spanning at least 2 minutes**,
+      the pass drops the ref in A1. It records a `CredentialRefReadDenied`
+      Warning event on the holder, counts
+      `credentialuse_refs_read_denied_total`, and lists the ref in `unheld`
+      with the reason `ReadDenied`. Until the bound, it keeps the hold and
+      requeues. The two minutes let a grant still propagating, or briefly
+      reprovisioned, recover first (§10.7.2).
 
   On a pass that runs A2 the consent read is live already, so that read
   serves.
@@ -2093,15 +2115,17 @@ the runtime keeps a second annotation on the holder, next to the record:
 credential-use.krateo.io/unheld: [{"ref":"team-b/Secret/db-creds","reason":"ConsentWithdrawn","since":"2026-11-08T17:02:11Z"}]
 ```
 
-- **Reasons:** `NotConsented` (never held, because consent was missing) and
-  `ConsentWithdrawn` (held, then released). `since` is when the ref
+- **Reasons:** `NotConsented` (never held, because consent was missing),
+  `ConsentWithdrawn` (held, then released), and `ReadDenied` (held, then
+  released after a persistent 403 on the consent read). `since` is when the ref
   entered that state, and it is kept while the state lasts.
 - **The same write.** It is written in the A1 merge patch, together with
   the record, whenever either changes, so it costs no extra write. The
   holder event filter treats it like the record (§7.5).
 - **It is bounded.** It holds at most 16 entries. **When it has to trim,
-  it keeps `ConsentWithdrawn` entries ahead of `NotConsented` ones** (L4),
-  because a withdrawal is the cause a later not-found needs explained.
+  it keeps `ConsentWithdrawn` and `ReadDenied` entries ahead of
+  `NotConsented` ones** (L4), because a released hold is the cause a later
+  not-found needs explained.
   Within each reason, the most recent come first. Beyond 16, the last entry
   is `{"ref":"…","reason":"More","count":<n>}`. With refs of at most about 350
   characters, it stays under 6 KB.
@@ -2604,6 +2628,10 @@ on krateo-057:
 - `Resolved` carries unheld hops too. After a re-point of an unheld hop,
   Connect uses the old chain for up to 10s, and never an unheld
   same-namespace Secret (L1).
+- A NotFound on the live confirmation makes the ref Missing, with no
+  requeue loop. Five 403s over 2 minutes in PerNamePoll drop the ref, with
+  the event, the metric and a `ReadDenied` entry. Start fails without
+  list or watch on namespaces.
 - R0 stops for a deleting P with a deleting user in the cache (L1). In
   PerNamePoll, an A2 enqueues its own release batch (L2). Consent is the
   union of the two lists, and an object's list can't narrow its
@@ -3128,6 +3156,14 @@ were not retried.
 |---|---|
 | M1 A held cross-namespace ref is dropped only on a positive, live-confirmed withdrawal: a live read of the object and its Namespace when the cache suggests a withdrawal or can't answer; drop only if neither list names the holder's namespace; keep and requeue if the read fails; the "stale cached drop is safe" argument replaced; the restart-during-teardown and just-after-a-new-hold tests | §11.3, §14 |
 | L1 `Resolved` carries unheld hops, so Connect uses exactly what the tracker read: up to 10s on the old chain after a re-point, and never an unheld same-namespace Secret | §9.2, §14 |
+
+**Revision 11** (Low items after the reviewer confirmed revision 10 clean):
+
+| Item | Resolved in |
+|---|---|
+| L1 A NotFound on the live confirmation means the target is gone: Missing, not a failed read, so no endless requeue | §11.3 |
+| L2 A persistent 403 on the object read in PerNamePoll: dropped after 5 consecutive 403s over at least 2 minutes, with an event, a metric and a `ReadDenied` entry | §11.3 |
+| L3 The Namespace informer's sync gates start, like the source check; a missing list or watch on namespaces fails start with a clear error | §7.5 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
