@@ -158,3 +158,6 @@
 2026-11-08T17:48:28Z platform gke-rlgov-measure-default-pool-11ffa2b6-lmxm cpuPlatform="Intel Broadwell" machineType=e2-standard-4 (gcloud compute instances describe; recorded once, between runs, during the overhead re-run; the first block's node -7f331cb1-bw7p was not recorded)
 2026-11-08T17:59:51Z overhead2-end gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
 2026-11-08T18:01:15Z cpu2-start gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+2026-11-08T18:09:07Z after-c2-off-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+2026-11-08T18:16:38Z after-c2-75-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+2026-11-08T18:24:10Z after-c2-50-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
