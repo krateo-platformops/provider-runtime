@@ -152,3 +152,4 @@
 2026-11-08T17:31:13Z after-b2-cold-ctrl-9 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
 2026-11-08T17:36:42Z after-b2-cold-ctrl-10 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
 2026-11-08T17:42:05Z after-b2-cold-new-10 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+2026-11-08T17:42:06Z block2-end gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
