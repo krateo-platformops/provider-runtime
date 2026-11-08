@@ -1580,11 +1580,10 @@ proves it.
     Otherwise the first symptom would be a namespace not found. So start
     fails clearly when the namespace is absent (§7.3).
 - **Admission keeps the invariant.** A ValidatingAdmissionPolicy in the
-  index namespace denies everything except the providers' index
-  ConfigMaps (`cu-index-*`) written by the providers' service accounts,
-  and the events the tracker records on them (§10.6.4). For core-provider
-  that means composition.krateo.io objects are refused there. The policy
-  never matches `v1/Namespace`, which is cluster-scoped:
+  index namespace allows only an explicit list of writes, and denies
+  everything else. It is stronger than a rule that refuses only
+  composition objects. Its three exceptions come from core-provider's
+  review:
 
   ```yaml
   apiVersion: admissionregistration.k8s.io/v1
@@ -1593,6 +1592,7 @@ proves it.
     name: krateo-credential-use-namespace
   spec:
     failurePolicy: Fail
+    paramKind: {apiVersion: v1, kind: ConfigMap}
     matchConstraints:
       namespaceSelector:
         matchLabels: {kubernetes.io/metadata.name: krateo-credential-use}
@@ -1600,21 +1600,106 @@ proves it.
         - apiGroups: ["*"]
           apiVersions: ["*"]
           resources: ["*"]
-          operations: ["CREATE", "UPDATE", "DELETE"]
+          operations: ["CREATE", "UPDATE"]   # never DELETE: see below
+      excludeResourceRules:                  # the Namespace object itself
+        - apiGroups: [""]
+          apiVersions: ["*"]
+          resources: ["namespaces"]
+          operations: ["*"]
+    variables:
+      - name: kubeControllers
+        expression: >-
+          request.userInfo.username in [
+            "system:serviceaccount:kube-system:root-ca-cert-publisher",
+            "system:serviceaccount:kube-system:service-account-controller",
+            "system:kube-controller-manager"]
+      - name: core
+        expression: request.resource.group == ""
     validations:
       - expression: >-
           (request.resource.resource == "events") ||
-          (request.resource.group == "" && request.resource.resource == "configmaps" &&
-           (object != null ? object : oldObject).metadata.name.startsWith("cu-index-") &&
-           request.userInfo.username in ["system:serviceaccount:krateo-system:git-provider",
-                                         "system:serviceaccount:krateo-system:core-provider"])
-        message: only providers' cu-index-* ConfigMaps may be written in krateo-credential-use
+          (variables.core && request.resource.resource == "configmaps" &&
+           object.metadata.name == "kube-root-ca.crt" && variables.kubeControllers) ||
+          (variables.core && request.resource.resource == "serviceaccounts" &&
+           object.metadata.name == "default" && variables.kubeControllers) ||
+          (variables.core && request.resource.resource == "configmaps" &&
+           object.metadata.name.startsWith("cu-index-") &&
+           ("system:serviceaccounts:" + params.data.managementNamespace) in request.userInfo.groups)
+        message: >-
+          only cu-index-* ConfigMaps from the management namespace's service accounts,
+          events, and Kubernetes' own kube-root-ca.crt and default ServiceAccount
+          may be written in krateo-credential-use
+  ---
+  apiVersion: admissionregistration.k8s.io/v1
+  kind: ValidatingAdmissionPolicyBinding
+  metadata:
+    name: krateo-credential-use-namespace
+  spec:
+    policyName: krateo-credential-use-namespace
+    validationActions: [Deny]
+    paramRef:
+      name: cu-policy-params
+      namespace: krateo-system             # installer's; not in the index namespace
+      parameterNotFoundAction: Deny
+  ---
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: cu-policy-params
+    namespace: krateo-system
+  data:
+    managementNamespace: krateo-system     # the policy's parameter
   ```
 
-  installer renders the list of service accounts from the providers it
-  installs; the two names above are examples. A
-  ValidatingAdmissionPolicyBinding with `validationActions: [Deny]` binds
-  it.
+  **The exceptions, and why each is needed:**
+
+  1. **Kubernetes' own writers in every namespace.** In
+     kube-controller-manager, the root-CA publisher creates and reconciles
+     the `kube-root-ca.crt` ConfigMap, and the service-account controller
+     does the same for the `default` ServiceAccount, in every namespace.
+     They are allowed for exactly those two objects, by name, and only from
+     those identities. **Verified in Kubernetes v1.36.2**
+     (`k8s.io/kubernetes@v1.36.2` in the module cache):
+     - their clients are created as `NewClient("root-ca-cert-publisher")`
+       (`cmd/kube-controller-manager/app/certificates.go:269`) and
+       `NewClient("service-account-controller")`
+       (`cmd/kube-controller-manager/app/core.go:618`);
+     - with `UseServiceAccountCredentials` on, those are service accounts in
+       `metav1.NamespaceSystem`, that is `kube-system`
+       (`cmd/kube-controller-manager/app/controllermanager.go:826-831`), so
+       `system:serviceaccount:kube-system:root-ca-cert-publisher` and
+       `system:serviceaccount:kube-system:service-account-controller`;
+     - with it off, every controller uses the controller-manager's own
+       credentials (`SimpleControllerClientBuilder`, `:823`), which is why
+       `system:kube-controller-manager` is allowed too;
+     - the ConfigMap's name is `RootCACertConfigMapName = "kube-root-ca.crt"`
+       (`pkg/controller/certificates/rootcacertpublisher/publisher.go:42`).
+  2. **The policy never matches DELETE**, so the namespace can be deleted.
+     Matching DELETE would refuse the namespace controller as it empties the
+     namespace, and recreate the deadlock class this design removes. The
+     index needs no protection from deletion by admission: it carries no
+     finalizer, so deleting it can't block anything, and RBAC limits who may
+     delete it. A deleted index is recreated and rebuilt (§10.6.6).
+  3. **The writers are dynamic.** Composition controllers run as
+     `system:serviceaccount:<management namespace>:<resource>-<version>`,
+     service accounts created at runtime (68 on krateo-057), so no static
+     username list can name them. The rule matches the group
+     `system:serviceaccounts:<management namespace>`, which every service
+     account in that namespace belongs to, ANDed with the `cu-index-` name
+     prefix. The management namespace is **the policy's parameter**, a
+     ConfigMap installer owns in that namespace. git-provider's fixed
+     service account in `krateo-system` fits the same rule.
+
+  **And the Namespace object itself is excluded.** For a CREATE or UPDATE
+  of a Namespace, a `namespaceSelector` is matched against that Namespace's
+  own labels (`k8s.io/apiserver@v0.37.2/pkg/admission/plugin/webhook/predicates/namespace/matcher.go:68-85`,
+  which policy matching uses too). So without the exclusion, the policy
+  would refuse installer's own updates of `krateo-credential-use`. The
+  revision 12 sketch said the policy "never matches `v1/Namespace`": that
+  was wrong, and is corrected here.
+
+  For core-provider, the effect is that composition.krateo.io objects are
+  refused there, along with everything else not on the list.
 - **The start check stays**, but by construction it never fires. At start
   the tracker lists holders of K in the index namespace and refuses to
   start if there are any. At acquire time, a holder there gets no hold: a
@@ -2692,11 +2777,25 @@ on krateo-057:
   Connect uses the old chain for up to 10s, and never an unheld
   same-namespace Secret (L1).
 - **The dedicated index namespace:** start fails clearly when it is
-  absent. With the ValidatingAdmissionPolicy installed, creating a holder
-  there, or a ConfigMap not named `cu-index-*`, is denied. A `cu-index-*`
-  ConfigMap written by a provider's service account, and its events, are
-  allowed. With the policy absent, the start check refuses a holder of K
-  there.
+  absent. With the policy absent, the start check refuses a holder of K
+  there. With the ValidatingAdmissionPolicy installed (envtest, with the
+  policy, its binding and its parameter ConfigMap applied):
+  - writes of `kube-root-ca.crt` by
+    `system:serviceaccount:kube-system:root-ca-cert-publisher`, and of the
+    `default` ServiceAccount by
+    `system:serviceaccount:kube-system:service-account-controller`, are
+    allowed, and so are both as `system:kube-controller-manager`. The same
+    names written by any other identity are denied;
+  - **deleting the namespace completes**: the policy matches no DELETE, and
+    the test's namespace controller empties and finalizes it;
+  - a dynamic composition-controller service account,
+    `system:serviceaccount:krateo-system:widgets-v1-2-0`, created during
+    the test, writes its `cu-index-*` ConfigMap;
+  - **a composition object is refused**, and so is a ConfigMap not named
+    `cu-index-*`, or one written from outside the management namespace;
+  - installer's update of the `krateo-credential-use` Namespace object is
+    allowed, which tests the exclusion;
+  - events are allowed.
 - A NotFound on the live confirmation makes the ref Missing, with no
   requeue loop. Five 403s over 2 minutes in PerNamePoll drop the ref, with
   the event, the metric and a `ReadDenied` entry. Start fails without
@@ -2980,8 +3079,10 @@ instead:
 - the namespace ships in installer's own release, before any composition
   controller enables PerName (§10.6.1);
 - the ValidatingAdmissionPolicy there refuses composition.krateo.io
-  objects, and everything except `cu-index-*` ConfigMaps from the
-  providers' service accounts;
+  objects, and everything else not on its allowlist (§10.6.1). Composition
+  controllers' runtime service accounts are matched by the
+  `system:serviceaccounts:krateo-system` group with the `cu-index-` prefix,
+  so new controllers need no policy change;
 - **core-provider generates the composition controller's RBAC** for
   configmaps in that namespace: `get`, `create`, `update`, `patch`, `watch`.
 
@@ -3259,6 +3360,16 @@ were not retried.
 | core-provider's BLOCKER: the index namespace. The user chose a dedicated namespace no holder can be created in (`krateo-credential-use`), as installer measured on krateo-057: 83 compositions of 67 kinds, all in `krateo-system`, structurally. installer ships it in its own release, with a new `.Values.namespaces` key and `helm.sh/resource-policy: keep`, before any index is written. Start fails clearly when it is absent. A ValidatingAdmissionPolicy allows only `cu-index-*` ConfigMaps from providers' service accounts (and their events). core-provider generates the configmap RBAC there. The start check stays, and never fires by construction. At most two writers per index | §10.6.1, §7.3, §13, §16.3 |
 | core-provider: the claim that compositions live in the definition's namespace removed; they can be anywhere, because each composition controller watches cluster-wide | §16.3 |
 | oasgen's correction: rest-dynamic-controller isn't a second known instance. Its Delete tolerates a failed Secret read (`restResources.go:1692`, in Delete at `:1574`), and is exposed only where a resolved value builds the delete request (`BuildCallConfig` returning nil). core-provider#402 stays the known second instance | §1, §16.2 |
+
+**Revision 13** (crediting core-provider, who found three breakages in the policy sketch):
+
+| Item | Resolved in |
+|---|---|
+| Kubernetes' own per-namespace writers: `kube-root-ca.crt` and the `default` ServiceAccount, allowed by name and by identity, with the identities verified in Kubernetes v1.36.2. `system:kube-controller-manager` added for clusters without `UseServiceAccountCredentials` | §10.6.1 |
+| The policy matches CREATE and UPDATE only, never DELETE, so the namespace can be deleted; the index is protected by its finalizer-free design and RBAC, not by admission | §10.6.1 |
+| Dynamic writers: match the group `system:serviceaccounts:<management namespace>` ANDed with the `cu-index-` prefix, with the management namespace as the policy's parameter; git-provider fits the same rule | §10.6.1 |
+| Our own correction: a `namespaceSelector` matches a Namespace object's own CREATE and UPDATE, so the Namespace is now excluded explicitly; revision 12's "never matches `v1/Namespace`" was wrong | §10.6.1 |
+| Tests: Kubernetes' writers allowed, the namespace deletion completes, a dynamic composition-controller service account writes its index, a composition object is refused | §14 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
