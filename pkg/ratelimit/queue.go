@@ -372,9 +372,11 @@ func (q *gatedQueue[T]) Get() (item T, shutdown bool) {
 // it was processed becomes available again. Done for a key no worker holds does
 // nothing. inner learns of it in the same critical section as the record, so no
 // worker can pop key between the two. Once ShutDown has begun inner doesn't:
-// it hands nothing out by then, and its Done can wait forever on a lock its
-// own hand-out was left holding (design §4, "Shutdown"). The slot is given
-// back either way.
+// it hands nothing out by then, so its record no longer matters. On
+// controller-runtime v0.23.3 its Done could also wait forever on a lock its own
+// hand-out was left holding; v0.25.0 fixed that (#3540), and the skip stays
+// because it is still correct (design §4, "Shutdown"). The slot is given back
+// either way.
 func (q *gatedQueue[T]) Done(key T) {
 	q.mu.Lock()
 	if _, ok := q.processing[key]; !ok {
@@ -425,9 +427,9 @@ func (q *gatedQueue[T]) NumRequeues(item T) int { return q.rateLimiter.NumRequeu
 // Len returns the number of items the priority queue would count: ready ones,
 // including those being processed again, and not delayed ones. It reads them
 // from the record, which holds exactly the keys in inner, and takes no lock, so
-// it never waits on a pop. It doesn't ask inner: inner's Len takes a lock that
-// inner's hand-out can be left holding after a shutdown (design §4,
-// "Shutdown"). Nothing in provider-runtime or controller-runtime calls it.
+// it never waits on a pop. It doesn't ask inner, which would mean calling it
+// without mu or waiting for mu behind a pop (design §4, "Shutdown"). Nothing
+// in provider-runtime or controller-runtime calls it.
 func (q *gatedQueue[T]) Len() int {
 	return int(q.readyLen.Load())
 }

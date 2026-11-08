@@ -4,7 +4,7 @@ title: provider-runtime — take the local slot before the pop
 description: Design, implemented, for taking the saturation gate's local slot before the workqueue pop, so low local capacity behaves like fewer workers, without letting an idle worker hold a slot when several controllers share one governor.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, workqueue, reconciler]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-08T00:00:00Z
 ---
 
 # Take the local slot before the pop
@@ -16,7 +16,9 @@ there) and follows core-provider's design on
 [unstructured-runtime#72](https://github.com/krateo-platformops/unstructured-runtime/issues/72).
 Code references in §1 to §3 are to provider-runtime at `d0632f1`, before the
 change, and controller-runtime v0.23.3 (`CR/` is
-`sigs.k8s.io/controller-runtime@v0.23.3`).
+`sigs.k8s.io/controller-runtime@v0.23.3`). §4's references to controller-runtime
+are to v0.25.2, where they were rechecked when the module moved to it (§4,
+"Rechecked on v0.25.2").
 
 ## 1. The problem
 
@@ -109,10 +111,10 @@ saturation on, `ForControllerRuntime` sets `NewQueue` whether or not a
   updates the record below.** The first version didn't, and had two races (§10);
 - `ready` (keys ready in `inner`) and `processing` (keys a worker holds).
   Available = `ready` minus `processing`, which is exactly what `inner` can hand
-  out (`priorityqueue.go:390-393`);
+  out (`priorityqueue.go:406-409`);
 - `waiting`, delayed keys with ready time and priority, each with a timer; a
   timer that fires makes every due key ready at once (§10). Upstream's rules apply: the earlier time and higher priority win
-  (`:228-246`), and an immediate add cancels the wait (`:254-257`);
+  (`:255-271`), and an immediate add cancels the wait (`:277-280`);
 - `idle`, workers blocked in `GetWithPriority`, and `granted`, slots handed to the
   queue whose worker hasn't popped yet.
 
@@ -121,7 +123,7 @@ worker and an available item.
 
 **Adds.** An immediate add goes to `inner` and `ready`. If the key wasn't
 available before, the count rises and the governor is told. A delayed or
-rate-limited add computes its time (`rateLimiter.When`, as upstream at `:205-210`)
+rate-limited add computes its time (`rateLimiter.When`, as upstream at `:221-228`)
 and goes to `waiting`. When its timer fires it becomes an immediate add with its
 stored priority. `Forget` and `NumRequeues` go to the rate limiter.
 
@@ -150,7 +152,7 @@ below the new capacity.
 takes the queue's lock. It then marks the queue shut, wakes every waiting worker
 (idle or granted) and removes the queue from the governor's list. A waiting
 worker returns `shutdown=true`, so `processNextWorkItem` returns false and it
-exits (`controller.go:422-425`). A slot granted to a worker that finds the queue
+exits (`controller.go:424-427`). A slot granted to a worker that finds the queue
 shut, or whose pop `inner` ends with shutdown, is released before returning.
 Running reconciles finish; their `Done` releases their slots. Why `inner` is shut
 down outside the lock, and why that is safe, is under "Shutdown, outside the
@@ -184,23 +186,24 @@ other caller out. A pop is made only after a grant, and a grant only when the
 record shows an item that is ready and not processing. With every change to
 `inner` made under the same lock, nothing changes between the grant's count and
 the pop. What remains is whether `inner` hands that item out without needing
-anything the pop is holding. It does (references to `CR/pkg/controller/priorityqueue/priorityqueue.go`):
+anything the pop is holding. It does (references to `CR/pkg/controller/priorityqueue/priorityqueue.go`
+at v0.25.2):
 
 - **Buffered adds.** `AddWithOpts` only appends to `addBuffer` and signals
-  (`:153-170`). The buffer is flushed by `inner`'s own goroutines: `handleAddBuffer`
-  (`:172-184`), and `handleReadyItems`, which flushes before it hands anything out
-  (`:376`). `GetWithPriority` counts itself a waiter and signals
-  `handleReadyItems` (`:424-436`), which takes only `inner`'s locks, never ours.
+  (`:169-186`). The buffer is flushed by `inner`'s own goroutines: `handleAddBuffer`
+  (`:188-200`), and `handleReadyItems`, which flushes before it hands anything out
+  (`:392`). `GetWithPriority` counts itself a waiter and signals
+  `handleReadyItems` (`:449-461`), which takes only `inner`'s locks, never ours.
   So an item added before the pop is in the ready tree by the time it is handed
   out.
 - **A key re-added while it is processing.** `inner` keeps it in the ready tree
-  but skips it while the key is locked (`:390-393`), until `Done` unlocks it and
-  signals (`:467-473`). The record counts such a key as not free until the queue's
+  but skips it while the key is locked (`:406-409`), until `Done` unlocks it and
+  signals (`:492-498`). The record counts such a key as not free until the queue's
   own `Done`, which calls `inner.Done` in the same critical section first. So the
   record never counts a locked key as available.
 - **Shutdown while a pop waits inside `inner`.** `ShutDown` shuts `inner` down
   before it takes the lock, so the pop returns either the item, if `inner`
-  handed it out first, or `shutdown` (`:436-444`). Either way it returns, and
+  handed it out first, or `shutdown` (`:461-469`). Either way it returns, and
   then `ShutDown` takes the lock. `TestShutDownDuringAPopInsideInnerReturns` and
   `TestAPopRacingShutDownReportsNoBrokenRecord` pin it.
 
@@ -274,7 +277,7 @@ next section fixes that.
 **Shutdown, outside the lock.** core-provider's review of #40 found that
 `ShutDown` took the queue's lock before calling `inner.ShutDown()`. A stuck pop
 holds that lock inside `inner.GetWithPriority()`, and only `inner.ShutDown()`
-wakes it (`:436-444`). So in exactly the case the watchdog exists for, graceful
+wakes it (`:461-469`). So in exactly the case the watchdog exists for, graceful
 shutdown hung, and `Len` and `ShuttingDown`, which took the lock too, blocked as
 well. Now:
 
@@ -290,17 +293,19 @@ well. Now:
 - `ShuttingDown` reads `stopping` and takes no lock.
 - `Len` reads `len(ready)` from an atomic stored with every change to `ready`,
   and takes no lock. `ready` holds exactly the keys in `inner`, so this is the
-  number upstream's `Len` reports: ready items, including those being processed
-  again, and no delayed ones. It doesn't ask `inner`, because `inner.Len` can
-  wait forever after a shutdown (below). Nothing calls `Len` today, in
-  provider-runtime or in controller-runtime v0.23.3's `pkg/`. The record's count
-  is the clearest answer that can't block, and matches `inner`'s whenever the
-  record is right.
+  number upstream's `Len` reports (`:511-523`): ready items, including those
+  being processed again, and no delayed ones. It doesn't ask `inner`. On
+  v0.23.3 `inner.Len` could wait forever after a shutdown (below). v0.25.2
+  fixed that, but asking `inner` would still mean calling into it without the
+  queue's lock, against the rule above, or waiting for the lock a pop holds.
+  Nothing calls `Len` today, in provider-runtime or in controller-runtime
+  v0.25.2's `pkg/`. The record's count is the clearest answer that can't block,
+  and matches `inner`'s whenever the record is right.
 
 This breaks the rule that every call into `inner` happens under the queue's lock,
 and here is why that's safe. Once `inner` is shut down it hands nothing out:
-`GetWithPriority` returns at once (`:425-428`) and `AddWithOpts` drops the item
-(`:153-156`). The record exists so that a grant always finds an item to hand
+`GetWithPriority` returns at once (`:450-453`) and `AddWithOpts` drops the item
+(`:169-172`). The record exists so that a grant always finds an item to hand
 out, and after shutdown no grant is honoured, so it no longer has to match
 anything. Each operation racing a shutdown:
 
@@ -308,24 +313,39 @@ anything. Each operation racing a shutdown:
   either finds the queue shut and hands the slot back, or pops, gets `shutdown`
   from `inner` and releases the slot. Either way the slot is released once.
 - **A pop** inside `inner` either gets the item, a normal pop, or `shutdown`.
-  Upstream can also return the item together with `shutdown=true` (`:445-446`).
+  Upstream can also return the item together with `shutdown=true` (`:470-471`).
   The queue then drops it, without reporting, and releases the slot.
-- **`Done`** still gives the slot back after a shutdown. It doesn't call
-  `inner.Done`, for a reason found while building this. If `done` closes while
-  upstream's hand-out goroutine is sending to the pop on the unbuffered `get`
-  channel (`:400`), the pop can leave on `done`. The goroutine then blocks
-  forever, holding `w.lock` and `w.lockedLock` (`:369-383`), and every later
-  `inner.Done` (`:468`) and `inner.Len` (`:490`) waits for good. That wasn't
-  reachable before, because no pop could be inside `inner` at `ShutDown`. It is
-  now. On v0.23.3's own queue, with a shutdown racing a hand-out, `Done` never
-  returned in 2,788 of 200,000 runs
-  (`hack/review-2026-11-07/upstream_shutdown_wedge_test.go.txt`). Skipping
-  `inner.Done` once `stopping` is set is sound. The pop that could leave the
-  hand-out stuck held the queue's lock and saw `done` closed, which comes after
-  `stopping` was set, so any `Done` that takes the lock after it sees `stopping`.
-  After shutdown `inner`'s record of processing keys is never read again. One
-  cost: `inner`'s own unfinished-work metric keeps those keys, on a queue that
-  is going away.
+- **`Done`** still gives the slot back after a shutdown, and doesn't call
+  `inner.Done`. The skip was added for a hazard found while building this, on
+  v0.23.3. If `done` closed while upstream's hand-out goroutine was sending to
+  the pop on the unbuffered `get` channel, the pop could leave on `done`. The
+  goroutine then blocked forever, holding `w.lock` and `w.lockedLock`, and
+  every later `inner.Done` and `inner.Len` waited for good. That wasn't
+  reachable before the gated queue, because no pop could be inside `inner` at
+  `ShutDown`. On v0.23.3's own queue, with a shutdown racing a hand-out, `Done`
+  never returned in 2,788 of 200,000 runs
+  (`hack/review-2026-11-07/upstream_shutdown_wedge_test.go.txt`).
+
+  **The hang is fixed upstream** in v0.25.0
+  ([#3540](https://github.com/kubernetes-sigs/controller-runtime/pull/3540)):
+  the hand-out now selects on `done` as well as on the send (`:421-424`), so it
+  no longer blocks holding `w.lock` (`:385-386`) and `w.lockedLock`
+  (`:398-399`), which `inner.Done` (`:493`) and `inner.Len` (`:515`) take. When
+  `done` wins, the item has already left `inner` and its key stays locked;
+  after shutdown that matters to no one. The same test on v0.25.2: 200,000
+  runs, the pop got the item 141,104 times and `shutdown` 58,896, and `Done`
+  never returned in 0. Calling `Len` after `Done`, also 0 of 200,000.
+
+  **The skip stays**, because it is still correct and costs nothing. After
+  shutdown `inner` hands nothing out that the queue honours, so nothing it does
+  with its record of processing keys reaches a worker; and the slot is given
+  back either way. Keeping it also keeps `Done` independent of how `inner`
+  behaves after shutdown, which `TestDoneAfterShutDownSkipsInner` pins with an
+  `inner` that wedges as v0.23.3's could. It is sound for the same reason as
+  before: a pop that was inside `inner` at the shutdown held the queue's lock
+  and saw `done` closed, which comes after `stopping` was set, so any `Done`
+  that takes the lock after it sees `stopping`. One cost: `inner`'s own
+  unfinished-work metric keeps those keys, on a queue that is going away.
 
 The tests:
 - `TestShutDownEndsAStuckPop`: a stuck pop, then `ShuttingDown`, `Len` and
@@ -341,9 +361,35 @@ The tests:
 
 **The `QueueWaitRecorder` wrapper.** At `d0632f1` it lacked `AddWithOpts` and
 `GetWithPriority`, so controller-runtime wrapped it and every item ran at
-priority 0 (`controller.go:339-343`). That was fixed separately in v1.10.1
+priority 0 (`controller.go:341-345`). That was fixed separately in v1.10.1
 (`queueWaitInstrumentedPriority`). With a recorder, `ForControllerRuntime` wraps
 the gated queue in that variant, so priorities hold under it.
+
+**Rechecked on v0.25.2.** The module moved from controller-runtime v0.23.3 to
+v0.25.2, and every claim above about upstream's priority queue was checked
+again against v0.25.2's `priorityqueue.go`; the line numbers above are
+v0.25.2's. Between the two, the file changed in four places, and none breaks a
+claim:
+
+- the hand-out selects on `done` (`:416-425`, #3540), under "Shutdown, outside
+  the lock" above. Before shutdown `done` is open, so a hand-out behaves as on
+  v0.23.3, and the pop's argument stands;
+- `logState` copies the items under `w.lock` and logs the copies (`:525-560`,
+  #3593, in v0.25.1), where v0.23.3 logged pointers after unlocking, a data
+  race with writers of `ReadyAt`. It takes only `inner`'s lock, never ours, and
+  only when V(5) is enabled; the gated queue gives `inner` `logr.Discard()`, so
+  it never does;
+- the trees use `k8s.io/utils`' fork of `btree` (`:29`) instead of
+  `github.com/google/btree`, with the same ordering functions (`:562-574`);
+- `new(expr)` replaces `ptr.To` (`:232`).
+
+`metrics.go`, with `DepthMetricWithPriority`, is unchanged but for a licence
+header: the priority dimension of the depth metric was there in v0.23.3. The
+only change under `CR/pkg/internal/metrics` that `inner` reaches is the help
+text of `workqueue_retries_total`, which now says it counts adds with a
+non-zero delay; `inner` gets none, so it stays 0 for gated controllers, as §3
+says. In the controller, `processNextWorkItem` (`controller.go:422-441`) and
+the `NewQueue` check (`:340-345`) are as before, shifted by two lines.
 
 ## 5. Several controllers, several governors
 

@@ -7,6 +7,11 @@
 // module: 200000 runs, the pop got the item 162600 times and shutdown 37400;
 // Done never returned in 2788 (565s). Each wedged run leaks its goroutines.
 // It backs design-local-slot-before-pop.md §4, "Shutdown, outside the lock".
+//
+// Run again on 2026-11-08 on v0.25.2, which has the upstream fix (#3540), the
+// same way: 200000 runs, the pop got the item 141104 times and shutdown 58896;
+// Done never returned in 0 (2.4s). With q.Len() called after q.Done(k) as
+// well: 200000 runs, 0 (9.4s).
 package hazard
 
 import (
