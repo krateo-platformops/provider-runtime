@@ -241,10 +241,10 @@ For Krateo, that's core-provider#310.
     With it on, the runtime sets the Go memory limit at 0.8 of `memory.max`,
     unless `GOMEMLIMIT`, your own `debug.SetMemoryLimit` call or
     `ExperimentalGoMemoryLimit` says otherwise, and halves `local` when headroom
-    under that limit falls to 15%. Before the local gate moved into the queue it
-    ran clean in 20 of 20 runs on an overcommitted synthetic workload, against 11
-    of 20 for v1.10.0; it is to be measured again on the combined code. It hasn't
-    run on a real provider and it's no guarantee: see
+    under that limit falls to 15%. On this release's code it ran clean in 20 of
+    20 runs on an overcommitted synthetic workload, against 2 of 20 for v1.10.0
+    (11 of 20 in an earlier block, before the gate moved). **It has not been run
+    on a real provider**, and it's no guarantee: see
     [configuration](./configuration.md#confirmation-of-the-memory-input). Keep
     workers times the largest call well under the memory limit. A sample period
     below 1s only matters to this input. `ExperimentalMemory` replaced

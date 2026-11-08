@@ -14,9 +14,9 @@ timestamp: 2026-11-07T00:00:00Z
 default. It ships rate-limit and CPU slow-down. **Memory stays experimental and
 off by default.** The first memory input did not prevent OOMKills on the kind
 re-measurement. The current one cleared the confirmation block on a synthetic
-workload, on the code before the local gate moved into the queue (§11 item 18),
-and is to be measured again on the combined code. It has not run on a real
-provider, the last line of the bar (§11 item 16). The saturation settings were decided by the user on 2026-11-05 from the measurements recorded
+workload, before the local gate moved into the queue (§11 item 18) and again
+on the combined code. It has not been run on a real provider, the last line of
+the bar (§11 item 16). The saturation settings were decided by the user on 2026-11-05 from the measurements recorded
 in [configuration](./configuration.md#the-pressure-thresholds-are-provisional).
 The CPU pressure threshold (50%) stays provisional until core-provider
 validates it (open question 5). Where the implementation chose something this
@@ -674,11 +674,20 @@ every line of item 16 is met.
     not throttling itself. That code ran the local gate after the workqueue pop,
     so a deferred object slept a jittered 1s to 30s and could miss a slot that
     freed meanwhile; core-provider found this inversion in
-    unstructured-runtime#72. The gate is now in the queue, so the block is
-    repeated on the combined code with the same design
-    (`hack/rlgov-measure/remeasure-plan.txt`). With the gate in the queue the
-    new arm defers nothing for local capacity: its engagement is read from
-    `local`, the logged cuts and the calls in flight.
+    unstructured-runtime#72.
+
+    **Re-run on the combined code**, with the same design and settings fixed
+    before the first run (`hack/rlgov-measure/remeasure-plan.txt`): 60 runs, none
+    discarded. The new arm was clean in 20 of 20 on the ramp at 6.12 Observes/s
+    and 10 of 10 on cold start at 20.06. v1.10.0 was clean in 2 of 20 at 2.15
+    and 7 of 10 at 6.72, with 36 restarts, all OOMKilled, and 0 liveness kills.
+    The sampler cost under 0.06% of a core. Every line that was run is met
+    again, and the real-provider line is still not done. With the gate in the
+    queue, the new arm defers nothing for local capacity, so its engagement is
+    read from `local`, the logged cuts and the calls in flight. The control's
+    ramp result moved from 11 of 20 to 2 of 20 between the blocks, and the
+    cause isn't established
+    ([configuration](./configuration.md#confirmation-of-the-memory-input)).
 17. **One object, several scopes. Decided by the user on 2026-11-05, after
     git-provider's adoption found the gap.** A `Repo` has `fromRepo` and `toRepo`,
     each with its own URL and credential, and every external method touches
@@ -713,4 +722,4 @@ every line of item 16 is met.
     gone, a keyless call isn't gated, and nothing is written on the object for
     the controller's own saturation. It changes user-visible behaviour of an
     off-by-default feature, so it is a minor release. Both measurement blocks of
-    item 16 measured the old gate and are repeated on the combined code.
+    item 16 measured the old gate and were repeated on the combined code.

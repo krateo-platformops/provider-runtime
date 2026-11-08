@@ -107,7 +107,7 @@ example provider declares `--rate-limit-governor` /
 | `--rate-limit-recovery-interval` / `<NAME>_PROVIDER_RATE_LIMIT_RECOVERY_INTERVAL` | `RateLimit.RecoveryInterval` | `30s` | yes | How long a key must go clean before its capacity rises by one, and the same for the local capacity after any cut. Also the upper bound of the "waiting for capacity" requeue delay (1s to this value). |
 | `--rate-limit-max-hold` / `<NAME>_PROVIDER_RATE_LIMIT_MAX_HOLD` | `RateLimit.MaxHold` (`*time.Duration`) | `1h` (`nil`) | yes | The longest a server's refusal holds its key. A `Retry-After` or reset time past it is cut to it; after the cut hold one call goes through, and if the server still refuses, the key is held again. `0` means no cap: the server's deadline holds in full. Negative is an error. A pointer, so that unset (`1h`) and `0` (no cap) differ. The first cut for a key is logged at Info with the key, the deadline the server asked for and the cap; not again until the key has gone a whole `RecoveryInterval` clean. Every cut is counted in `ratelimit.hold_clamped`. |
 | `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, each controller's queue takes a local slot before every reconcile and gives it back when the reconcile returns, so low capacity behaves like fewer workers ([design](./design-local-slot-before-pop.md)). Needs the controller built with `ForControllerRuntime`, and `UsePriorityQueue` left unset or true. |
-| `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemory` | `false` | yes (off) | **Experimental, and off by default.** Adds memory to the local input. At `Start` it sets the Go memory limit, unless something else did, and while a Go memory limit is in effect the input is the headroom under it. With no limit (`GOMEMLIMIT=off`) the input is the working-set ratios. It [cleared the bar on an overcommitted synthetic workload](#confirmation-of-the-memory-input), but it has not run on a real provider. Renamed from `ExperimentalMemoryWorkingSet`, with no alias. |
+| `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemory` | `false` | yes (off) | **Experimental, and off by default.** Adds memory to the local input. At `Start` it sets the Go memory limit, unless something else did, and while a Go memory limit is in effect the input is the headroom under it. With no limit (`GOMEMLIMIT=off`) the input is the working-set ratios. It [cleared the bar on an overcommitted synthetic workload](#confirmation-of-the-memory-input), on this release's code too. **It has not been run on a real provider.** Renamed from `ExperimentalMemoryWorkingSet`, with no alias. |
 | none | `RateLimit.Saturation.ExperimentalGoMemoryLimit` | `0` | yes | Experimental. The Go memory limit `Start` sets, in bytes. `0` derives it: 0.8 of `memory.max` (provisional), when that is a real limit, read once at `Start`. Read only with `ExperimentalMemory`. An explicit value always wins: `GOMEMLIMIT` first, `off` included, then a limit the program set itself, then this option. With the input off the runtime doesn't touch the limit. It logs what it set. |
 | none | `RateLimit.Saturation.ExperimentalGoMemoryHeadroomRatio` | `0.15` (**provisional**) | yes | Experimental. Share of the Go memory limit left free at or below which local capacity halves. Read only with `ExperimentalMemory`. There is no hard level. Headroom counts the live heap at the last GC plus the runtime's non-heap memory, read from `runtime/metrics` with no I/O. |
 | `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. Local capacity halves at most once per sample. A shorter period only matters to the experimental memory input: CPU pressure's `avg10` is already a 10-second average, so sampling it faster gains nothing and costs CPU in the container it protects. |
@@ -160,8 +160,8 @@ and off by default.** The user decided what follows from the measurements below
   version of this input, the working-set ratios alone,
   [did not prevent OOMKills](#re-measurement-of-the-memory-input). The current
   one [cleared the confirmation block](#confirmation-of-the-memory-input) on a
-  synthetic workload, and hasn't run on a real provider, so the default stays
-  off.
+  synthetic workload, twice, the second time on this release's code. **It has
+  not been run on a real provider**, so the default stays off.
 - `local` starts at 1 and rises by 1 per `StartupRampInterval` (2s) until its
   first cut. After any cut, it rises by 1 per clean `RecoveryInterval` (30s),
   the same as API limits.
@@ -215,10 +215,56 @@ The sampler's own cost is below, with [the re-measurement](#re-measurement-of-th
 #### Confirmation of the memory input
 
 The bar is §11 item 16 of the [design](./design-rate-limit-governor.md). On the
-overcommitted workload, the memory input **cleared every line that was run**, on
-the code before the local gate moved into the queue; the block is to be run
-again on the combined code. One line remains: **it has not run on a real
-provider, so the bar is not fully met and the default stays off.**
+overcommitted synthetic workload, the memory input **cleared every line that was
+run**, twice: before the local gate moved into the queue, and again on this
+release's code. **`ExperimentalMemory` has not been run on a real provider.**
+That is the bar's last line, so the bar is not fully met and the default stays
+off.
+
+##### Re-run on this release's code
+
+The same design as the first block below, with settings fixed and committed
+before the first run. New arm: this release's code, the gate in the queue (#40)
+on controller-runtime v0.25.2. Control: v1.10.0 on its own controller-runtime
+v0.23.3. The node was a new one, `e2-standard-4` on Intel Broadwell, with the
+same Kubernetes 1.35.8 and kernel 6.12.94+. 60 runs, one at a time, ABBA,
+none discarded, one node and boot ID throughout. Every run and its report are in
+`hack/rlgov-measure/results/` (`b2-*`, `block2-report.txt`).
+
+| Workload | Arm | Runs | Clean | Restarts (all OOMKilled) | Liveness kills | Observes/s, median (range) | Peak working set |
+|---|---|---|---|---|---|---|---|
+| Ramp | new | 20 | **20** | 0 | 0 | 6.12 (6.06 to 6.19) | 201 to 218 MiB |
+| Ramp | control | 20 | 2 | 33 | 0 | 2.15 (1.84 to 2.50) | 234 to 255 MiB |
+| Cold start | new | 10 | **10** | 0 | 0 | 20.06 (19.98 to 20.17) | 202 to 218 MiB |
+| Cold start | control | 10 | 7 | 3 | 0 | 6.72 (6.51 to 8.19) | 218 to 252 MiB |
+
+| Line of the bar | Required | Result | Met |
+|---|---|---|---|
+| Clean on the overcommitted workload | at least 18 of 20 | 20 of 20 | yes |
+| No crash loop on cold start, backlog present first | at least 9 of 10 | 10 of 10 | yes: no harm on cold start |
+| Control alternating in the same block | yes | v1.10.0, ABBA | yes |
+| Restarts split by cause | yes | new 0; control 36, all OOMKilled; 0 liveness kills in either arm | yes |
+| Throughput not below the old code's clean runs | at or above | ramp 6.12 against 2.23, cold start 20.06 against 6.80 | yes |
+| Sampler cost at the chosen period, in a container | reported | under 0.06% of a core ([below](#the-samplers-cost-at-the-confirmation)) | yes |
+| A run on a real provider | yes | **not done** | **no** |
+
+**The new arm defers nothing for local capacity**, so its engagement shows in
+`local`, the logged cuts and the calls in flight. On the ramp, mean `local` was
+about 8, with 2 cuts a run. On cold start it was 6.5.
+
+**The control moved between the blocks, and why isn't established.** On the
+ramp it was clean in 11 of 20 in the first block and 2 of 20 here (two-sided
+Fisher p = 0.0057, computed after seeing the data). Its cold start (7 of 10 both
+times), throughput and operating point didn't move. The settings, workloads,
+probe, the control's source and dependencies, and the node's recorded kernel,
+kubelet and cgroup limits are the same in both blocks. What differs is the VM,
+whose CPU platform wasn't recorded the first time, the node's age, and a rebuilt
+control image. The control runs at the edge of its limit, so a small host
+difference can move it, but that is a candidate, not a finding. Read the ramp
+contrast as the control clean in 2 to 11 of 20 across two blocks, not as 20
+against 2. The new arm's own lines are absolute, and both blocks met them.
+
+##### First block, before the gate moved
 
 **Setup.** One GKE node, `e2-standard-4`, Kubernetes 1.35.8, Container-Optimized
 OS, kernel 6.12.94+, cgroup v2, with `cpu.pressure` present. Node load averaged
@@ -279,15 +325,13 @@ case.
 - The live heap updates at each GC, so on an idle controller the reading can be
   old. This is reasoning, not a measurement.
 - The limit is read once, so an in-place resize doesn't move it.
-- **The figures measure the code before the local gate moved into the queue
-  (#40), not throttling itself.** That code ran the gate after the workqueue
-  pop, so a deferred object slept a jittered 1s to 30s and could miss a slot
-  that freed meanwhile, while others took it. core-provider found this
-  inversion in unstructured-runtime#72. The bar result stands as measured, but
-  the gate has since moved, so these figures don't carry over to the current
-  code. The block is to be run again on it, with the same design
-  (`hack/rlgov-measure/remeasure-plan.txt`). Per-object service wasn't
-  measured: the logs are aggregate.
+- **This block's figures measure the code before the local gate moved into the
+  queue (#40), not throttling itself.** That code ran the gate after the
+  workqueue pop, so a deferred object slept a jittered 1s to 30s and could miss
+  a slot that freed meanwhile, while others took it. core-provider found this
+  inversion in unstructured-runtime#72. The re-run above measures the current
+  code. Per-object service wasn't measured in either block: the logs are
+  aggregate.
 
 **How the settings were chosen.** Exploration ran on the same node before the
 settings were fixed. It is not evidence for the bar, and every run is in
@@ -329,6 +373,11 @@ runs each, alternating, on the node above:
 |---|---|---|---|---|
 | New | `cpu.pressure`, `runtime/metrics` | 407, 426, 510µs | 0.041 to 0.051% | 0.16 to 0.20% |
 | v1.10.0 | `cpu.pressure`, `memory.current`, `memory.stat`, `memory.max` | 670, 699, 774µs | 0.067 to 0.077% | 0.27 to 0.31% |
+| New, re-run on this release's code | `cpu.pressure`, `runtime/metrics` | 433, 559, 560µs | 0.043 to 0.056% | 0.17 to 0.22% |
+| v1.10.0, re-run alongside | as above | 811, 820, 848µs | 0.081 to 0.085% | 0.32 to 0.34% |
+
+The first two rows ran on the first block's node, the last two on the re-run's.
+In every run of this release's code, the sampler cost under 0.06% of a core.
 
 Headroom costs less than the working set, as item 15 expected, because it skips
 `memory.stat`. Earlier sessions saw this cost move about tenfold with host load
