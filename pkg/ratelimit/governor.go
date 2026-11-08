@@ -670,6 +670,7 @@ func (g *Governor) Start(ctx context.Context) error {
 			"More reconcilers use this Governor than controllers have a gated queue. Build every controller that uses it with controller.Options.ForControllerRuntime",
 			"reconcilers", reconcilers, "gatedControllers", gated)
 	}
+	g.sat.applyGoMemoryLimit()
 	g.log.Info("Saturation sampler started", "cgroup", g.sat.dir, "samplePeriod", g.sat.opts.SamplePeriod.String())
 	g.sample()
 	t := time.NewTicker(g.sat.opts.SamplePeriod)
@@ -717,14 +718,15 @@ type KeySnapshot struct {
 
 // InputSnapshot is one saturation input's last sample, for metrics.
 type InputSnapshot struct {
-	// Input is cpu_pressure or memory_working_set.
+	// Input is cpu_pressure, memory_working_set or go_memory_headroom.
 	Input string
 	// Enabled is false when the input is missing (no cgroup v2, no PSI, no
 	// memory limit) or saturation is off. A disabled input has no Percent:
 	// zero would read as healthy.
 	Enabled bool
 	// Percent is the input's value: PSI some avg10 for cpu_pressure, the working
-	// set as a share of memory.max for the working set.
+	// set as a share of memory.max for the working set, the share of the Go
+	// memory limit left free for the headroom. Lower headroom is worse.
 	Percent float64
 }
 

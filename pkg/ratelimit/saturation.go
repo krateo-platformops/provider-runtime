@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -19,9 +22,9 @@ import (
 // kind measurement in docs/configuration.md.
 //
 // The CPU pressure threshold is PROVISIONAL: the measurement supports 50, and
-// core-provider is validating it. The working-set ratios belong to the
-// experimental memory input, which is off by default: re-measured, that input
-// did not prevent OOMKills (design §11).
+// core-provider is validating it. The working-set ratios, the Go memory limit
+// ratio and the headroom ratio belong to the experimental memory input, which
+// is off by default (design §11).
 const (
 	// DefaultSamplePeriod is how often the sampler reads the cgroup files. CPU
 	// pressure gains nothing from a faster sample, because "avg10" is already
@@ -43,19 +46,28 @@ const (
 	// which the experimental memory input drops local capacity straight to 1.
 	// PROVISIONAL.
 	DefaultWorkingSetHardRatio = 0.90
+	// DefaultGoMemoryLimitRatio is the share of memory.max the runtime gives
+	// the Go memory limit when the experimental memory input is on and nothing
+	// set the limit explicitly (design §11 item 14). PROVISIONAL.
+	DefaultGoMemoryLimitRatio = 0.80
+	// DefaultGoMemoryHeadroomRatio is the share of the Go memory limit left
+	// free at or below which the experimental memory input halves local
+	// capacity (design §11 item 15). PROVISIONAL.
+	DefaultGoMemoryHeadroomRatio = 0.15
 )
 
 // Saturation inputs, as named in the metrics.
 const (
 	InputCPUPressure      = "cpu_pressure"
 	InputMemoryWorkingSet = "memory_working_set"
+	InputGoMemoryHeadroom = "go_memory_headroom"
 )
 
 // allInputs are the inputs the sampler reads. memory.pressure is not one of
 // them: on the kind measurement it read 0.00 up to every OOMKill, because a Go
 // controller's anonymous memory, with no swap, gives the kernel nothing to
 // reclaim and so nothing to stall on (design §11).
-var allInputs = []string{InputCPUPressure, InputMemoryWorkingSet}
+var allInputs = []string{InputCPUPressure, InputMemoryWorkingSet, InputGoMemoryHeadroom}
 
 const (
 	defaultCgroupMount = "/sys/fs/cgroup"
@@ -70,19 +82,39 @@ const (
 // StartupRampInterval until its first cut, and after any cut rises by one per
 // clean RecoveryInterval, up to the ceiling.
 //
-// Memory is not part of this unless ExperimentalMemoryWorkingSet is set.
+// Memory is not part of this unless ExperimentalMemory is set.
 type SaturationOptions struct {
 	// Enabled turns the local input on, independently of the rate-limit input.
 	// It reads CPU pressure only.
 	Enabled bool
 
-	// ExperimentalMemoryWorkingSet adds the memory working set to the local
-	// input. EXPERIMENTAL, off by default, and not memory protection: on the
-	// kind re-measurement it did not prevent OOMKills, in 0 of 19 runs on an
-	// overcommitted workload (docs/configuration.md). The calls admitted
-	// between two samples, and the single call the floor always lets through,
-	// can still cross the limit.
-	ExperimentalMemoryWorkingSet bool
+	// ExperimentalMemory adds memory to the local input. EXPERIMENTAL,
+	// off by default, and not memory protection: the calls admitted between two
+	// samples, and the single call the floor always lets through, can still
+	// cross the limit (docs/configuration.md).
+	//
+	// With it on, and only then, Start sets the Go memory limit unless something
+	// already did; see ExperimentalGoMemoryLimit. While a Go memory limit is in
+	// effect the input is the headroom under it, read from runtime/metrics with
+	// no I/O. With no limit (GOMEMLIMIT=off) the input is the working-set ratios.
+	ExperimentalMemory bool
+
+	// ExperimentalGoMemoryLimit is the Go memory limit Start sets, in bytes.
+	// Read only with ExperimentalMemory. 0 derives it:
+	// DefaultGoMemoryLimitRatio of memory.max (provisional), when memory.max is
+	// a real limit. Read once, at Start, so a later resize doesn't move it.
+	//
+	// An explicit value always wins: Start changes nothing if GOMEMLIMIT is set,
+	// "off" included, or if the program already called debug.SetMemoryLimit.
+	// This option comes after those two.
+	ExperimentalGoMemoryLimit int64
+
+	// ExperimentalGoMemoryHeadroomRatio is the share of the Go memory limit (0-1)
+	// left free at or below which local capacity halves. Read only with
+	// ExperimentalMemory. Defaults to DefaultGoMemoryHeadroomRatio
+	// (provisional). There is no hard level: dropping straight to 1 cost
+	// throughput and gained no margin when measured.
+	ExperimentalGoMemoryHeadroomRatio float64
 
 	// CgroupDir is the cgroup v2 directory to read. Empty means the process's
 	// own cgroup: /sys/fs/cgroup joined with the path in /proc/self/cgroup
@@ -109,13 +141,13 @@ type SaturationOptions struct {
 
 	// WorkingSetSoftRatio is the share of memory.max (0-1) at or above which
 	// the working set (memory.current minus inactive_file) halves local
-	// capacity. Read only with ExperimentalMemoryWorkingSet. Defaults to 0.80
+	// capacity. Read only with ExperimentalMemory. Defaults to 0.80
 	// (provisional).
 	WorkingSetSoftRatio float64
 
 	// WorkingSetHardRatio is the share of memory.max (0-1) at or above which
 	// local capacity drops straight to 1. Read only with
-	// ExperimentalMemoryWorkingSet. Defaults to 0.90 (provisional).
+	// ExperimentalMemory. Defaults to 0.90 (provisional).
 	WorkingSetHardRatio float64
 }
 
@@ -135,7 +167,14 @@ func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 	if o.WorkingSetHardRatio == 0 {
 		o.WorkingSetHardRatio = DefaultWorkingSetHardRatio
 	}
+	if o.ExperimentalGoMemoryHeadroomRatio == 0 {
+		o.ExperimentalGoMemoryHeadroomRatio = DefaultGoMemoryHeadroomRatio
+	}
 	switch {
+	case o.ExperimentalGoMemoryLimit < 0:
+		return o, errors.Errorf("ratelimit: saturation ExperimentalGoMemoryLimit must not be negative, got %d", o.ExperimentalGoMemoryLimit)
+	case o.ExperimentalGoMemoryHeadroomRatio < 0 || o.ExperimentalGoMemoryHeadroomRatio > 1:
+		return o, errors.Errorf("ratelimit: saturation ExperimentalGoMemoryHeadroomRatio must be in (0, 1], got %v", o.ExperimentalGoMemoryHeadroomRatio)
 	case o.SamplePeriod < 0:
 		return o, errors.Errorf("ratelimit: saturation SamplePeriod must be positive, got %s", o.SamplePeriod)
 	case o.StartupRampInterval < 0:
@@ -147,6 +186,109 @@ func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 			o.WorkingSetSoftRatio, o.WorkingSetHardRatio)
 	}
 	return o, nil
+}
+
+// goMemoryStats is the Go runtime's memory against its limit, in bytes.
+type goMemoryStats struct {
+	// limit is the Go memory limit: math.MaxInt64 when there is none, 0 when
+	// the runtime doesn't report it.
+	limit uint64
+	// used is what the program can't give back: the live heap at the last GC,
+	// plus the runtime's memory that isn't heap. Garbage and free heap don't
+	// count, because with a limit set the GC fills the room up to the limit
+	// whatever the load, so a figure that includes them sits at the limit and
+	// says nothing.
+	used uint64
+}
+
+// goMemoryReader reads goMemoryStats from runtime/metrics, with no I/O. It keeps
+// its sample slice, so a read doesn't allocate. Only the sampler goroutine uses
+// it.
+type goMemoryReader struct{ samples []metrics.Sample }
+
+func newGoMemoryReader() *goMemoryReader {
+	names := []string{
+		"/gc/gomemlimit:bytes",
+		"/gc/heap/live:bytes",
+		"/memory/classes/total:bytes",
+		"/memory/classes/heap/released:bytes",
+		"/memory/classes/heap/objects:bytes",
+		"/memory/classes/heap/unused:bytes",
+		"/memory/classes/heap/free:bytes",
+	}
+	r := &goMemoryReader{samples: make([]metrics.Sample, len(names))}
+	for i, n := range names {
+		r.samples[i].Name = n
+	}
+	return r
+}
+
+func (r *goMemoryReader) read() goMemoryStats {
+	metrics.Read(r.samples)
+	var v [7]uint64
+	for i := range r.samples {
+		// A metric a future runtime drops reads as KindBad, and Uint64 on it
+		// panics. That must not take the sampler down.
+		if r.samples[i].Value.Kind() != metrics.KindUint64 {
+			return goMemoryStats{}
+		}
+		v[i] = r.samples[i].Value.Uint64()
+	}
+	limit, live, total, released, objects, unused, free := v[0], v[1], v[2], v[3], v[4], v[5], v[6]
+	notHeap := total - released - objects - unused - free
+	return goMemoryStats{limit: limit, used: live + notHeap}
+}
+
+// goHeadroom returns the share of the Go memory limit left free, or disabled
+// when there is no limit to measure it against.
+func goHeadroom(m goMemoryStats) reading {
+	switch {
+	case m.limit == 0:
+		return disabled("the Go runtime does not report its memory limit")
+	case m.limit >= math.MaxInt64:
+		return disabled("no Go memory limit")
+	case m.used >= m.limit:
+		return reading{enabled: true}
+	}
+	return reading{enabled: true, percent: float64(m.limit-m.used) / float64(m.limit) * 100}
+}
+
+// applyGoMemoryLimit sets the Go memory limit, once, when the experimental
+// memory input is on and nothing else set it (design §11 item 14). The limit is
+// process-wide, so with the input off it is not touched, or even read: a library
+// changing it otherwise is what design §7 ruled out. It stays set for the life
+// of the process.
+func (s *saturation) applyGoMemoryLimit() {
+	if !s.opts.ExperimentalMemory {
+		return
+	}
+	if v := s.getenv("GOMEMLIMIT"); v != "" {
+		s.log.Info("Go memory limit left as set by GOMEMLIMIT", "GOMEMLIMIT", v)
+		return
+	}
+	if cur := s.setMemoryLimit(-1); cur != math.MaxInt64 {
+		s.log.Info("Go memory limit left as the program set it", "bytes", cur)
+		return
+	}
+	if v := s.opts.ExperimentalGoMemoryLimit; v > 0 {
+		s.setMemoryLimit(v)
+		s.log.Info("Go memory limit set from the option", "bytes", v)
+		return
+	}
+	root, err := os.OpenRoot(s.dir)
+	if err != nil {
+		s.log.Info("Go memory limit not set", "reason", err.Error())
+		return
+	}
+	defer func() { _ = root.Close() }()
+	limit, why := readMemoryMax(root)
+	if why != "" {
+		s.log.Info("Go memory limit not set", "reason", why)
+		return
+	}
+	v := int64(float64(limit) * DefaultGoMemoryLimitRatio)
+	s.setMemoryLimit(v)
+	s.log.Info("Go memory limit set from memory.max", "bytes", v, "memoryMax", limit, "ratio", DefaultGoMemoryLimitRatio)
 }
 
 // reading is one input's value in one sample.
@@ -164,21 +306,25 @@ func disabled(why string) reading { return reading{disabledBecause: why} }
 type cgroupSample struct {
 	cpuPressure reading
 	workingSet  reading
+	goHeadroom  reading
 }
 
 func (s cgroupSample) byInput(input string) reading {
 	switch input {
 	case InputCPUPressure:
 		return s.cpuPressure
+	case InputGoMemoryHeadroom:
+		return s.goHeadroom
 	default:
 		return s.workingSet
 	}
 }
 
-// cgroupReader reads one sample. It is the only part of the saturation input
-// that does I/O, and only the sampler goroutine calls it.
+// cgroupReader reads one sample, with the memory files only if memory is set.
+// It is the only part of the saturation input that does I/O, and only the
+// sampler goroutine calls it.
 type cgroupReader interface {
-	read() cgroupSample
+	read(memory bool) cgroupSample
 }
 
 type saturation struct {
@@ -189,6 +335,12 @@ type saturation struct {
 
 	// last is the latest sample, for metrics.
 	last atomic.Pointer[cgroupSample]
+
+	// getenv, setMemoryLimit and goMemory are os.Getenv, debug.SetMemoryLimit and
+	// a goMemoryReader, replaced in tests: the Go memory limit is process-wide.
+	getenv         func(string) string
+	setMemoryLimit func(int64) int64
+	goMemory       func() goMemoryStats
 
 	// Owned by the sampler goroutine.
 	loggedDisabled map[string]bool
@@ -211,16 +363,32 @@ func newSaturation(o SaturationOptions, log logging.Logger) (*saturation, error)
 	return &saturation{
 		opts:           o,
 		dir:            dir,
-		reader:         cgroupFiles{dir: dir, memory: o.ExperimentalMemoryWorkingSet},
+		reader:         cgroupFiles{dir: dir},
 		log:            log,
+		getenv:         os.Getenv,
+		setMemoryLimit: debug.SetMemoryLimit,
+		goMemory:       newGoMemoryReader().read,
 		loggedDisabled: map[string]bool{},
 	}, nil
 }
 
-// read takes one sample from the cgroup files, publishes it for metrics, and
-// logs each input the first time it is found disabled.
+// read takes one sample, publishes it for metrics, and logs each input the first
+// time it is found disabled.
+//
+// With the experimental memory input on, the headroom under the Go memory limit
+// replaces the working set while there is a limit, so memory.stat isn't read:
+// with the limit set the working set sits on a plateau just under the limit and
+// doesn't track load (design §11). With no limit the working set is the input.
 func (s *saturation) read() cgroupSample {
-	smp := s.reader.read()
+	var headroom reading
+	if s.opts.ExperimentalMemory {
+		headroom = goHeadroom(s.goMemory())
+	}
+	smp := s.reader.read(s.opts.ExperimentalMemory && !headroom.enabled)
+	smp.goHeadroom = headroom
+	if headroom.enabled {
+		smp.workingSet = disabled("the Go memory headroom replaces it while a Go memory limit is set")
+	}
 	s.last.Store(&smp)
 	s.logDisabledOnce(smp)
 	return smp
@@ -231,7 +399,8 @@ func (s *saturation) read() cgroupSample {
 //
 //   - Working set at or above the hard ratio (experimental memory input): a cut,
 //     capacity 1 at once.
-//   - Any input over its threshold: a cut, capacity halves, minimum 1. step runs
+//   - Any input over its threshold, or Go memory headroom at or below its ratio:
+//     a cut, capacity halves, minimum 1. step runs
 //     once per sample, so this halves at most once per sample period.
 //   - A clean sample: capacity +1, up to ceiling, once enough time has passed
 //     since the last step or saturated sample. Until the first cut that time is
@@ -282,6 +451,9 @@ func (s *saturation) evaluate(smp cgroupSample) (hard, saturated bool, cause str
 		causes = append(causes, "memory working set "+formatPercent(r.percent)+" of limit")
 		hard = r.percent >= s.opts.WorkingSetHardRatio*100
 	}
+	if r := smp.goHeadroom; r.enabled && r.percent <= s.opts.ExperimentalGoMemoryHeadroomRatio*100 {
+		causes = append(causes, "Go memory headroom "+formatPercent(r.percent)+" of limit")
+	}
 	return hard, len(causes) > 0, strings.Join(causes, ", ")
 }
 
@@ -290,11 +462,12 @@ func formatPercent(p float64) string {
 }
 
 // logDisabledOnce logs each input the first time it is found disabled, at
-// Info: a missing input is how the node was built, not an error.
+// Info: a missing input is how the node was built, not an error. An input with
+// no reason wasn't asked for and isn't worth a line.
 func (s *saturation) logDisabledOnce(smp cgroupSample) {
 	for _, in := range allInputs {
 		r := smp.byInput(in)
-		if r.enabled || s.loggedDisabled[in] {
+		if r.enabled || r.disabledBecause == "" || s.loggedDisabled[in] {
 			continue
 		}
 		s.loggedDisabled[in] = true
@@ -323,16 +496,15 @@ func (s *saturation) inputs() []InputSnapshot {
 }
 
 // cgroupFiles reads the cgroup v2 interface files in dir. The memory files are
-// read only when memory is set: the experimental input is off by default, and
-// reading memory.stat is most of a sample's cost.
+// read only when asked: the experimental input is off by default, and reading
+// memory.stat is most of a sample's cost.
 type cgroupFiles struct {
-	dir    string
-	memory bool
+	dir string
 }
 
-const memoryInputOff = "the experimental memory input is off (SaturationOptions.ExperimentalMemoryWorkingSet)"
+const memoryInputOff = "the experimental memory input is off (SaturationOptions.ExperimentalMemory)"
 
-func (c cgroupFiles) read() cgroupSample {
+func (c cgroupFiles) read(memory bool) cgroupSample {
 	root, err := os.OpenRoot(c.dir)
 	if err != nil {
 		why := "no cgroup v2 directory at " + c.dir + ": " + err.Error()
@@ -341,7 +513,7 @@ func (c cgroupFiles) read() cgroupSample {
 	defer func() { _ = root.Close() }()
 
 	smp := cgroupSample{cpuPressure: readPressure(root, "cpu.pressure", "some"), workingSet: disabled(memoryInputOff)}
-	if c.memory {
+	if memory {
 		smp.workingSet = readWorkingSet(root)
 	}
 	return smp
@@ -383,17 +555,9 @@ func readPressure(root *os.Root, file, line string) reading {
 // killer acts on. Page cache the kernel can drop is excluded, so a large but
 // reclaimable cache doesn't count.
 func readWorkingSet(root *os.Root) reading {
-	limitRaw, err := root.ReadFile("memory.max")
-	if err != nil {
-		return disabled(missingWhy("memory.max", err))
-	}
-	limitText := strings.TrimSpace(string(limitRaw))
-	if limitText == "max" {
-		return disabled("no memory limit (memory.max is max)")
-	}
-	limit, err := strconv.ParseUint(limitText, 10, 64)
-	if err != nil || limit == 0 {
-		return disabled("memory.max: cannot parse " + strconv.Quote(limitText))
+	limit, why := readMemoryMax(root)
+	if why != "" {
+		return disabled(why)
 	}
 
 	currentRaw, err := root.ReadFile("memory.current")
@@ -419,6 +583,23 @@ func readWorkingSet(root *os.Root) reading {
 		ws = current - inactive
 	}
 	return reading{enabled: true, percent: float64(ws) / float64(limit) * 100}
+}
+
+// readMemoryMax returns memory.max in bytes, or why there is no real limit.
+func readMemoryMax(root *os.Root) (limit uint64, why string) {
+	raw, err := root.ReadFile("memory.max")
+	if err != nil {
+		return 0, missingWhy("memory.max", err)
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "max" {
+		return 0, "no memory limit (memory.max is max)"
+	}
+	limit, err = strconv.ParseUint(text, 10, 64)
+	if err != nil || limit == 0 {
+		return 0, "memory.max: cannot parse " + strconv.Quote(text)
+	}
+	return limit, ""
 }
 
 func statValue(stat []byte, key string) (uint64, bool) {

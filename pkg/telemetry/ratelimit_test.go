@@ -60,10 +60,10 @@ func TestRateLimitMetrics(t *testing.T) {
 		MaxConcurrentReconciles: 4,
 		Metrics:                 m,
 		Saturation: ratelimit.SaturationOptions{
-			Enabled:                      true,
-			ExperimentalMemoryWorkingSet: true,
-			CgroupDir:                    filepath.Join("..", "ratelimit", "testdata", "no-memory-limit"),
-			SamplePeriod:                 time.Hour,
+			Enabled:            true,
+			ExperimentalMemory: true,
+			CgroupDir:          filepath.Join("..", "ratelimit", "testdata", "no-memory-limit"),
+			SamplePeriod:       time.Hour,
 		},
 	})
 	if err != nil {
@@ -119,8 +119,8 @@ func TestRateLimitMetrics(t *testing.T) {
 	// No memory limit: the working-set input is disabled, and says so, rather
 	// than reporting a value of 0 that reads as healthy.
 	enabled := points(t, rm, "provider_runtime.ratelimit.saturation.input.enabled", "input")
-	if enabled["cpu_pressure"] != 1 || enabled["memory_working_set"] != 0 || len(enabled) != 2 {
-		t.Errorf("input enabled = %v, want cpu_pressure 1 and memory_working_set 0, and no other input", enabled)
+	if enabled["cpu_pressure"] != 1 || enabled["memory_working_set"] != 0 || enabled["go_memory_headroom"] != 0 || len(enabled) != 3 {
+		t.Errorf("input enabled = %v, want cpu_pressure 1, the memory inputs 0, and no other input", enabled)
 	}
 	values := points(t, rm, "provider_runtime.ratelimit.saturation.input", "input")
 	if _, ok := values["memory_working_set"]; ok {

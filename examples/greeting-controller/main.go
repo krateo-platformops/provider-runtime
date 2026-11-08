@@ -202,9 +202,9 @@ func rateLimitFlags(fs *flag.FlagSet, o *controller.RateLimitOptions) {
 	fs.BoolVar(&o.Saturation.Enabled, "saturation-governor",
 		env.Bool("GREETING_PROVIDER_SATURATION_GOVERNOR", false),
 		"Slow reconciles down automatically when this container is CPU-saturated.")
-	fs.BoolVar(&o.Saturation.ExperimentalMemoryWorkingSet, "saturation-experimental-memory",
+	fs.BoolVar(&o.Saturation.ExperimentalMemory, "saturation-experimental-memory",
 		env.Bool("GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY", false),
-		"EXPERIMENTAL: also read the memory working set. It is not OOM protection; see docs/configuration.md.")
+		"EXPERIMENTAL: also read memory, and set the Go memory limit unless GOMEMLIMIT is set. It is no guarantee against OOMKills; see docs/configuration.md.")
 }
 
 func main() {

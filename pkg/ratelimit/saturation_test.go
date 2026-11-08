@@ -22,7 +22,7 @@ func saturationGovernor(t *testing.T, ceiling int, dir string, memory bool) (*Go
 	g, c := testGovernor(t, Options{
 		MaxConcurrentReconciles: ceiling,
 		RecoveryInterval:        testRecovery,
-		Saturation:              SaturationOptions{Enabled: true, CgroupDir: fixture(dir), ExperimentalMemoryWorkingSet: memory},
+		Saturation:              SaturationOptions{Enabled: true, CgroupDir: fixture(dir), ExperimentalMemory: memory},
 	})
 	return g, c
 }
@@ -30,7 +30,7 @@ func saturationGovernor(t *testing.T, ceiling int, dir string, memory bool) (*Go
 func fixture(dir string) string { return filepath.Join("testdata", dir) }
 
 func useFixture(g *Governor, dir string) {
-	g.sat.reader = cgroupFiles{dir: fixture(dir), memory: g.sat.opts.ExperimentalMemoryWorkingSet}
+	g.sat.reader = cgroupFiles{dir: fixture(dir)}
 }
 
 // rampToCeiling takes clean samples, one startup step apart, until local
@@ -60,7 +60,7 @@ func inputByName(t *testing.T, g *Governor, name string) InputSnapshot {
 }
 
 func TestCgroupFixturesParse(t *testing.T) {
-	smp := cgroupFiles{dir: fixture("healthy"), memory: true}.read()
+	smp := cgroupFiles{dir: fixture("healthy")}.read(true)
 	if !smp.cpuPressure.enabled || smp.cpuPressure.percent != 2.10 {
 		t.Errorf("cpu.pressure some avg10 = %+v, want 2.10", smp.cpuPressure)
 	}
@@ -79,8 +79,8 @@ func TestMemoryPressureIsNotAnInput(t *testing.T) {
 		}
 	}
 	g, _ := saturationGovernor(t, 2, "healthy", false)
-	if got := len(g.Snapshot().Inputs); got != 2 {
-		t.Errorf("the snapshot reports %d inputs, want 2 (cpu_pressure, memory_working_set)", got)
+	if got := len(g.Snapshot().Inputs); got != 3 {
+		t.Errorf("the snapshot reports %d inputs, want 3 (cpu_pressure, memory_working_set, go_memory_headroom)", got)
 	}
 }
 
@@ -101,7 +101,7 @@ func TestMemoryInputIsOffByDefault(t *testing.T) {
 	if !inputByName(t, g, InputCPUPressure).Enabled {
 		t.Error("cpu_pressure reported as disabled: saturation must still read CPU")
 	}
-	if smp := (cgroupFiles{dir: fixture("no-cache-same-total")}).read(); smp.workingSet.enabled || smp.workingSet.disabledBecause != memoryInputOff {
+	if smp := (cgroupFiles{dir: fixture("no-cache-same-total")}).read(false); smp.workingSet.enabled || smp.workingSet.disabledBecause != memoryInputOff {
 		t.Errorf("working set sample = %+v, want it disabled because the input is off", smp.workingSet)
 	}
 
@@ -110,7 +110,7 @@ func TestMemoryInputIsOffByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.ExperimentalMemoryWorkingSet || o.SamplePeriod != time.Second || o.StartupRampInterval != 2*time.Second {
+	if o.ExperimentalMemory || o.SamplePeriod != time.Second || o.StartupRampInterval != 2*time.Second {
 		t.Errorf("defaults = %+v, want memory off, a 1s sample period and a 2s startup step", o)
 	}
 	if o.WorkingSetSoftRatio != 0.80 || o.WorkingSetHardRatio != 0.90 {
@@ -323,14 +323,16 @@ func TestMissingInputIsDisabledNotSaturated(t *testing.T) {
 		disabled []string
 		enabled  []string
 	}{
-		{"no-psi", []string{InputCPUPressure}, []string{InputMemoryWorkingSet}},
-		{"no-memory-limit", []string{InputMemoryWorkingSet}, []string{InputCPUPressure}},
-		{"does-not-exist", []string{InputCPUPressure, InputMemoryWorkingSet}, nil},
+		// The test process has no Go memory limit, so the headroom is off in
+		// each of these and the working set is the memory input.
+		{"no-psi", []string{InputCPUPressure, InputGoMemoryHeadroom}, []string{InputMemoryWorkingSet}},
+		{"no-memory-limit", []string{InputMemoryWorkingSet, InputGoMemoryHeadroom}, []string{InputCPUPressure}},
+		{"does-not-exist", []string{InputCPUPressure, InputMemoryWorkingSet, InputGoMemoryHeadroom}, nil},
 	} {
 		t.Run(tc.dir, func(t *testing.T) {
 			logs := &infoLog{}
 			g, c := testGovernor(t, Options{MaxConcurrentReconciles: 6, Logger: logs, Saturation: SaturationOptions{
-				Enabled: true, CgroupDir: fixture(tc.dir), ExperimentalMemoryWorkingSet: true,
+				Enabled: true, CgroupDir: fixture(tc.dir), ExperimentalMemory: true,
 			}})
 			g.sample()
 			for range 5 {
@@ -377,7 +379,7 @@ type stubReader struct {
 	outside atomic.Int64
 }
 
-func (s *stubReader) read() cgroupSample {
+func (s *stubReader) read(bool) cgroupSample {
 	s.reads.Add(1)
 	if !s.inTick.Load() {
 		s.outside.Add(1)
