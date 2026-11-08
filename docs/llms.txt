@@ -9,6 +9,8 @@ docs/examples.md: examples index
 docs/release.md: tag-only release runbook (v-prefixed git tags, Go module proxy)
 docs/log.md: curated history
 docs/design-rate-limit-governor.md: design (implemented, off by default) for slow-down under server-side rate limits and controller CPU/memory saturation
+docs/design-scale-to-zero.md: design (implemented, unreleased) for owners to run a per-Kind controller Deployment at 0 replicas while its Kind is empty
+pkg/scaletozero/scaletozero.go: Exists, Decide and Reconcile, the scale-to-zero helper owners call (live reader required; nothing else may write spec.replicas)
 pkg/ratelimit/signal.go: the rate-limit Signal, Report and the context sink
 pkg/ratelimit/governor.go: the per-key governor and its non-blocking Acquire
 pkg/ratelimit/saturation.go: the cgroup v2 saturation sampler (local capacity)
