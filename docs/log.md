@@ -12,6 +12,25 @@ timestamp: 2026-11-08T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-09 — unreleased, decided, not built: size local capacity from what reconciles cost
+- **Design:** [design-saturation-cost-model](./design-saturation-cost-model.md),
+  under independent review. The saturation input stops halving on a pressure
+  reading and recovering on a timer. It measures what reconciles cost, CPU per
+  slot-second and live heap per reconcile, and computes how many fit in the
+  container's limits: CPU at `CPUTarget` (0.9) of `cpu.max`, memory within the
+  Go memory limit less a reserve. Whole slots by error diffusion. CPU pressure
+  only blocks increases. Measured on GKE the old step settled at 71% of a 250m
+  limit with 31% less throughput; the model predicts 4.56 slots there, at 90%.
+- **Breaking, for an off-by-default feature, when it is built:**
+  `StartupRampInterval`, `WorkingSetSoftRatio`, `WorkingSetHardRatio` and
+  `ExperimentalMemoryWorkingSet` are removed, with their `Default…` constants and
+  the `memory_working_set` input; `RecoveryInterval` no longer touches local
+  capacity. Memory becomes a separate `Memory` toggle, off by default even with
+  saturation on. New options: `CPUTarget`, `MemoryReserve`, `GoMemoryLimit`.
+- **Not handled, by decision:** a downstream that slows without rate-limit
+  signals raises concurrency up to the ceiling; provider-runtime#50 is the
+  follow-up.
+
 ## 2026-11-08 — v1.12.0: the local slot is taken before the pop
 - **With saturation on, each controller's queue takes the local slot before it
   pops an item,** and gives it back when the reconcile returns. Low capacity

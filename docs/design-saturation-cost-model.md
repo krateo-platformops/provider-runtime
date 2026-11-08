@@ -9,24 +9,25 @@ timestamp: 2026-11-08T00:00:00Z
 
 # Size local capacity from what reconciles cost
 
-**Status:** first draft, for review. Nothing is built. It replaces the
+**Status:** design, for independent review. Nothing is built. The open questions
+were decided by the user on 2026-11-08 (§13). It replaces the
 mechanical step of §7 of [design-rate-limit-governor](./design-rate-limit-governor.md)
 (`saturation.step`, `pkg/ratelimit/saturation.go`) and the memory input of the
 held draft PR #48. The local slot and the gated queue of
 [design-local-slot-before-pop](./design-local-slot-before-pop.md) stay as they
 are; this design changes only how many slots there are. §12 reconciles it with
-the survey the user commissioned, and §13 lists what only the user can decide.
+the survey the user commissioned, and §13 records the user's decisions.
 
 **References.** Code is provider-runtime at `2a6ff02` (main), `CR/` is
 `sigs.k8s.io/controller-runtime@v0.25.2` (the version in `go.mod`), and
 `GOROOT/` is Go 1.26.10 (`toolchain go1.26.10` in `go.mod`). `#48` is
 `origin/feat/experimental-memory-headroom` at `0b35f67`, and every measurement
 file named below is under `hack/rlgov-measure/` on that branch. "The survey" is
-`reports/Reconcile slowdown on resource limits.md` in the user's workspace
-(`/Users/diegobraga/krateo/provider-runtime/`, not in this repository), with
-its notes under `research_notes/Reconcile slowdown on resource limits/`. Where
-it cites a primary source, this document names the source, and §14 lists what
-was checked here and what was taken from the survey unchecked.
+a literature and industry survey the user commissioned for this design, "Compute
+the knee, let pressure only veto"; it isn't in this repository, so §12
+summarises everything taken from it. Where it cites a primary source, this
+document names the source, and §14 lists what was checked here and what was
+taken from the survey unchecked.
 
 ## 1. The problem, measured
 
@@ -425,10 +426,12 @@ below it. Its dynamics, sample by sample:
 | off-CPU wait doubles | 4.94 once, then 9.09, 9.42, … 9.76 at t = 41s | 0.49, 0.49, 0.85, … 0.89 |
 | 10% Gaussian noise on every sample's CPU | mean 4.86, sd 0.14, range 4.1–5.1 | mean 0.887 |
 
-The model is a scratch script of this draft, not committed (only this document
-is); the Go simulation test of §10 replaces it. The wait-doubling row is the
-survey's caution: when a downstream slows, the CPU model admits more, correctly
-for CPU. §8 says what stops it from piling onto a struggling server.
+These figures came from Python scratch scripts written for the first draft and
+never committed. They are superseded by the Go simulation of §10, which drives
+the real estimator and law; where the two disagree, the Go simulation is right
+and this table is corrected. The wait-doubling row is the survey's caution: when
+a downstream slows, the CPU model admits more, correctly for CPU. §8 says what
+stops it from piling onto a struggling server, and what doesn't.
 
 ### 4.4 Memory
 
@@ -481,9 +484,42 @@ one is decided (design-rate-limit-governor §11 item 13): one reconcile always
 runs, so deletions finish. The ceiling is `MaxConcurrentReconciles` × the
 reconcilers on the Governor, as today. The gate needs a whole number, and at
 these sizes rounding is not a detail: on the measured curve, four slots use 81%
-of the limit and five 97%. §13 Q1 is that choice; this draft proposes error
-diffusion, publishing `⌊S + e⌋` each sample and carrying the remainder `e`, so
-the capacity alternates between 4 and 5 and averages 4.56.
+of the limit and five 97%.
+
+**Whole slots by error diffusion** (decided, §13 item 1). The sampler keeps a carry
+`e`, owned by the sampler goroutine, starting at 0. Each sample:
+
+```
+capacity = clamp(⌊S + e⌋, 1, ceiling)
+e        = S + e − ⌊S + e⌋          // the remainder, always in [0, 1)
+```
+
+So the capacity is `⌊S⌋` or `⌊S⌋ + 1`, and over `n` samples the published
+capacities sum to `ΣS + e₀ − eₙ`: their mean is within `1/n` of the mean of
+`S`. From `e = 0` at 4.56 it reads 4, 5, 4, 5, 4, 5, 4, 5, 5, … and averages
+4.56. This is quantisation,
+not oscillation: `S` itself is monotone (§4.3), and the capacity never leaves the
+two whole numbers either side of it.
+
+**The carry resets to 0** before that sample's capacity is computed, so the
+capacity is `⌊S⌋`:
+
+- **when a limit changes**: `L` (a new `cpu.max`), `G` (a new Go memory limit),
+  or `memory.max` when it sets the budget. The carry is the remainder of an
+  average under the old budget, and carried into a halved limit it could add a
+  whole slot, 20% of the CPU here, in the first sample. Resetting rounds that
+  sample down, the safe side;
+- **when `S` is clamped** at the floor or the ceiling: nothing is owed then, and a
+  carry left from those samples would add a slot the moment the clamp lifts;
+- **when the binding input changes** between CPU and memory: the carry belongs to
+  the other input's value;
+- **when an estimate restarts** (§3.5): the value it averaged is gone.
+
+A pressure-held sample (§6) keeps the carry: the held `S` is still the value to
+average. A lower capacity lets running reconciles keep their slots, as any cut
+does (§8), and the books measure what actually ran, so the estimates see the
+true mean in flight, not the published one. The carry is exported (§9) and
+logged by the harness (§10).
 
 ## 5. No limit set
 
@@ -536,7 +572,7 @@ budgeting goes over target, capped or not. A stall the model doesn't explain,
 with CPU under target, comes from outside its budget: other pods on the node.
 There, more slots buy no CPU, so blocking stops the one harmful thing, the climb.
 Cutting would need a size and a cooldown, the fixed constants the user ruled out
-(the survey proposes one ÷1.2 cut and a 15s cooldown; §12 and §13 Q3). The
+(the survey proposes one ÷1.2 cut and a 15s cooldown; §12 and §13 item 3). The
 evidence for not needing a cut: at the cap, with pressure 56 and the
 incident-provider liveness probe, the off arm had no failed probe in 5 runs.
 
@@ -598,7 +634,10 @@ data:
   more (§4.3's table), which is right for CPU. What stops it from adding load to
   a struggling server is the per-key input, on every server that signals (429,
   `Retry-After`, the `X-RateLimit` headers, a 503 with `Retry-After`), and the
-  ceiling. A server that slows without saying so isn't covered (§13 Q7).
+  ceiling. **A limitation, decided (§13 item 7):** a server that slows without
+  saying so isn't covered. Its longer waits raise the slots, up to the ceiling,
+  and so the load on it. A lowering-only downstream signal is
+  provider-runtime#50, a follow-up, not part of this change.
 - **An HPA on CPU:** holding CPU at `ρ × limit` keeps it from scaling out if its
   target, in limit terms, is above `ρ`. Either `ρ` sits above the HPA target, or
   the HPA scales on queue depth (AWS Builders' Library, via the survey). Whether
@@ -613,7 +652,7 @@ data:
 | Field | Default | Change |
 |---|---|---|
 | `Enabled` | off | unchanged: turns on the CPU input |
-| `Memory` | off | new name for #48's `ExperimentalMemory`; turns on the memory input and lets `Start` set the Go memory limit (§13 Q5) |
+| `Memory` | off, even with `Enabled` | new name for #48's `ExperimentalMemory`; turns on the memory input and lets `Start` set the Go memory limit (§13 item 5). Read only with `Enabled` |
 | `GoMemoryLimit` | 0 = 0.8 × `memory.max` | #48's `ExperimentalGoMemoryLimit`, same rules: `GOMEMLIMIT` or a limit the program set wins |
 | `CPUTarget` | 0.9 | new: `ρ` |
 | `MemoryReserve` | 0.15 | new: `r`, replaces #48's `ExperimentalGoMemoryHeadroomRatio` (its measured 15%), provisional |
@@ -625,11 +664,14 @@ data:
 `RecoveryInterval` no longer touches local capacity; it still governs keys. The
 constants for the removed fields, and `InputMemoryWorkingSet`, go too.
 
-**Removal, not deprecation.** Saturation is opt-in and off by default. A field
-kept but ignored would change behaviour silently; removing it fails the build of
-any consumer that sets it, which says exactly what changed. That is the
-precedent of the gated-queue release ("Breaking, for an off-by-default feature",
-`docs/log.md:24`). The example sets `ExperimentalMemoryWorkingSet` from a flag
+**Removal, not deprecation** (decided, §13 item 6). Saturation is opt-in and off by
+default. A field kept but ignored would change behaviour silently; removing it
+fails the build of any consumer that sets it, which says exactly what changed.
+The release that builds this marks it in [log](./log.md) as "Breaking, for an
+off-by-default feature", as the gated-queue change (#40) did; the log records the
+decision now. #48's `ExperimentalMemory`, `ExperimentalGoMemoryLimit` and
+`ExperimentalGoMemoryHeadroomRatio` were never released, so they are renamed,
+not removed. The example sets `ExperimentalMemoryWorkingSet` from a flag
 (`examples/greeting-controller/main.go:205`) and changes with it. Which
 consumers set the removed fields isn't checked here; the implementation scans
 them under both module paths before the release.
@@ -641,6 +683,7 @@ whole number) and the input gauges, with `memory_working_set` gone and
 | Gauge | Unit | Value |
 |---|---|---|
 | `…local.slots{input}` | slots | `S_cpu`, `S_mem` and the combined `S`, before rounding; `input` is `cpu`, `memory`, `combined` |
+| `…local.carry` | slots | the error-diffusion carry `e` (§4.5) |
 | `…local.binding{input}` | 0/1 | which input set `S` |
 | `…local.trusted{input}` | 0/1 | §3.5's trust |
 | `…local.cpu.limit`, `…cpu.used`, `…cpu.background` | cores | `L`, `ΔU/Δt`, `B̂` |
@@ -667,13 +710,17 @@ clock, not the period; every formula of §3–§4 against hand-computed values;
 not a negative delta); `B̂ ≥ ρL` (floor), zero slot-seconds, zero completions;
 the warm start, the 3σ hold-out and the restart; trust; the untrusted increase
 bound `Sᵢ₋₁ + Cᵢ`; pressure blocking a rise and letting a fall through; error
-diffusion averaging to the real value. Memory with a fake runtime-metrics reader
+diffusion averaging to the real value within `1/n`, its carry staying in
+`[0, 1)`, and each reset of §4.5 (a new `cpu.max`, a new Go limit, a clamp, a
+change of binding input, a restart) followed by `⌊S⌋`; a pressure-held sample
+keeping the carry. Memory with a fake runtime-metrics reader
 (#48's `goMemory` seam): observation only when the GC count rises, the `N⁻`
 pairing, `Û₀` only from fully idle samples, the allocation prior and its
 hand-over after three observations, the limiter alarm, `GOGC` without a Go limit,
 `GOGC=off`.
 
-**Simulation in Go,** replacing the draft's script: a discrete-event model of the
+**Simulation in Go,** superseding the Python scripts behind §4.3's figures, which
+were never committed: a discrete-event model of the
 measured workload (CFS quota per 100ms period, GOMAXPROCS 2, 23ms of CPU and
 400ms of wait per reconcile, 16 workers, a backlog) driving the real estimator
 and law through the fake clock. It must show, before any cluster run: settling
@@ -682,30 +729,63 @@ from one slot; every row of §4.3's table, including no oscillation after a cost
 step; and the memory workload settling at its budget from below with no sample
 over `H`.
 
-**GKE re-measure**, with the bars fixed before run 1 (§13 Q2 and Q4 decide the
-numbers in brackets). The CPU block repeats `cpu2-settings.txt` exactly (250m,
-512Mi, 16 workers, 64 Greetings, 1s poll, 360s, the probe), arms off and new, 5
-runs each, rotating. The harness first changes to compute rates over measured
-intervals and to log the model's values from `Snapshot` every second.
+**GKE re-measure**, with the bars below fixed before run 1 (decided, §13 item 2).
+The CPU block repeats `cpu2-settings.txt` exactly (250m, 512Mi, 16 workers, 64
+Greetings, 1s poll, 360s, the probe), arms off and new, 5 runs each, rotating.
 
 | Line | Bar |
 |---|---|
-| Validity | off arm at ≥ 225 ms/s with pressure over 50; burn 20.0–20.5 ms per call |
-| CPU used, new arm, t ≥ 60s, each run | [85–95%] of the limit |
-| Slots, new arm, steady state | mean between 4 and 6 (the survey's validation band; predicted 4.56) |
-| Throughput, new arm, median of 5 | ≥ [80%] of off (predicted 85%) |
-| Mean reconcile duration | ≤ 0.6 s (predicted 0.47; off 1.41) |
-| Pressure | [blocked rises in ≤ 10% of steady-state samples]; the 1s stall share's distribution reported |
-| Restarts, liveness kills, failed probes | 0 |
+| Validity, checked per run, never used to drop one | off arm at ≥ 225 ms/s with pressure over 50; burn 20.0–20.5 ms per call |
+| CPU used, new arm, t ≥ 60s, each run | 85–95% of the limit |
+| Throughput, new arm, median of 5 | ≥ 80% of the off arm's (predicted 85%) |
+| Pressure, new arm, steady state | rises blocked in at most 10% of samples; the distribution of the 1s stall share reported |
+| Restarts and failed probes, every arm | 0 |
+
+Reported, not bars: the mean slots (predicted 4.56; the survey's band is 4 to
+6), the mean reconcile duration (predicted 0.47s; off 1.41s), and the capacity's
+alternation between 4 and 5.
+
+**The harness changes first**, in its own commit, before any run:
+
+- **Rates over measured intervals.** Each `STAT` line takes its interval from the
+  monotonic clock between two reads (`time.Since` the previous one), prints it
+  as `dt`, and divides every delta by it: CPU from `usage_usec`, Observes,
+  burns, throttled time. Today it divides by a nominal second (§3.1).
+- **The model's values, on every line**, from `Snapshot`: `S_cpu`, `S_mem`, `S`,
+  the carry `e` and the published capacity; `k̂`, `ĉ`, `D̂`, `B̂`, the throughput
+  and the mean in flight; the sample's kind (idle, capped, active), with
+  `Δnr_periods` and `Δnr_throttled`; trust and restarts per estimate; the 1s
+  stall share and whether it blocked a rise; and, with memory on, `H`, `live`,
+  `Û₀`, `m̂`, `N⁻` and whether the sample held a GC observation. The report
+  script computes the bars from these same lines.
 
 The memory block repeats #48's (`results/block2-settings.txt`): ramp (16 MiB held
 1s, 500ms poll, 2 Greetings every 5s, 256Mi, 2 CPU, 240s) and cold start (64
-Greetings before start, 16 MiB held 300ms), ABBA against a control (§13 Q8), with
-#48's bar (design-rate-limit-governor on #48, §11 item 16): clean in at least 18
-of 20 ramp runs, no crash loop in at least 9 of 10 cold starts, no OOMKill in
-either, restarts split by cause, throughput not below the control's clean runs,
-the sampler's cost reported. The real-provider line stays open until
+Greetings before start, 16 MiB held 300ms), ABBA, with `Memory` on in the new
+arm, and #48's bar (design-rate-limit-governor on #48, §11 item 16): clean in at
+least 18 of 20 ramp runs, no crash loop in at least 9 of 10 cold starts, no
+OOMKill in either, restarts split by cause, throughput not below the control's
+clean runs, the sampler's cost reported. The real-provider line stays open until
 git-provider's rollout resumes.
+
+**The control arm is #48's measured build, `new3`** (decided, §13 item 8), recorded
+in `results/image-new3.txt` as commit `6d76a36bcff5e2e0d45d56fecf96f023e7094c63`
+and digest
+`sha256:ceb79357975eed7fc20b4eec005a83d546e8910d953642fd54a1e150492de58d`. It is
+rebuilt from that commit with `build.sh new new3 --local`, and used only if the
+rebuilt image's digest equals the recorded one. If it doesn't, nothing runs and
+the mismatch is reported. Two facts bear on that check:
+
+- **A byte-identical rebuild is unlikely.** `build.sh` packs the binary with a
+  plain `tar -cf`, which records its modification time, onto `alpine:3.20`, a
+  tag that moves; either changes the digest. The Go binary itself is
+  reproducible only from the same source path, since the build doesn't use
+  `-trimpath`.
+- **The recorded image still exists and matches.** The measuring worktree's
+  `images/measure-new3.tar` reads `sha256:ceb79357…92de58d` with
+  `crane digest --tarball`, checked on 2026-11-08. Commit `6d76a36` is in the
+  local object store but on no branch, local or remote, so nothing keeps it from
+  garbage collection.
 
 **For the independent reviewer**, who gets the code and not this conclusion.
 Attack:
@@ -756,7 +836,7 @@ Each new behaviour gets a revert check, as before.
 - **The uncontended duration alone** (§4.2, option 2): no ratchet, but 84% of
   the limit here and no correction for estimator bias. Kept, for capped samples
   only.
-- **A pressure veto that cuts** (the survey): §6, and §13 Q3.
+- **A pressure veto that cuts** (the survey): §6, and §13 item 3.
 - **Regression for CPU per reconcile**: §3.3. Not needed for the setpoint, and
   confounded at the operating point.
 
@@ -771,67 +851,50 @@ Each new behaviour gets a revert check, as before.
 | Two timescales: a ~10s cost-model tick with forgetting over tens of minutes and a step cap; a fast PSI loop that cuts once with a cooldown | Two timescales kept as estimates (`τ ≥ 10s`) and a 1s law; no fixed step cap and no cut, which the user ruled out; the law uses slot-seconds, which accrue continuously, so the completion-timing hazard behind a long tick doesn't arise (§3.4). Forgetting over tens of minutes would leave a cost change unlearned for that long; the restart handles changes instead (§3.5) |
 | PSI from the `total` delta, not `avg10` | Adopted (§6) |
 | Calibrate PSI at the operating point; 50 doesn't fit small quotas | True for a cut. For a block, 50 sits above the measured operating point (8–17) and below the cap (56); kept provisional, distribution recorded (§6, §10) |
-| A downstream signal that can only lower | The per-key input is that signal for servers that signal; a silent slowdown isn't covered (§8, §13 Q7) |
+| A downstream signal that can only lower | The per-key input is that signal for servers that signal; a silent slowdown isn't covered, a documented limitation, and provider-runtime#50 is the follow-up (§8, §13 item 7) |
 | HPA note | §8 |
-| Validate on GKE: 4–6 slots, CPU near 90% | §10's bars; predicted 4.56 slots, 90%, but whole slots give 81% or 97% (§4.5, §13 Q1) |
+| Validate on GKE: 4–6 slots, CPU near 90% | §10's bars; predicted 4.56 slots and 90%; whole slots give 81% or 97%, so the capacity alternates 4 and 5 by error diffusion (§4.5, §13 item 1) |
 | Prior art: Temporal | §11: same targets (CPU 0.9, memory as a hard stop), but feedback with tuned gains |
 | Prior art: Liu et al. 2003, MaxClients | The same structure, as the survey says: predict each resource's saturation from per-unit cost, take the binding one, re-estimate on drift. This design adds the background, which Liu's zero-intercept assumption omits, and the capped rule |
 | The survey's 4.7 slots and ~11/s at 90% | 4.18 by the uncontended formula and 4.56 on the measured curve, at 9.65/s: the survey used 20ms of CPU per reconcile; the measured cost is 23.1ms |
 
-## 13. Open questions for the user
+## 13. Decided by the user, 2026-11-08
 
-**Q1. Whole slots.** On the measured curve, 4 slots use 81% of the limit and 77%
-of the off arm's throughput; 5 use 97% and 91%; the target is 4.56.
-(a) Round down: never over target, 81% here. (b) Round to nearest: 97% here, a
-target that means ±half a slot. (c) Error diffusion (§4.5): the capacity
-alternates 4 and 5 and the mean is the target. **Recommendation: (c),** the only
-one under which `CPUTarget` means what it says at small slot counts. Premise
-checked: the rows S = 4 and 5 of §1's table.
+The first draft put these eight questions to the user, with options and a
+recommendation each. The user decided all of them, with the coordinator
+deciding item 8.
 
-**Q2. The target and the bars, together.** The brief's bars (CPU ≥ 90% of the
-limit, throughput ≥ 90% of unthrottled) don't hold together at `ρ = 0.9`. With
-(c), CPU is predicted at 90%, so "≥ 90%" passes about half the runs by noise, and
-throughput at 85%, a fail. Throughput ≥ 90% of off needs about 10.2/s, about
-238 ms/s, so `ρ ≈ 0.95`. (a) `ρ = 0.9`, bars CPU 85–95% of the limit and
-throughput ≥ 80% of off. (b) `ρ = 0.95`, the bars as written; throttling at
-S ≈ 4.9 is heavy (burn wall 67ms at 5 slots). (c) Rounding to nearest at
-`ρ = 0.9`: passes as written here, by granularity, not by design.
-**Recommendation: (a).** Premises checked: §1's table and the interpolation.
-
-**Q3. Pressure: block rises only, or also cut.** The brief's preview blocks; the
-survey recommends one ÷1.2 cut after a few seconds' confirmation, then a 15s
-cooldown. (a) Block only (§6). (b) Block, and cut once with a cooldown when the
-stall persists with CPU under target. **Recommendation: (a)**: a cut needs the
-fixed step and hold-off ruled out, and the off arm at pressure 56 had no failed
-probe. Revisit if the re-measure shows probe failures.
-
-**Q4. "Pressure around the threshold."** The cost model targets CPU, so pressure
-at the operating point is an outcome, measured at 8–17 (`avg10`) at four or five
-slots, well under 50. As a bar it would fail a controller doing what it should.
-(a) Drop it as a bar; report the stall-share distribution. (b) Bar: rises
-blocked in at most 10% of steady-state samples. (c) Bar: mean pressure below the
-off arm's. **Recommendation: (b), with the distribution reported.**
-
-**Q5. The memory input's default.** (a) On with `Enabled`. (b) A separate
-`Memory` toggle, off by default, until the memory block and the real-provider
-line pass. **Recommendation: (b)**: turning it on sets the process-wide Go memory
-limit, which the governor design keeps behind an explicit choice (§7 there, and
-#48's §11 item 14), and its real-provider line is still open.
-
-**Q6. Removed options.** (a) Remove (§9). (b) Keep them, ignored, marked
-deprecated. (c) Keep them, and fail `New` if one is set. **Recommendation: (a)**,
-the gated-queue precedent; (c) if a consumer is found setting one.
-
-**Q7. A silent downstream slowdown.** (a) Not in this change: the per-key input
-covers servers that signal, the ceiling bounds the rest. (b) Add a success-rate
-or timeout input that can only lower. **Recommendation: (a)**, revisited with a
-real provider; the user's goal is the container's own limits.
-
-**Q8. The memory block's control arm.** (a) #48's measured build (`new3`), 20 of
-20 and 10 of 10 clean: the bar becomes "no worse than #48". (b) v1.11.0, the
-released code. **Recommendation: (a)**, since #48 is the result being replaced;
-its image is a local tarball (`images/measure-new3.tar` in the measuring
-worktree), not pushed.
+1. **Whole slots: error diffusion** (§4.5). On the measured curve 4 slots use 81%
+   of the limit and 5 use 97%, against a target of 4.56. Rounding down would hold
+   CPU at 81%, and rounding to nearest at 97%, a target meaning ±half a slot. With
+   error diffusion the capacity alternates 4 and 5 and averages the computed
+   value; §4.5 specifies the carry and when it resets.
+2. **`CPUTarget` is 0.9, and the GKE bars are fixed before run 1** (§10): CPU
+   85–95% of the limit, throughput at least 80% of unthrottled, no restarts, no
+   failed probes. The brief's bars, CPU and throughput both at least 90%, don't
+   hold together at 0.9: CPU is predicted at exactly 90%, which noise would fail
+   half the time, and throughput at 85%. Throughput at 90% would have needed a
+   target of about 0.95.
+3. **Pressure only blocks increases. It never cuts** (§6). The survey's one cut
+   with a cooldown would bring back a fixed step and a hold-off.
+4. **Pressure's bar** (folded into 2): rises blocked in at most 10% of
+   steady-state samples, with the distribution reported. "Pressure near the
+   threshold" is dropped: the model targets CPU, and pressure at the operating
+   point read 8–17 (`avg10`), well under 50.
+5. **Memory is a separate `Memory` toggle, off by default even with saturation
+   on** (§9). Turning it on sets the process-wide Go memory limit, which the
+   governor design keeps behind an explicit choice (§7 there, and #48's §11 item
+   14), and its real-provider line is still open.
+6. **The options that no longer mean anything are removed**: `StartupRampInterval`,
+   the working-set ratios and `ExperimentalMemoryWorkingSet` (§9). The release
+   marks it Breaking in [log](./log.md), as #40 did.
+7. **A downstream that slows without signals is not handled in this change.** It
+   is documented as a limitation (§8): it raises concurrency, up to the ceiling.
+   provider-runtime#50 is the follow-up for a downstream signal that can only
+   lower.
+8. **The memory block's control arm is #48's measured build, `new3`**, rebuilt
+   from its recorded commit and used only if its digest matches the record
+   (§10, which also says why a match is unlikely).
 
 ## 14. Checked, and not
 
@@ -840,7 +903,9 @@ and §4.4; the code references to `governor.go` and `queue.go`; the kernel's
 `cgroup-v2.rst` (`cpu.max`, `cpu.stat` keys, their presence and
 non-hierarchy, `memory.max`), `sched-bwc.rst` (period, slices, the statistics'
 one-line definitions) and `psi.rst` (format, `total` in µs); every figure of §1
-and §4.3, recomputed from the committed logs and the draft's scripts.
+and §4.3, recomputed from the committed logs and the first draft's scripts,
+which §10's Go simulation supersedes; the recorded `new3` tarball's digest
+(§10); provider-runtime#50 is open with that title.
 
 **Not checked here:**
 
