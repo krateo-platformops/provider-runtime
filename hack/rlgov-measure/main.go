@@ -206,7 +206,11 @@ func (r *recorder) IncRateLimitDeferral(_ context.Context, _ string, reason rate
 	r.mu.Unlock()
 }
 func (r *recorder) IncRateLimitSignal(context.Context, string, ratelimit.SignalKind) {}
-func (r *recorder) ObserveRateLimit(s func() ratelimit.Snapshot)                     { r.snap = s }
+
+// IncRateLimitHoldClamped is MetricsRecorder's since #45's MaxHold. The control
+// build, v1.10.0, doesn't ask for it, and an extra method is harmless there.
+func (r *recorder) IncRateLimitHoldClamped(context.Context, string) {}
+func (r *recorder) ObserveRateLimit(s func() ratelimit.Snapshot)    { r.snap = s }
 
 func envInt(k string, d int) int {
 	if v, err := strconv.Atoi(os.Getenv(k)); err == nil {
