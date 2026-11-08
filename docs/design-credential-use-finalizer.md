@@ -263,55 +263,54 @@ They find it through the missing-ref prober, or on their next pass (§10.3).
 
 ### 5.1 Helm, and the two interleavings
 
-*Corrected from the previous revision, which said Helm uninstall deletes
-custom resources before Secrets. That is false.* According to the
-re-review, Helm v3.21.3's `pkg/release/util/kind_sorter.go:73-110` puts
-Secret, and a chart's own Namespace, in `UninstallOrder` ahead of kinds it
-doesn't know (`:151-153`), so custom resources are deleted last. It also
-says `pkg/kube/client.go:601-615` waits between kinds. **I haven't
-re-verified these lines: my reads of Helm's source were blocked by this
-session's permissions (§17).** core-provider's composition delete is a Helm
-uninstall, so this ordering is the common one, not an edge case.
+*Corrected from an earlier revision, which said Helm uninstall deletes
+custom resources before Secrets. That is false.* Verified against Helm
+v3.21.3, read from the module cache:
+
+- **The order.** `UninstallOrder` in `pkg/releaseutil/kind_sorter.go` lists
+  ConfigMap, SecretList, Secret and ServiceAccount, and later Namespace and
+  PriorityClass. Kinds it doesn't know sort last (`lessByKind`: "unknown
+  kind is last"). So an uninstall deletes the Secret, then the chart's own
+  Namespace, then every custom resource.
+- **What the wait between kinds waits for.** `batchPerform`
+  (`pkg/kube/client.go:601-615`) calls `wg.Wait()` between kinds. That
+  waits only for the previous kind's goroutines to **return**. Each runs
+  `deleteResource` (`:630-638`): one DELETE call with a propagation policy,
+  retried on conflict. **It doesn't wait for the objects to be gone.**
+- **`--wait`.** Only with `--wait` does `pkg/action/uninstall.go:134-136`
+  call `WaitForDelete(deletedResources, timeout)`, and it does so once,
+  after every delete has been issued.
+
+So a custom resource's DELETE lands milliseconds after the Secret's DELETE
+returns, well inside the 60s grace. core-provider's composition delete is a
+Helm uninstall, so this ordering is the common case, not an edge case.
 
 **Interleaving A, a live namespace.** The uninstall, or a `kubectl delete -f`
 whose file lists the Secret first, deletes P and then holder H. P's
 namespace stays live.
 
-- H's deletion starts within the grace: the live list after the grace sees
-  H deleting, so P is kept until H is gone. **Covered.**
+- H's deletion starts within the grace, as it does under Helm: the live list
+  after the grace sees H deleting, so P is kept until H is gone.
+  **Covered.**
 - H's deletion starts after the grace and after the releaser's list: P is
   released, and H fails until P is recreated. The namespace is live, so this
-  is recoverable, and it is the residual below.
+  is recoverable, and it is §5.2's residual. Helm doesn't produce this case.
+  A slow manual sequence can.
 
 **Interleaving B, a chart that ships its Namespace.** The uninstall deletes
-P and the chart's Namespace before H. The namespace controller then deletes
-H.
+P, then the chart's Namespace, then H, each a few milliseconds after the
+last. The namespace controller also deletes H.
 
-- The Namespace has its `deletionTimestamp` by the end of the grace: the
-  live re-read sees it, so P is kept until its users are gone, and the
-  namespace controller's deletion of H runs with P readable. **Covered.**
+- The Namespace has its `deletionTimestamp` long before the grace ends, so
+  the live re-read sees it. P is kept until its users are gone, and H's
+  deletion runs with P readable. **Covered.**
 
-**Whether A and B are covered depends on what the wait between kinds
-waits for.** There are two cases:
-
-- If it only orders the delete calls, or gives up within the grace, both
-  are covered as above.
-- If it waits until each kind's objects are *gone*, with a timeout longer
-  than the grace, then the uninstall can't delete H, or in B the Namespace,
-  until P is gone. P is then released after the grace, because nothing has
-  started deleting. In A, H then fails until P is recreated, and nothing
-  will recreate it. In B, the Namespace is deleted next and H with it, P
-  can't be recreated, and **the namespace wedges**.
-
-So the reading of `client.go:601-615` must be confirmed before this is
-considered closed. If the wait blocks until objects are gone, the runtime
-can't tell this uninstall apart from a rotation, and the remedy is on the
-uninstall side. Two remedies are possible. One: core-provider's composition
-delete deletes the chart's custom resources and waits for them before it
-runs `helm uninstall`. Two: a chart marks credential Secrets
-`helm.sh/resource-policy: keep`. In A that leaves the Secret behind; in B,
-the namespace deletion then removes it under §5's namespace row. §18 lists
-this as pending verification, not yet a question.
+**Tools that wait for objects to disappear between kinds.** A tool that
+deleted the Secret and then waited for it to be gone before deleting the
+holders would defeat the grace: nothing would start deleting until the
+Secret was released. Helm v3.21.3 doesn't do this, as shown above, and no
+other tool that does is known here. If one turns up, the fix is on its side:
+delete the holders first, or don't wait for the Secret.
 
 **The cost to rotation.** A Secret with live users that is deleted in a live
 namespace is held for up to the grace. During that time, creating one with
@@ -1487,13 +1486,13 @@ on krateo-057:
   live namespace. The Secret is kept until the holder is gone. And again
   with the holder deleted after the grace, which hits the residual: the
   holder fails until the Secret is recreated.
-- **Interleaving B** (§5.1): delete the Secret, then the namespace 1s
-  later, and let the test's namespace controller delete the holders. The
-  live re-read of the namespace's `deletionTimestamp` keeps the Secret, and
-  the namespace tears down. A second variant **waits for the Secret to be
-  gone before deleting the namespace**, as a waiting uninstall would. It
-  is expected to wedge, and it documents §5.1's open point: it is marked as
-  a known failure until that point is settled, never skipped.
+- **Interleaving B** (§5.1): delete the Secret, then the namespace, then
+  the holders, each right after the previous DELETE returns, as Helm's
+  `batchPerform` does. Let the test's namespace controller delete the
+  holders too. The live re-read of the namespace's `deletionTimestamp` keeps
+  the Secret, and the namespace tears down. There is no variant that waits
+  for the Secret to be gone before the next kind: Helm v3.21.3 doesn't wait,
+  and no tool that does is known (§5.1).
 - A namespace deletion that starts just after the grace, and a holder
   deletion between R2 and R3 (an interceptor delays R3), check §6.4's
   last-step reads and the deletion pass's unskippable A2.
@@ -1713,10 +1712,9 @@ runtime (§7.3).
 - With per-version controllers, the release list covers the whole
   GroupKind (§3).
 - **Its composition delete is a Helm uninstall**, which deletes Secrets, and
-  a chart's own Namespace, before custom resources (§5.1, per the
-  re-review). If Helm waits for each kind to be gone, core-provider must
-  delete the chart's custom resources, and wait for them, before running
-  the uninstall. Otherwise its compositions hit §5.1's interleavings.
+  a chart's own Namespace, before custom resources. It doesn't wait for one
+  kind to be gone before deleting the next (§5.1, verified), so the grace
+  covers it. core-provider needs no change to its uninstall order.
 
 ### 16.4 "Answer from status" is a complement worth recommending
 
@@ -1801,7 +1799,7 @@ to NQ1 to NQ4):
 
 | Item | Resolved in |
 |---|---|
-| NQ1 A 60s configurable grace; the Namespace's `deletionTimestamp` and the deleting users re-read live as the last step before R3; deletion passes never skip; the Helm text corrected; interleavings A and B; the cost to rotation | §5, §5.1, §6.2 R1 to R3, §6.3, §6.4; tests in §14. **B under a Helm that waits for objects to be gone is open** (§5.1, §18) |
+| NQ1 A 60s configurable grace; the Namespace's `deletionTimestamp` and the deleting users re-read live as the last step before R3; deletion passes never skip; the Helm text corrected and verified; interleavings A and B; the cost to rotation | §5, §5.1, §6.2 R1 to R3, §6.3, §6.4; tests in §14 |
 | NQ2 No cap; the event and gauge name the stuck holder | §5.2, §12 |
 | NQ3 The builder line `.WatchesRawSource(r.CredentialUseSource())` | §7.5 |
 | NQ4 Filed as provider-runtime#46, out of scope | §3 |
@@ -1822,26 +1820,19 @@ to NQ1 to NQ4):
 The re-review's L7 (read the `deletionTimestamp`, not the phase) is folded
 into NQ1 and §5.
 
-**Not verified by this author.** The Helm v3.21.3 references in §5.1
-(`kind_sorter.go:73-110`, `:151-153`, `client.go:601-615`) come from the
-re-review. This session's permissions blocked my reads of Helm's source,
-both through `gh api` and in the local module cache. They were not
-retried.
+**The Helm facts in §5.1 are verified.** The coordinator read them from
+Helm v3.21.3 in the module cache: `pkg/releaseutil/kind_sorter.go`
+(`UninstallOrder`, `lessByKind`), `pkg/kube/client.go:601-615` and
+`:630-638`, and `pkg/action/uninstall.go:134-136`. They show that Helm
+doesn't wait for objects to be gone between kinds. So the worst case the
+third revision flagged doesn't happen. Its pending-verification item is
+removed, and so is the waiting-uninstall envtest variant (§14). This
+session's own reads of Helm's source were blocked by its permissions, and
+were not retried.
 
 ## 18. Open questions for the user
 
 **Decided since the last revision**: NQ1 (a 60s grace, §5), NQ2 (no cap,
 §5.2), NQ3 (the builder line, §7.5) and NQ4 (provider-runtime#46).
 
-**Pending verification, not yet a question: what Helm's wait between kinds
-waits for** (§5.1). If `pkg/kube/client.go:601-615` in Helm v3.21.3 waits
-until each kind's objects are gone, with a timeout longer than the grace,
-then interleaving B wedges, and A leaves holders failing. The grace can't
-fix that, because the uninstall deletes nothing more until the Secret is
-gone, and the Secret can only go by being released. The remedies would then
-be on the uninstall side (§5.1, §16.3), and the user would choose between
-them. That choice rests on a fact I couldn't read, so it isn't put as a
-question yet. Someone with access should confirm those lines, and the
-relative order of Secret and Namespace in `UninstallOrder`, first.
-
-No other question needs the user.
+Nothing is open. No question needs the user.
