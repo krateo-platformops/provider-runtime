@@ -104,8 +104,10 @@ Related prior art in core-provider:
   The probe drew that warning for the existing finalizer
   (`git-provider-rlgov.log` line 2).
 - **No finalizer can be added to an object that is being deleted.**
-  `ValidateNoNewFinalizers` (`objectmeta.go:126-134`) rejects that with
-  `Forbidden`. Removing finalizers is still allowed, and so is changing
+  `ValidateNoNewFinalizers` (`objectmeta.go:126-134`) rejects that with a
+  field error of type Forbidden. The API server returns it as **422
+  Invalid** (`k8s.io/apiserver@v0.37.2/pkg/registry/rest/update.go:157`),
+  not as an RBAC 403. Removing finalizers is still allowed, and so is changing
   labels and annotations. NamespaceLifecycle forbids *creating* objects in
   a terminating namespace, but allows updates and patches.
 - **Strategic merge patch merges finalizers as a set** on built-in kinds:
@@ -396,8 +398,10 @@ It also breaks foreground-deletion cycles (§11.8).
     - **held**: P now carries the finalizer and the fresh epoch. That
       includes a P that is being deleted *with* the finalizer: the patch
       adds no new finalizer, so it is allowed, and the epoch still moves;
-    - **Deleting**: `Forbidden`, because P is being deleted and lacks the
-      finalizer. A new holder gets `MustNotConnect`. For an established
+    - **Deleting**: the patch is rejected as **422 Invalid**, with a
+      Forbidden cause on `metadata.finalizers`, because P is being deleted
+      and lacks the finalizer (§2). An RBAC **403 Forbidden** is *not* this
+      outcome: it is an Acquire error (§10.7). A new holder gets `MustNotConnect`. For an established
       holder this is **Degraded**, the one term this doc uses for every
       fail-open (§8);
     - **Missing**: NotFound;
@@ -518,7 +522,7 @@ tG, whose R2 list reads at tL > tG, and whose R3 patch lands at tR > tL.
   still fresh. The releaser starts again from R1. Its next list is after
   tW > tA, so it sees H.
 - **tW > tR.** The finalizer was gone before A2. A2 adds it back (held), or
-  is Forbidden because P is being deleted (Deleting), and the acquirer
+  is rejected because P is being deleted (Deleting), and the acquirer
   knows which.
 
 **A holder that starts deleting during a release.** Say H's
@@ -588,7 +592,7 @@ only come after the write it reports.
 - **One created while another is deleted.** This is §6.4's middle case.
   Either R2 sees the new announcement, or A2's fresh epoch breaks R3.
 - **The finalizer added after a concurrent removal.** This is §6.4's last
-  case. A Forbidden A2 on a deleting P gives a new holder `MustNotConnect`
+  case. An A2 rejected as Deleting gives a new holder `MustNotConnect`
   (§8). It never gets its owner finalizer, so it deletes freely.
 - **Error or crash after the announce**, with a concurrent releaser: §6.4.
 - **A holder or namespace deletion during a release**: §6.4.
@@ -659,6 +663,50 @@ appears after it is held on a later pass, through the prober or backoff
 (§10.3). Until then it is unprotected: it was created after the decision, in
 a live namespace, so it is recoverable.
 
+### 6.8 N processes of one kind, without leader election (CP1)
+
+The composition controller runs without leader election (`LeaderElect`
+off), and its rollouts overlap old and new pods. So every part of this
+design must be safe with N processes of one kind running at once, each
+reconciling any holder. Part by part:
+
+- **Acquire** (A1, A2). A1 is guarded by the holder's resourceVersion. A2 is
+  a strategic merge (built-in kinds) or a guarded merge (custom resources),
+  with a fresh epoch. §6.4's proof never asks which process wrote what: a
+  releaser in any process fails its test against an A2 from any process.
+- **The verified sets are per process, and only ever reduce skips.** A
+  process skips A2 only against its *own* `written` entry, issued after its
+  *own* observation of the record (§6.3). Another process's writes never
+  let it skip. N processes therefore write at least as often as one would:
+  after a restart, up to N A2s per (P, K, N).
+- **Release** (R0 to R3). R3's JSON-patch tests serialize any number of
+  releasers. A losing releaser re-reads from R1.
+- **The index** (§10.6). Every write is guarded and merges on conflict. The
+  superset proof (§10.6.3) is between any acquirer and any pruner, in any
+  processes. The CRD pointer is written once, with a test that it is
+  absent, so only one process wins.
+- **Disown and the count** (§7.4). The strips are R3's patches. Every
+  process counts the same cluster, live. The count fields are written with
+  tests of their previous values, and `disown-settled` only with a test
+  that `held-count` is `"0"`. A process that reads a non-zero count written
+  by another resets its own zero counter.
+- **Old pods in an overlapping rollout** that run a runtime without this
+  feature don't acquire, and don't `Forget`. A holder whose owner finalizer
+  an old pod removed, leaving the record, no longer counts as a user
+  (§6.1). Holds such pods never made are those of §11.9.1, backfilled by
+  the new pods.
+
+**Nothing needs a single writer.** Leader election is therefore **not a
+prerequisite**, and §16.3 lists no leader-election work for
+unstructured-runtime. What N processes cost is duplicated work:
+
+- every process runs the release loop, the prober and the Disown count;
+- their writes conflict more often, and the losers retry.
+
+Where a runtime has leader election, as provider-runtime's adapter does, the
+adapter runs these loops only on the leader, to save that work. That is a
+saving, not a safety requirement.
+
 ## 7. The package: `pkg/credentialuse`
 
 ### 7.1 The core: no manager, no controller-runtime
@@ -711,8 +759,7 @@ type Options struct {
 	DeletionGrace  time.Duration            // §5; default 60s
 	ProbeInterval  time.Duration            // missing-ref prober; default 15s (§10.3)
 	DisownInterval time.Duration            // §7.4; default 60s
-	DisownPasses   int                      // §7.4; consecutive zero passes, default 3
-	Index          types.NamespacedName     // PerName mode only (§10.6)
+	DisownPasses   int                      // §7.4; consecutive zero passes, default 5
 	Logger         logging.Logger
 	Metrics        MetricsRecorder
 }
@@ -721,15 +768,22 @@ type Options struct {
 
 type ProtectedKind struct {
 	GVK   schema.GroupVersionKind
-	Watch WatchMode // LabelScoped (default) or PerName (§13)
+	Watch WatchMode // LabelScoped (default), PerName (§10.6) or PerNamePoll (§10.7)
 	// Content keeps whole objects, not metadata, in this kind's cache, for
 	// refs with a Next. For Secrets this is opt-in and holds Secret data (§10.4).
 	Content bool
 }
 
+type SharedOptions struct {
+	Namespaces     []string                  // restrict the caches (§10.5); default all
+	Listers        map[schema.GroupKind]Lister // for Guaranteed refs (§9.3)
+	IndexNamespace string                    // PerName and PerNamePoll (§10.6.1)
+	IndexMaxLines  int                       // §10.6.4; default 2,000
+}
+
 // NewShared builds the process-wide state: informers per protected kind,
-// shared by every tracker. Run it once, under the caller's leader election
-// for the release side (§7.3).
+// shared by every tracker. Run it once per process. Leader election is not
+// required for safety (§6.8).
 func NewShared(c Clients, o SharedOptions) *Shared
 func (s *Shared) Run(ctx context.Context) error
 
@@ -798,7 +852,8 @@ For unstructured-runtime:
    it, for the reason §7.5 gives for the source (M4). Filter holder update
    events whose only change is the record, as `IgnoreCredentialUseRecord`
    does (M6).
-6. RBAC as in §13.
+6. RBAC as in §13. In PerName or PerNamePoll mode, also set
+   `SharedOptions.IndexNamespace` (§10.6.1).
 
 "Find the last user" is the release loop's job, inside `Run`. `Users` is
 exported for diagnostics and tests.
@@ -814,9 +869,19 @@ exported for diagnostics and tests.
   informer not yet running. It starts them, and waits for their sync before
   returning. core-provider's dynamicwatch and pool can call it when a
   CompositionDefinition appears.
-- **Errors.** An invalid finalizer prefix, an unmappable holder or protected
-  kind, or a missing `OwnerFinalizer` is returned by `Track`. Before `Run`,
-  the error makes `Run` fail, so the process refuses to start (U2).
+- **Errors.** `Track` returns an error for:
+  - an invalid finalizer prefix;
+  - an unmappable holder or protected kind;
+  - a missing `OwnerFinalizer`;
+  - `DisownPasses × DisownInterval` below twice the kind's largest
+    reconcile or request timeout (§7.4);
+  - in PerName and PerNamePoll modes: no `IndexNamespace`; an
+    `IndexNamespace` that holders of the kind live in, or that disagrees
+    with the CRD's pointer; or an `IndexMaxLines` above the ceiling
+    (§10.6).
+
+  Before `Run`, the error makes `Run` fail, so the process refuses to start
+  (U2).
 
 ### 7.4 Disown
 
@@ -870,11 +935,22 @@ credential-use.krateo.io/disown-settled: "true"
 ```
 
 **Settling counts consecutive zero passes, not wall-clock time** (L4). A
-process sets `disown-settled` once it has seen `DisownPasses` (3)
-consecutive passes count zero. The passes must span longer than the longest
-reconcile, which is the reconcile timeout plus its grace, 90s by default.
-At the defaults, 3 passes at 60s span 180s. A non-zero count clears the
-flag. **Downgrading the runtime, removing the interface from the connecter,
+process sets `disown-settled` once it has seen `DisownPasses` (**5** by
+default) consecutive passes count zero.
+
+- **Setup validates** `DisownPasses × DisownInterval ≥ 2 ×` the kind's
+  largest reconcile or request timeout (L3). provider-runtime's reconcile
+  timeout plus its grace is 90s by default, so the minimum is 180s, and the
+  defaults give 300s.
+- **The `disown-settled` write tests that `held-count` is `"0"`**, so it
+  can't land over a newer non-zero count.
+- **A process that reads a non-zero count** written by another process
+  resets its own zero counter.
+- **A count that can't be made**, because the index is missing or
+  unreadable, or a list fails, is written as `held-count: "unknown"`. That
+  clears `disown-settled`, and is never read as zero (§10.6.5).
+
+A non-zero count clears the flag. **Downgrading the runtime, removing the interface from the connecter,
 or uninstalling is safe once `held-count` is `0` and `disown-settled` is
 `true`.** Any process can write the fields, because each one counts the
 same cluster, live.
@@ -897,7 +973,7 @@ count. Two things cover that (L5):
   count, what it would strip, and changes nothing.
 
 **A pass that started before the switch** may still land an A2 after the
-strip. §10.6, interleaving 3, shows why consecutive zero passes catch it.
+strip. §10.6.8, interleaving 3, shows why consecutive zero passes catch it.
 
 **Namespaces outside `SharedOptions.Namespaces`.** Disown doesn't use the
 caches. Its lists are live and cluster-wide, so it reaches every namespace,
@@ -1039,8 +1115,8 @@ per key. In order:
      (R4), deletion passes included. That includes a custom-resource A2
      whose retries ran out (M5). Log once per object, record a Warning
      event (`CredentialUseDegraded`), count the metric, and proceed to
-     Connect as today. It never gets `MustNotConnect`. A Forbidden A2
-     (outcome Deleting) is Degraded in the same way (§11.4).
+     Connect as today. It never gets `MustNotConnect`. An A2 rejected as
+     Deleting (422) is Degraded in the same way (§11.4).
    - `WithResolved(externalCtx, a)` puts the resolved chain on Connect's
      context (§9.2).
    - The gate's `pristine` copy (`:870`) is taken after Acquire, so that a
@@ -1332,15 +1408,15 @@ because each starts from "every object this kind holds":
 - `WithHeld` (§11.6);
 - the rebuild after a lost event.
 
-**The index** (the user's decision) is one ConfigMap per holder kind, in the
-provider's namespace. It lists the protected objects that kind holds:
+**The index** is one ConfigMap per holder kind. It lists the protected
+objects that kind holds:
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: credential-use-index.repo.git.krateo.io
-  namespace: krateo-system
+  namespace: krateo-system          # SharedOptions.IndexNamespace
 data:
   entries: |
     /Secret/team-a/git-token
@@ -1349,49 +1425,148 @@ data:
 
 Each line is `<group>/<kind>/<namespace>/<name>`. The group is empty for
 core kinds, and so is the namespace for cluster-scoped objects. The lines
-are sorted.
+are sorted. **The index must be a superset** of what the kind holds: every
+protected object that carries a finalizer with K's prefix has its line. §10.6.3
+proves it.
 
-**Its location is fixed once, on the holder CRD.** The first process of the
-kind to start writes `credential-use.krateo.io/index: <namespace>/<name>` on
-the CRD, with a patch that tests the annotation is absent. Every later
-process reads it. **A process whose configured index (`SharedOptions.Index`)
-disagrees with the CRD's refuses to start** (§7.3), so two processes of one
-kind can never keep two indexes. Moving the index means Disown, then
-re-pointing the annotation by hand.
+#### 10.6.1 Where it lives, and who owns it
 
-**Writes, and their order.**
+- **The namespace is explicit:** `SharedOptions.IndexNamespace` (CP2, L6).
+  It must outlive every holder of the kind, so it must not be a namespace
+  any holder lives in:
+  - **At start**, the tracker lists holders of K in that namespace. If there
+    are any, it refuses to start.
+  - **At acquire time**, a holder in the index namespace gets no hold. A new
+    holder fails closed, an established one is Degraded, and the tracker
+    logs it.
+  - The namespace is normally the provider's own management namespace, such
+    as `krateo-system`.
+- **The location is fixed once, on the holder CRD.** The first process of
+  the kind writes `credential-use.krateo.io/index: <namespace>/<name>` on
+  the CRD, with a patch that tests the annotation is absent. Every later
+  process reads it. A process whose `IndexNamespace` disagrees with the
+  CRD's refuses to start (§7.3), so two processes of one kind can never keep
+  two indexes. Moving the index means Disown, then re-pointing the
+  annotation by hand.
+- **The tracker owns the ConfigMap entirely** (M2, decided). Charts don't
+  ship it. At start, the tracker creates it if it is absent. Create races
+  between processes are harmless: the loser gets AlreadyExists and reads the
+  winner's.
+- **Nobody else should manage it.** If a GitOps tool does anyway, for
+  example because it lives in a namespace Argo CD syncs, exclude its data
+  from comparison and sync:
 
-- **Add before A2.** When A2 is about to write a P whose line isn't in the
-  index, the tracker first adds the line, with an update guarded by the
-  ConfigMap's resourceVersion (retried on conflict). The index is therefore
-  always a superset of what this kind holds.
-- **Prune after R3.** When R3 has removed K's last finalizer from P (K's
-  marker label is gone), the tracker removes the line, guarded the same
-  way. A crash between R3 and the prune leaves a line for an object that
-  holds nothing. The next startup recheck finds no finalizer there and
-  prunes it.
+  ```yaml
+  # in the Argo CD Application
+  ignoreDifferences:
+    - kind: ConfigMap
+      name: credential-use-index.repo.git.krateo.io
+      namespace: krateo-system
+      jsonPointers: [/data]
+  syncPolicy:
+    syncOptions: [RespectIgnoreDifferences=true]
+  ```
 
-**Size.** A ConfigMap holds at most 1 MiB. A typical line is about 60 bytes,
-so the index holds about 17,000 names. With every field at its maximum (a
-253-character name, a 63-character namespace, a long group), a line is
-about 400 bytes, and the index still holds about 2,600. PerName mode is for
-small held sets, whose names are known when the RBAC is generated, so this
-is far above what it is used for. **When the index is full**, adding a line
-fails. A2 then doesn't run: a new holder fails closed, an established one is
-Degraded (§8), and the tracker logs and counts it.
+#### 10.6.2 Writes: Dekker on both sides
 
-**Who reads it in PerName mode.**
+Every write is a read-modify-write guarded by the ConfigMap's
+resourceVersion. On a conflict, the writer re-reads and **merges**: it
+re-applies its own adds and removes to what it read, so it never overwrites
+another writer's change.
+
+- **The acquirer adds before A2, then checks after.**
+  1. Before A2 for a P whose line is missing, it adds the line.
+  2. After a successful A2, it **live-GETs the index**. If the line is
+     missing (a concurrent prune removed it), it adds it again.
+- **The pruner removes after R3, then checks after.**
+  1. After a release batch's R3s, it removes, **in one write per batch**
+     (L1), the lines of the objects whose K's marker label R3 removed.
+  2. After that write succeeds, it **live-GETs each pruned P**. If P carries
+     a finalizer with K's prefix again (a concurrent A2 re-added it), it
+     adds the line back.
+- **The startup recheck's prune** follows the same rule. It prunes the lines
+  whose objects carry no finalizer with K's prefix, then live-GETs those
+  objects, and adds back any that now do.
+
+#### 10.6.3 Why the index stays a superset
+
+The reviewer's interleaving:
+
+1. R2 sees no users of P.
+2. H2, a new holder, announces, and sees P's line present, so it doesn't add
+   it.
+3. R3 removes the finalizer.
+4. H2's A2 re-adds the finalizer (P is not being deleted).
+5. The prune removes the line.
+
+Now P carries the finalizer and has no line. Without the checks after the
+writes, the index has stopped being a superset.
+
+With them, let:
+
+- tW be the time H2's A2 lands;
+- tI be the time of H2's index GET after it, so tI > tW;
+- tP be the time the prune lands;
+- tQ be the time of the pruner's GET of P after it, so tQ > tP.
+
+There are two cases:
+
+- **tP < tI.** H2's GET sees the line missing, and adds it back.
+- **tP > tI.** Then tQ > tP > tI > tW, so the pruner's GET sees the
+  finalizer H2's A2 added, and adds the line back.
+
+Both GETs are consistent reads, so in every ordering at least one side sees
+the other. If both add the line back, the merge makes that one line. The
+same argument covers the startup recheck's prune against a concurrent A2.
+An add that fails (an error, a full index) stops before A2, so a
+finalizer is never written without its line having been written first.
+
+#### 10.6.4 Size, and when it fills (L1, L2)
+
+- **The cap is in lines:** `SharedOptions.IndexMaxLines`, 2,000 by default.
+  At about 400 bytes a line, which is the worst case (a 253-character name,
+  a 63-character namespace, a long group), 2,000 lines fit in a
+  ConfigMap's 1 MiB. PerName is for hundreds of names, not thousands.
+- **The hard ceiling** is about 17,000 lines of typical size (60 bytes)
+  in 1 MiB. Setup rejects a cap above it. Every write also checks the byte
+  size, so lines longer than typical meet the 1 MiB limit before the cap.
+- **At 80% of the cap**, the tracker records a Warning event on the index
+  ConfigMap and sets `credentialuse_index_fill_ratio`.
+- **When it is full**, adding a line fails, so A2 doesn't run. A new holder
+  fails closed, and an established holder is Degraded (§8).
+- **The remedy, documented:** move the kind to LabelScoped (§13), or raise
+  the cap within the ceiling.
+
+#### 10.6.5 Who reads it, and what a missing index means
 
 - **The startup recheck** reads the index, GETs each named object, and
   enqueues a release batch for every (K, N) finalizer it finds.
 - **Disown** reads it to find what to strip and what to count (§7.4).
-- **`WithHeld`** reads it and stops at the first line whose object still
+- **`WithHeld`** reads it, and stops at the first line whose object still
   carries K's prefix (§11.6).
 
-**If someone deletes it by hand,** the tracker sees that (it watches the
-ConfigMap by name) and **rebuilds it from the records**. It lists the
-holders of K, takes the union of their records, GETs each named object, and
-writes back the ones that carry a finalizer with K's prefix.
+**A missing or unreadable index is an error, never "no holds"** (L4).
+`WithHeld` returns the error, so `scaletozero` keeps the controller up.
+Disown writes `held-count: "unknown"`, which is not `"0"`, so it never
+settles. The tracker keeps retrying, and recreates the index if it is
+missing (§10.6.6).
+
+#### 10.6.6 Tampering, deletion, and the rebuild (M2, L5)
+
+The tracker watches the ConfigMap by name (or polls it in PerNamePoll mode,
+§10.7). **A change that drops lines this process didn't remove** is checked
+line by line. A dropped line whose object no longer carries K's prefix
+needs nothing: another process pruned it. A dropped line whose object
+still carries the prefix is **tampering**, or a lost race. The tracker adds
+those lines back, records a Warning event and counts
+`credentialuse_index_tampered_total`.
+
+**If the ConfigMap is deleted**, the tracker recreates it and rebuilds it
+from the records. It lists the holders of K, takes the union of their
+records, GETs each named object, and keeps those that carry a finalizer with
+K's prefix. The rebuild writes by **merging** into what is there, re-reading
+and merging again on a conflict (L5), so concurrent adds by other acquirers
+are never lost.
 
 **The residual.** An object whose last holder's record was already gone
 (after `Forget`), but whose R3 hadn't landed when the index was deleted, is
@@ -1399,48 +1574,107 @@ in no record, so the rebuild can't find it. Its finalizer stays until
 someone removes it. It isn't lost: K's marker label is still on it, so an
 operator with list rights finds it with
 `kubectl get secrets -A -l credential-use.krateo.io/k-<hash>=true`, and
-`DisownPrefix` with an explicit name list strips it. The doc text says not
-to delete the index.
+`DisownPrefix` with an explicit name list strips it.
 
-**RBAC.** `get`, `update` and `patch` on that one ConfigMap, by
-`resourceNames`, plus `watch` on it through a field-selected watch. Then
-either `create` on ConfigMaps in the provider's namespace, used once, or
-none at all if the chart ships the ConfigMap empty, which is the
-recommendation. These grants are bound in the provider's own namespace. That
-is not the unsafe namespaced Role of §13: the provider's own namespace is
-not one whose objects it manages, and if it is deleted the provider stops
-anyway (core-provider#313).
+#### 10.6.7 RBAC for the index
 
-**The reviewer's three interleavings, resolved:**
+- `get`, `update` and `patch` on the one ConfigMap, by `resourceNames`;
+- `watch` on it, through a `metadata.name` field-selected watch (§13). In
+  PerNamePoll mode, no watch is needed;
+- **`create` on ConfigMaps in the index namespace.** It can't be scoped by
+  name: a create request carries no name in its URL, so the request has no
+  name for a `resourceNames` rule to match. That is broader than the rest,
+  and it is confined to that one namespace.
+
+These grants are bound in the index namespace. That is not the unsafe
+namespaced Role of §13: the index namespace holds no holders (§10.6.1), so
+no teardown of a managed namespace can remove them.
+
+#### 10.6.8 The reviewer's three earlier interleavings, resolved
 
 1. **A restart between `Forget` and R3.** H's last pass writes `Forget`
    with its owner-finalizer removal, and H is gone. The process restarts
    before R3, so the in-memory release batch is lost. P still carries the
-   finalizer, and its line is still in the index, because it is pruned
+   finalizer, and its line is still in the index, because lines are pruned
    only after R3. The startup recheck reads the index, finds the finalizer,
    and enqueues the batch. R2 finds no users, so R3 releases it.
    (LabelScoped mode reaches the same end through the protected informer's
    initial list.)
 2. **A never-established holder deleted while the process was down.** H's
-   pass held P (A1, the index line, A2), and then Connect failed, so H never
-   got its owner finalizer. H is deleted while no process runs. It has no
+   pass held P (A1, the index line, A2), then Connect failed, so H never got
+   its owner finalizer. H is deleted while no process runs. It has no
    finalizer, so it vanishes at once, and no event reaches anyone. On
    restart, P's line is in the index, so the recheck enqueues its batch. R2
    finds no record naming P, and R3 releases it.
 3. **A1 before the Disown switch.** A pass that began before the switch was
-   set runs A1, then the switch is set, then the Disown loop strips H's
-   record and P's finalizer, and then the pass's A2 lands and re-adds the
+   set runs A1, then the switch is set, the Disown loop strips H's record
+   and P's finalizer, and then the pass's A2 lands and re-adds the
    finalizer. Two things close this:
-   - every Acquire reads the switch again just before each A2. A pass that
-     sees it set stops and returns its refs unheld;
+   - every Acquire reads the switch again just before each A2, and a pass
+     that sees it set stops and returns its refs unheld;
    - a pass already past that check, whose A2 lands after the strip, is
      caught by the Disown loop's next pass. The live count, from the index
-     in PerName mode, sees the finalizer, so the loop strips it again. The
-     count is non-zero, which resets the settling.
+     in PerName mode, sees the finalizer, so the loop strips it again, and
+     the non-zero count resets the settling.
 
    Disown is settled only after `DisownPasses` consecutive zero passes,
-   spanning longer than the longest reconcile (§7.4). So no pass that
+   spanning at least twice the longest reconcile (§7.4). So no pass that
    started before the switch can still land a write after it is settled.
+
+### 10.7 PerNamePoll mode: runtime-provisioned RBAC, no watches
+
+A provider that grants its controller access per name **at runtime** can't
+use PerName's watches without extra privilege. Kubernetes' escalation
+prevention lets a subject grant only permissions it already holds, unless it
+has `escalate`. To grant a named `watch` on any Secret, the provisioner
+would need `watch`, and so `list`, on all Secrets. That is exactly the grant
+oasgen removed in #510. oasgen also rejects relying on `escalate`.
+
+So **`Watch: PerNamePoll`** uses no watches at all on protected kinds, only
+GETs and patches:
+
+- **The provisioner** holds `get` and `patch` on Secrets cluster-wide (plus
+  the same on any other protected kind), and grants the controller named
+  `get` and `patch`.
+- **The order is mandatory**, both ways:
+  - to hold a name: add it to the ClusterRole's `resourceNames` (bound by a
+    ClusterRoleBinding), then add the index line, then A2;
+  - to drop a name: prune the index line, then remove the name from the
+    ClusterRole.
+  - An A2 issued before its RBAC exists fails with **403 Forbidden**. That
+    error looks like a credential problem, but it is an ordering defect. It
+    is reported as an Acquire error (§8), never as the outcome Deleting,
+    which is a 422 (§6.2).
+- **If provisioning fails**, the name isn't added. A2 doesn't run: a new
+  holder fails closed, and an established one is Degraded.
+- **What replaces the watches:** each held object is polled with a GET,
+  with the prober's backoff (§10.3): from 15s, doubling up to 5 minutes,
+  and back to 15s whenever the object changes. The index is polled the same
+  way. Holder events still arrive through the holder informer, so releases
+  after a holder's deletion stay prompt. Only changes to *protected* objects
+  (finalizer stripped, `deletionTimestamp`, recreate, a re-pointed chain)
+  are seen by polling.
+
+**Latency and cost, against PerName.**
+
+- **Latency.** A change to a held object is seen within the poll interval:
+  up to 5 minutes for an object that has been stable, not within watch
+  latency. The windows of §6.5 and §9.2 stretch by that much. The grace
+  still runs from local first sight (§5), so a late sighting delays a
+  release but never shortens the grace.
+- **Cost.** About one GET per held object per poll interval. 500 held
+  objects polled at 5 minutes cost under 2 GETs/s; right after changes, at
+  15s, about 33/s. PerName holds one watch per object instead.
+
+**The honest cost.** The provisioner can read any Secret whose name it
+knows. It can't list or watch Secrets, but `get` on all Secrets is still a
+broad read.
+
+**The alternative.** Protect only refs whose names are known when the RBAC
+is generated, such as oasgen's configuration-level Secrets, with static
+`resourceNames` in PerName mode. Per-object Secrets resolved from paths are
+then not protected, and the deadlock remains possible for them. That is
+documented, not hidden.
 
 ## 11. Lifecycle edges
 
@@ -1473,7 +1707,7 @@ namespace stays Terminating until then. The waiting event names the user.
 If it carries this (K, N)'s finalizer, A2 holds it. The epoch moves and the
 holder counts, so §5 keeps the Secret while its namespace is terminating or
 a user is deleting. Otherwise it is released as §5 says. If it lacks the
-finalizer, A2 is Forbidden:
+finalizer, A2 is rejected (Deleting):
 
 - **a new holder** gets `MustNotConnect`: no Connect, §12's report, and
   requeue with backoff. It never gets its owner finalizer, so it deletes
@@ -1626,7 +1860,8 @@ remove the finalizers it holds there. That is a new wedge.
 | namespaces | `get` | §5's live `deletionTimestamp` check |
 | the holder kind | `get`, `list`, `watch`, `patch`, `update` | the holder informer, R2's consistent list, A1 (patch), and `Forget` in the finalizer-removal Update and on its own (update) (L8) |
 | customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; the count fields and the one-time index pointer, written only on change (§7.4, §10.6) |
-| configmaps, by `resourceNames` (PerName mode: the kind's index) | `get`, `watch`, `update`, `patch`, plus `create` in the provider's namespace once, unless the chart ships the index | §10.6 |
+| configmaps, by `resourceNames` (PerName and PerNamePoll: the kind's index) | `get`, `update`, `patch`, and `watch` in PerName mode | §10.6 |
+| configmaps, in the index namespace | `create` (it can't be scoped by name) | the tracker creates the index (§10.6.7) |
 | events | `create`, `patch` | §12 |
 
 `update`, `create` and `delete` on protected kinds are not needed: every
@@ -1639,15 +1874,40 @@ when they change, and the PerName index pointer once. A CRD write makes the
 API server rebuild its OpenAPI, which is why nothing else writes the
 CRD.
 
-**By name.** Where refs are known when the RBAC is generated, as
-core-provider generates RBAC per composition and knows the passwordRef
-Secret, the ClusterRole lists them in `resourceNames`. A list or watch
-authorized by `resourceNames` must name one object with a
-`metadata.name` field selector. So such a protected kind uses
-`Watch: PerName`: one watch per held object, field-selected, plus GETs.
-That fits small held sets. Refs that can't be known in advance, such as
-git-provider's user-supplied Secrets or oasgen's paths, need the verbs on
-all objects of the kind, with `Watch: LabelScoped`.
+**LabelScoped exposes every Secret.** Its informer needs `list` and
+`watch` on Secrets cluster-wide, with no name restriction. The tracker's
+transform keeps only metadata in memory, but the grant itself lets the
+provider read every Secret's data. That is the grant oasgen removed in
+#510. Use it only where the provider already holds it.
+
+**By name, three shapes.**
+
+1. **Static, by name (`Watch: PerName`).** Where refs are known when the
+   RBAC is generated, as core-provider generates RBAC per composition and
+   knows the passwordRef Secret, the ClusterRole lists them in
+   `resourceNames`. `resourceNames` does authorize `list` and `watch`, but
+   only for a request with a `metadata.name` field selector: the API server
+   takes the request's name from that selector and nowhere else
+   (`k8s.io/apiserver@v0.37.2/pkg/endpoints/request/requestinfo.go:245-250`).
+   So PerName makes one field-selected watch per held object, plus GETs.
+   That fits small held sets, and needs the index (§10.6).
+2. **Provisioned at runtime, by name (`Watch: PerNamePoll`, §10.7).** A
+   provider whose names are only known at runtime adds each one to a
+   ClusterRole's `resourceNames`, bound by a ClusterRoleBinding. The order
+   is RBAC, then the index line, then A2, and the reverse after the prune.
+   It is mandatory: an A2 that runs before its RBAC fails with a 403 that
+   looks like a credential problem. The provisioner holds `get` and `patch`
+   on the protected kinds cluster-wide, and grants only those, named, so
+   there are no watches.
+3. **Unrestricted (`Watch: LabelScoped`).** Refs that can't be known in
+   advance and aren't provisioned, such as git-provider's user-supplied
+   Secrets, need the verbs on all objects of the kind.
+
+**Escalation.** Kubernetes lets a subject grant only permissions it holds,
+unless it has `escalate` on roles (and `bind` to bind roles it doesn't
+hold). A provider that holds `*` on `rbac.authorization.k8s.io` has
+`escalate` and `bind` implicitly. **The design never depends on that**: the
+PerNamePoll provisioner grants only `get` and `patch`, which it holds.
 
 Doc text for consumers:
 
@@ -1656,8 +1916,10 @@ Doc text for consumers:
 > ClusterRoleBinding: `get`, `list`, `watch` and `patch` on `secrets` and on
 > every other kind your refs name; `get` on `namespaces`; `patch` and
 > `update` on your own kinds; `get`, `list`, `watch` and `patch` on your
-> kinds' CustomResourceDefinitions, by name. Use `resourceNames` only when you know every Secret name when
-> you generate the RBAC, and set `Watch: PerName` for those kinds. Don't
+> kinds' CustomResourceDefinitions, by name. Use `resourceNames` only when
+> you know every Secret name when you generate the RBAC (`Watch: PerName`),
+> or when you provision each name at runtime (`Watch: PerNamePoll`); both
+> need the index ConfigMap's grants (§10.6.7). Don't
 > use a namespaced Role for these permissions: it is deleted with its
 > namespace, and objects there then can't finish deleting.
 
@@ -1746,6 +2008,30 @@ on krateo-057:
 - A holder informer relist resets `recordSince`, and the next passes write
   (L2).
 - `IgnoreCredentialUseRecord` passes a record change it didn't write (L8).
+- **The index stays a superset** (§10.6.3). The reviewer's interleaving runs
+  as a test, with interceptors holding each step: R2 sees no users, H2
+  sees the line, R3, H2's A2, then the prune. It is run in both orders of
+  H2's index GET and the prune, and asserts the line is back either way.
+  The same is checked for the startup recheck's prune against an A2.
+- The tracker creates a missing index at start; a hand edit that drops a
+  held line is restored, with an event and the tampering metric; a
+  conflicting rebuild merges with a concurrent add (L5); a missing or
+  unreadable index keeps `WithHeld` true and the count `"unknown"` (L4).
+- The 80% warning and the full index: a new holder fails closed and an
+  established one is Degraded (L2). Setup rejects a cap above the
+  ceiling, an index namespace that holds holders, and a short
+  `DisownPasses × DisownInterval` (L3).
+- **N processes without leader election** (§6.8): three `Shared` instances
+  of one kind, none leader-elected, run the stress test, and Disown and its
+  count settle correctly, including a process that reads another's non-zero
+  count.
+- **PerNamePoll** (§10.7): no watch is opened on a protected kind; holds
+  under RBAC provisioned in order; an A2 run before its RBAC fails with a
+  403 that is reported as an Acquire error, not as Deleting; a failed
+  provisioning fails closed for a new holder and is Degraded for an
+  established one.
+- The Deleting outcome is recognised by its 422 Invalid with a Forbidden
+  cause on `metadata.finalizers`, and never by a 403.
 - A foreground-deleted holder that owns its Secret completes (§11.8).
 - Setup after start, and `Track` twice with equal and with different
   Options.
@@ -1930,6 +2216,19 @@ writing for #510:
 - **A mistyped or unmatched path resolves to not found**, so it silently
   protects nothing. `AssertCredentialRefsCover` (§11.9) fails on it. The
   collector's tests should run it for every RestDefinition fixture.
+- **RBAC without undoing #510.** oasgen removed cluster-wide `list` and
+  `watch` on Secrets in #510, so LabelScoped is out. It can adopt with
+  runtime-provisioned RBAC, `Watch: PerNamePoll` (§10.7, §13). Its
+  provisioner already targets a ClusterRole and a ClusterRoleBinding, with
+  a cluster-scoped builder, as oasgen has confirmed. That builder holds
+  `get` and `patch` on Secrets cluster-wide, and grants each name to
+  rest-dynamic-controller in the mandatory order. The cost is that the
+  provisioner can read any Secret whose name it knows (§10.7).
+- **The narrower alternative:** protect only the Configuration-level
+  Secrets, whose names are known when the RBAC is generated, with
+  `Watch: PerName`. Per-object Secrets resolved from paths then stay
+  unprotected, and the deadlock remains possible for them. That choice is
+  oasgen's to make.
 
 ### 16.3 unstructured-runtime (core-provider)
 
@@ -1952,10 +2251,29 @@ runtime (§7.3).
   kind to be gone before deleting the next (§5.1, verified), so the grace
   covers it. core-provider needs no change to its uninstall order.
 
-**Generated RBAC must outlast the holds.** Read from a local checkout of
-core-provider (`go/core-provider/internal/tools/deploy/deploy.go`). The
-commit couldn't be determined, so core-provider should confirm this at
-main. `Undeploy`:
+**When.** core-provider is on provider-runtime v1.7.2. It adopts after
+#395 (the v1.11/v1.12 bump), which is queued behind #313, #402 and #399
+(CP3a).
+
+**No leader election is needed** (CP1). The composition controller runs
+without it, and its rollouts overlap pods. §6.8 shows the design is safe
+that way, so there is no new unstructured-runtime work for it.
+
+**The index namespace** (CP2). In PerName mode the index needs a namespace
+no holder lives in (§10.6.1). For the composition controller today, that
+would be the definition's namespace, which is where its compositions live.
+So the composition controller's adoption follows core-provider#313, which
+moves the controller to core-provider's management namespace, and the
+index goes there. #313's Relocating mode doesn't change the cases above
+(CP5).
+
+**Deletion passes still acquire** (CP4), even after #402's fix (1) stops
+Delete from reading `passwordRef`: Connect and other reads on the delete
+path still need their holds.
+
+**Generated RBAC must outlast the holds.** core-provider confirmed this at
+main `6cb7d0e`, in `go/core-provider/internal/tools/deploy/deploy.go`.
+`Undeploy`:
 
 - refuses while composition instances exist (`ErrCompositionStillExist`),
   but only when it will delete the CRD (`!SkipCRD`);
@@ -1985,6 +2303,11 @@ instance goes. Two cases matter:
   error, while `scaletozero.Exists(... WithHeld(...))` (or `WithHeldIndex`
   in PerName mode) finds a hold under the kind's prefix that this
   definition's RBAC is the only grant for.
+- **"The only grant" is computed, not read** (CP3b). It is the name's
+  absence from the union of the `resourceNames` that core-provider would
+  generate for every *other* live definition of the GroupKind, computed
+  from those definitions' specs as its generator computes them. It is never
+  read from RBAC objects, which can lag or be edited.
 - With `SkipCRD`, the surviving definition's generated `resourceNames` must
   include every name the retiring one held, before the retiring RBAC is
   deleted.
@@ -2120,6 +2443,29 @@ were not retried.
 | L8 The predicate drops only record changes equal to this process's last write | §7.5 |
 | L9 Per-ref backoff in the prober, and GETs for few names | §10.3 |
 | L10 §8 renumbered, with the source check first, before the orphan path; "Degraded" as the one fail-open term; re-verify §5.1 for Helm 4 | §8, §6.2, §11.4, §5.1 |
+
+**The §10.6 pass, core-provider's review, and oasgen's** (the decisions on
+`587aa71`):
+
+| Item | Resolved in |
+|---|---|
+| M1 The index is a true superset: Dekker on both sides with consistent reads, the startup prune included, proved on the reviewer's interleaving | §10.6.2, §10.6.3 |
+| M2 The tracker owns the index and creates it; `create` can't be scoped by name; tampering detected, merged back, with an event and a metric; an Argo CD `ignoreDifferences` note | §10.6.1, §10.6.6, §10.6.7, §13 |
+| L1 Prunes coalesced to one write per batch; a default cap of 2,000 lines; 17,000 only as the hard ceiling | §10.6.2, §10.6.4 |
+| L2 A warning at 80%; at full, fail closed or Degraded; the remedy | §10.6.4 |
+| L3 `DisownPasses` 5; the validated span; `disown-settled` tests `held-count`; the zero counter resets on another's non-zero count | §7.4, §7.3 |
+| L4 A missing or unreadable index is an error, never "no holds" | §10.6.5, §7.4 |
+| L5 The rebuild merges with concurrent adds | §10.6.6 |
+| L6, CP2 `SharedOptions.IndexNamespace`; no holders there; checked at start and at acquire; composition-controller adoption follows core-provider#313 | §10.6.1, §7.1, §7.3, §16.3 |
+| L7 | covered by M2 |
+| CP1 N processes without leader election: safe part by part; nothing needs a single writer, so no leader-election work | §6.8, §16.3 |
+| CP3a Timeline: after #395, behind #313, #402 and #399 | §16.3 |
+| CP3b "The only grant": the union of `resourceNames` computed from live definitions' specs | §16.3 |
+| CP4 Deletion passes still acquire after #402's fix (1) | §16.3 |
+| CP5 #313's Relocating mode cited; no change to the cases | §16.3 |
+| oasgen: `resourceNames` authorizes list and watch only with a `metadata.name` field selector, cited | §13 |
+| oasgen: runtime-provisioned RBAC by name, `Watch: PerNamePoll`; the mandatory order; failed provisioning; latency and cost against PerName; the honest cost; the narrower alternative; `*` on RBAC implies `escalate` and `bind`, never relied on | §10.7, §13, §16.2 |
+| The Deleting outcome is a 422 Invalid, not a 403, so an RBAC denial can't be mistaken for it | §2, §6.2, §10.7 |
 
 ## 18. Open questions for the user
 
