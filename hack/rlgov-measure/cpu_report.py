@@ -12,10 +12,13 @@ nothing for local capacity, so engagement shows as cuts, local below the ceiling
 and fewer calls in flight, not as deferrals. The first block's logs still carry
 ramping and saturated deferrals; they are printed when present.
 
-Validity, decided before the re-run (results/cpu2-settings.txt): each run's
-median burn_cpu_ms/call within 0.5ms above the setting, and the off arm
-saturated: CPU at least 90% of the limit, 12 or more calls in flight, pressure
-over 50. A run that fails one is flagged, not dropped.
+Validity, decided before the re-run's first run (results/cpu2-settings.txt):
+each run's median burn_cpu_ms/call within 0.5ms above the setting, and the off
+arm saturated: CPU at least 90% of the limit and pressure over 50. Calls in
+flight are printed as a diagnostic only: the check of 12 or more was
+mis-specified, counting calls inside Observe rather than reconciles, and was
+dropped after the calibration run, before run 1. A run that fails a check is
+flagged, not dropped.
 """
 import glob, os, re, statistics, sys
 
@@ -84,8 +87,6 @@ def flags(r, arm):
     if arm == "off":
         if r["cpu"] < 0.9 * LIMIT_MS:
             out.append(f"off not saturated: cpu {r['cpu']:.0f}ms/s")
-        if r["inflight"] is None or r["inflight"] < 12:
-            out.append(f"off not saturated: {r['inflight']} in flight")
         if r["some"] <= 50:
             out.append(f"off not saturated: pressure {r['some']:.1f}")
     return out

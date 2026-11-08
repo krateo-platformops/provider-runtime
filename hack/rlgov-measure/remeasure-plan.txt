@@ -103,12 +103,25 @@ Rules written down before run 1 (they are in cpu_block.sh's settings text):
   nothing for local capacity.
 - Validity, checked per run and reported, never used to drop a run: the median
   burn_cpu_ms/call is 20.0 to 20.5. In off, CPU is at least 225ms/s, 12 or more
-  calls are in flight and pressure is over 50. If off doesn't saturate, the
+  calls are in flight and pressure is over 50 (the in-flight check was dropped
+  after the calibration below, before run 1). If off doesn't saturate, the
   block shows nothing about the threshold, and that is the result; the workload
   is not retuned mid-block.
 - A calibration check before the block (approved): one 120s off run, not
   counted, to confirm 20ms a call and saturation on the node. If it doesn't
   saturate, stop and re-propose rather than tune.
+
+Calibration, 2026-11-08 (results/c2cal-off-2.log). CPU 250ms/s, throttled 2s a
+second; pressure 59.6; 20.1ms a call; calls in flight median 11. So the check of
+12 or more in flight failed, and the run stopped there, untuned. That check was
+mis-specified: it counts calls inside Observe, not reconciles, and all 16
+workers were busy while it read about 11. The coordinator's correction, made
+before run 1 and written into cpu2-settings.txt: off's validity is CPU at least
+225ms/s and pressure over 50, calls in flight are a diagnostic only, and the
+workload is unchanged. At about 60% pressure the 75 arm will likely not engage.
+It reads "did not engage" unless it does, and the arms aren't changed for it.
+Order changed too: the memory block and the overhead runs first, then this
+block.
 
 == 3. Memory block re-run: plan
 

@@ -5,6 +5,7 @@
 # so it doesn't disturb it. The re-run writes ovh2-* and uses ctrl3, so the
 # first runs (ovh-*, against ctrl2) are never overwritten.
 cd "$(dirname "$0")" || exit 1
+bash setup.sh || { echo "BLOCK-STOPPED: cluster setup failed"; exit 2; }
 A="SAT_PERIOD_MS=1000 PHASE_S=60 EXPERIMENTAL_MEMORY=true"
 NEW=${1:?usage: overhead.sh <image tag of the fixed commit>}
 bash nodeid.sh overhead2-start

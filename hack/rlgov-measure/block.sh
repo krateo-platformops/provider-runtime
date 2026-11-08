@@ -25,6 +25,7 @@
 # list is exactly those files. A failed commit doesn't stop the block: the logs
 # are on disk.
 cd "$(dirname "$0")" || exit 1
+bash setup.sh || { echo "BLOCK-STOPPED: cluster setup failed"; exit 2; }
 NEW=${1:?usage: block.sh <image tag of the fixed commit>}
 CTRL=ctrl3
 M="SATURATION=true EXPERIMENTAL_MEMORY=true"
