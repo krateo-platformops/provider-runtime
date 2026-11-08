@@ -20,6 +20,18 @@ def mean(xs):
     return statistics.mean(xs) if xs else None
 
 
+def measured(paths):
+    """Drops the logs of runs whose setup failed, after naming them: prun.sh
+    wrote them before anything was measured, so they have no data."""
+    out = []
+    for p in sorted(paths):
+        if "# DISCARDED setup failed" in open(p).read():
+            print(f"{os.path.basename(p)[:-4]}: setup failed, nothing measured")
+        else:
+            out.append(p)
+    return out
+
+
 def run(path):
     t = open(path).read()
     rows = [dict(re.findall(r"(\S+?)=(\S+)", l)) for l in t.splitlines() if l.startswith("STAT ")]
@@ -55,7 +67,7 @@ for mode in ("ramp", "cold"):
     print(f"== {mode}")
     arms = {}
     for arm in ("new", "ctrl"):
-        runs = sorted((run(p) for p in glob.glob(f"{R}/{PREFIX}-{mode}-{arm}-*.log")), key=key)
+        runs = sorted((run(p) for p in measured(glob.glob(f"{R}/{PREFIX}-{mode}-{arm}-*.log"))), key=key)
         arms[arm] = runs
         for r in runs:
             print(f"{r['name']:18} restarts={r['restarts']} terms={r['terms']} oom={r['oom']} liveness={r['liveness']} unhealthy={r['unhealthy']} "

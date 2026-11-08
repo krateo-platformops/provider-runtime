@@ -31,6 +31,18 @@ def num(v):
         return None
 
 
+def measured(paths):
+    """Drops the logs of runs whose setup failed, after naming them: prun.sh
+    wrote them before anything was measured, so they have no data."""
+    out = []
+    for p in sorted(paths):
+        if "# DISCARDED setup failed" in open(p).read():
+            print(f"{os.path.basename(p)[:-4]}: setup failed, nothing measured")
+        else:
+            out.append(p)
+    return out
+
+
 def run(path):
     t = open(path).read()
     rows = [dict(re.findall(r"(\S+?)=(\S+)", l)) for l in t.splitlines() if l.startswith("STAT ")]
@@ -80,7 +92,7 @@ def flags(r, arm):
 
 
 for arm in ("off", "75", "50"):
-    runs = sorted((run(p) for p in glob.glob(f"{R}/{PREFIX}-{arm}-*.log")), key=lambda r: int(r["name"].rsplit("-", 1)[1]))
+    runs = sorted((run(p) for p in measured(glob.glob(f"{R}/{PREFIX}-{arm}-*.log"))), key=lambda r: int(r["name"].rsplit("-", 1)[1]))
     print(f"== {arm}")
     for r in runs:
         f = flags(r, arm) if PREFIX != "c" else []
