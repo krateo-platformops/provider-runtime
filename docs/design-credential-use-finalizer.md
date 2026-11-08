@@ -1700,6 +1700,42 @@ proves it.
 
   For core-provider, the effect is that composition.krateo.io objects are
   refused there, along with everything else not on the list.
+
+  **Subresources aren't matched.** `resources: ["*"]` matches a request
+  only when it has no subresource. The matcher splits each rule into a
+  resource and a subresource, and `"*"` has an empty subresource
+  (`k8s.io/apiserver@v0.37.2/pkg/admission/plugin/webhook/predicates/rules/rules.go:106-117`).
+  So `serviceaccounts/token`, for example, is outside the policy, as
+  core-provider checked. Only `"*/*"` would match subresources.
+
+  **The parameter ConfigMap, and `parameterNotFoundAction: Deny`.** Stated
+  at core-provider's request; the design doesn't change:
+
+  1. **`cu-policy-params` and the binding ship in installer's same
+     release**, together with the policy and the namespace.
+  2. **That ConfigMap needs the same protection as the policy.** Nobody
+     may hold broad `delete` on configmaps in `krateo-system`. Whoever can
+     delete it can change what the policy does.
+  3. **The symptom of its absence.** With the parameters missing, the
+     binding fails before any expression runs: the apiserver reports
+     "no params found for policy binding with `Deny` parameterNotFoundAction"
+     (`policy/generic/policy_dispatcher.go:400-401`). Under
+     `failurePolicy: Fail`, that turns into a denial reading
+     "failed to configure binding: …"
+     (`policy/validating/dispatcher.go:75-100`). So **every** CREATE and
+     UPDATE in `krateo-credential-use` is denied, including
+     kube-controller-manager's `kube-root-ca.crt` and the `default`
+     ServiceAccount. `cu-index-*` writes fail with a Forbidden that names
+     the binding, so new holders fail closed and established ones are
+     Degraded (§10.6.4). **An operator could misread this as missing
+     RBAC.** The message names the policy binding, not a role, and the
+     runbook says to check that `cu-policy-params` exists first.
+
+  **Why Deny, not Allow.** With `Allow`, a missing parameter would let
+  every write through. Anyone able to delete one ConfigMap could then
+  switch the namespace's protection off, silently. With `Deny`, losing it
+  fails loudly and closed: no holder gets a hold it can't keep, and
+  nothing is written where the invariant no longer holds.
 - **The start check stays**, but by construction it never fires. At start
   the tracker lists holders of K in the index namespace and refuses to
   start if there are any. At acquire time, a holder there gets no hold: a
@@ -3370,6 +3406,16 @@ were not retried.
 | Dynamic writers: match the group `system:serviceaccounts:<management namespace>` ANDed with the `cu-index-` prefix, with the management namespace as the policy's parameter; git-provider fits the same rule | §10.6.1 |
 | Our own correction: a `namespaceSelector` matches a Namespace object's own CREATE and UPDATE, so the Namespace is now excluded explicitly; revision 12's "never matches `v1/Namespace`" was wrong | §10.6.1 |
 | Tests: Kubernetes' writers allowed, the namespace deletion completes, a dynamic composition-controller service account writes its index, a composition object is refused | §14 |
+
+**Revision 14** (crediting core-provider, who checked §10.6.1 and §16.3 and asked for these to be stated):
+
+| Item | Resolved in |
+|---|---|
+| The parameter ConfigMap and the binding ship in installer's same release | §10.6.1 |
+| The parameter ConfigMap needs the policy's protection: no broad configmap `delete` in `krateo-system` | §10.6.1 |
+| The symptom of its absence, verified in apiserver v0.37.2: every write in the namespace is denied before any expression runs; `cu-index-*` writes fail with a Forbidden naming the binding (new holders fail closed, established ones are Degraded); it can be misread as missing RBAC | §10.6.1 |
+| Why `Deny` stays: `Allow` would let one ConfigMap deletion switch the protection off | §10.6.1 |
+| core-provider's check that `resources: ["*"]` doesn't match subresources such as `serviceaccounts/token`, verified in the matcher | §10.6.1 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
