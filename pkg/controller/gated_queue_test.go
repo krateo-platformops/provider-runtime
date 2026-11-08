@@ -96,10 +96,14 @@ func TestForControllerRuntimeGatesTheQueueWithSaturation(t *testing.T) {
 			queue := newRecordedQueue(t, o)
 			pq := requirePriorityQueue(t, queue)
 
-			got := worker(pq)
+			// Both items are queued before the worker starts. An idle worker
+			// takes the first item that arrives, as upstream's queue would, so
+			// starting it first would let resync go out before spec-change
+			// exists.
 			low, high := -100, 100
 			pq.AddWithOpts(sigspq.AddOpts{Priority: &low}, newTestRequest("resync"))
 			pq.AddWithOpts(sigspq.AddOpts{Priority: &high}, newTestRequest("spec-change"))
+			got := worker(pq)
 			first, priority, ok := gotWithin(got, 5*time.Second)
 			if !ok || first != newTestRequest("spec-change") || priority != high {
 				t.Fatalf("first item = %v at %d (got one: %v), want spec-change at %d", first, priority, ok, high)
