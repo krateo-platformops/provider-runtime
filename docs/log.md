@@ -12,7 +12,7 @@ timestamp: 2026-11-08T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## 2026-11-07 — unreleased: the local slot is taken before the pop
+## 2026-11-08 — v1.12.0: the local slot is taken before the pop
 - **With saturation on, each controller's queue takes the local slot before it
   pops an item,** and gives it back when the reconcile returns. Low capacity
   behaves like fewer workers: queue order is the order work runs in, and no
