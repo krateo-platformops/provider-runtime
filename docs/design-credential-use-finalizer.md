@@ -250,6 +250,11 @@ server clock behind the local one nor a late delivery can shorten it.
 
 A cluster-scoped P has no namespace, so it always takes the last row.
 
+**The table covers held refs.** A ref in another namespace is held only with
+the target's consent (§11.3). One that isn't held isn't covered here, and
+the original deadlock doesn't apply to it: the holder's namespace teardown
+never deletes a Secret in another namespace.
+
 **The re-reads are the last step before the release patch.** When the
 grace has run out, the releaser GETs the Namespace live and reads its
 `deletionTimestamp`, not its phase. It then lists the holders live, to find
@@ -647,8 +652,16 @@ only come after the write it reports.
   Fairness to do it, unless the provider sets a QPS.
   - For 1,000 holders that is 2,000 writes, plus 1,000 extra passes, each
     with an external Observe call, if the predicate isn't installed.
-  - At 2 workers and about 0.5s per pass, the backfill takes about 8 minutes
-    with the predicate, and about 16 without.
+  - At 2 workers and about 0.5s per pass, the backfill takes about 4
+    minutes with the predicate (1,000 passes × 0.5s ÷ 2), and about 8
+    without (2,000 passes). The previous revision said 8 and 16, which was
+    twice too high.
+  - In PerNamePoll mode a new name needs its grant before A2. Each holder's
+    first pass stops at A2's 403 (about 50ms, with no Connect) and returns a
+    short `RequeueAfter`, which holds no worker (§10.7.2). The provisioner
+    grants the whole wave in one coalesced update, and the second pass
+    completes. That gives about 1,000 × (0.05s + 0.5s) ÷ 2 ≈ 4.6 minutes
+    with the predicate, and about 9 without.
   - With saturation on, local slots pace it further.
 - **A release:** for a batch of M pending objects in (K, N), M GETs, one
   Namespace GET per deleting namespace, one paginated metadata-only list of
@@ -1198,7 +1211,9 @@ func (c *connector) CredentialRefs(mg resource.Managed) ([]credentialuse.Ref, er
 ```
 
 The tracker follows the chain level by level, and **holds each object
-before it reads it**:
+before it reads it**, except a hop that §11.3's gate doesn't let it hold.
+That hop is read live, without a hold, and its `Next` is still followed
+(§9.4):
 
 1. A1 for level 1, then A2 for the KubernetesTarget.
 2. Read the KubernetesTarget: from its content cache, or with a live GET if
@@ -1278,6 +1293,36 @@ on. Where they might be missing, the guarantee doesn't hold. `RefsFunc`
 must then set `Guaranteed` only for objects that carry them, and return a
 normal, held ref for the rest. Whether every composition carries those
 labels is for core-provider to verify.
+
+### 9.4 Chains that consent in part
+
+Each hop of a chain is held or not on its own, by §11.3's gate. A chain can
+therefore be partly held, and that is still full protection against the
+deadlock this design fixes. That deadlock needs the holder's *own*
+namespace teardown to delete something the holder's deletion reads, and
+that teardown deletes only objects in the holder's namespace. Every
+same-namespace hop is always held.
+
+**A held intermediate with an unheld Secret elsewhere.** Holder H is in
+namespace A. Its Configuration C is in A, and C's Secret S is in B, which
+hasn't consented. C is held and S isn't. Tearing down A deletes C, which is
+held and stays readable, and never deletes S, which lives in B. So H's
+deletion pass can read both C and S. C's hold is not "held for no benefit":
+without it, A's teardown could delete C first, and H could never find S.
+The only remaining case is B being deleted while H lives, which is §11.3's
+recoverable residual.
+
+**The opposite shape: an intermediate elsewhere, with the Secret at home.**
+H and S are in A, and C is in B, which hasn't consented. S is held and C
+isn't. The tracker still follows C's `Next`, with a live GET each pass, so S
+is found and held. Tearing down A deletes S, which is held, and never C. So
+H's deletion reads both. The remaining case is again B being deleted while
+H lives: C is gone, and H fails until C is recreated, which is
+recoverable.
+
+**The cost of an unheld hop.** It isn't labelled, so §9.2's enqueue doesn't
+see it re-pointed, and it is read live on every pass rather than from the
+cache. A re-point of C is then picked up on the holder's next pass.
 
 ## 10. Watches, caches and memory
 
@@ -1671,29 +1716,68 @@ GETs and patches. The provisioner holds `get` and `patch` on Secrets
 cluster-wide (plus the same on any other protected kind), and grants the
 controller named `get` and `patch`.
 
+**The credential-use ClusterRole is dedicated** (M1):
+
+- only the provisioner creates and writes it;
+- no chart ships it;
+- it has no `aggregationRule`. An aggregated role's rules are rewritten by
+  the aggregation controller, which would undo the provisioner's grants;
+- it carries only the tracker's `get` and `patch` for holds. **The
+  controller's own read grants for Connect come from the provider's
+  separate provisioning**, and must cover every name in the index. A line
+  is written only for a ref Connect reads, so they do.
+
+If a GitOps tool manages the ClusterRole anyway, exclude its rules:
+
+```yaml
+ignoreDifferences:
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: credential-use.rest-dynamic-controller
+    jsonPointers: [/rules]
+syncPolicy:
+  syncOptions: [RespectIgnoreDifferences=true]
+```
+
+**"As today" still holds under this split.** Disown empties the index, so
+the provisioner revokes the credential-use grants. Connect keeps working
+through the provider's own read grants. A Degraded holder proceeds to a
+Connect that doesn't depend on the credential-use ClusterRole at all. And
+a 403 window in that ClusterRole (§10.7.1) affects only the tracker's GETs
+and patches, never Connect.
+
 #### 10.7.1 The grants are a pure function of the index (M1)
 
 The provisioner doesn't take grant requests. It **reconciles** the
 ClusterRole's `resourceNames` so that they cover the index's names, continuously.
 
 - **Its inputs:**
-  - the index ConfigMap of each kind it provisions for, read live; it may
-    also watch it by name, because the provisioner's RBAC allows that;
-  - the ClusterRole it manages, by name, read live. A ClusterRoleBinding
-    binds that ClusterRole to the controller.
-- **Its loop**, on every index change and every `ProvisionInterval` (5s by
-  default):
-  1. Read the index. The desired grants are the names in its lines, per
-     protected kind.
-  2. Read the ClusterRole. **Grant** every desired name it lacks, in **one**
-     update per cycle (coalesced, L6), guarded by resourceVersion, merging
-     on conflict.
+  - the index ConfigMap of **every kind the ClusterRole serves** (L1).
+    These are **watched by name**, which is the primary signal (L3);
+  - the ClusterRole it manages, **kept in a cache** by a watch on its name,
+    and written only with resourceVersion-guarded updates. A
+    ClusterRoleBinding binds it to the controller;
+  - **a slow fallback poll**, every `ProvisionResync` (5 minutes by
+    default), which re-reads every index and the ClusterRole live, in case
+    an event was lost.
+- **Its loop**, on every index or ClusterRole event, and on each fallback
+  poll:
+  1. The desired grants are the **union** of the names in every served
+     index's lines, per protected kind.
+  2. **Grant** every desired name the ClusterRole lacks, in **one** update
+     (coalesced, L6), guarded by resourceVersion, merging on conflict.
   3. For each granted name no line names any more, **revoke only after a
-     check**: live-GET, with its own cluster-wide `get`, every object of
-     that name it last saw in the index. If any carries a finalizer with K's
-     prefix, keep the name. Otherwise, re-read the index **after** those
-     GETs. If no line names it still, add it to the revoke set.
+     check**:
+     - live-GET, with its own cluster-wide `get`, every object of that name
+       it last saw in any served index. If any carries a finalizer with
+       **any served kind's prefix**, keep the name (L1);
+     - otherwise, re-read **every** served index live, after those GETs. If
+       no line in any of them names it still, add it to the revoke set.
   4. Remove the revoke set in one guarded update.
+- **Steady-state read cost** (L3): two watches per served kind and one for
+  the ClusterRole, no GETs, and one live read of each index and the
+  ClusterRole per fallback poll. GETs happen only when a name is about to
+  be revoked.
 
 **The order this gives, end to end.** To hold a new name, the acquirer adds
 the index line, then waits for the grant (§10.7.2), then runs A2. To drop
@@ -1716,25 +1800,34 @@ reported as an Acquire error, never as the outcome Deleting, which is a 422
 Now P carries the finalizer and has its line, but the grant is gone. **The
 hold isn't lost**: revoking a permission never touches P's finalizer, and
 the index is a superset again (§10.6.3). The next provisioner cycle reads
-the line and grants the name again. **The residual is one provisioner cycle
-of 403** (5s by default) on that name. During it, H2's passes, and any R3
-or Disown patch on P, fail and retry. Ordered the other way, with H2's A2
+the line and grants the name again. **The residual is one provisioner
+reaction of 403** on that name: the watch delivering H2's re-added line,
+and one guarded update. That is typically under a second, and at worst one
+fallback poll (5 minutes) if the event is lost. During it, the tracker's A2,
+R3 and Disown patches on P fail and retry. Connect isn't affected, because
+it reads through the provider's own grants (M1). Ordered the other way, with H2's A2
 landing before the provisioner's GET, the GET sees the finalizer and the
 name isn't revoked at all.
 
-**Name-level grants are cluster-wide.** A ClusterRole's `resourceNames`
-match a name in every namespace. So granting `git-token` lets the controller
-`get` and `patch` every Secret named `git-token` in any namespace. Binding
-per namespace with RoleBindings would narrow that, but RoleBindings die with
-their namespace (§13), so the design accepts the breadth and states it.
+**Name-level grants are cluster-wide** (L4). A ClusterRole's
+`resourceNames` match a name in every namespace. So granting `git-token`
+lets the controller **`get` and `patch`** every Secret named `git-token`, in
+any namespace. Binding per namespace with RoleBindings would narrow that,
+but RoleBindings die with their namespace (§13), so the design accepts the
+breadth and states it. The tracker still patches only objects it holds, and
+**the cross-namespace gate (§11.3)** decides which those are. So the breadth
+is a capability the controller has, not a reference a tenant can make it
+act on.
 
 #### 10.7.2 A 403 from A2 is retried briefly (L4)
 
 RBAC propagates to each API server through that server's own informer, so a
 grant that one server already applies can still be denied by another for a
-moment. **A 403 on A2 is retried** with backoff (0.5s, 1s, 2s, 4s: about
-8s in all) before it is reported as the ordering error. For a new holder,
-the pass then fails closed and requeues. **For an established holder it is
+moment. **A 403 on A2 is retried without sleeping in a worker** (L2). The
+pass returns a short `RequeueAfter` (0.5s, then 1s, 2s, 4s, tracked per
+holder and ref in memory). Once about 8s in all have passed, the 403 is
+reported as an Acquire error, the ordering or provisioning defect. For a new
+holder, the pass then fails closed and requeues with backoff. **For an established holder it is
 Degraded, and that is harmless**: Degraded is today's behaviour for one
 pass. Nothing is removed, the record already names P, so every releaser
 counts the holder, and the next pass writes A2 once the grant has
@@ -1749,7 +1842,7 @@ propagated.
   after a holder's deletion stay prompt. Only changes to *protected* objects
   are seen by polling: a finalizer stripped, a `deletionTimestamp`, a
   recreate, a re-pointed chain.
-- **The `written` skip needs a live GET** (L1). Without a watch, a stripped
+- **The `written` skip needs a live GET** (L1 of the previous pass). Without a watch, a stripped
   finalizer or a recreate isn't delivered to drop the entry. So in
   PerNamePoll, A2 may skip only after a live GET of P confirms the UID in
   the `written` entry and the finalizer. The steady state then costs one GET
@@ -1808,13 +1901,101 @@ finalizer. When the Secret appears, the prober or the holder's next pass
 holds it, and `BeforeEstablish` re-checks it before any owner finalizer is
 written. A provider that tolerates a missing optional Secret is unaffected.
 
-### 11.3 A Secret in another namespace
+### 11.3 A ref in another namespace: held only with the target's consent (M2)
 
-Allowed. The finalizer names the holder's namespace (§3), and the release
-check lists that namespace only. Under §5, the Secret's own namespace
-decides whether a deletion is recoverable. A cross-namespace user keeps a
-Secret in a terminating namespace alive until that user goes, so that
-namespace stays Terminating until then. The waiting event names the user.
+**Same-namespace refs are always held.** A ref whose object lives in a
+namespace other than the holder's is held **only if the target consents**
+(the user's decision).
+
+**Consent.** The target object, or its Namespace, carries:
+
+```
+credential-use.krateo.io/allow-holders-from: "team-a,team-b"
+```
+
+The value is a comma-separated list of holder namespaces.
+
+**`*` is allowed on the target object, and not on a Namespace.** On an
+object, `*` is one owner's deliberate choice about one object: a platform
+Secret in `krateo-system` that every tenant is meant to use is the real
+case for it. On a Namespace, `*` would open every object in it, present and
+future, to pinning by every tenant, and to grants for them under
+PerNamePoll. That is never one decision about one Secret, so a Namespace
+must list namespaces by name. A `*` on a Namespace is ignored, with a
+Warning event on it.
+
+**The check.** It is a live read, made for each cross-namespace ref
+**before** the index line, the grant and A2:
+
+- a GET of the Namespace's metadata, which the tracker can always make
+  (§13);
+- a GET of the target object's metadata. In PerNamePoll mode it is made
+  with the provider's own read grant for that object, which Connect needs
+  anyway (§13). If that GET is denied, Connect can't read the object either,
+  and the ref is treated as not held.
+
+**A ref without consent is not held.** It gets no index line, no grant and
+no A2, though its `Next` is still followed (§9.4). Connect proceeds **exactly as
+today**,
+with a Warning event, `CredentialRefNotHeld`, naming the ref and the missing
+consent, and the metric `credentialuse_refs_not_held_total`. This is a
+fail-open with no regression, not an Acquire error: nothing that worked
+before stops working.
+
+**Why the original deadlock doesn't apply to a ref that isn't held.** The
+deadlock in §1 needs the holder's *own* namespace teardown to delete the
+Secret first. That teardown deletes only objects in the holder's namespace,
+so it never deletes a Secret in another one. What remains is the reverse
+case: **the Secret's own namespace is deleted while the holder lives.** The
+holder then fails Connect, and if it is deleted, it waits. That is
+recoverable. Once that namespace is fully gone, it and the Secret can be
+recreated. Alternatively, the holder's owner can set deletion-policy
+`orphan`, or the target's owner can consent, and the holder is protected
+from its next pass.
+
+**Consent withdrawn while the ref is held: the hold stays until the holder
+stops using the ref.** The new consent rule applies to new holds only. The
+existing hold is released by the normal protocol, when the holder's record
+drops the ref or the holder goes. This is the safe choice. Releasing on
+withdrawal would turn a protected holder into one that can wedge in the
+middle of its life, in the very case this feature exists for: the target's
+namespace deleted while the holder is deleting. Consent was given when the
+hold was taken, so the hold runs to the end of that reference. The cost to
+the target's owner is bounded by §5. In a live namespace a deleted target
+waits only while a holder is deleting. A namespace teardown waits for the
+cross-namespace holders. The withdrawal is visible: a Warning event on each
+affected holder (`CredentialRefConsentWithdrawn`) and a metric. The owner
+can end it at once by having the holder's reference changed, or the holder
+deleted.
+
+**Chains.** Each hop is held or not on its own, by the same gate. A hop
+outside the *holder's* namespace needs consent for the holder's namespace,
+whatever namespace the previous hop was in, because the hold and its
+finalizer belong to the holder (§3). **An unheld hop doesn't stop the
+chain.** Its `Next` is still followed, so a same-namespace Secret behind a
+cross-namespace intermediate is still held. Because the unheld hop isn't
+labelled, it isn't in the label-scoped cache, so it is read with a live GET
+on each pass. §9.4 works through both shapes.
+
+**The provisioner never grants a ref that isn't held.** A ref without
+consent never gets an index line, and the provisioner grants only what the
+index names (§10.7.1). Only the tracker's identity can write the index,
+besides cluster administrators (§10.6.7).
+
+**What this closes.**
+
+- **Tenant-chosen grants.** Without the gate, a tenant could name any
+  Secret in another namespace, and under PerNamePoll the provisioner would
+  grant the controller `get` and `patch` on it *because* of that reference.
+  Now a grant follows only a reference the target has consented to.
+- **Pinning.** Without the gate, a tenant could put a finalizer on a Secret
+  in a namespace it doesn't control, delaying that Secret's deletion and
+  holding that namespace's teardown open. Now only consenting targets can
+  be pinned, and only by the namespaces they list.
+
+A cross-namespace user that *is* held keeps a Secret in a terminating
+namespace alive until that user goes, as before. That namespace stays
+Terminating until then, and the waiting event names the user.
 
 ### 11.4 A Secret already being deleted when an object first references it
 
@@ -2037,9 +2218,20 @@ Doc text for consumers:
 > kinds' CustomResourceDefinitions, by name. Use `resourceNames` only when
 > you know every Secret name when you generate the RBAC (`Watch: PerName`),
 > or when you provision each name at runtime (`Watch: PerNamePoll`); both
-> need the index ConfigMap's grants (§10.6.7). Don't
-> use a namespaced Role for these permissions: it is deleted with its
-> namespace, and objects there then can't finish deleting.
+> need the index ConfigMap's grants (§10.6.7). With PerNamePoll, the
+> credential-use ClusterRole is created and written only by your provisioner.
+> Don't ship it in a chart, and don't give it an `aggregationRule`. Connect's
+> own read grants come from your separate provisioning. Don't use a
+> namespaced Role for these permissions: it is deleted with its namespace,
+> and objects there then can't finish deleting.
+>
+> **Refs across namespaces.** Holders hold a Secret in another namespace
+> only if that Secret, or its Namespace, carries
+> `credential-use.krateo.io/allow-holders-from` listing the holder's
+> namespace. `*` is accepted on the Secret only. Without it, the reference
+> still works as before, but isn't protected, and the holder gets a
+> `CredentialRefNotHeld` event. Removing the annotation later doesn't
+> release existing holds; it stops new ones.
 
 ## 14. Tests, and what the reviewer should attack
 
@@ -2163,6 +2355,20 @@ on krateo-057:
   versions stays safe and is measured for churn. Both owner finalizer
   names are accepted during provider-runtime#46.
 - Tamper checks skip lines whose R3 was seen, and GET the rest (L5).
+- **Cross-namespace consent** (§11.3): a ref without consent gets no line,
+  no grant and no A2, and Connect proceeds with `CredentialRefNotHeld`;
+  consent by object, by namespace, and `*` on an object; a `*` on a
+  Namespace is ignored; withdrawal keeps the hold until the record drops
+  the ref; both partly consenting chain shapes of §9.4, held hop by hop,
+  with the chain followed past an unheld hop; the provisioner never grants an
+  unheld ref; the Secret's own namespace deleted while an unheld holder
+  lives, and its recovery.
+- The provisioner serves two kinds from one ClusterRole: the union of
+  grants, and revocation checked against both prefixes after re-reading
+  both indexes (L1). It is watch-driven with a fallback poll (L3). A 403
+  on A2 requeues without holding a worker (L2).
+- Disown and Degraded leave Connect working under the split ClusterRoles
+  (M1).
 - A foreground-deleted holder that owns its Secret completes (§11.8).
 - Setup after start, and `Track` twice with equal and with different
   Options.
@@ -2347,19 +2553,39 @@ writing for #510:
 - **A mistyped or unmatched path resolves to not found**, so it silently
   protects nothing. `AssertCredentialRefsCover` (§11.9) fails on it. The
   collector's tests should run it for every RestDefinition fixture.
-- **RBAC without undoing #510.** oasgen removed cluster-wide `list` and
-  `watch` on Secrets in #510, so LabelScoped is out. It can adopt with
-  runtime-provisioned RBAC, `Watch: PerNamePoll` (§10.7, §13). Its
-  provisioner already targets a ClusterRole and a ClusterRoleBinding, with
-  a cluster-scoped builder, as oasgen has confirmed. That builder holds
-  `get` and `patch` on Secrets cluster-wide, and grants each name to
-  rest-dynamic-controller in the mandatory order. The cost is that the
-  provisioner can read any Secret whose name it knows (§10.7).
-- **The narrower alternative:** protect only the Configuration-level
-  Secrets, whose names are known when the RBAC is generated, with
-  `Watch: PerName`. Per-object Secrets resolved from paths then stay
-  unprotected, and the deadlock remains possible for them. That choice is
-  oasgen's to make.
+- **RBAC, as things stand.** Today oasgen's provider mints
+  `resourceNames`-scoped Secret Roles that are authorized only through
+  `escalate`, which comes from a `*` on `rbac.authorization.k8s.io`. Its
+  ClusterRole doesn't mention Secrets at all. oasgen-provider#526 tracks
+  that posture. In oasgen's session, the user decided that #510 proceeds on
+  the existing mechanism, and the posture change happens separately in
+  #526. This design never relies on `escalate` (§13), so oasgen has two
+  options, and **hasn't committed to either**:
+  1. **PerNamePoll** (§10.7), with a provisioner that holds cluster-wide
+     `secrets: [get, patch]`, a new grant for oasgen. Its cluster-scoped
+     builder can target a ClusterRole and ClusterRoleBinding, as oasgen has
+     confirmed. The credential-use ClusterRole is dedicated (§10.7), and
+     Connect's read grants stay with oasgen's own provisioning, which must
+     cover the index. The cost is that the provisioner can read any Secret
+     whose name it knows.
+  2. **Protect only names known when the RBAC is generated**, such as the
+     Configuration-level Secrets, with `Watch: PerName`. Per-object Secrets
+     resolved from paths then stay unprotected, and the deadlock remains
+     possible for them.
+- **What is held, as oasgen measured it.**
+  - **Per-object Secrets are always held.** oasgen's per-CR `secretRef`
+    Secrets are always read from the CR's own namespace
+    (`EnsureSecretRole(..., mg.GetNamespace(), ...)`), so they are
+    same-namespace refs.
+  - **Configuration-level auth Secrets are held only where the target
+    consents.** They can live in another namespace (`authsecretrbac.go:131`
+    groups them by Secret namespace), so §11.3's gate applies.
+  - **This partial coverage follows from the opt-in, by design, and is not
+    a gap.** An unheld cross-namespace Secret isn't exposed to the
+    deadlock, because the CR's namespace teardown never deletes it (§9.4).
+    The remedy, where protection is wanted anyway, is an
+    `allow-holders-from` annotation on the target, and that is the target
+    owner's decision.
 
 ### 16.3 unstructured-runtime (core-provider)
 
@@ -2609,6 +2835,20 @@ were not retried.
 | L4 A 403 on A2 is retried for about 8s; why Degraded is harmless | §10.7.2 |
 | L5 Tamper checks skip lines with a visible R3; the N× GET cost accepted | §10.6.6 |
 | L6 ClusterRole updates coalesced per cycle; the cost of a 2,000-name rule, with the linear match cited | §10.7.1, §10.7.3 |
+
+**Revision 7** (cross-namespace consent and the provisioner):
+
+| Item | Resolved in |
+|---|---|
+| M2 Cross-namespace refs held only with the target's consent (`allow-holders-from`, by object or namespace; `*` on objects only); a live check before line, grant and A2; not held means fail-open as today with `CredentialRefNotHeld`; withdrawal keeps the hold until the reference ends; chains gated per hop; the provisioner never grants an unheld ref; why tenant-chosen grants and pinning are closed; why the deadlock doesn't apply to an unheld ref, and the remaining recoverable case | §11.3, §5, §13, §16.2 |
+| M1 The credential-use ClusterRole is dedicated (provisioner-only, no chart, no `aggregationRule`); Connect's read grants are separate and cover the index; an Argo CD note; Disown and Degraded still as today | §10.7, §13 |
+| L1 One ClusterRole for several kinds: the union of indexes; revocation checks every served prefix after re-reading every index | §10.7.1 |
+| L2 A 403 on A2 returns a short `RequeueAfter`, never a sleep; the backfill figures recomputed, and the old ones corrected | §10.7.2, §6.6 |
+| L3 The provisioner is watch-driven, caches the ClusterRole, and falls back to a slow poll; its steady-state read cost | §10.7.1 |
+| L4 The widening says `get` and `patch`, and points to the cross-namespace gate | §10.7.1 |
+| oasgen-provider#526 cited; both adoption options as they stand; oasgen not committed to either | §16.2 |
+| Chains that consent in part: each hop gated on its own; why that is full protection; the held-intermediate and the intermediate-elsewhere shapes; an unheld hop no longer stops the chain | §9.4, §11.3 |
+| oasgen's coverage as measured: per-CR Secrets same-namespace, always held; Configuration-level Secrets held only with consent; partial by design, and the remedy | §16.2 |
 
 ## 18. Open questions for the user
 
