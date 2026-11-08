@@ -771,21 +771,28 @@ git-provider's rollout resumes.
 **The control arm is #48's measured build, `new3`** (decided, §13 item 8), recorded
 in `results/image-new3.txt` as commit `6d76a36bcff5e2e0d45d56fecf96f023e7094c63`
 and digest
-`sha256:ceb79357975eed7fc20b4eec005a83d546e8910d953642fd54a1e150492de58d`. It is
-rebuilt from that commit with `build.sh new new3 --local`, and used only if the
-rebuilt image's digest equals the recorded one. If it doesn't, nothing runs and
-the mismatch is reported. Two facts bear on that check:
+`sha256:ceb79357975eed7fc20b4eec005a83d546e8910d953642fd54a1e150492de58d`.
 
-- **A byte-identical rebuild is unlikely.** `build.sh` packs the binary with a
-  plain `tar -cf`, which records its modification time, onto `alpine:3.20`, a
-  tag that moves; either changes the digest. The Go binary itself is
-  reproducible only from the same source path, since the build doesn't use
-  `-trimpath`.
-- **The recorded image still exists and matches.** The measuring worktree's
-  `images/measure-new3.tar` reads `sha256:ceb79357…92de58d` with
-  `crane digest --tarball`, checked on 2026-11-08. Commit `6d76a36` is in the
-  local object store but on no branch, local or remote, so nothing keeps it from
-  garbage collection.
+- **The image used is the recorded tarball,** `images/measure-new3.tar` in the
+  measuring worktree, not a rebuild. Before the block, and again before it is
+  loaded on the cluster, its digest is re-read with `crane digest --tarball` and
+  compared with `results/image-new3.txt`. A mismatch stops the block. It read
+  `sha256:ceb79357…92de58d`, matching, on 2026-11-08.
+- **Provenance check, reported but not blocking.** `6d76a36` is rebuilt with
+  `build.sh new new3 --local` from a checkout at the measuring worktree's path,
+  with the toolchain the tarball's binary records (`go version -m` on it), and the
+  SHA-256 of the rebuilt `measure` binary is compared with that of `/measure`
+  extracted from the tarball's appended layer. The report says whether they
+  match. A mismatch is reported and doesn't stop the block: the tarball is the
+  build that was measured, whatever a rebuild produces.
+- **Why the binary, not the image.** A rebuilt image's digest can't be expected to
+  match: `build.sh` packs the binary with a plain `tar -cf`, which records its
+  modification time, onto `alpine:3.20`, a tag that moves. The Go binary can
+  match, but only from the same source path and toolchain, since the build
+  doesn't use `-trimpath`.
+- **The source is kept.** `6d76a36` was on no branch; it is now held by the local
+  branch `measure-new3-source`, so garbage collection can't remove it. That
+  branch isn't pushed.
 
 **For the independent reviewer**, who gets the code and not this conclusion.
 Attack:
@@ -892,9 +899,12 @@ deciding item 8.
    is documented as a limitation (§8): it raises concurrency, up to the ceiling.
    provider-runtime#50 is the follow-up for a downstream signal that can only
    lower.
-8. **The memory block's control arm is #48's measured build, `new3`**, rebuilt
-   from its recorded commit and used only if its digest matches the record
-   (§10, which also says why a match is unlikely).
+8. **The memory block's control arm is #48's measured build, `new3`**, decided by
+   the coordinator: the recorded tarball, used after its digest is re-checked
+   against the record. A rebuild from `6d76a36` checks provenance by comparing
+   the `measure` binary's hash with the tarball's, and its result is reported but
+   doesn't block (§10). The first decision, a rebuild used only if its image
+   digest matched, was replaced, because that digest can't be expected to match.
 
 ## 14. Checked, and not
 
