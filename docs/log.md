@@ -27,6 +27,9 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   the `memory_working_set` input; `RecoveryInterval` no longer touches local
   capacity. Memory becomes a separate `Memory` toggle, off by default even with
   saturation on. New options: `CPUTarget`, `MemoryReserve`, `GoMemoryLimit`.
+- **Behaviour change with no CPU limit:** today pressure over 50 halves local
+  capacity; the design learns the CPU the node gives at pressure onset and
+  applies the same law to it.
 - **Not handled, by decision:** a downstream that slows without rate-limit
   signals raises concurrency up to the ceiling; provider-runtime#50 is the
   follow-up.
