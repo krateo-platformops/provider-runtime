@@ -832,6 +832,7 @@ func FinalizerName(holder schema.GroupKind, namespace string) (string, error)
 
 const (
 	AnnotationRefs = "credential-use.krateo.io/refs.v1"
+	AnnotationUnheld = "credential-use.krateo.io/unheld"
 	LabelHeld      = "credential-use.krateo.io/held"
 )
 ```
@@ -1077,9 +1078,9 @@ return ctrl.NewControllerManagedBy(mgr).
 ```
 
 `IgnoreCredentialUseRecord` drops a holder update event only if its only
-change is the record annotation (setting aside `resourceVersion` and
-`managedFields`), **and** the new record equals the one this process last
-wrote for that holder (L8). A hand edit of the record, or another process's
+change is the record or the `unheld` annotation (setting aside
+`resourceVersion` and `managedFields`), **and** both equal what this process
+last wrote for that holder (L8). A hand edit of the record, or another process's
 write, still triggers a pass. That removes the extra pass A1 would otherwise
 cause (§6.6, M6), and nothing else. An outside runtime filters its holder
 events the same way.
@@ -1401,6 +1402,10 @@ batches, not holders (holders only for kinds with a `Next`, §9.2, L7): the
 
 The releaser re-checks the grace itself in R1, so an early or duplicate
 enqueue is harmless.
+
+**Any change to K's finalizer or epoch on a protected object** also
+enqueues its (K, N) batch. R0's fast path settles it at once when users
+exist. It is the backstop for an A2 issued from a stale view (§11.3).
 
 **On startup**, the protected informers' initial list enqueues a release
 batch for every (K, N) of every held object. In PerName mode, the index
@@ -1934,13 +1939,18 @@ Warning event on it.
   anyway (§13). If that GET is denied, Connect can't read the object either,
   and the ref is treated as not held.
 
-**A ref without consent is not held.** It gets no index line, no grant and
-no A2, though its `Next` is still followed (§9.4). Connect proceeds **exactly as
-today**,
+**A ref without consent is not held.** The gate runs before A1, so the ref
+isn't in the record. It gets no index line, no grant and no A2, though its
+`Next` is still followed (§9.4). It is listed in the holder's `unheld`
+annotation as `NotConsented` (below). Connect proceeds **exactly as today**,
 with a Warning event, `CredentialRefNotHeld`, naming the ref and the missing
 consent, and the metric `credentialuse_refs_not_held_total`. This is a
 fail-open with no regression, not an Acquire error: nothing that worked
 before stops working.
+
+An unheld ref's consent is re-checked live on the prober's backoff (§10.3),
+not on every pass, because the target isn't labelled and so isn't in the
+cache. When consent appears, the ref is held on the next pass.
 
 **Why the original deadlock doesn't apply to a ref that isn't held.** The
 deadlock in §1 needs the holder's *own* namespace teardown to delete the
@@ -1953,20 +1963,105 @@ recreated. Alternatively, the holder's owner can set deletion-policy
 `orphan`, or the target's owner can consent, and the holder is protected
 from its next pass.
 
-**Consent withdrawn while the ref is held: the hold stays until the holder
-stops using the ref.** The new consent rule applies to new holds only. The
-existing hold is released by the normal protocol, when the holder's record
-drops the ref or the holder goes. This is the safe choice. Releasing on
-withdrawal would turn a protected holder into one that can wedge in the
-middle of its life, in the very case this feature exists for: the target's
-namespace deleted while the holder is deleting. Consent was given when the
-hold was taken, so the hold runs to the end of that reference. The cost to
-the target's owner is bounded by §5. In a live namespace a deleted target
-waits only while a holder is deleting. A namespace teardown waits for the
-cross-namespace holders. The withdrawal is visible: a Warning event on each
-affected holder (`CredentialRefConsentWithdrawn`) and a metric. The owner
-can end it at once by having the holder's reference changed, or the holder
-deleted.
+**Consent withdrawn: the hold is released** (the user's decision). The
+target owner's consent is authoritative. When `allow-holders-from` no
+longer names a holder's namespace, either on the object or on its
+Namespace, that holder's hold is dropped:
+
+- **from the record.** The holder's next pass writes A1 without the ref;
+- **from the index and the grant**, through the normal path: R3, then the
+  prune, then the provisioner's revoke (§10.6.2, §10.7.1);
+- **and the finalizer** goes through the normal release protocol, with §5's
+  grace and live re-checks. Holders of the same kind in the same namespace
+  all lose consent together, so the finalizer for (K, N) goes once the last
+  of them has dropped the ref.
+
+**How the withdrawal is seen.**
+
+- **A change to the target's annotation** is delivered by the label-scoped
+  informer, whose transform keeps `credential-use.*` annotations (§10.1).
+  It enqueues the target's holders through the index.
+- **A change to the Namespace's annotation** is delivered by a
+  metadata-only informer on Namespaces, with the same kind of transform,
+  and enqueues the holders of every held object in that namespace.
+- **In PerNamePoll mode**, the target object isn't watched. Its annotation
+  is seen by the held-object poll, within its backoff (§10.7.3), at most 5
+  minutes, and at once by any pass that runs A2 (below). A Namespace isn't a
+  protected kind, so its informer runs in PerNamePoll too.
+
+A `CredentialConsentWithdrawn` Warning event is recorded on the target and
+on each affected holder, and `credentialuse_consent_withdrawn_total` is
+counted. The holder's event names the target, the namespace whose consent
+was withdrawn, and that the hold was released:
+
+```
+hold on team-b/Secret/db-creds released: holders from team-a are no longer allowed (allow-holders-from on Namespace team-b)
+```
+
+**A durable record of what isn't held.** An event expires in about an hour,
+but a Secret may be removed days after its consent was withdrawn. The holder
+would then see a plain not-found, which looks the same as a rotation gap. So
+the runtime keeps a second annotation on the holder, next to the record:
+
+```
+credential-use.krateo.io/unheld: [{"ref":"team-b/Secret/db-creds","reason":"ConsentWithdrawn","since":"2026-11-08T17:02:11Z"}]
+```
+
+- **Reasons:** `NotConsented` (never held, because consent was missing) and
+  `ConsentWithdrawn` (held, then released). `since` is when the ref
+  entered that state, and it is kept while the state lasts.
+- **The same write.** It is written in the A1 merge patch, together with
+  the record, whenever either changes, so it costs no extra write. The
+  holder event filter treats it like the record (§7.5).
+- **It is bounded.** It holds at most 16 entries, most recent first. Beyond
+  that, the last entry is
+  `{"ref":"…","reason":"More","count":<n>}`. With refs of at most about 350
+  characters, it stays under 6 KB.
+- **An entry goes** when the ref is held again, or when the holder no longer
+  names it.
+- **It is the runtime's.** Like the record, it shouldn't be edited. An edit
+  is overwritten by the next A1.
+
+**Reading it next to a not-found** (operators and providers). When a holder
+fails with a not-found for a credential, look at
+`credential-use.krateo.io/unheld`:
+
+- **an entry for that object with `ConsentWithdrawn`**: its owner withdrew
+  consent at `since`, the hold was released, and the object was then free
+  to be deleted. Recover inside the holder's own live namespace, by
+  re-pointing or with deletion-policy `orphan`;
+- **an entry with `NotConsented`**: it was never protected (§11.3);
+- **no entry**: the ref was held, or it is in the holder's namespace. The
+  not-found is then a rotation gap, or §5.2's residual.
+
+provider-runtime adds a pointer to that annotation to the failure message
+(§12), so the cause is visible without knowing the annotation exists.
+
+**The holder then proceeds as for any unheld ref**: Connect works as today,
+with no hold. If the Secret later goes, the holder's owner recovers inside
+the holder's own live namespace, with deletion-policy `orphan` or a
+re-point.
+
+**Why the drop can't race an A2 into a stranded or unindexed finalizer.**
+Two rules close it:
+
+1. **Every A2 of a cross-namespace ref is preceded by a live consent read in
+   the same pass**, as is every new hold (line, grant, A2). A pass that runs
+   A2 after the withdrawal therefore sees it, writes no A2, and drops the
+   ref instead. A pass whose A2 is skipped (§6.3) writes nothing. Deletion
+   passes never skip, so they always read consent live.
+2. **Every change to K's finalizer or epoch on a protected object enqueues
+   its (K, N) release batch.** That covers any A2 still in flight. Say
+   process Y's pass read consent before the withdrawal and its A2 lands
+   after a release has already removed the finalizer. The A2's own write
+   is delivered as a change to P, which enqueues a batch. That batch's
+   consistent list (R2) runs after the A2, finds no record naming P, and
+   releases it by §5. The same backstop covers any A2 issued from a stale
+   view of a holder's record, consent or not.
+
+So no finalizer is left without a record and a pending release check. A2
+still runs only after its index line (§10.6.3), so none is left without a
+line either.
 
 **Chains.** Each hop is held or not on its own, by the same gate. A hop
 outside the *holder's* namespace needs consent for the holder's namespace,
@@ -2125,12 +2220,42 @@ Then provider-runtime's mapping.
 | A live holder whose protected object was released under §5 and is gone | Its credential read fails, as today; the provider's error names the object | Synced=False/ReconcileError from Connect |
 | A new holder that must not connect (§11.4), or whose acquire failed | Sync failed, with a message naming the object and the reason; readiness unknown | Synced=False/ReconcileError, Ready=NotObserved |
 | An established holder whose acquire failed | It proceeds; a Warning event and one log line | event `CredentialUseDegraded` |
+| A holder with refs that aren't held (§11.3) | A durable, runtime-owned list of them, with reasons, on the holder; when a credential read fails, a pointer to it in the failure message | annotation `credential-use.krateo.io/unheld`; the Synced suffix below |
 
 In a terminating namespace, events are rejected (`git-provider-rlgov.log`
 line 7), so there the log and the gauge are the signal. The message for a
 new holder that must not connect is
 `credential <kind> <ns>/<name> is being deleted and can't be held; not connecting until it is replaced or the reference changes`.
 No new condition type is added (U4).
+
+**The pointer to unheld refs, in the failure message.** When a pass fails in
+Connect or Observe, so that Synced=False/ReconcileError, **and** the holder's
+`unheld` list is non-empty, provider-runtime appends exactly:
+
+```
+; credential-use: <n> ref<s> not held (<reason> since <since><more>), see annotation credential-use.krateo.io/unheld
+```
+
+- `<n>` is the number of entries, counting those folded into `More`, and
+  `<s>` is `s` when `<n>` is not 1;
+- `<reason>` and `<since>` are those of the most recent entry, with `<since>`
+  in RFC 3339 UTC;
+- `<more>` is empty when `<n>` is 1, and `, +<n-1> more` otherwise.
+
+For example:
+`; credential-use: 1 ref not held (ConsentWithdrawn since 2026-11-08T17:02:11Z), see annotation credential-use.krateo.io/unheld`.
+
+**Its length is at most 160 characters.** At most 142 is reachable, with
+`<n>` capped at 9999 and reasons of at most 16 characters. It is added
+**only** on a failing pass with a non-empty list. It is never added to a
+successful pass, and never to a failure that isn't in Connect or Observe.
+It is message text, not a new condition (U4).
+
+**Outside runtimes**, in neutral terms: when a pass fails because the
+object's credentials or the objects that lead to them can't be read, and
+the object's `unheld` annotation is non-empty, add to the failure you
+report: the number of unheld refs, the most recent reason and its time, and
+the annotation's key.
 
 **The held gauge counts finalizers, not labels** (L4).
 `credentialuse_held_objects{holder_kind}` is the number of (protected
@@ -2152,7 +2277,7 @@ remove the finalizers it holds there. That is a new wedge.
 |---|---|---|
 | Secrets, and each other `Protected` kind | `get`, `patch` | A2, R1, R3, the live fallbacks and the prober |
 | the same | `list`, `watch` | the label-scoped informer |
-| namespaces | `get` | §5's live `deletionTimestamp` check |
+| namespaces | `get`, `list`, `watch` | §5's live `deletionTimestamp` check; the metadata-only informer that sees consent on Namespaces (§11.3) |
 | the holder kind | `get`, `list`, `watch`, `patch`, `update` | the holder informer, R2's consistent list, A1 (patch), and `Forget` in the finalizer-removal Update and on its own (update) (L8) |
 | customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; the count fields and the one-time index pointer, written only on change (§7.4, §10.6) |
 | configmaps, by `resourceNames` (PerName and PerNamePoll: the kind's index) | `get`, `update`, `patch`, and `watch` in PerName mode | §10.6 |
@@ -2230,8 +2355,9 @@ Doc text for consumers:
 > `credential-use.krateo.io/allow-holders-from` listing the holder's
 > namespace. `*` is accepted on the Secret only. Without it, the reference
 > still works as before, but isn't protected, and the holder gets a
-> `CredentialRefNotHeld` event. Removing the annotation later doesn't
-> release existing holds; it stops new ones.
+> `CredentialRefNotHeld` event. Removing a namespace from the annotation
+> later releases those holders' holds through the normal protocol, with a
+> `CredentialConsentWithdrawn` event.
 
 ## 14. Tests, and what the reviewer should attack
 
@@ -2358,8 +2484,10 @@ on krateo-057:
 - **Cross-namespace consent** (§11.3): a ref without consent gets no line,
   no grant and no A2, and Connect proceeds with `CredentialRefNotHeld`;
   consent by object, by namespace, and `*` on an object; a `*` on a
-  Namespace is ignored; withdrawal keeps the hold until the record drops
-  the ref; both partly consenting chain shapes of §9.4, held hop by hop,
+  Namespace is ignored; withdrawal releases the hold through the normal
+  protocol, seen by watch and by the PerNamePoll poll, and a concurrent A2
+  that lands after the release is caught by the batch its own write
+  enqueues; both partly consenting chain shapes of §9.4, held hop by hop,
   with the chain followed past an unheld hop; the provisioner never grants an
   unheld ref; the Secret's own namespace deleted while an unheld holder
   lives, and its recovery.
@@ -2369,6 +2497,12 @@ on krateo-057:
   on A2 requeues without holding a worker (L2).
 - Disown and Degraded leave Connect working under the split ClusterRoles
   (M1).
+- **The unheld record and its pointer:** a ConsentWithdrawn ref plus a
+  not-found Connect error produce Synced=False/ReconcileError whose message
+  ends with the exact suffix, under 160 characters. A successful pass, and
+  an empty list, add nothing. The annotation is written in the same patch
+  as the record, never in a write of its own. It caps at 16 entries with a
+  `More` entry. The holder event names target, namespace and release.
 - A foreground-deleted holder that owns its Secret completes (§11.8).
 - Setup after start, and `Track` twice with equal and with different
   Options.
@@ -2572,18 +2706,20 @@ writing for #510:
      Configuration-level Secrets, with `Watch: PerName`. Per-object Secrets
      resolved from paths then stay unprotected, and the deadlock remains
      possible for them.
-- **What is held, as oasgen measured it.**
-  - **Per-object Secrets are always held.** oasgen's per-CR `secretRef`
-    Secrets are always read from the CR's own namespace
-    (`EnsureSecretRole(..., mg.GetNamespace(), ...)`), so they are
-    same-namespace refs.
-  - **Configuration-level auth Secrets are held only where the target
-    consents.** They can live in another namespace (`authsecretrbac.go:131`
-    groups them by Secret namespace), so §11.3's gate applies.
-  - **This partial coverage follows from the opt-in, by design, and is not
-    a gap.** An unheld cross-namespace Secret isn't exposed to the
-    deadlock, because the CR's namespace teardown never deletes it (§9.4).
-    The remedy, where protection is wanted anyway, is an
+- **What oasgen measured, and only that.**
+  - At the single call site that reads them, per-CR `secretRef` Secrets
+    are read from the CR's own namespace
+    (`EnsureSecretRole(..., mg.GetNamespace(), ...)`). So those are
+    same-namespace refs, which are held by default.
+  - Auth `SecretKeySelector`s carry their own namespace, and the collector
+    groups them by it (`authsecretrbac.go:131`). So they can be
+    cross-namespace, and are held only where the target consents (§11.3).
+  - **Not checked:** whether any other Secret read in oasgen-provider or
+    rest-dynamic-controller crosses namespaces.
+  - Where these refs are cross-namespace, the partial coverage follows from
+    the opt-in by design. An unheld cross-namespace Secret isn't exposed to
+    the deadlock, because the CR's namespace teardown never deletes it
+    (§9.4). The remedy, where protection is wanted anyway, is an
     `allow-holders-from` annotation on the target, and that is the target
     owner's decision.
 
@@ -2849,6 +2985,17 @@ were not retried.
 | oasgen-provider#526 cited; both adoption options as they stand; oasgen not committed to either | §16.2 |
 | Chains that consent in part: each hop gated on its own; why that is full protection; the held-intermediate and the intermediate-elsewhere shapes; an unheld hop no longer stops the chain | §9.4, §11.3 |
 | oasgen's coverage as measured: per-CR Secrets same-namespace, always held; Configuration-level Secrets held only with consent; partial by design, and the remedy | §16.2 |
+
+**Revision 8:**
+
+| Item | Resolved in |
+|---|---|
+| Withdrawn consent releases the hold (the user's decision, replacing revision 7's "keep until the reference ends"): dropped from the record, the index line and the grant; the finalizer through the normal protocol; seen by watch on the target and on Namespaces, and by the poll in PerNamePoll; events on target and holders and a metric; the holder then proceeds as unheld | §11.3, §13 |
+| The proof that the drop can't race an A2 into a stranded or unindexed finalizer: a live consent read before every cross-namespace A2, and a release batch enqueued by every change to K's finalizer or epoch, which also covers A2s from any stale view of a record | §11.3, §10.2 |
+| oasgen's coverage claim narrowed to what was measured, with what wasn't checked stated | §16.2 |
+| The holder-side event names the target, the withdrawing namespace and the release; a durable, bounded `credential-use.krateo.io/unheld` annotation (`NotConsented`, `ConsentWithdrawn`) written in the same patch as the record; how to read it next to a not-found | §11.3, §7.1, §7.5 |
+| A pointer to the `unheld` annotation appended to Synced=False on a failing Connect or Observe: the exact suffix, its length bound, when it's added, neutral guidance for outside runtimes, and a test | §12, §14 |
+| **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
 
