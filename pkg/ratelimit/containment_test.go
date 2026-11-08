@@ -369,11 +369,13 @@ func TestAPopRacingShutDownReportsNoBrokenRecord(t *testing.T) {
 	t.Logf("%d runs: the pop got the item %d times, shutdown %d times", runs, gotItem, gotShutdown)
 }
 
-// wedgingInner stands for upstream's priority queue after a shutdown that
-// raced a hand-out: its hand-out goroutine sends on the unbuffered get channel
-// holding the locks Done and Len take (priorityqueue.go:369-400), the pop it
-// was for has left on done (:436-444), and the send never completes. From then
-// on its Done and Len never return.
+// wedgingInner stands for controller-runtime v0.23.3's priority queue after a
+// shutdown that raced a hand-out: its hand-out goroutine sends on the
+// unbuffered get channel holding the locks Done and Len take
+// (priorityqueue.go:369-400 at v0.23.3), the pop it was for has left on done
+// (:436-444), and the send never completes. From then on its Done and Len never
+// return. v0.25.0 fixed that upstream (#3540); the test keeps the queue from
+// depending on it.
 type wedgingInner struct {
 	priorityqueue.PriorityQueue[string]
 	shut   atomic.Bool

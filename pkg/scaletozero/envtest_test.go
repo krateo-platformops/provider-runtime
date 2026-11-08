@@ -97,7 +97,7 @@ func requireAPIServer(t *testing.T) {
 		return
 	}
 	msg := "KUBEBUILDER_ASSETS is not set: this test needs envtest's kube-apiserver and etcd " +
-		"(export KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.35.0))"
+		"(export KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.37.0))"
 	if os.Getenv("CI") != "" {
 		t.Fatal(msg)
 	}

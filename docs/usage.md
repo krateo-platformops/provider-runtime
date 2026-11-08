@@ -4,14 +4,18 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-08T00:00:00Z
 ---
 
 # Usage
 
 provider-runtime is consumed as a plain Go module. It requires Go ≥ 1.26
-(see `go.mod`; since v1.7.0) and pins `sigs.k8s.io/controller-runtime` v0.23.x / `k8s.io/*`
-v0.35.x — your provider's controller-runtime version must be compatible.
+(see `go.mod`; since v1.7.0) and pins `sigs.k8s.io/controller-runtime` v0.25.x / `k8s.io/*`
+v0.37.x (v0.23.x / v0.35.x up to v1.11.x) — your provider's
+controller-runtime version must be compatible. Go's minimal version selection
+raises a provider that requires older versions to these when it upgrades
+provider-runtime; bump them in your own `go.mod` too, and build against
+controller-runtime v0.25's API (its release notes list the breaking changes).
 
 Build with **Go ≥ 1.26.10**. The `go` line is only the language floor; the
 standard library comes from your toolchain. Older 1.26 patches carry
@@ -352,5 +356,7 @@ make lint       # golangci-lint run
 `make kind-up` / `make kind-down` manage a local kind cluster for manual
 testing of consumers; the library's own tests need no cluster. The
 `pkg/scaletozero` tests need envtest's kube-apiserver and etcd binaries:
-`export KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.35.0)`. Without it
-they skip locally, and fail under `CI`.
+`export KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.37.0)`, with
+setup-envtest from controller-runtime's release-0.25, as CI pins it in
+`.github/workflows/run-tests.yaml`. Without it they skip locally, and fail
+under `CI`.

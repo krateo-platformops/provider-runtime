@@ -4,7 +4,7 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-08T00:00:00Z
 ---
 
 # Log
@@ -35,6 +35,26 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   saturation runs in the process.
 - Design: [design-local-slot-before-pop](./design-local-slot-before-pop.md). Not
   measured on a cluster yet.
+- **The release also moves to controller-runtime v0.25.2 and `k8s.io/*`
+  v0.37,** from v0.23.3 and v0.35 (`k8s.io/api`, `apimachinery`, `client-go`
+  and `apiextensions-apiserver` v0.37.2; `controller-tools` v0.22.0). The
+  reason is v0.25.0's fix for a priority queue hang on shutdown
+  ([controller-runtime#3540](https://github.com/kubernetes-sigs/controller-runtime/pull/3540)).
+  If the queue shut down while handing an item to a waiting pop, `Done` and
+  `Len` could block for good. The ungated controllers, which use that queue
+  by default, could hit it at shutdown. A targeted test hung in 2,788 of
+  200,000 runs on v0.23.3, and in none of 200,000 on v0.25.2. The gated
+  queue's own guard against it stays, and design §4 says why.
+- **Consumers must bump** `sigs.k8s.io/controller-runtime` to v0.25.x and
+  `k8s.io/*` to v0.37.x in their own `go.mod`. Go raises them anyway when
+  provider-runtime is upgraded. Their code must then build against
+  controller-runtime v0.24 and v0.25. The breaking changes there are the
+  `k8s.io/*` v0.36 and v0.37 APIs and `GetEventRecorder`, which now returns
+  controller-runtime's `recorder.EventRecorder`. That type includes client-go's
+  `events.EventRecorder`, so passing it on to plumbing's recorder still works,
+  but a fake `recorder.Provider` must change. `WebhookBuilder.WithCustomPath`
+  is removed and the scheme builder is deprecated. The `go` floor stays 1.26.0.
+  envtest moves to 1.37.0, with setup-envtest from release-0.25.
 
 ## 2026-11-08 — v1.11.0: scale idle controllers to zero
 - **`pkg/scaletozero`**, for owners that run one controller Deployment per
