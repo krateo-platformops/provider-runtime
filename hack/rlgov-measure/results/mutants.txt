@@ -3,7 +3,7 @@ baseline passed
 KILLED    Start doesn't apply the limit
           TestStartAppliesTheGoMemoryLimitToTheRuntime
 KILLED    limit set with the memory input off
-          TestGoMemoryLimitUntouchedWithTheMemoryInputOff,TestStartAppliesTheGoMemoryLimitToTheRuntime
+          TestGoMemoryLimitUntouchedWithTheMemoryInputOff,TestHardWorkingSetRatioDropsToOneAtOnce,TestMissingInputIsDisa
 KILLED    GOMEMLIMIT ignored
           TestGoMemoryLimitExplicitValueWins
 KILLED    the program's own limit ignored
@@ -23,15 +23,15 @@ KILLED    negative limit accepted
 KILLED    headroom ratio default 0.10
           TestGoMemoryHeadroomHalvesAtItsRatio
 KILLED    headroom ratio default not applied
-          TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomNamesItselfInTheDeferral
+          TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomNamesItselfInTheCut
 KILLED    ratio exclusive
           TestGoMemoryHeadroomHalvesAtItsRatio
 KILLED    headroom never cuts
-          TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomHasNoHardLevel,TestGoMemoryHeadroomNamesItselfInTheDe
+          TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomHasNoHardLevel,TestGoMemoryHeadroomNamesItselfInTheCu
 KILLED    headroom has a hard level
           TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomHasNoHardLevel
 KILLED    cause doesn't name the headroom
-          TestGoMemoryHeadroomNamesItselfInTheDeferral
+          TestGoMemoryHeadroomNamesItselfInTheCut
 KILLED    memory.stat still read with headroom
           TestGoMemoryHeadroomReplacesTheWorkingSet
 KILLED    memory.stat never read
