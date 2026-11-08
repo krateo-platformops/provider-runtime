@@ -56,14 +56,21 @@ Delete is a no-op, but the runtime needs Connect before it can remove the
 finalizer. **The defect is generic: any provider and any kind whose Connect
 reads a Secret that a namespace deletion can delete first.**
 
-**It exists outside this runtime too.** oasgen-provider's
-rest-dynamic-controller is built on unstructured-runtime, which core-provider
-owns, and its delete path reads Secrets: `handler.Delete` →
-`ensureSecretRefRBACAndResolve` → `secretref.GetSecretValue`. In
-core-provider, the composition controller's Delete reads the chart's
-`passwordRef` Secret (core-provider#402), a second known instance. **This is
-flagged for core-provider.** It is why the bookkeeping is a standalone
-package that doesn't need a manager (§7).
+**It exists outside this runtime too.** In core-provider, the composition
+controller's Delete reads the chart's `passwordRef` Secret
+(core-provider#402). That is **the known second instance**, built on
+unstructured-runtime, which core-provider owns. **This is flagged for
+core-provider.** It is why the bookkeeping is a standalone package that
+doesn't need a manager (§7).
+
+oasgen-provider's rest-dynamic-controller, also on unstructured-runtime, is
+**not** a second known instance (corrected by oasgen). Its Delete
+(`restResources.go:1574`) reads a Secret, through `handler.Delete` →
+`ensureSecretRefRBACAndResolve` → `secretref.GetSecretValue`, but tolerates
+the failure: it logs a Warn and continues with `resolved = nil`
+(`restResources.go:1692`). It is exposed only where a resolved value is
+needed to build the delete request itself, such as a path parameter. There,
+`BuildCallConfig` returns nil.
 
 Related prior art in core-provider:
 
@@ -904,8 +911,10 @@ exported for diagnostics and tests.
   - an empty `OwnerFinalizers`;
   - `DisownPasses × DisownInterval` below twice the kind's largest
     reconcile or request timeout (§7.4);
-  - in PerName and PerNamePoll modes: no `IndexNamespace`; an
-    `IndexNamespace` that holders of the kind live in, or that disagrees
+  - in PerName and PerNamePoll modes: no `IndexNamespace`; **an
+    `IndexNamespace` that doesn't exist**, which fails with
+    `credential-use: index namespace krateo-credential-use not found: install it (installer release) before enabling PerName`;
+    an `IndexNamespace` that holders of the kind live in, or that disagrees
     with the CRD's pointer; or an `IndexMaxLines` above the ceiling
     (§10.6).
 
@@ -1536,8 +1545,8 @@ objects that kind holds:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: credential-use-index.repo.git.krateo.io
-  namespace: krateo-system          # SharedOptions.IndexNamespace
+  name: cu-index-repo.git.krateo.io
+  namespace: krateo-credential-use  # SharedOptions.IndexNamespace
 data:
   entries: |
     /Secret/team-a/git-token
@@ -1553,15 +1562,69 @@ proves it.
 #### 10.6.1 Where it lives, and who owns it
 
 - **The namespace is explicit:** `SharedOptions.IndexNamespace` (CP2, L6).
-  It must outlive every holder of the kind, so it must not be a namespace
-  any holder lives in:
-  - **At start**, the tracker lists holders of K in that namespace. If there
-    are any, it refuses to start.
-  - **At acquire time**, a holder in the index namespace gets no hold. A new
-    holder fails closed, an established one is Degraded, and the tracker
-    logs it.
-  - The namespace is normally the provider's own management namespace, such
-    as `krateo-system`.
+  It must outlive every holder of the kind, so it must be a namespace no
+  holder lives in.
+- **The recommended value is a dedicated namespace that no holder can be
+  created in**, such as `krateo-credential-use` (the user's decision, on
+  core-provider's blocker). The provider's management namespace doesn't
+  qualify. installer measured krateo-057: all 83 composition instances, of
+  67 kinds, are in `krateo-system`. That is structural: the Installer CR
+  sets `spec.namespaces: {"krateo": "krateo-system"}`, and moving a
+  composition means uninstalling and reinstalling it.
+- **installer ships the namespace, in its own release:**
+  - a new declared key in `.Values.namespaces`, whose schema is today
+    `additionalProperties: false` with only `krateo`;
+  - the Namespace annotated `helm.sh/resource-policy: keep`, so that an
+    uninstall never deletes the indexes;
+  - **that release lands before any controller writes an index there.**
+    Otherwise the first symptom would be a namespace not found. So start
+    fails clearly when the namespace is absent (§7.3).
+- **Admission keeps the invariant.** A ValidatingAdmissionPolicy in the
+  index namespace denies everything except the providers' index
+  ConfigMaps (`cu-index-*`) written by the providers' service accounts,
+  and the events the tracker records on them (§10.6.4). For core-provider
+  that means composition.krateo.io objects are refused there. The policy
+  never matches `v1/Namespace`, which is cluster-scoped:
+
+  ```yaml
+  apiVersion: admissionregistration.k8s.io/v1
+  kind: ValidatingAdmissionPolicy
+  metadata:
+    name: krateo-credential-use-namespace
+  spec:
+    failurePolicy: Fail
+    matchConstraints:
+      namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: krateo-credential-use}
+      resourceRules:
+        - apiGroups: ["*"]
+          apiVersions: ["*"]
+          resources: ["*"]
+          operations: ["CREATE", "UPDATE", "DELETE"]
+    validations:
+      - expression: >-
+          (request.resource.resource == "events") ||
+          (request.resource.group == "" && request.resource.resource == "configmaps" &&
+           (object != null ? object : oldObject).metadata.name.startsWith("cu-index-") &&
+           request.userInfo.username in ["system:serviceaccount:krateo-system:git-provider",
+                                         "system:serviceaccount:krateo-system:core-provider"])
+        message: only providers' cu-index-* ConfigMaps may be written in krateo-credential-use
+  ```
+
+  installer renders the list of service accounts from the providers it
+  installs; the two names above are examples. A
+  ValidatingAdmissionPolicyBinding with `validationActions: [Deny]` binds
+  it.
+- **The start check stays**, but by construction it never fires. At start
+  the tracker lists holders of K in the index namespace and refuses to
+  start if there are any. At acquire time, a holder there gets no hold: a
+  new holder fails closed, an established one is Degraded, and the tracker
+  logs it. Admission makes both unreachable, and they stay as a backstop
+  for a cluster without the policy.
+- **Write contention is low.** There is one ConfigMap per kind, so an index
+  has at most two writers at once (old and new pods during a rollout).
+  That is core-provider's observation, and it holds generally, because a
+  kind has one controller.
 - **The location is fixed once, on the holder CRD.** The first process of
   the kind writes `credential-use.krateo.io/index: <namespace>/<name>` on
   the CRD, with a patch that tests the annotation is absent. Every later
@@ -1581,8 +1644,8 @@ proves it.
   # in the Argo CD Application
   ignoreDifferences:
     - kind: ConfigMap
-      name: credential-use-index.repo.git.krateo.io
-      namespace: krateo-system
+      name: cu-index-repo.git.krateo.io
+      namespace: krateo-credential-use
       jsonPointers: [/data]
   syncPolicy:
     syncOptions: [RespectIgnoreDifferences=true]
@@ -2395,7 +2458,7 @@ remove the finalizers it holds there. That is a new wedge.
 | the holder kind | `get`, `list`, `watch`, `patch`, `update` | the holder informer, R2's consistent list, A1 (patch), and `Forget` in the finalizer-removal Update and on its own (update) (L8) |
 | customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; the count fields and the one-time index pointer, written only on change (§7.4, §10.6) |
 | configmaps, by `resourceNames` (PerName and PerNamePoll: the kind's index) | `get`, `update`, `patch`, and `watch` in PerName mode | §10.6 |
-| configmaps, in the index namespace | `create` (it can't be scoped by name) | the tracker creates the index (§10.6.7) |
+| configmaps, in the index namespace (`krateo-credential-use`) | `create` (it can't be scoped by name) | the tracker creates the index (§10.6.7). The namespace itself is installer's; providers never create it, and admission limits what may be written there (§10.6.1) |
 | events | `create`, `patch` | §12 |
 
 `update`, `create` and `delete` on protected kinds are not needed: every
@@ -2628,6 +2691,12 @@ on krateo-057:
 - `Resolved` carries unheld hops too. After a re-point of an unheld hop,
   Connect uses the old chain for up to 10s, and never an unheld
   same-namespace Secret (L1).
+- **The dedicated index namespace:** start fails clearly when it is
+  absent. With the ValidatingAdmissionPolicy installed, creating a holder
+  there, or a ConfigMap not named `cu-index-*`, is denied. A `cu-index-*`
+  ConfigMap written by a provider's service account, and its events, are
+  allowed. With the policy absent, the start check refuses a holder of K
+  there.
 - A NotFound on the live confirmation makes the ref Missing, with no
   requeue loop. Five 403s over 2 minutes in PerNamePoll drop the ref, with
   the event, the metric and a `ReadDenied` entry. Start fails without
@@ -2812,6 +2881,12 @@ git-provider implements `CredentialRefs` on both connecters, wires
 
 ### 16.2 oasgen-provider (rest-dynamic-controller)
 
+**How exposed it is** (oasgen's correction, §1). Its Delete tolerates a
+failed Secret read, and is exposed only where a resolved value is needed to
+build the delete request, such as a path parameter, when `BuildCallConfig`
+returns nil. Protection matters for those kinds; for the rest, a missing
+Secret doesn't block deletion today.
+
 rest-dynamic-controller adopts through unstructured-runtime's integration
 (§7.2), not `CredentialRefsProvider`. Its `RefsFunc` is the collector it is
 writing for #510:
@@ -2894,13 +2969,25 @@ runtime (§7.3).
 without it, and its rollouts overlap pods. §6.8 shows the design is safe
 that way, so there is no new unstructured-runtime work for it.
 
-**The index namespace** (CP2). In PerName mode the index needs a namespace
-no holder lives in (§10.6.1). For the composition controller today, that
-would be the definition's namespace, which is where its compositions live.
-So the composition controller's adoption follows core-provider#313, which
-moves the controller to core-provider's management namespace, and the
-index goes there. #313's Relocating mode doesn't change the cases above
-(CP5).
+**The index namespace** (CP2, core-provider's blocker). In PerName mode the
+index needs a namespace no holder can live in (§10.6.1). Compositions can be
+in any namespace, because each composition controller watches
+cluster-wide, and on krateo-057 they are all in `krateo-system`. So neither
+the definition's namespace nor the management namespace qualifies. The
+index goes in installer's dedicated `krateo-credential-use` namespace
+instead:
+
+- the namespace ships in installer's own release, before any composition
+  controller enables PerName (§10.6.1);
+- the ValidatingAdmissionPolicy there refuses composition.krateo.io
+  objects, and everything except `cu-index-*` ConfigMaps from the
+  providers' service accounts;
+- **core-provider generates the composition controller's RBAC** for
+  configmaps in that namespace: `get`, `create`, `update`, `patch`, `watch`.
+
+This no longer depends on core-provider#313, which concerns the controller
+dying with its own namespace (§11.5). #313's Relocating mode doesn't change
+the cases above (CP5).
 
 **Deletion passes still acquire** (CP4), even after #402's fix (1) stops
 Delete from reading `passwordRef`: Connect and other reads on the delete
@@ -3164,6 +3251,14 @@ were not retried.
 | L1 A NotFound on the live confirmation means the target is gone: Missing, not a failed read, so no endless requeue | §11.3 |
 | L2 A persistent 403 on the object read in PerNamePoll: dropped after 5 consecutive 403s over at least 2 minutes, with an event, a metric and a `ReadDenied` entry | §11.3 |
 | L3 The Namespace informer's sync gates start, like the source check; a missing list or watch on namespaces fails start with a clear error | §7.5 |
+
+**Revision 12** (crediting core-provider and oasgen):
+
+| Item | Resolved in |
+|---|---|
+| core-provider's BLOCKER: the index namespace. The user chose a dedicated namespace no holder can be created in (`krateo-credential-use`), as installer measured on krateo-057: 83 compositions of 67 kinds, all in `krateo-system`, structurally. installer ships it in its own release, with a new `.Values.namespaces` key and `helm.sh/resource-policy: keep`, before any index is written. Start fails clearly when it is absent. A ValidatingAdmissionPolicy allows only `cu-index-*` ConfigMaps from providers' service accounts (and their events). core-provider generates the configmap RBAC there. The start check stays, and never fires by construction. At most two writers per index | §10.6.1, §7.3, §13, §16.3 |
+| core-provider: the claim that compositions live in the definition's namespace removed; they can be anywhere, because each composition controller watches cluster-wide | §16.3 |
+| oasgen's correction: rest-dynamic-controller isn't a second known instance. Its Delete tolerates a failed Secret read (`restResources.go:1692`, in Delete at `:1574`), and is exposed only where a resolved value builds the delete request (`BuildCallConfig` returning nil). core-provider#402 stays the known second instance | §1, §16.2 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
