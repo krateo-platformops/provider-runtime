@@ -1,0 +1,20 @@
+CPU threshold block started 2026-11-07T07:47:33Z
+image: final2 6ee8e9b0ec0b89ed2ae5c66703d06c7cddeb4bb5 sha256:377168f3c798a5e2fe91294146c136b48aa18ce7c76ccd2a6d67564599597e4c
+memory input: off in every arm
+workload: cpu mode, 250m limit, 512Mi, 64 Greetings, 16 workers, about 100ms of CPU per Observe, poll 1s, 240s per run
+arms: off (SATURATION unset), 75 (SATURATION=true SAT_CPU=75), 50 (SATURATION=true SAT_CPU=50); 5 runs each
+order: rotating. Round 1 off,75,50; round 2 75,50,off; round 3 50,off,75; round 4 off,75,50; round 5 75,50,off.
+
+liveness probe: httpGet /healthz, no initial delay, periodSeconds 10, timeoutSeconds 1, failureThreshold 3, about 30s to a kill
+source of the probe: incident-provider, helm/incident-provider/templates/deployment.yaml:68: httpGet /healthz with no period, timeout or failure set, so Kubernetes' defaults apply. Read from its default branch by the coordinator; that repository is not checked out where this block runs, so the harness's author did not read it.
+health server: the harness answers /healthz through controller-runtime's HealthProbeBindAddress with AddHealthzCheck and healthz.Ping, as incident-provider's main.go does. The check is named "ping" here and "healthz" there; that only names the /healthz/<name> subpath, so there is no harness change and final2 stays.
+other consumers, by chart defaults: alert-provider has readiness only; core-provider has tcpSocket 8080, period 20; git-provider, azuredevops-provider, patch-provider, oasgen-provider, identity-lifecycle and access-review have no liveness probe. What an installer sets on top was not checked.
+probe used earlier in this harness, not used here: httpGet /healthz, period 2, timeout 1, failure 3. No consumer ships it.
+scope of the result: a controller with this probe. It does not carry to consumers with none, such as git-provider.
+
+what counts, decided before run 1:
+benefit: the off arm gets liveness kills, and 50 removes or clearly cuts them, with kills reported by cause. If the off arm has no liveness kills, the result is "no benefit shown here". The workload and the probe are not tuned to produce kills.
+cost: Observes per second up against off, plus failed probes that did not kill.
+also reported: whether 75 engaged at all, as deferrals and local.
+
+driver power: Now drawing from 'AC Power'

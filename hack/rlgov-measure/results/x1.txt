@@ -1,0 +1,183 @@
+2026-11-06T10:36:16Z x1-start gke-rlgov-measure-default-pool-7f331cb1-bw7p cab95f05-1c66-4f2b-b831-12288ef738de v1.35.8-gke.1439001 6.12.94+
+done x1-ctrl-1: # restarts=0 # lastTerminated=
+done x1-ws80-1: # restarts=0 # lastTerminated=
+done x1-ws75-1: # restarts=1 # lastTerminated=OOMKilled
+done x1-live-1: # restarts=0 # lastTerminated=
+done x1-map-1: # restarts=0 # lastTerminated=
+Unable to connect to the server: dial tcp 136.115.19.160:443: connect: network is unreachable
+Unable to connect to the server: dial tcp 136.115.19.160:443: connect: network is unreachable
+done x1-ctrl-2: # restarts=2 # lastTerminated=OOMKilled
+Unable to connect to the server: dial tcp 136.115.19.160:443: connect: network is unreachable
+F1106 12:58:29.221582   99791 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+error: failed to create serviceaccount: Post "https://136.115.19.160/api/v1/namespaces/x1-ws80-2/serviceaccounts?fieldManager=kubectl-create&fieldValidation=Strict": getting credentials: exec: executable gke-gcloud-auth-plugin failed with exit code 1
+F1106 12:58:34.138806     135 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+error: failed to create clusterrolebinding: Post "https://136.115.19.160/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?fieldManager=kubectl-create&fieldValidation=Strict": getting credentials: exec: executable gke-gcloud-auth-plugin failed with exit code 1
+F1106 13:14:22.936546     325 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+F1106 13:44:58.306622     598 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+error: error validating "STDIN": error validating data: failed to download openapi: Get "https://136.115.19.160/openapi/v2?timeout=32s": getting credentials: exec: executable gke-gcloud-auth-plugin failed with exit code 1; if you choose to ignore these errors, turn validation off with --validate=false
+F1106 14:06:52.991927    1156 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+Unable to connect to the server: getting credentials: exec: executable gke-gcloud-auth-plugin failed with exit code 1
+error executing jsonpath "{.items[0].metadata.name}": Error executing template: array index out of bounds: index 0, length 0. Printing more information for debugging the template:
+	template was:
+		{.items[0].metadata.name}
+	object given to jsonpath engine was:
+		map[string]interface {}{"apiVersion":"v1", "items":[]interface {}{}, "kind":"List", "metadata":map[string]interface {}{"resourceVersion":""}}
+
+
+
+F1106 14:07:17.495921    1544 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+F1106 14:40:48.506218    1658 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+error: error validating "STDIN": error validating data: failed to download openapi: Get "https://136.115.19.160/openapi/v2?timeout=32s": getting credentials: exec: executable gke-gcloud-auth-plugin failed with exit code 1; if you choose to ignore these errors, turn validation off with --validate=false
+F1106 14:56:47.551635    2049 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+F1106 15:00:32.593052    2269 cred.go:145] print credential failed with error: Failed to retrieve access token:: failure while executing gcloud, with args [config config-helper --format=json]: exit status 1 (err: ERROR: (gcloud.config.config-helper) There was a problem refreshing your current auth tokens: HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token (Caused by NameResolutionError("HTTPSConnection(host='oauth2.googleapis.com', port=443): Failed to resolve 'oauth2.googleapis.com' ([Errno 8] nodename nor servname provided, or not known)"))
+Please run:
+
+  $ gcloud auth login
+
+to obtain new credentials.
+
+If you have already logged in with a different account, run:
+
+  $ gcloud config set account ACCOUNT
+
+to select an already authenticated account to use.
+)
+error: error validating "STDIN": error validating data: failed to download openapi: Get "https://136.115.19.160/openapi/v2?timeout=32s": getting credentials: exec: executable gke-gcloud-auth-plugin failed with exit code 1; if you choose to ignore these errors, turn validation off with --validate=false
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found
+Error from server (NotFound): error when creating "STDIN": namespaces "x1-ws80-2" not found

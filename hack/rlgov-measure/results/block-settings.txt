@@ -1,0 +1,11 @@
+block started 2026-11-06T20:58:41Z
+new arm:     final2 6ee8e9b0ec0b89ed2ae5c66703d06c7cddeb4bb5 sha256:377168f3c798a5e2fe91294146c136b48aa18ce7c76ccd2a6d67564599597e4c
+control arm: ctrl2 d0632f1 (harness at 6ee8e9b0ec0b89ed2ae5c66703d06c7cddeb4bb5) sha256:40427c58ede5877806455513351a48dcbb851234f503ebd80b6b0ca32d7383f9
+env, both arms: SATURATION=true EXPERIMENTAL_MEMORY=true
+workload ramp: 16 workers, 16 MiB held 1s per Observe, poll 500ms, 2 Greetings every 5s from t=15, 256Mi, 2 CPU, 240s
+workload cold: 64 Greetings before the controller starts, 16 workers, 16 MiB held 300ms, poll 1s, 256Mi, 2 CPU, 240s
+new arm's settings, all defaults: Go limit 0.8 of memory.max, headroom soft cut 15%, sample 1s, CPU threshold 50, startup ramp 2s, recovery 30s
+control's settings, all defaults: working-set ratios 0.80/0.90, sample 1s, CPU threshold 50, startup ramp 2s, recovery 30s
+order: ABBA, ramp pairs 1 to 20, then cold pairs 1 to 10; pair i runs new first when i is odd
+driver power: Now drawing from 'AC Power'
+driver sleep setting:  sleep                1 (sleep prevented by caffeinate, caffeinate, caffeinate, caffeinate, caffeina

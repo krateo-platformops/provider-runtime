@@ -1,0 +1,20 @@
+# Credentials and cluster coordinates: never committed.
+kubeconfig
+env.local
+.docker/
+
+# Build output and the control's source tree.
+/measure
+/measure-*
+/layer-*.tar
+/images/
+/ctrl-src/
+/ctrl.tar
+/.gobin/
+
+# The GKE auth plugin caches an access token next to the kubeconfig.
+gke_gcloud_auth_plugin_cache
+
+# A run in progress; prun.sh removes these when it finishes.
+results/*.stream
+results/*.causes

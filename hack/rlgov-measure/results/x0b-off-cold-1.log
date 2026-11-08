@@ -1,0 +1,19 @@
+# run=x0b-off-cold-1 mode=burst image=ctrl cpu=2 mem=256Mi env= seconds=240 started=2026-11-06T11:29:55 ended=2026-11-06T11:34:35
+# driver_load_end=11:34  up  4:19, 19 users, load averages: 76,34 79,73 77,20
+LOG node kernel="Linux version 6.12.94+ (builder@2f29dc84e049) (Chromium OS 17.0_pre498229-r33 clang version 17.0.0 (/mnt/host/source/src/third_party/llvm-project 14f0776550b5a49e1c42f49a00213f7f3fa047bf), LLD 17.0.0) #1 SMP Fri Aug 21 07:56:42 UTC 2026" cgroup_v2=true cpu_pressure_file=true memory_pressure_file=true memory_max=268435456 cpu_max="200000 100000"
+# restarts=5
+# lastTerminated=OOMKilled
+# terminations:
+# term 1 OOMKilled 137 2026-11-06T10:30:37Z
+# term 2 OOMKilled 137 2026-11-06T10:30:37Z
+# term 2 OOMKilled 137 2026-11-06T10:30:50Z
+# term 3 OOMKilled 137 2026-11-06T10:30:50Z
+# term 3 OOMKilled 137 2026-11-06T10:31:17Z
+# term 4 OOMKilled 137 2026-11-06T10:31:17Z
+# term 4 OOMKilled 137 2026-11-06T10:32:04Z
+# term 5 OOMKilled 137 2026-11-06T10:32:04Z
+# term 5 OOMKilled 137 2026-11-06T10:33:36Z
+# events:
+BackOff     11    Back-off restarting failed container measure in pod measure-75bc7bbbf5-7krmw_x0b-off-cold-1(ca61129f-9b36-486e-9dd2-b874ef3ad1ef)
+Unhealthy   2     Liveness probe failed: Get "http://10.92.0.19:8081/healthz": dial tcp 10.92.0.19:8081: connect: connection refused
+Unhealthy   1     Liveness probe failed: Get "http://10.92.0.19:8081/healthz": read tcp 10.92.0.1:54816->10.92.0.19:8081: read: connection reset by peer
