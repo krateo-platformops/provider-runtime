@@ -12,7 +12,7 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — scale idle controllers to zero
+## 2026-11-08 — v1.11.0: scale idle controllers to zero
 - **`pkg/scaletozero`**, for owners that run one controller Deployment per
   Kind or per version (core-provider, oasgen-provider). While the Kind has
   no instances the controller runs 0 replicas; when one appears it goes back
