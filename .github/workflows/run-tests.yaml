@@ -17,12 +17,12 @@ jobs:
         run: go mod download
       # pkg/scaletozero tests Exists and Reconcile against envtest's
       # kube-apiserver and etcd. Under CI those tests fail rather than skip
-      # when KUBEBUILDER_ASSETS is unset. setup-envtest is release-0.23,
-      # pinned; 1.35.0 matches k8s.io/* v0.35.
+      # when KUBEBUILDER_ASSETS is unset. setup-envtest is release-0.25,
+      # pinned; 1.37.0 matches k8s.io/* v0.37.
       - name: Install envtest binaries
         run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20260305142021-f9589b9f2b9d
-          echo "KUBEBUILDER_ASSETS=$("$(go env GOPATH)/bin/setup-envtest" use -p path 1.35.0)" >> "$GITHUB_ENV"
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.3-0.20261103101737-9603adbb18be
+          echo "KUBEBUILDER_ASSETS=$("$(go env GOPATH)/bin/setup-envtest" use -p path 1.37.0)" >> "$GITHUB_ENV"
       - name: Run coverage
         run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
       - name: Upload coverage to Codecov
