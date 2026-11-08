@@ -1252,6 +1252,17 @@ the intermediate objects that were held, not a newer cached copy. Without it,
 Connect could read a re-pointed KubernetesTarget naming a Secret this pass
 never held.
 
+**It carries unheld hops too** (L1). An unheld hop (§9.4) is read live by
+the tracker, through the shared 10s read, and `Resolved` returns that very
+read. So Connect uses exactly what the tracker read and followed. The
+effect:
+
+- after a re-point of an unheld hop, the holder stays on the old chain for
+  up to 10s, until the shared read is refreshed;
+- the holder never uses a same-namespace Secret that was not held: the
+  tracker follows the new hop's `Next` and holds what it names in the same
+  pass, before Connect is given the new hop.
+
 **`Resolved` alone doesn't close the window** (MED-5). If the
 KubernetesTarget is re-pointed after this pass, the holder keeps connecting
 through the old, still-held chain until it reconciles again. So the tracker
@@ -2023,15 +2034,29 @@ not only before A2:
 - **On a pass that runs A2**, consent is read live, before the A2, as it is
   before the line, the grant and the A2 of every new hold. **The live read is
   mandatory in the adding direction.**
-- **On a withdrawal, the pass drops the ref in A1**, in the same pass.
+- **A held ref is dropped only on a positive, live-confirmed withdrawal**
+  (M1). When the cache suggests a withdrawal, or **can't answer** (a source
+  not yet synced, or the object or its Namespace absent from the cache),
+  the pass makes **one live read of the object and of its Namespace**
+  before any drop:
+  - if neither list names the holder's namespace, the pass drops the ref in
+    A1;
+  - if either does, it keeps the hold. That is the case of a stale cache,
+    or of a source still syncing after a restart;
+  - **if the live read fails, it keeps the hold and requeues.**
 
-**Dropping on a stale cached withdrawal is the safe direction.** If the
-cache shows a withdrawal that has since been reversed, the hold is released
-by the normal protocol. The next pass then sees the ref as new, and
-re-acquires it through the live check. The cost is churn and a short spell
-unheld, which is today's behaviour. A deleting holder never skips A2, so it
-always reads consent live: a stale cache can't release a hold during a
-holder's deletion.
+  On a pass that runs A2 the consent read is live already, so that read
+  serves.
+
+**Why a drop needs that confirmation.** Releasing a hold is the direction
+that can expose a holder. A stale or unsynced cache is most likely exactly
+when it matters most: just after a restart during a namespace teardown, or
+just after a new hold, before the informer has delivered the object. Acting
+on the cache then could release a hold whose consent never changed. With
+the live confirmation, a hold is released only when the target's owner has
+really withdrawn consent. A cache that is wrong in the other direction
+(showing consent that was withdrawn) only delays the drop until the live
+read of the next pass that runs A2, or until the informer catches up.
 
 **How a withdrawal reaches the holders.**
 
@@ -2112,9 +2137,8 @@ Three rules close it:
    the same pass**, as is every new hold (line, grant, A2). A pass that runs
    A2 after the withdrawal sees it, writes no A2, and drops the ref instead.
 2. **A pass that skips A2 still checks consent**, from the cache or from the
-   skip's live GET, and drops the ref if it is withdrawn. A skip writes
-   nothing to P, so it can't re-add a finalizer, and a stale cache only
-   delays the drop to a later pass.
+   skip's live GET, and drops the ref only after a live read confirms the
+   withdrawal. A skip writes nothing to P, so it can't re-add a finalizer.
 3. **After every A2 of a cross-namespace ref, and after every A2 in
    PerNamePoll mode, the acquirer enqueues the (K, N) release batch
    itself** (§10.2). That covers an A2 still in flight. Say process Y's pass
@@ -2563,11 +2587,23 @@ on krateo-057:
   on A2 requeues without holding a worker (L2).
 - Disown and Degraded leave Connect working under the split ClusterRoles
   (M1).
-- **The gate on every pass** (M1): an established holder that skips A2
-  sees a withdrawal in its cache, drops the ref in A1, and the hold is
-  released. The same in PerNamePoll mode, through the skip's live GET. A
-  stale cached withdrawal releases and then re-acquires. A deleting holder
-  always reads live.
+- **The gate on every pass** (M1):
+  - an established holder that skips A2 sees a withdrawal in its cache,
+    confirms it with a live read, drops the ref in A1, and the hold is
+    released. The same in PerNamePoll mode, through the skip's live GET;
+  - a cached withdrawal the live read contradicts drops nothing, and a
+    failed live read keeps the hold and requeues;
+  - **a restart with Namespace-level consent while the target's namespace
+    is terminating:** the Namespace informer hasn't synced, the live read
+    shows consent, the hold survives, and the teardown completes with the
+    holder protected;
+  - **a skipping pass right after a new hold, before the informer delivers
+    P:** the cache can't answer, the live read shows consent, and the hold
+    stays;
+  - a deleting holder always reads live.
+- `Resolved` carries unheld hops too. After a re-point of an unheld hop,
+  Connect uses the old chain for up to 10s, and never an unheld
+  same-namespace Secret (L1).
 - R0 stops for a deleting P with a deleting user in the cache (L1). In
   PerNamePoll, an A2 enqueues its own release batch (L2). Consent is the
   union of the two lists, and an object's list can't narrow its
@@ -3085,6 +3121,13 @@ were not retried.
 | L4 Trimming keeps `ConsentWithdrawn` ahead of `NotConsented` | §11.3 |
 | L5 The Namespace handler compares transformed objects, and acts only on `credential-use.*` annotations or the `deletionTimestamp` | §11.3 |
 | L6 A shared unheld hop's live read is reused per pass batch or 10s TTL; why that is safe | §9.4 |
+
+**Revision 10:**
+
+| Item | Resolved in |
+|---|---|
+| M1 A held cross-namespace ref is dropped only on a positive, live-confirmed withdrawal: a live read of the object and its Namespace when the cache suggests a withdrawal or can't answer; drop only if neither list names the holder's namespace; keep and requeue if the read fails; the "stale cached drop is safe" argument replaced; the restart-during-teardown and just-after-a-new-hold tests | §11.3, §14 |
+| L1 `Resolved` carries unheld hops, so Connect uses exactly what the tracker read: up to 10s on the old chain after a re-point, and never an unheld same-namespace Secret | §9.2, §14 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
