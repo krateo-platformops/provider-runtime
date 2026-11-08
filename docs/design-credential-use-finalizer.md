@@ -9,12 +9,12 @@ timestamp: 2026-11-08T00:00:00Z
 
 # Credential-use finalizer
 
-**Status:** design, second revision, for re-review. Nothing is built. The
+**Status:** design, third revision, for re-review. Nothing is built. The
 user chose the approach: a finalizer on each Secret an object uses, the
-analog of Crossplane's ProviderConfigUsage. The user's decisions on the
-first review (U1 to U7) are binding here. §17 maps every review item to the
-section that resolves it, and §18 holds the questions only the user can
-decide.
+analog of Crossplane's ProviderConfigUsage. The user's decisions are
+binding here: U1 to U7 on the first review, and NQ1 to NQ4 on the second.
+§17 maps every review item to the section that resolves it, and §18 holds
+what is still open.
 
 Code references are to provider-runtime at `77cce67`, controller-runtime
 v0.25.2, client-go v0.37.2 and apimachinery v0.37.2 (`AM/` is
@@ -147,14 +147,19 @@ of that name. Three more keys sit next to it on the protected object:
 - **The held label**, `credential-use.krateo.io/held: "true"`. It is set in
   the same write as the finalizer. The protected-object caches select on it
   (§10).
-- **The record** lives on the holder, not here (§4).
+- **K's marker label**, `credential-use.krateo.io/k-<hash>: "true"`, also
+  set in that write, so that one kind's holds can be selected (§10.1).
+
+**The record** lives on the holder, not here (§4).
 
 **Validity.** The name part is a namespace name, a DNS label of at most 63
 characters. The prefix is a DNS subdomain: a CRD's lowercased kind must be a
 DNS-1035 label, and its group is a DNS subdomain. Only the total length,
 `15 + len(kind) + 1 + len(group) <= 253`, can fail, and only for a
 pathological group. Setup checks it and refuses to start (§7.3). The name
-contains a `/`, so the API server doesn't warn on it.
+contains a `/`, so the API server doesn't warn on it. The runtime's existing
+finalizer, which lacks a `/` and draws the warning, is out of scope here. It
+is filed as provider-runtime#46.
 
 **Why shared, and not one finalizer per holder object.** Per-object
 finalizers (`.../<uid>`) would need no release check at all. They are
@@ -222,59 +227,120 @@ A hold exists to stop one thing: a holder that can never finish deleting
 because what it reads is gone *and can't be put back*. Losing a Secret is
 unrecoverable in two cases:
 
-- **its namespace is terminating**, so it can't be recreated (§1);
+- **its namespace is being deleted**, so it can't be recreated (§1);
 - **one of its users is being deleted** and still needs Connect.
 
 Otherwise, a deleted Secret can be recreated, and holding it would break
 delete-and-recreate rotation: the recreate fails with AlreadyExists while
 the old object waits.
 
-The rule:
+The rule, where "the grace" is `Options.DeletionGrace` (60s by default,
+configurable), counted from P's `deletionTimestamp`:
 
 | Protected object P | P's finalizer for (K, N) is kept while |
 |---|---|
 | not being deleted | any user of P in N exists (§6.1) |
-| being deleted, its namespace terminating | any user of P in N exists |
-| being deleted, its namespace live | any user of P in N **is being deleted** |
+| being deleted, no user at all | never: released at once |
+| being deleted, its namespace has a `deletionTimestamp` | any user of P in N exists |
+| being deleted, its namespace live | the grace runs; after it, any user of P in N **is being deleted** |
 
-A cluster-scoped P has no namespace, so it always takes the third row.
+A cluster-scoped P has no namespace, so it always takes the last row.
+
+**The re-reads are the last step before the release patch.** When the
+grace has run out, the releaser GETs the Namespace live and reads its
+`deletionTimestamp`, not its phase. It then lists the holders live, to find
+users that are deleting. Only then does it patch (§6.2, R2 and R3). Reading
+them earlier, when P is first read, would let a namespace deletion or a
+holder deletion that starts during the grace go unseen.
+
+**Deletion passes never skip the write.** A holder that is being deleted
+always runs A2, whatever the verified set says (§6.3). So its write changes
+the epoch, and a release patch racing it fails its test (§6.4).
 
 Once P is gone and is then recreated, its holders acquire the new
 incarnation. It has a new UID, so nothing they held carries over (§6.3).
 They find it through the missing-ref prober, or on their next pass (§10.3).
 
-**"Its namespace is terminating" is read live.** The releaser GETs the
-Namespace from the API server, never from a cache, before it releases a
-deleting P under the third row. In a teardown, P's `deletionTimestamp` is
-set after the namespace's, so a live read made after P's
-`deletionTimestamp` always sees the namespace terminating. A cache could
-lag behind the Secret's event and say the namespace is live.
+### 5.1 Helm, and the two interleavings
 
-**The residual, stated plainly.** If a Secret is deleted while its
-namespace is live and no user is being deleted, it is released at once. Its
-live holders then fail Connect until it is recreated. If the namespace is
-deleted before then, the teardown wedges on those holders, exactly as today.
-The same happens when a user starts deleting just after the release
-decision, and when a Secret and its holder are deleted together and the
-Secret goes first, as `kubectl delete -f` of a file that lists the Secret
-before the Repo does (§18 NQ1). The remedy, documented for consumers:
+*Corrected from the previous revision, which said Helm uninstall deletes
+custom resources before Secrets. That is false.* According to the
+re-review, Helm v3.21.3's `pkg/release/util/kind_sorter.go:73-110` puts
+Secret, and a chart's own Namespace, in `UninstallOrder` ahead of kinds it
+doesn't know (`:151-153`), so custom resources are deleted last. It also
+says `pkg/kube/client.go:601-615` waits between kinds. **I haven't
+re-verified these lines: my reads of Helm's source were blocked by this
+session's permissions (§17).** core-provider's composition delete is a Helm
+uninstall, so this ordering is the common one, not an edge case.
+
+**Interleaving A, a live namespace.** The uninstall, or a `kubectl delete -f`
+whose file lists the Secret first, deletes P and then holder H. P's
+namespace stays live.
+
+- H's deletion starts within the grace: the live list after the grace sees
+  H deleting, so P is kept until H is gone. **Covered.**
+- H's deletion starts after the grace and after the releaser's list: P is
+  released, and H fails until P is recreated. The namespace is live, so this
+  is recoverable, and it is the residual below.
+
+**Interleaving B, a chart that ships its Namespace.** The uninstall deletes
+P and the chart's Namespace before H. The namespace controller then deletes
+H.
+
+- The Namespace has its `deletionTimestamp` by the end of the grace: the
+  live re-read sees it, so P is kept until its users are gone, and the
+  namespace controller's deletion of H runs with P readable. **Covered.**
+
+**Whether A and B are covered depends on what the wait between kinds
+waits for.** There are two cases:
+
+- If it only orders the delete calls, or gives up within the grace, both
+  are covered as above.
+- If it waits until each kind's objects are *gone*, with a timeout longer
+  than the grace, then the uninstall can't delete H, or in B the Namespace,
+  until P is gone. P is then released after the grace, because nothing has
+  started deleting. In A, H then fails until P is recreated, and nothing
+  will recreate it. In B, the Namespace is deleted next and H with it, P
+  can't be recreated, and **the namespace wedges**.
+
+So the reading of `client.go:601-615` must be confirmed before this is
+considered closed. If the wait blocks until objects are gone, the runtime
+can't tell this uninstall apart from a rotation, and the remedy is on the
+uninstall side. Two remedies are possible. One: core-provider's composition
+delete deletes the chart's custom resources and waits for them before it
+runs `helm uninstall`. Two: a chart marks credential Secrets
+`helm.sh/resource-policy: keep`. In A that leaves the Secret behind; in B,
+the namespace deletion then removes it under §5's namespace row. §18 lists
+this as pending verification, not yet a question.
+
+**The cost to rotation.** A Secret with live users that is deleted in a live
+namespace is held for up to the grace. During that time, creating one with
+the same name fails with AlreadyExists, and `kubectl replace --force`
+waits. That is up to 60s with the default. A Secret with no users is
+released at once.
+
+### 5.2 The residual, and the platform namespace
+
+If a Secret is deleted while its namespace is live, and none of its users
+starts deleting within the grace, it is released. Its live holders then
+fail Connect until it is recreated. If the namespace is deleted before then,
+or a holder is deleted, that holder wedges until the Secret is recreated.
+The remedy, documented for consumers:
 
 > If you delete a Secret your objects use while its namespace is live,
-> recreate it before deleting those objects. Or delete the objects first. If
-> objects are already stuck deleting on a missing Secret in a live namespace,
-> recreate the Secret, and they finish.
+> recreate it before deleting those objects, or delete the objects first. If
+> objects are already stuck deleting on a missing Secret in a live
+> namespace, recreate the Secret, and they finish.
 
-**A new consequence for platform namespaces** (L7). Platform Secrets live in
-`krateo-system` and are used across namespaces. If one is deleted, for
-rotation say, while any of its users is being deleted, it stays Terminating
-for as long as that deletion takes. Recreating it fails with AlreadyExists
-until then. A holder whose external Delete keeps failing blocks the
-platform Secret's rotation for that whole time. Before U5's
-"a user is being deleted" rule, there was no hold, and that holder wedged
-instead. U5 limits the block to the deleting user's lifetime: it ends when
-that deletion finishes or is abandoned. It doesn't bound it in time. The
-waiting event and gauge name the deleting holder (§12). §18 NQ2 asks
-whether to cap it.
+**Platform namespaces.** Platform Secrets live in `krateo-system` and are
+used across namespaces. If one is deleted while any of its users is being
+deleted, it stays Terminating for as long as that deletion takes. Recreating
+it fails with AlreadyExists until then. A holder whose external Delete keeps
+failing blocks the platform Secret's rotation for that whole time. U5's
+"a user is being deleted" rule limits the block to that user's deletion.
+**There is no time cap** (NQ2, decided). The waiting event and gauge name
+the stuck holder (§12), and the operator unblocks rotation by fixing,
+orphaning or deleting that holder.
 
 ## 6. The protocol: shared finalizer, write-to-acquire (U6)
 
@@ -300,45 +366,61 @@ It also breaks foreground-deletion cycles (§11.8).
 
 **The acquirer**, for each ref P of holder H, in every pass, before Connect:
 
-- **A1. Announce.** If H's record doesn't name P, write the new record
-  with a merge patch guarded by H's resourceVersion
-  (`client.MergeFromWithOptimisticLock`). On a conflict, requeue. The
-  in-memory object takes the patched resourceVersion, so the pass's later
-  writes don't conflict with it.
-- **A2. Write P**, unless the verified set allows skipping it (§6.3).
-  - Built-in kinds (Secret, ConfigMap): one **strategic merge patch** with
+- **A1. Announce.** If H's record differs from the refs just computed,
+  write the new record with a merge patch guarded by H's resourceVersion
+  (`client.MergeFromWithOptimisticLock`). A conflict requeues, for any
+  holder: it is a conflict on the holder itself, and the next pass is
+  immediate. The in-memory object takes the patched resourceVersion. **In
+  the same pass, synchronously**, A1 drops the `observed` entries for refs it
+  removed, and resets them for refs it added (§6.3).
+- **A2. Write P.** It is skipped only where §6.3 allows: never on a deletion
+  pass, and never for a ref this pass's A1 added.
+  - **Built-in kinds** (Secret, ConfigMap): one strategic merge patch with
     no precondition. It merges the finalizer into the list, sets the epoch
-    to a fresh token, and sets the held label. A strategic merge patch
-    can't drop or duplicate anyone else's finalizers.
-  - Custom resources: a live GET, then a **merge patch guarded by
-    resourceVersion** (`MergeFromWithOptimisticLock`) that writes the full
-    finalizer list plus the finalizer, the fresh epoch, and the label. On a
-    conflict, GET again and retry, up to 3 times, then requeue.
-  - Outcomes: **held** (P now carries the finalizer and the fresh epoch),
-    **Deleting** (`Forbidden`: P is being deleted and lacks the finalizer),
-    or **Missing** (NotFound). P being deleted *with* the finalizer is held:
-    the patch adds no new finalizer, so it is allowed, and the epoch still
-    moves.
+    to a fresh token, and sets the held label and the kind's marker label
+    (§10.1). A strategic merge patch can't drop or duplicate anyone else's
+    finalizers.
+  - **Custom resources:** a live GET, then a merge patch guarded by
+    resourceVersion (`MergeFromWithOptimisticLock`) that writes the full
+    finalizer list with the finalizer added, the fresh epoch, and both
+    labels. On a conflict it GETs and retries, up to 3 times. If the
+    retries run out, a new holder requeues (fail closed), and an
+    established holder is **Degraded**: it logs once, records an event,
+    counts the metric, and proceeds, deletion passes included (R4, M5).
+  - **Outcomes:**
+    - **held**: P now carries the finalizer and the fresh epoch. That
+      includes a P that is being deleted *with* the finalizer: the patch
+      adds no new finalizer, so it is allowed, and the epoch still moves;
+    - **Deleting**: `Forbidden`, because P is being deleted and lacks the
+      finalizer;
+    - **Missing**: NotFound;
+    - **Degraded**: any other error. A new holder fails closed and an
+      established one proceeds (§8).
 - **A3.** Only then Connect.
 
 **The releaser** works on one holder kind K and one namespace N at a time,
 for the set of protected objects pending there (R7). For each pending P:
 
-- **R0. Fast path.** Ask the holder informer's index for users of P in N.
-  Holders that §6.1 excludes don't count. If a user exists and §5 says
-  keep, stop. This settles the usual case, where one of several users
+- **R0. Fast path.** Ask the holder informer's index for users of P in N,
+  leaving out the holders §6.1 excludes. If P is not being deleted and a
+  user exists, stop. This settles the usual case, where one of several users
   leaves.
 - **R1. Get P live.** Note its resourceVersion, the index *i* of the
-  finalizer in `metadata.finalizers`, and the epoch *e*. If the finalizer
-  is absent, P is done. If the epoch is absent (only a third party could
-  cause that), set a fresh one with a strategic merge or guarded patch, and
-  requeue. For a deleting namespaced P, GET its Namespace live (§5).
-- **R2. List consistently, once for the whole batch.** After every R1 GET
-  in the batch, make one live, paginated, metadata-only list of K in N
+  finalizer in `metadata.finalizers`, the epoch *e*, and its
+  `deletionTimestamp`.
+  - If the finalizer is absent, P is done.
+  - If the epoch is absent (only a third party could cause that), set a
+    fresh one and requeue.
+  - If P is being deleted in a namespace that was live when last seen, has
+    users by R0, and is still inside the grace, requeue the batch at the
+    end of the grace (§5).
+- **R2. The last reads, after every R1 in the batch.** For each P being
+  deleted, GET its Namespace live and read its `deletionTimestamp`. Then
+  make **one** live, paginated, metadata-only list of K in N
   (`PartialObjectMetadataList`, no resourceVersion, so it is a consistent
   read), with no label or version selector. For each P, compute its users
-  (§6.1) and its deleting users.
-- **R3. Release** each P that §5 says to release. Apply one **JSON patch**:
+  and its deleting users (§6.1), and apply §5's table.
+- **R3. Release** each P the table says to release, with one JSON patch:
 
   ```json
   [{"op":"test",   "path":"/metadata/annotations/<F escaped>", "value":"<e>"},
@@ -348,50 +430,81 @@ for the set of protected objects pending there (R7). For each pending P:
   ```
 
   `<F escaped>` is the finalizer name with `/` written as `~1` (RFC 6901).
-  When the finalizer is the last `credential-use.` one on P, the patch also
-  tests the whole `/metadata/finalizers` array as read and removes the held
-  label. Otherwise the label stays, because another kind's hold needs it.
+  Two cases add to the patch, and both then also test the whole
+  `/metadata/finalizers` array as R1 read it:
+  - when F is K's last finalizer on P (no other namespace's), the patch
+    also removes K's marker label;
+  - when F is the last `credential-use.` finalizer of any kind, it also
+    removes the held label.
+
   If a test fails, the API server rejects the whole patch. The exact status
-  code is pinned by a test, and is treated as a conflict: P goes back to
-  R1. No other writer's change can be clobbered: the patch removes one
-  index it has just tested, and one annotation.
+  code is pinned by a test, and is treated as a conflict: P goes back to R1.
+  No other writer's change can be clobbered: the patch removes one index it
+  has just tested, and keys only this kind writes. When R3 succeeds, this
+  process drops its `written` entries for P at once, synchronously.
 
 ### 6.3 The verified set
 
-The fast path in A2 may skip the write only for pairs this process has
-written. The tracker keeps them in memory:
+A2 may skip the write only for pairs this process has written (U6), and
+never on a deletion pass. The tracker keeps three maps in memory:
 
 - `written[(P.uid, K, N)] = t_issue`: the local monotonic time at which this
-  process issued a successful A2 write for P, K and N;
-- `observed[(H.uid, P)] = t_obs`: the local time at which this process first
-  saw H's record naming P, by reading it from the holder informer at the
-  start of a pass or from the response to its own A1.
+  process issued a successful A2 write for P, K and N.
+- `recordSince[(H.uid, P)]`: the **informer delivery time** of the first
+  holder event, in the current unbroken run of H's versions whose record
+  names P. The holder informer's handler maintains it, and the handler
+  touches nothing else. A delivered version whose record doesn't name P
+  ends the run and deletes the entry, so a later re-add starts a new run
+  with a new time.
+- `observed[(H.uid, P)]`, written only by passes, **synchronously**. When a
+  pass's A1 adds P, it sets `observed` to the time A1's response returned,
+  **overwriting** any earlier value (M1). When A1 removes P, it deletes the
+  entry. That ref can't skip in the pass whose A1 added it.
 
-**A2 may skip for (H, P) only if `t_obs < t_issue`**, that is, this process
-wrote P *after* it had seen H's record naming P. This is U6's rule ("only
-for pairs this process wrote") in its exact form. One write covers every
-holder whose record was already visible when the write was issued, and that
-is what keeps a restart from re-writing P once per holder (§6.6).
+t_obs for (H, P) is **the later of** `observed` and `recordSince`. If both
+are absent, because the informer hasn't delivered the record yet and no
+local A1 wrote it, the pass doesn't skip. Taking the later time can only
+make skips rarer. `written` is keyed by P, not by holder, so A1 has no
+per-holder `written` entry to reset. The comparison with t_obs is what makes
+a re-added ref write again.
+
+**A2 may skip for (H, P) only if** all of these hold:
+
+- the pass is not a deletion pass;
+- this pass's A1 didn't add P;
+- `written[(P.uid, K, N)]` exists, with `t_obs < t_issue`. That is, this
+  process wrote P after the informer had delivered H's record naming P.
+
+**After a restart or a leader change**, all three maps are empty. The
+holder informer's initial list delivers every holder at about the time it
+syncs, t_sync, and that becomes their `recordSince`. The first pass of the
+first holder of P writes P at some t_issue > t_sync. Every holder whose
+record was in that initial list has `recordSince` = t_sync < t_issue, so it
+skips. **So a restart costs one A2 per (P, K, N)**, as claimed, under this
+definition. The exceptions are holders whose record changes after the
+sync, and every deletion pass: they write again.
 
 Entries are dropped:
 
-- when H's record stops naming P, so an away-and-back re-point writes again;
-- when P's UID changes or P disappears;
-- when P loses the finalizer for (K, N) or leaves the label-scoped cache
-  (third-party stripping, §10.2);
-- when Disown runs, and when the process restarts or loses leadership. The
-  memory is gone, so everything is written again.
+- **in the pass, synchronously:** by A1, for refs it removes; by a
+  successful R3, for the P it released;
+- **in the protected informer's handler:** when P's UID changes or P is
+  deleted, when P loses the finalizer for (K, N), or when P leaves the
+  label-scoped cache (§10.2). The handler only deletes `written` entries; it
+  never creates or extends one;
+- **all of them** on Disown, and when the process restarts or loses
+  leadership.
 
 ### 6.4 Why it is safe
 
 Take an acquirer whose A1 lands at tA and whose A2 write lands at tW, with
 tA < tW (A2 starts after A1 returns). Take a releaser whose R1 reads P at
-tG, whose R2 lists at tL > tG, and whose R3 patch lands at tR > tL.
+tG, whose R2 list reads at tL > tG, and whose R3 patch lands at tR > tL.
 
 - **tW < tG.** Then tA < tG < tL, so R2 sees H's record naming P, and H is
-  a user. The releaser keeps the finalizer, except where §5's third row
-  says to release (P being deleted, namespace live, H not deleting). That
-  is U5's intended release, not a lost hold.
+  a user. The releaser keeps the finalizer, except where §5's last row says
+  to release (P being deleted, its namespace live, the grace over, H not
+  deleting). That is U5's intended release, not a lost hold.
 - **tG < tW < tR.** A2 wrote a fresh random epoch, so at tR the epoch is not
   *e*, and R3's first test fails. This holds even if another releaser
   removed the finalizer between tG and tW and A2 re-added it: the epoch is
@@ -401,69 +514,114 @@ tG, whose R2 lists at tL > tG, and whose R3 patch lands at tR > tL.
   is Forbidden because P is being deleted (Deleting), and the acquirer
   knows which.
 
+**A holder that starts deleting during a release.** Say H's
+`deletionTimestamp` lands at tD_H.
+
+- If tD_H < tL, the list sees H deleting, so P is kept.
+- If tD_H > tL, H's deletion pass runs A2 without a skip. If that write
+  lands before tR, R3 fails and the retry's list sees H deleting.
+- If it lands after tR, the release won. This needs tD_H inside the
+  releaser's few milliseconds between the list and the patch, and after the
+  grace. A2 then reports Deleting, H proceeds Degraded, and H fails until P
+  is recreated. Its namespace is live, so this is recoverable, and it is
+  part of §5.2's residual.
+
+The namespace's deletion is handled the same way. Its `deletionTimestamp`
+is read live after the grace, as the last step before R3. A namespace
+deletion that starts after that read deletes the holders, and their
+deletion passes write. So the release loses unless it lands in the same few
+milliseconds.
+
 **Error or crash after the announce** (HIGH-1). Suppose A1 succeeds and A2
-fails, times out, or the process dies. No `written` entry exists, so every
-later pass, in any process, runs A2 again before its Connect. The record
-alone never lets a pass skip the write. A2 is idempotent: a write that
-landed but whose response was lost is simply repeated. While A2 has not
-succeeded, a concurrent releaser can't use the record against H: the record
-is visible to its R2 (tA < tL), or R2 came first, in which case the
-finalizer may go and the next A2 restores it or reports Deleting. In no
-case does H connect on a P that a releaser can remove underneath it.
+fails, times out, or the process dies. Then no `written` entry is issued
+after it. A ref A1 adds never skips in that pass, and after a restart
+`written` is empty, so every later pass, in any process, runs A2 before its
+Connect. A2 is idempotent: a write that landed but whose response was lost
+is simply repeated. While A2 has not succeeded, a concurrent releaser can't
+use the record against H. Either the record is visible to its R2
+(tA < tL), or R2 came first, in which case the finalizer may go and the
+next A2 restores it or reports Deleting. In no case does H connect on a P
+that a releaser can remove underneath it without H's next write seeing so.
 
 **The skip is safe** for the same reason as the first case. If
-`t_obs < t_issue`, then tA < t_obs < t_issue < tW. Every releaser that read
-P before tW fails its test, and every releaser that reads after tW sees H.
-The only things that can still remove the finalizer while H's record names
-P are §5's live-namespace release, Disown, and third parties. The first two
-are intended. Third parties drop the `written` entry through the informer
-(§10.2), within the cache's lag.
+`t_obs < t_issue`, then tA < t_obs < t_issue < tW, because the informer
+delivered the record after the API server had stored it. So every releaser
+that read P before tW fails its test, and every releaser that reads after
+tW sees H. The only things that can still remove the finalizer while H's
+record names P are:
 
-**What the proof assumes.** R1's GET and R2's list are consistent reads,
-and A2 is a write. No decision rests on a cache. Caches serve only the fast
-paths (R0, the `written` skip), and both are safe when stale: a stale R0
-that sees a user already gone only delays the release to the next event.
+- §5's live-namespace release, which H's deletion passes guard against by
+  never skipping;
+- Disown, which is intended;
+- third parties, which drop the `written` entry through the informer
+  (§10.2), within the cache's lag.
+
+**What the proof assumes.** R1's GET, R2's Namespace GET and R2's list are
+consistent reads, and A2 is a write. No decision rests on a cache. Caches
+serve only the fast paths (R0, and the `written` skip), and both are safe
+when stale. A stale R0 that sees a user already gone only delays the
+release to the next event. The skip rests on a delivery time, which can
+only come after the write it reports.
 
 ### 6.5 Races, case by case
 
 - **Two users deleted at once.** Their events coalesce into one batch for
   (K, N), and R2 sees whichever are left. Two releasers in two processes are
   serialized by R3's tests.
-- **One created while another is deleted.** This is §6.4's middle case:
-  either R2 sees the new announcement, or A2's fresh epoch breaks R3.
+- **One created while another is deleted.** This is §6.4's middle case.
+  Either R2 sees the new announcement, or A2's fresh epoch breaks R3.
 - **The finalizer added after a concurrent removal.** This is §6.4's last
   case. A Forbidden A2 on a deleting P gives a new holder `MustNotConnect`
   (§8). It never gets its owner finalizer, so it deletes freely.
 - **Error or crash after the announce**, with a concurrent releaser: §6.4.
+- **A holder or namespace deletion during a release**: §6.4.
 - **Third-party stripping** (`kubectl replace`, Argo CD's Replace sync
-  option) removes the finalizer and the label outside the protocol. P
-  leaves the label-scoped cache, which drops the `written` entries and
+  option) removes the finalizer and the labels outside the protocol. P
+  leaves the label-scoped cache. That drops the `written` entries and
   enqueues P's holders through the index (§10.2). The window is the
   informer's lag plus the holders' queue wait.
+- **A recreate behind a cached UID** (L6). P is released and removed, and
+  recreated under the same name. A process other than the releaser drops
+  its `written` entries for the old UID only when its informer delivers
+  the old P's deletion. Until then, that process's fast path may find the
+  old P, with the finalizer, in its cache, and skip A2, while Connect reads
+  the new, unheld P. **The window runs from the old P's final removal to
+  that delivery**, which is watch latency. It can't open while the old P
+  is held, because the recreate fails with AlreadyExists until P is gone.
+  It can't open in the releasing process, which drops its entries when R3
+  succeeds. It matters only if the new P is deleted inside the window.
 
 ### 6.6 Cost
 
-- **Steady state:** none. Refs are unchanged and `written` covers them, so
-  everything is read from caches.
+- **Steady state:** no API calls. Refs are unchanged and `written` covers
+  them, so everything is read from caches.
 - **A new holder, or new refs:** one patch of the holder (A1), plus one
-  write per new P (A2).
+  write per new P (A2). A1 changes the holder, so it **causes one extra pass**
+  of that holder: its update event re-queues it, and the pass makes an
+  external Observe call. A status update in the steady state changes
+  nothing, so it causes no extra pass, but A1 does change the object. The
+  previous revision's "no extra pass" was wrong. The predicate shipped with
+  `CredentialUseSource` (§7.5) drops holder updates whose only change is the
+  record, and removes the extra pass.
+- **Deletion passes:** one A2 per ref per pass, never skipped.
 - **After a restart or leader change:** one A2 per (P, K, N), not per
-  holder. The first pass of the first holder of each P writes it, and every
-  holder whose record was visible then is covered.
-- **Backfill on upgrade** (L6): every existing holder has no record, so it
-  needs A1 and A2 on its first pass. That is two writes per holder. A2
-  can't be coalesced here, because each record is only written in that
-  pass. 1,000 holders make about 2,000 writes over the first poll interval
-  (1 minute by default), about 33 per second. With saturation on, local
-  slots spread them, and so does the REST config's client-side limiter when
-  one is set. The A1 write changes the holder's resourceVersion, but it
-  causes no extra pass beyond the one the pass's own status update already
-  causes: both events coalesce in the queue while the item is being
-  processed. So there is nothing to skip.
-- **A release:** for a batch of M pending objects in (K, N), M GETs (plus
-  one Namespace GET), one paginated metadata-only list of K in N, and up to
-  M patches. A namespace teardown with 50 Secrets lists the holders once,
-  not 50 times.
+  holder (§6.3).
+- **Backfill on upgrade** (L6, M6). Every existing holder has no record, so
+  its first pass makes A1 and A2: two writes per holder. A2 can't be
+  coalesced, because each record is written in that same pass. Nothing
+  paces this but the controller's workers and the client's request rate.
+  controller-runtime's `GetConfig` disables client-side rate limiting by
+  default (`pkg/client/config/config.go:101-104`), leaving API Priority and
+  Fairness to do it, unless the provider sets a QPS.
+  - For 1,000 holders that is 2,000 writes, plus 1,000 extra passes, each
+    with an external Observe call, if the predicate isn't installed.
+  - At 2 workers and about 0.5s per pass, the backfill takes about 8 minutes
+    with the predicate, and about 16 without.
+  - With saturation on, local slots pace it further.
+- **A release:** for a batch of M pending objects in (K, N), M GETs, one
+  Namespace GET per deleting namespace, one paginated metadata-only list of
+  K in N, and up to M patches. A namespace teardown with 50 Secrets lists
+  the holders once, not 50 times.
 
 ### 6.7 The invariant, restated so it is true
 
@@ -472,8 +630,8 @@ either been written by A2 after the record named it, or been found absent by
 a live read made after the pass's last A2 and before that finalizer write.**
 That live read is the check just before `AddFinalizer` (§8, R6). A ref that
 appears after it is held on a later pass, through the prober or backoff
-(§10.3). It is unprotected until then: it was created after the decision,
-in a live namespace, so it is recoverable.
+(§10.3). Until then it is unprotected: it was created after the decision, in
+a live namespace, so it is recoverable.
 
 ## 7. The package: `pkg/credentialuse`
 
@@ -524,11 +682,14 @@ type Options struct {
 	Protected      []ProtectedKind          // kinds Refs and Next may name; default: Secret
 	MaxDepth       int                      // levels of Next followed; default 3
 	Enqueue        func(holder types.NamespacedName) // the caller's queue (§10.2)
-	Disown         bool                     // §7.4
+	DeletionGrace  time.Duration            // §5; default 60s
 	ProbeInterval  time.Duration            // missing-ref prober; default 15s (§10.3)
+	DisownSettle   time.Duration            // §7.4; default 10m
 	Logger         logging.Logger
 	Metrics        MetricsRecorder
 }
+// Disown is not an option: it is the switch on the holder CRD (§7.4), so
+// every process of the kind reads the same value.
 
 type ProtectedKind struct {
 	GVK   schema.GroupVersionKind
@@ -604,8 +765,11 @@ For unstructured-runtime:
    just before that write, so both go in one write. **This is mandatory.**
    On any deletion pass where its own finalizer is already absent but the
    record is present, it writes `Forget` with an Update of its own.
-5. **Enqueue:** pass `Options.Enqueue` that adds a holder to its workqueue
-   (§10.2).
+5. **Enqueue, and the holder event filter:** pass `Options.Enqueue` that adds
+   a holder to its workqueue (§10.2). It is required: `Track` fails without
+   it, for the reason §7.5 gives for the source (M4). Filter holder update
+   events whose only change is the record, as `IgnoreCredentialUseRecord`
+   does (M6).
 6. RBAC as in §13.
 
 "Find the last user" is the release loop's job, inside `Run`. `Users` is
@@ -632,28 +796,76 @@ Disown replaces the first revision's ReleaseOnly (HIGH-3), which left
 records and finalizers behind for objects still in use, so a downgrade
 wasn't safe.
 
-With `Options.Disown`:
+**The switch is cluster-visible, on the holder CRD** (M2). It is an
+annotation, `credential-use.krateo.io/disown`, on the
+CustomResourceDefinition of the holder kind. Its value is `all`, or a
+comma-separated list of protected GroupKinds (`Secret`,
+`KubernetesTarget.core.krateo.io`) to stop protecting. Every tracker of that
+GroupKind watches its CRD by name and reads the switch. Why the CRD, and not
+a ConfigMap in the provider's namespace:
 
-- `Acquire` acquires nothing. It returns all refs Unheld, the object
-  proceeds as it does today, and nothing is ever `MustNotConnect`.
-- The loop strips the record from every holder of K (a merge patch guarded
-  by resourceVersion).
+- **It is keyed by exactly the right thing.** A CRD is one per GroupKind,
+  and every process that reconciles the kind can read it. core-provider runs
+  one process per composition version, and those processes have no single
+  "provider namespace" a ConfigMap would belong to.
+- **It is cluster-scoped**, so no namespace teardown can delete it, and it
+  needs no extra object.
+- **Its weakness is a re-apply.** Whoever applies the CRD could strip the
+  annotation with a full-object Update. Helm's three-way merge and
+  server-side apply keep annotations they don't own. core-provider generates
+  its CRDs, so it must write them with patch or apply, never a full Update.
+  The doc text says so.
+
+**What Disown does.** While the switch is on, for every tracker of the kind
+in every process:
+
+- `Acquire` acquires nothing. It returns every ref Unheld, the object
+  proceeds as today, and nothing is ever `MustNotConnect`.
+- The loop strips the record from every holder of K, with a merge patch
+  guarded by resourceVersion.
 - It removes every finalizer with K's prefix, and its epoch, from every
-  labelled protected object (R3's JSON patch, without the user check). It
-  removes the label where that was the last `credential-use.` finalizer.
-- It reports `credentialuse_held_objects{holder_kind}`, which is exported in
-  every mode.
+  protected object, using R3's JSON patch without the user check. It
+  removes K's marker label, and the held label where that was the last
+  `credential-use.` finalizer.
 
-**At 0, downgrading the runtime, removing the interface from the
-connecter, or uninstalling is safe.** Disown is also the way to:
+**"Safe" is observable cluster-wide**, not only on one process's gauge.
+Every pass of the Disown loop makes a **live count**: label-selected,
+metadata-only, paginated lists of each protected kind (by K's marker label,
+counting finalizers with K's prefix), plus the holders that still carry a
+record. It writes the result on the CRD:
 
-- **drop a kind from `Protected`.** Disown runs for that protected kind
-  only: `Options.DisownProtected`.
-- **delete a holder CRD** (L5). The holders are gone, so the loop skips the
-  record step. It finds the protected objects by label and prefix.
+```
+credential-use.krateo.io/held-count: "0"
+credential-use.krateo.io/held-zero-since: "2026-11-08T17:02:11Z"
+```
 
-The release notes must say: set Disown, wait for the gauge to reach 0, then
-change the version.
+A non-zero count clears `held-zero-since`. **Downgrading the runtime,
+removing the interface from the connecter, or uninstalling is safe once
+`held-count` is 0 and `held-zero-since` is older than `DisownSettle`**
+(10 minutes by default). That is long enough for every process of the kind
+to have seen the switch and finished its in-flight passes. Any process can
+write the count, because each one counts the same cluster, live.
+
+**Namespaces outside `SharedOptions.Namespaces`.** Disown doesn't use the
+caches. Its lists are live and cluster-wide, so it reaches every namespace,
+including those the caches don't cover. Under `resourceNames` RBAC, where
+cluster-wide lists aren't allowed, it works from the holders' records
+instead: it GETs and patches each named object.
+
+**Disown with no holder kind, for a deleted CRD** (L5). When the holder CRD
+is gone, its objects are gone too: a CRD's deletion removes its custom
+resources first. But finalizers with its prefix may remain on protected
+objects. `credentialuse.DisownPrefix(ctx, clients, holder schema.GroupKind,
+protected []schema.GroupVersionKind)` needs no holder kind and no switch. It
+lists the protected kinds live by K's marker label, removes every finalizer
+with the prefix `credential-use.<kind>.<group>/` and its epoch, and removes
+the labels as above. It refuses to run while the CRD still exists, even if
+it is being deleted, because then holders may still be deleting and need
+their refs. It ships as a function and as a one-shot Job recipe in the
+docs.
+
+**Dropping one protected kind** goes through the same switch, by listing
+that kind in the annotation.
 
 ### 7.5 provider-runtime's adapter and wiring (U2)
 
@@ -682,25 +894,55 @@ gains `FinalizerName() string`, through a new optional interface,
 implement it, on a connecter that implements `CredentialRefsProvider`, is a
 setup error: the runtime can't tell established holders from new ones.
 
+**The builder line, and the predicate, are required** (NQ3, decided). The
+tracker enqueues holders when a protected object changes (§10.2), so it
+needs a handle on the controller the provider builds after
+`NewReconciler`. The provider writes:
+
+```go
+r := reconciler.NewReconciler(mgr, kind, reconciler.WithExternalConnecter(c), ...)
+return ctrl.NewControllerManagedBy(mgr).
+	Named("myresource").
+	For(&v1alpha1.MyResource{}, builder.WithPredicates(reconciler.IgnoreCredentialUseRecord())).
+	WatchesRawSource(r.CredentialUseSource()).
+	WithOptions(o.ForControllerRuntime()).
+	Complete(r)
+```
+
+`IgnoreCredentialUseRecord` drops holder update events whose only change is
+the record annotation, once `resourceVersion` and `managedFields` are set
+aside. That removes the extra pass A1 would otherwise cause (§6.6, M6). An
+outside runtime filters its holder events the same way.
+
 **A setup error refuses to start**: the runnable's `Start` returns it, so
-`mgr.Start` fails. The process exits with the error. It doesn't run with the
-feature half on.
+`mgr.Start` fails and the process exits. Setup errors include:
+
+- an invalid finalizer prefix;
+- an unmappable holder or protected kind;
+- a missing owner finalizer name;
+- **a tracker whose `CredentialUseSource` was never started** (M4).
+  controller-runtime starts a controller's sources before its workers, so
+  the first `Reconcile` proves it. If the source hasn't been started by
+  then, that `Reconcile` does nothing (no Acquire, no Connect) and signals
+  the runnable, whose `Start` returns
+  `credential-use source for <kind> was not started: add .WatchesRawSource(r.CredentialUseSource()) to the controller`.
+  If no `Reconcile` comes, the runnable also fails 2 minutes after leader
+  election with the source still unstarted.
+
+U2's rule is that acquiring without its supporting pieces must not run.
+Without the source, third-party stripping, re-pointed intermediates and
+recreated objects would wait for the poll interval, so the windows of §6.5
+and §9.2 would stretch to it. That is a loss of protection, not only of
+latency, so it fails at start.
 
 **Fake managers work.** `pkg/resource/fake.Manager` has a nil config. With
-a nil config, the adapter doesn't build a `Shared` and logs once that
-credential-use is off. Unit tests that don't care are unaffected. Tests
-that do inject one: `reconciler.WithCredentialUseShared(s)`, built on
-client-go fakes. A connecter that doesn't implement the interface creates
-nothing (§11.10).
-
-**Prompt requeue needs one builder line.** The tracker enqueues holders
-when a protected object changes (§10.2). `NewReconciler` has no handle on
-the controller the provider builds afterwards, so the reconciler exposes
-`CredentialUseSource()` and the provider adds
-`.WatchesRawSource(r.CredentialUseSource())`. Without it, safety is
-unchanged and re-acquiring waits for the poll interval or backoff. The
-reconciler logs a warning if the source hasn't been started 30s after the
-manager started. §18 NQ3 asks whether to keep this explicit.
+a nil config, the adapter doesn't build a `Shared`, logs once that
+credential-use is off, and makes `CredentialUseSource` a no-op source.
+Unit tests that don't care are unaffected. Tests that do inject a `Shared`
+with `reconciler.WithCredentialUseShared(s)`, built on client-go fakes. A
+connecter that doesn't implement the interface creates nothing (§11.10),
+and `CredentialUseSource` is then a no-op source, so the builder line is
+harmless there too.
 
 ## 8. Where it runs in Reconcile; the governor and the gated queue
 
@@ -714,17 +956,22 @@ per key. In order:
    `RemoveFinalizer` would write nothing, and the record is present, write
    the record's removal with an Update of its own (R12). No Connect, so
    nothing to acquire.
+0. **The source check** (M4): if the tracker's `CredentialUseSource` hasn't
+   been started, return at once and fail the manager (§7.5).
 4. **Acquire**, new, after the orphan check and before the Connect gate
-   (`:879`), on every remaining pass, deletion passes included.
-   - A conflict returns `rateLimitedRequeue()`, as every conflict does.
+   (`:879`), on every remaining pass, deletion passes included. **A deletion
+   pass always writes** (A2 never skips there, §5, §6.3).
+   - A conflict on A1, the holder's own record, returns
+     `rateLimitedRequeue()`, as every conflict on the holder does.
    - **A new holder** (no owner finalizer) fails closed. On `MustNotConnect`
      or any other error: Synced=False/ReconcileError, Ready=NotObserved
      through `markNotObserved`, and return the error so backoff applies.
-   - **An established holder** fails open on every Acquire error (R4),
-     deletion passes included. Log once per object, record a Warning event
-     (`CredentialUseDegraded`), and proceed to Connect as today. It never
-     gets `MustNotConnect`. An established holder whose ref is Deleting and
-     unheld also proceeds (§11.4).
+   - **An established holder** fails open on every other Acquire error
+     (R4), deletion passes included. That includes a custom-resource A2
+     whose retries ran out (M5). Log once per object, record a Warning
+     event (`CredentialUseDegraded`), count the metric, and proceed to
+     Connect as today. It never gets `MustNotConnect`. An established
+     holder whose ref is Deleting and unheld also proceeds (§11.4).
    - `WithResolved(externalCtx, a)` puts the resolved chain on Connect's
      context (§9.2).
    - The gate's `pristine` copy (`:870`) is taken after Acquire, so that a
@@ -811,28 +1058,36 @@ never held.
 **`Resolved` alone doesn't close the window** (MED-5). If the
 KubernetesTarget is re-pointed after this pass, the holder keeps connecting
 through the old, still-held chain until it reconciles again. So the tracker
-also **enqueues holders through the record index** when a protected object
-with a `Next`:
+also **enqueues holders through the record index** when a held protected
+object with a `Next`:
 
-- changes generation, or changes resourceVersion through someone else's
-  write (not one of the tracker's own epoch or label writes, which it
-  recognises by the `credential-use.` keys that changed);
-- loses the finalizer or the label;
-- is deleted or recreated with a new UID.
+- changes generation, or changes through someone else's write. A change
+  counts as the tracker's own only if the two versions are equal once every
+  `credential-use.` label, annotation and finalizer, `resourceVersion` and
+  `managedFields` are set aside (L2). For a metadata-only kind, a change to
+  data can't be told apart, but it doesn't need to be: such a kind has no
+  `Next`;
+- loses the finalizer or a label;
+- gets a `deletionTimestamp`, or is deleted.
 
-Plain Secrets without a `Next` are enqueued only on finalizer or label loss
-and on deletion or recreation, because a data change doesn't change what
-they hold.
+Plain Secrets without a `Next` are enqueued only on finalizer or label loss,
+on a `deletionTimestamp`, and on deletion, because a data change doesn't
+change what they hold.
+
+**A recreated object is not among these events** (L5). It is unlabelled, so
+the label-scoped informer doesn't deliver it. **Only the missing-ref prober
+sees it** (§10.3). The holders' own retries also find it, and
+`BeforeEstablish` re-checks before an owner finalizer is written.
 
 **The window that remains is reconcile latency, stated honestly.** From the
 change to the holder's next pass, the holder uses the old chain. That time
-covers the informer's lag, the holder's queue wait (including a gated
-queue's wait for a local slot), and, if `CredentialUseSource` isn't wired,
-the poll interval. A **paused** holder doesn't reconcile at all, so it stays
-on the old chain until it is unpaused. It is also deleted only after it is
-unpaused, and its first pass then acquires before anything else. The window
-matters only if the newly named Secret is deleted inside it, and §5 already
-makes that recoverable unless its namespace is terminating.
+covers the informer's lag and the holder's queue wait, including a gated
+queue's wait for a local slot. For a recreated object it also covers up to
+one prober interval. A **paused** holder doesn't reconcile at all, so it
+stays on the old chain until it is unpaused. It is also deleted only after
+it is unpaused, and its first pass then acquires before anything else. The
+window matters only if the newly named object is deleted inside it, and §5
+already makes that recoverable unless its namespace is being deleted.
 
 ### 9.3 Refs whose lifetime is already guaranteed (C2)
 
@@ -866,24 +1121,48 @@ process:
   it holds only objects some kind holds;
 - **metadata-only** (`metadatainformer`), unless `Content` is set (§10.4);
 - **with a transform** that drops `managedFields`, every annotation except
-  `credential-use.*`, and every label except the held label.
+  `credential-use.*`, and every label except `credential-use.*`.
 
 What remains is about 300 to 500 bytes per object: name, namespace, UID,
 resourceVersion, generation, `deletionTimestamp`, finalizers, the epoch
-annotations and the label. 10,000 held Secrets cost about 5 MB.
+annotations and the labels. 10,000 held Secrets cost about 5 MB.
 
-**A fast-path miss falls back to a live GET.** That covers an object not yet
-labelled (it was just created, or it has never been held), an object the
-informer hasn't delivered yet, and a namespace the caller's informers don't
-cover (§10.5). A2's write sets the label, so from then on the object is in
-the cache.
+**Two labels.** A2 sets both in the same write as the finalizer:
+
+- the held label, `credential-use.krateo.io/held: "true"`, shared by every
+  kind. It scopes the caches;
+- **K's marker label** (L3), `credential-use.krateo.io/k-<hash>: "true"`,
+  where `<hash>` is the first 16 hex digits of the SHA-256 of
+  `<lowercase kind>.<group>`. It lets `scaletozero` and Disown select one
+  kind's held objects and stop at the first match (§11.6). A hash collision
+  is harmless: every reader then checks the finalizer prefix, and pages on
+  past a mismatch.
+
+**Who removes the labels** (L4):
+
+- R3 removes K's marker label with K's last finalizer on P, and the held
+  label with the last `credential-use.` finalizer (§6.2);
+- Disown removes them likewise;
+- if a third party strips the finalizers but leaves a label, any tracker
+  whose informer sees a labelled object with no matching finalizer removes
+  the label. That is a JSON patch testing that the whole finalizer array
+  still has no `credential-use.` entry, so it can't race a new A2.
+
+**A fast-path miss falls back to a live GET.** That covers:
+
+- an object not yet labelled, because it was just created or has never been
+  held;
+- an object the informer hasn't delivered yet;
+- a namespace the caller's informers don't cover (§10.5).
+
+A2's write sets the labels, so from then on the object is in the cache.
 
 ### 10.2 The holder informer, the index, and enqueue (R5)
 
 There is one metadata-only informer per holder kind, with a transform that
 keeps the UID, resourceVersion, `deletionTimestamp`, finalizers and the
 record. That is about 300 bytes plus about 100 bytes per ref, so 10,000
-holders cost about 5 MB.
+holders cost about 5 MB. Its handler maintains `recordSince` (§6.3).
 
 Its index maps each recorded ref to holders. The index serves:
 
@@ -891,29 +1170,49 @@ Its index maps each recorded ref to holders. The index serves:
 - **mapping holder events to release batches**: a create, an update whose
   record or owner finalizer changed, and a delete map to the protected
   objects in the old and the new record, and enqueue their (K, N) batch;
-- **enqueueing holders when a protected object changes** (§9.2). Events from
-  the protected-object informer go through the index to `Options.Enqueue`.
-  A label-scoped informer delivers losing the label, the signature of a
-  `kubectl replace` or an Argo CD Replace that strips our metadata, as a
-  deletion. So a stripped object enqueues its holders, and the tracker drops
-  the `written` entries for it (§6.3).
+- **enqueueing holders when a protected object changes** (§9.2), through
+  `CredentialUseSource` or `Options.Enqueue`. A label-scoped informer
+  delivers an object losing its label as a deletion. That is the signature
+  of a `kubectl replace`, or an Argo CD Replace, that strips our metadata.
+  So a stripped object enqueues its holders, and the handler drops the
+  `written` entries for it (§6.3).
 
-On startup, the protected informers' initial list enqueues a release batch
-for every (K, N) of every held object. So every hold is checked again after
-a restart, and a holder delete missed while down can't strand a finalizer.
+**A protected object getting a `deletionTimestamp`** (M3) enqueues the
+(K, N) batch of every finalizer of K it carries:
+
+- at once, which releases it if it has no users at all;
+- again when the grace ends, measured from the `deletionTimestamp`, for
+  §5's live-namespace row.
+
+The releaser re-checks the grace itself in R1, so an early or duplicate
+enqueue is harmless.
+
+**On startup**, the protected informers' initial list enqueues a release
+batch for every (K, N) of every held object. So every hold is checked again
+after a restart, and a holder delete missed while down can't strand a
+finalizer.
 
 ### 10.3 Seeing new objects: the missing-ref prober (R6)
 
 A newly created object, such as a Secret recreated for rotation, isn't
 labelled, so the label-scoped informer can't see it. The tracker keeps the
-set of refs it last found Missing for some holder. Every `ProbeInterval`
-(15s by default), the prober live-GETs each distinct missing ref, at most
-100 per tick, rotating through the set. When one exists, it enqueues the
-ref's holders through the index. Their next pass runs A2 on the new
+set of refs it last found Missing for some holder.
+
+Every `ProbeInterval` (15s by default), the prober makes **one live,
+metadata-only, paginated LIST per (kind, namespace)** that has missing
+refs, not a GET per ref (L1). It matches the names and enqueues the holders
+of every ref it finds, through the index. Their next pass runs A2 on the new
 incarnation.
 
-The holders' own retries find it too, within their backoff of 60s at most.
-`BeforeEstablish` re-checks a Missing ref live just before the owner
+**Its cost** is, per tick, one list per namespace with a missing ref, sized
+by all objects of that kind in that namespace (about 1 KB each as
+metadata). It is zero while nothing is missing. A namespace with 200 Secrets
+and one missing ref costs about 200 KB every 15s until the ref appears.
+Under `resourceNames` RBAC, where such a list isn't allowed, the prober
+falls back to one GET per missing name.
+
+The holders' own retries find a new object too, within their backoff of 60s
+at most. `BeforeEstablish` re-checks a Missing ref live just before the owner
 finalizer is written (§6.7). This is how U5's "holders re-acquire the new
 incarnation" happens.
 
@@ -990,11 +1289,15 @@ doesn't get worse. What is newly stuck is every protected object those
 remaining users held. **Uninstall through Disown** (§7.4). Doc text:
 
 > Before uninstalling a provider, delete its objects and wait for them to
-> go. Or set Disown and wait for `credentialuse_held_objects` to reach 0.
-> After an out-of-order uninstall, remove the objects' own finalizers, then
-> the `credential-use.<kind>.<group>/<namespace>` finalizers, the annotation
-> with the same key, and the `credential-use.krateo.io/held` label once no
-> `credential-use.` finalizer is left.
+> go. Or annotate each holder CRD with `credential-use.krateo.io/disown=all`,
+> and wait until its `credential-use.krateo.io/held-count` is `0` and
+> `held-zero-since` is older than 10 minutes. After an out-of-order
+> uninstall, remove the objects' own finalizers first. Then, if the CRD is
+> gone, run the `DisownPrefix` Job. Otherwise remove by hand the
+> `credential-use.<kind>.<group>/<namespace>` finalizers, the annotation with
+> the same key, the kind's `credential-use.krateo.io/k-<hash>` label, and the
+> `credential-use.krateo.io/held` label once no `credential-use.` finalizer
+> is left.
 
 core-provider#313 is the same class: a controller that runs in the
 namespace being deleted dies before it can release anything. This design
@@ -1007,15 +1310,16 @@ manages, and the RBAC that keeps it working must not live there either
 At 0 replicas, nothing releases. So **`scaletozero.Exists` also counts, as
 instances, protected objects that carry a finalizer with the Kind's
 prefix**. A new option asks for it,
-`scaletozero.WithHeld(protected ...schema.GroupVersionKind)`. With it,
-after the instance list finds nothing, `Exists` runs a metadata-only,
-paginated list of each protected kind, selected by the held label, and
-stops at the first object with a finalizer starting
-`credential-use.<kind>.<group>/`. A stale hold then keeps the controller
-running until it releases it, after which the Kind can scale down.
+`scaletozero.WithHeld(protected ...schema.GroupVersionKind)`. With it, if
+the instance list finds nothing, `Exists` lists each protected kind
+metadata-only, selected by **K's marker label** (§10.1), with `Limit: 1`. It
+stops at the first object whose finalizers include the prefix
+`credential-use.<kind>.<group>/`, and pages on only past a hash collision
+(L3). A stale hold then keeps the controller running until it releases it,
+after which the Kind can scale down.
 
 This is a `pkg/scaletozero` change, shipped in the same release, and the
-owners (core-provider, oasgen-provider) pass the option. The prefix is per
+owners (core-provider, oasgen-provider) pass the option. The marker is per
 GroupKind, so with core-provider's controller per composition version, a
 hold keeps every version's controller up. That is safe, because any of them
 can release it, and it costs only the running replicas.
@@ -1080,7 +1384,7 @@ Then provider-runtime's mapping.
 | State | Report (neutral) | provider-runtime |
 |---|---|---|
 | A deleting holder whose protected object is still referenced elsewhere | Nothing extra. Its deletion runs normally, because the object stays readable: the object reports that it is deleting, and its sync state reflects the delete call | Ready=False/Deleting; Synced=True/ReconcileSuccess, or the delete's error |
-| A protected object waiting for users after its deletion was requested | No condition, since Secrets have none. A Normal event on the object, throttled, once per state change, naming the holder kind, namespace and count, plus the deleting holders by name; an Info log line; the waiting gauge | event `WaitingForCredentialUsers`, gauge `credentialuse_waiting_objects{holder_kind}` |
+| A protected object waiting for users after its deletion was requested, including during the grace | No condition, since Secrets have none. A Normal event on the object, throttled, once per state change, naming the holder kind, namespace and count, plus the deleting holders by name, so a stuck holder is named (NQ2); an Info log line; the waiting gauge | event `WaitingForCredentialUsers`, gauge `credentialuse_waiting_objects{holder_kind}` |
 | A live holder whose protected object is being deleted but held | It keeps working; no condition change; a throttled Warning event naming the object and why it is kept | event `CredentialDeleting` |
 | A live holder whose protected object was released under §5 and is gone | Its credential read fails, as today; the provider's error names the object | Synced=False/ReconcileError from Connect |
 | A new holder that must not connect (§11.4), or whose acquire failed | Sync failed, with a message naming the object and the reason; readiness unknown | Synced=False/ReconcileError, Ready=NotObserved |
@@ -1091,6 +1395,13 @@ line 7), so there the log and the gauge are the signal. The message for a
 new holder that must not connect is
 `credential <kind> <ns>/<name> is being deleted and can't be held; not connecting until it is replaced or the reference changes`.
 No new condition type is added (U4).
+
+**The held gauge counts finalizers, not labels** (L4).
+`credentialuse_held_objects{holder_kind}` is the number of (protected
+object, finalizer) pairs with the kind's prefix in the process's cache. A
+labelled object whose finalizers are gone doesn't count, and the janitor in
+§10.1 removes its label. The cluster-wide, live count for Disown is
+separate, and is written on the CRD (§7.4).
 
 ## 13. RBAC (U7)
 
@@ -1105,8 +1416,9 @@ remove the finalizers it holds there. That is a new wedge.
 |---|---|---|
 | Secrets, and each other `Protected` kind | `get`, `patch` | A2, R1, R3, the live fallbacks and the prober |
 | the same | `list`, `watch` | the label-scoped informer |
-| namespaces | `get` | §5's live terminating check |
-| the holder kind | `get`, `list`, `watch`, `patch` | the holder informer, R2's consistent list, A1 and `Forget` |
+| namespaces | `get` | §5's live `deletionTimestamp` check |
+| the holder kind | `get`, `list`, `watch`, `patch`, `update` | the holder informer, R2's consistent list, A1 (patch), and `Forget` in the finalizer-removal Update and on its own (update) (L8) |
+| customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch, and the live count written on the CRD (§7.4) |
 | events | `create`, `patch` | §12 |
 
 `update`, `create` and `delete` on protected kinds are not needed: every
@@ -1127,8 +1439,9 @@ Doc text for consumers:
 > If your connecter implements `CredentialRefsProvider` (or your runtime
 > calls `credentialuse`), grant, in a ClusterRole bound with a
 > ClusterRoleBinding: `get`, `list`, `watch` and `patch` on `secrets` and on
-> every other kind your refs name; `get` on `namespaces`; `patch` on your
-> own kinds. Use `resourceNames` only when you know every Secret name when
+> every other kind your refs name; `get` on `namespaces`; `patch` and
+> `update` on your own kinds; `get`, `list`, `watch` and `patch` on your
+> kinds' CustomResourceDefinitions, by name. Use `resourceNames` only when you know every Secret name when
 > you generate the RBAC, and set `Watch: PerName` for those kinds. Don't
 > use a namespaced Role for these permissions: it is deleted with its
 > namespace, and objects there then can't finish deleting.
@@ -1165,11 +1478,27 @@ on krateo-057:
 
 **Further envtest cases:**
 
-- U5: a Secret deleted in a live namespace with live, non-deleting users is
-  released at once, and recreating it under the same name succeeds. The
-  holders acquire the new UID, through the prober.
+- U5 and the grace: a Secret deleted in a live namespace, with live users
+  and none of them deleting, is kept for the grace and then released.
+  Recreating it under the same name fails with AlreadyExists during the
+  grace, and succeeds after it. The holders acquire the new UID through the
+  prober. A Secret with no users is released at once.
+- **Interleaving A** (§5.1): delete the Secret, then a holder 1s later, in a
+  live namespace. The Secret is kept until the holder is gone. And again
+  with the holder deleted after the grace, which hits the residual: the
+  holder fails until the Secret is recreated.
+- **Interleaving B** (§5.1): delete the Secret, then the namespace 1s
+  later, and let the test's namespace controller delete the holders. The
+  live re-read of the namespace's `deletionTimestamp` keeps the Secret, and
+  the namespace tears down. A second variant **waits for the Secret to be
+  gone before deleting the namespace**, as a waiting uninstall would. It
+  is expected to wedge, and it documents §5.1's open point: it is marked as
+  a known failure until that point is settled, never skipped.
+- A namespace deletion that starts just after the grace, and a holder
+  deletion between R2 and R3 (an interceptor delays R3), check §6.4's
+  last-step reads and the deletion pass's unskippable A2.
 - A Secret deleted in a live namespace while a user is deleting is kept
-  until that user goes.
+  until that user goes, past the grace.
 - A ref changed on update releases the old Secret.
 - A cross-namespace user keeps a Secret whose namespace is terminating.
 - A Secret already being deleted gets a new holder with `MustNotConnect`,
@@ -1180,11 +1509,19 @@ on krateo-057:
   holders, and they write again.
 - A label-scoped watch delivers losing the label as a deletion (§2).
 - R3's failed `test` op: the exact status code.
-- Disown drains to a gauge of 0.
+- Disown, through the CRD annotation, drains two `Shared` instances (two
+  processes) to a live `held-count` of 0, including a namespace outside
+  `SharedOptions.Namespaces`; `DisownPrefix` after the CRD is deleted, and
+  its refusal while the CRD exists.
+- Start fails when `CredentialUseSource` isn't wired (M4).
+- `IgnoreCredentialUseRecord` drops a record-only update and passes every
+  other change (M6).
+- The prober finds a recreated Secret with one LIST per namespace.
 - A foreground-deleted holder that owns its Secret completes (§11.8).
 - Setup after start, and `Track` twice with equal and with different
   Options.
-- `scaletozero.Exists` with `WithHeld`.
+- `scaletozero.Exists` with `WithHeld`, stopping at the first object with
+  K's marker label, and paging past a forced hash collision.
 - `Watch: PerName` against `resourceNames` RBAC, on an envtest API server
   started with `--authorization-mode=RBAC`, through an impersonated
   ServiceAccount.
@@ -1200,7 +1537,18 @@ cache per actor. They enumerate every schedule of:
 - the deletion of P, of H, and of the namespace, at every point.
 
 That includes **error or crash after A1, with a concurrent releaser**
-(HIGH-1), and a restart that clears the verified set.
+(HIGH-1), and a restart that clears the verified set. The model also covers
+the second review's schedules:
+
+- a ref that this pass's A1 adds, with a stale `written` entry from an
+  earlier run of the same ref (M1). Away and back, without the informer
+  ever delivering the middle version, must still write;
+- a holder deletion and a namespace deletion that start during the grace,
+  just after it, and between R2 and R3;
+- a deletion pass that holds a `written` entry: it must still write;
+- a recreate behind a cached UID (L6), which is asserted to be the only
+  window and to close when the deletion is delivered;
+- the epoch-only and label-only self-write filter (L2).
 
 **The model asserts safety, not only convergence** (L4). The invariant: *a
 holder H that is deleting (with the owner finalizer), whose pass held P
@@ -1253,7 +1601,14 @@ no safety violation.
 - fail-open for established holders on deletion passes: does it ever turn a
   safe state into a wedge?
 - two processes for one GroupKind with different version selectors;
-- Disown racing a still-running acquirer during a rollout.
+- Disown racing a still-running acquirer during a rollout, and whether
+  `DisownSettle` is long enough for every process to see the switch;
+- the grace: the order of the re-reads, and whether any path releases a
+  deleting P in a namespace that already has a `deletionTimestamp`;
+- `recordSince` and `observed`: whether any informer reordering or relist
+  can make `t_obs` earlier than the record's true arrival;
+- the start check for `CredentialUseSource` (M4): a controller that starts
+  its workers before a source, if any controller-runtime path does.
 
 ## 15. Alternatives rejected
 
@@ -1357,6 +1712,11 @@ runtime (§7.3).
 - RBAC is by name where generated (§13).
 - With per-version controllers, the release list covers the whole
   GroupKind (§3).
+- **Its composition delete is a Helm uninstall**, which deletes Secrets, and
+  a chart's own Namespace, before custom resources (§5.1, per the
+  re-review). If Helm waits for each kind to be gone, core-provider must
+  delete the chart's custom resources, and wait for them, before running
+  the uninstall. Otherwise its compositions hit §5.1's interleavings.
 
 ### 16.4 "Answer from status" is a complement worth recommending
 
@@ -1379,7 +1739,7 @@ The first revision is `a2ee5d1`. This revision answers its review.
 | Item | Resolved in |
 |---|---|
 | U1 Chains: protect any kind in v1, with `Next` | §9, §9.1 |
-| U2 Implicit wiring; setup failure refuses to start | §7.3, §7.5 (prompt requeue: §18 NQ3) |
+| U2 Implicit wiring; setup failure refuses to start | §7.3, §7.5 (the builder line: NQ3, below) |
 | U3 Build `Resolved` now; alone it doesn't close the window | §9.2 |
 | U4 Events, a log line and a gauge; no new condition | §12 |
 | U5 Hold only when unrecoverable; the residual and its remedy | §5 |
@@ -1431,58 +1791,57 @@ The first revision is `a2ee5d1`. This revision answers its review.
 | L3 An unparseable record counts as a user; the key is versioned | §4 |
 | L4 The model invariant fixed | §14 |
 | L5 Deleting a holder CRD goes through Disown | §7.4 |
-| L6 The backfill herd and its QPS; no extra pass to skip | §6.6 |
-| L7 The `krateo-system` wedge, and how U5 limits it | §5 (cap: §18 NQ2) |
+| L6 The backfill herd and its QPS | §6.6. Its "no extra pass" was wrong, and is corrected by the second review's M6 |
+| L7 The `krateo-system` wedge, and how U5 limits it | §5.2 (no cap: NQ2, below) |
 | L8 Idempotent setup; fake managers | §7.3, §7.5 |
 | L9 Cosmetic | noted; no design change |
 
+**The second review** (the re-review of `ffc41cb`, and the user's answers
+to NQ1 to NQ4):
+
+| Item | Resolved in |
+|---|---|
+| NQ1 A 60s configurable grace; the Namespace's `deletionTimestamp` and the deleting users re-read live as the last step before R3; deletion passes never skip; the Helm text corrected; interleavings A and B; the cost to rotation | §5, §5.1, §6.2 R1 to R3, §6.3, §6.4; tests in §14. **B under a Helm that waits for objects to be gone is open** (§5.1, §18) |
+| NQ2 No cap; the event and gauge name the stuck holder | §5.2, §12 |
+| NQ3 The builder line `.WatchesRawSource(r.CredentialUseSource())` | §7.5 |
+| NQ4 Filed as provider-runtime#46, out of scope | §3 |
+| M1 A1-added refs never skip; drops and resets in the pass; `t_obs` from the informer's delivery time, overwritten; §6.6's restart claim re-checked | §6.2 A1, §6.3, §6.6 |
+| M2 Disown as a cluster-visible switch on the holder CRD; a live cluster-wide count; `DisownPrefix` for a deleted CRD; namespaces outside the caches | §7.4, §11.5 |
+| M3 A `deletionTimestamp` on a protected object enqueues its batches, at once and after the grace | §10.2 |
+| M4 Start fails when `CredentialUseSource` wasn't started; "safety is unchanged" removed | §7.5, §8 step 0, §7.2 item 5 |
+| M5 A custom-resource A2 whose retries ran out is Degraded for established holders | §6.2 A2, §8 step 4 |
+| M6 `IgnoreCredentialUseRecord`; the extra pass corrected; backfill paced only by workers and request rate, with figures | §6.6, §7.5 |
+| L1 The prober lists per namespace, with its cost | §10.3 |
+| L2 Self-writes: equal once the `credential-use.` keys are stripped | §9.2 |
+| L3 K's marker label, hashed, so `WithHeld` stops at the first match | §3, §10.1, §11.6 |
+| L4 The gauge counts finalizers; who removes the labels | §10.1, §12 |
+| L5 A recreated unlabelled object is seen only by the prober | §9.2 |
+| L6 The window around a recreate behind a cached UID | §6.5 |
+| L8 Holder RBAC needs `update` | §13 |
+
+The re-review's L7 (read the `deletionTimestamp`, not the phase) is folded
+into NQ1 and §5.
+
+**Not verified by this author.** The Helm v3.21.3 references in §5.1
+(`kind_sorter.go:73-110`, `:151-153`, `client.go:601-615`) come from the
+re-review. This session's permissions blocked my reads of Helm's source,
+both through `gh api` and in the local module cache. They were not
+retried.
+
 ## 18. Open questions for the user
 
-**NQ1. A grace period before releasing a deleted Secret in a live
-namespace?** U5 releases at once. The cost: when a Secret and its holder
-are deleted together and the Secret goes first (`kubectl delete -f` of a
-file that lists it first), the release can win the race. The holder then
-wedges in a live namespace until the Secret is recreated. Helm uninstall
-deletes custom resources before Secrets, so it isn't affected. Options:
+**Decided since the last revision**: NQ1 (a 60s grace, §5), NQ2 (no cap,
+§5.2), NQ3 (the builder line, §7.5) and NQ4 (provider-runtime#46).
 
-- (a) release at once, as decided;
-- (b) a fixed grace, such as 30s, during which a user that starts deleting
-  still keeps the Secret. Delete-then-create rotation then fails with
-  AlreadyExists for that long;
-- (c) a configurable grace that defaults to 0.
+**Pending verification, not yet a question: what Helm's wait between kinds
+waits for** (§5.1). If `pkg/kube/client.go:601-615` in Helm v3.21.3 waits
+until each kind's objects are gone, with a timeout longer than the grace,
+then interleaving B wedges, and A leaves holders failing. The grace can't
+fix that, because the uninstall deletes nothing more until the Secret is
+gone, and the Secret can only go by being released. The remedies would then
+be on the uninstall side (§5.1, §16.3), and the user would choose between
+them. That choice rests on a fact I couldn't read, so it isn't put as a
+question yet. Someone with access should confirm those lines, and the
+relative order of Secret and Namespace in `UninstallOrder`, first.
 
-*Recommendation: (c).* It keeps your decision as the default, and lets an
-operator whose workflows delete bundles turn it on without a release.
-
-**NQ2. Cap the "a user is being deleted" hold in a live namespace?** A
-holder stuck deleting blocks the rotation of a platform Secret for as long
-as it is stuck (§5, L7). Options:
-
-- (a) no cap: the event and gauge name the stuck holder;
-- (b) a cap, such as 15 minutes, after which the Secret is released and the
-  stuck holder wedges instead.
-
-*Recommendation: (a).* A cap trades a visible, recoverable block for a
-permanent wedge of the holder, and the operator can always resolve (a) by
-fixing or orphaning that holder.
-
-**NQ3. Prompt holder requeue: one explicit builder line, or a hook?**
-Safety is implicit (U2), but enqueueing holders when a protected object
-changes needs a handle on the provider's controller, which `NewReconciler`
-doesn't have. Options:
-
-- (a) the provider adds `.WatchesRawSource(r.CredentialUseSource())`, and
-  the reconciler warns at start if it wasn't wired;
-- (b) `ForControllerRuntime` always wraps the queue and registers it by
-  controller name, and the reconciler finds it by that name.
-
-*Recommendation: (a).* The controller name is the provider's choice
-(`Named("myresource")` in `docs/usage.md`), so the lookup in (b) is
-fragile. Without the line, re-acquiring waits for the poll interval, and
-nothing becomes unsafe.
-
-**NQ4. The existing finalizer name**, `finalizer.managedresource.krateo.io`,
-draws the API server's warning for lacking a `/`. Options: (a) leave it;
-(b) migrate it in a separate change. *Recommendation: (b), as its own
-issue*, unchanged from the first revision. It has nothing to do with this
-deadlock.
+No other question needs the user.
