@@ -12,6 +12,33 @@ timestamp: 2026-11-05T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — scale idle controllers to zero
+- **`pkg/scaletozero`**, for owners that run one controller Deployment per
+  Kind or per version (core-provider, oasgen-provider). While the Kind has
+  no instances the controller runs 0 replicas; when one appears it goes back
+  up. On krateo-057, 32 idle controllers used 236 MiB. Settled with both
+  owners in #39. Design: [design-scale-to-zero](./design-scale-to-zero.md).
+- New API: `scaletozero.Exists`, `Decide`, `Reconcile`, `Result`, `Reason`
+  (`Active`, `IdleHoldDown`, `Idle`, `Unknown`).
+- **The helper is the mechanism, not the trigger.** It watches nothing: the
+  owner must reconcile when the first instance of a Kind appears.
+- Decisions recorded in the design:
+  - `Exists` instead of `Count`: the decision is binary, so it lists one
+    item at a time, stops at the first match, and follows `Continue` past
+    empty pages.
+  - An error never reads as 0: `Result.Replicas` is then the current
+    replicas if non-zero, else `active`, with reason `Unknown`, and nothing
+    is patched.
+  - `Reconcile` takes `active`. It wakes a controller from 0 to `active`,
+    puts an idle one to 0, and leaves any non-zero count alone while
+    instances exist.
+  - `Exists` needs a live reader (`mgr.GetAPIReader()`), and `Reconcile` a
+    client from `client.New`.
+- **Precondition:** the caller writes the Deployment's `spec.replicas`
+  nowhere else, including a full-object Update that omits it.
+- Tests run against envtest. CI installs its binaries, and the tests fail
+  rather than skip under `CI` without them.
+
 ## 2026-11-07 — v1.10.1: queue telemetry keeps item priorities
 - **With `QueueWaitRecorder` set, the priority queue now honours priorities.**
   The instrumented wrapper implemented only the plain workqueue interface, so

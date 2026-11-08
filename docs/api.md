@@ -74,6 +74,16 @@ Annotation keys (`AnnotationKeyExternalName`, `…ExternalCreatePending/Succeede
 - `NewTransport(base http.RoundTripper) *Transport` — an `http.RoundTripper` that reports a `ratelimit.Signal` for each response carrying rate-limit headers, to the sink on the request's context, and passes the response through unchanged.
 - `Parse(resp, key, now) (ratelimit.Signal, bool)`, `Resource(h http.Header) string` (for display only), `WithKey(ctx, key)` (override the key per request), `HostKey(u *url.URL) string` (the default key: the host, lower case).
 
+## `pkg/scaletozero` (unreleased)
+
+Called by an owner (core-provider, oasgen-provider) from its own reconcile to run a per-Kind controller Deployment at 0 replicas while the Kind has no instances. The helper is the mechanism, not the trigger: it watches nothing, so the owner must reconcile when the first instance appears. Design: [design-scale-to-zero](./design-scale-to-zero.md).
+
+- `Exists(ctx, r client.Reader, gvk, sel labels.Selector) (bool, error)` — whether at least one instance matching `sel` exists, in any namespace, terminating ones included; metadata-only LIST with `Limit: 1`, stopping at the first match and following `Continue` past empty pages. `sel` is required (nil is an error; pass `labels.Everything()` for all). A failed LIST on any page, a missing CRD or an unserved version is an error, never false. `r` must be live (`mgr.GetAPIReader()`): a cache-backed reader makes it fail whenever the Kind is empty.
+- `Decide(exists bool, lastSeen, now time.Time, holdDown time.Duration) (replicas int32, requeueAfter time.Duration)` — pure; 1 (running) while an instance exists, 0 (idle) once the Kind has been empty for the whole `holdDown` since `lastSeen`. A zero `lastSeen` starts the hold-down now; a future `lastSeen` stays running; `holdDown <= 0` returns running. `requeueAfter` is the rest of the hold-down, otherwise 0.
+- `Reconcile(ctx, c client.Client, deploy types.NamespacedName, gvk, sel, lastSeen time.Time, holdDown time.Duration, active int32) (Result, error)` — two reads per call (a GET of the scale, then the `Exists` LIST) and a patch of `deployments/scale` only on change: 0 → `active` to wake, any non-zero count left alone while running, → 0 when idle. Safe on every poll. `active` must be >= 1. On any error nothing is patched, `LastSeen` comes back unchanged, `Reason` is `Unknown`, and `Replicas` is never 0 (the current replicas if read and non-zero, else `active`). Precondition: the caller writes the Deployment's `spec.replicas` nowhere else.
+- `Result` (`Replicas`, `Reason`, `LastSeen`, `RequeueAfter`, `Exists`, `Patched`); `Reason` with the constants `ReasonActive` (`"Active"`), `ReasonIdleHoldDown` (`"IdleHoldDown"`), `ReasonIdle` (`"Idle"`), `ReasonUnknown` (`"Unknown"`); a test pins the literals.
+- RBAC the owner needs: list on the watched resource cluster-wide; get and patch on `deployments/scale`.
+
 ## `pkg/logging`
 
 `Logger` interface (`Info`, `Debug`, `Warn`, `Error`, `WithValues`, `WithName`); `NewNopLogger`, `NewLogrLogger`, `NewSlogLogger`; OTel log model: `NewOTelJSONHandler(level, w, attrs...)`, `NewOTelHandler(level, w, serviceName)` (tees JSON stream + otelslog bridge), `ServiceNameAttr(serviceName)`.

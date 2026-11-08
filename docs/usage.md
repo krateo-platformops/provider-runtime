@@ -306,6 +306,46 @@ For Krateo, that's core-provider#310.
   `TestProviderWithoutKeyerIsBoundedByLocal` in `pkg/reconciler`; the
   provider side is the provider's to keep.
 
+- **Scale to zero** (unreleased; for owners that manage controller
+  Deployments, not for the controllers themselves) — `pkg/scaletozero`
+  runs a per-Kind controller Deployment at 0 replicas while the Kind has no
+  instances, and wakes it when one appears. See
+  [the design](./design-scale-to-zero.md).
+  - *Wiring.* Call it from the reconcile of the object that owns the
+    controller, and persist `LastSeen` in that object's status:
+
+    ```go
+    // A live client: Exists fails on a cache-backed one.
+    live, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper()})
+    // ...
+    res, err := scaletozero.Reconcile(ctx, live, deployKey, gvk, sel,
+        obj.Status.LastSeen.Time, 10*time.Minute, obj.Spec.ReplicaCount)
+    if err != nil {
+        return ctrl.Result{}, err // nothing was patched; render nothing new
+    }
+    obj.Status.LastSeen = metav1.NewTime(res.LastSeen)
+    return ctrl.Result{RequeueAfter: res.RequeueAfter}, nil
+    ```
+  - *The helper is the mechanism, not the trigger.* It watches nothing. A
+    controller at 0 gets no reconcile, so the owner must reconcile its owning
+    object when the first instance of the Kind appears, for example with a
+    per-Kind watch.
+  - *The selector* must be exactly the one the controller reconciles by
+    (`labels.Everything()` when it takes every instance). A narrower one
+    scales a controller to zero while instances it serves still exist.
+  - *A live reader.* `Exists` needs `mgr.GetAPIReader()`, and `Reconcile` a
+    client from `client.New`, not `mgr.GetClient()`.
+  - *Per call:* two reads, a GET of the scale subresource and a
+    metadata-only LIST that stops at the first instance; a PATCH only on
+    change. Safe on every poll. During the hold-down, `RequeueAfter` keeps
+    the scale-down on time between polls.
+  - *Precondition.* Write the Deployment's `spec.replicas` nowhere else. A
+    full-object Update that omits `replicas` defaults it to 1 and fights the
+    helper: render `replicas` from the last `Result.Replicas`, which is never
+    0 on an error.
+  - *RBAC.* list on the watched resource cluster-wide; get and patch on
+    `deployments/scale`.
+
 ## Developing this library
 
 ```sh
@@ -315,4 +355,7 @@ make lint       # golangci-lint run
 ```
 
 `make kind-up` / `make kind-down` manage a local kind cluster for manual
-testing of consumers; the library's own tests need no cluster.
+testing of consumers; the library's own tests need no cluster. The
+`pkg/scaletozero` tests need envtest's kube-apiserver and etcd binaries:
+`export KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.35.0)`. Without it
+they skip locally, and fail under `CI`.
