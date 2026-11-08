@@ -68,3 +68,103 @@ b2-cold-ctrl-10    restarts=0 terms=0 oom=0 liveness=0 unhealthy=0 obs/s=6.61 pe
    obs/s median 20.06 range 19.98-20.17; clean runs median 20.06 range 19.98-20.17; peakWS 202-218; node load mean 0.28, max 0.91
 -- ctrl: 10 runs, clean 7, restarts [0, 0, 1, 0, 1, 0, 0, 1, 0, 0], restarts total 3, terminations 3, oom 3, liveness kills 0, unhealthy 3, crash-looped (restarts>=3) 0, discarded 0
    obs/s median 6.72 range 6.51-8.19; clean runs median 6.80 range 6.51-8.19; peakWS 218-252; node load mean 0.20, max 1.28
+
+
+== Why the control's ramp result moved between the blocks (written 2026-11-08, from the records)
+
+Everything above this line is block_report.py's output. This section is written
+by hand.
+
+The control's ramp went from 11 of 20 clean in the first block (b-*, 2026-11-06)
+to 2 of 20 here. Two-sided Fisher exact p = 0.0057, computed after seeing the
+data. Its restarts per run rose from 0.70 to 1.65. Nothing else about the
+control moved. Its cold start is 7 of 10 in both blocks (0.40 and 0.30 restarts
+a run), and its throughput barely changed: ramp median 2.06 then 2.15, cold
+7.02 then 6.72. It ran at the same operating point too: mean local about 3 to
+5, about 2 calls in flight, 2 to 7 cuts a run. The comparison that counts is
+the one within each block, ABBA, run against run on one node, and it stands.
+But a control of unchanged code that got this much worse means something else
+differed between the blocks.
+
+What is the same, from the records:
+- Settings: block-settings.txt and block2-settings.txt agree line for line on
+  env, workloads (ramp and cold), limits (256Mi, 2 CPU), 240s, the defaults of
+  both arms and the ABBA order. They differ only in the image lines and the
+  re-run's notes.
+- Workload and probe: prun.sh's ramp and burst modes are unchanged between
+  cd45987 (the first block's settings commit) and 6d76a36 (the re-run's image
+  commit). The default probe is the same, period 2s, timeout 1s, failure 3.
+  Every b2-* log records it. The b-* logs predate that line, and prun.sh at
+  cd45987 sets the same probe.
+- Control source: d0632f1 in both. Its dependencies: ctrl/go.mod and
+  ctrl/go.sum match the go.mod and go.sum ctrl2 was built from (6ee8e9b),
+  except that golang.org/x/sys v0.49.0 moves from indirect to direct, at the
+  same version.
+- Harness code in the memory modes: Observe's allocate, touch, hold path is
+  unchanged. main.go's changes between 6ee8e9b and 6d76a36 are the measured
+  burn and its STAT fields, used only in cpu mode. burn.go is compiled in but
+  not called with LOAD_CPU_MS unset.
+- Node, as recorded: kubelet v1.35.8-gke.1439001, the same kernel build string
+  (6.12.94+, built Aug 21 2026), cgroup v2, cpu.pressure and memory.pressure
+  present, memory.max 268435456, cpu.max "200000 100000". The machine type is
+  e2-standard-4 in both, but that comes from the design doc and the
+  coordinator's note, not from a run record.
+- The Greeting CRD: the same examples/greeting-controller/crd.yaml, unchanged
+  in git since before the first block. It was applied by hand on the first
+  cluster and by setup.sh on this one. It defines the objects; nothing in a run
+  reads it.
+- The driver: on AC with sleep prevented at both starts, and no run discarded
+  in either block. This block spent part of its time on battery, and no run was
+  paused (block2-power.txt).
+
+What differs, from the records:
+1. A different VM. The first block ran on node -7f331cb1-bw7p (boot cab95f05),
+   this one on -11ffa2b6-lmxm (boot 4264eb41), in a cluster created for it. The
+   CPU platform an e2 VM lands on isn't fixed and wasn't recorded for either.
+   Nor were the containerd version (2.2.7 on this node, unrecorded on the old
+   one) or what else the node ran.
+2. Node age. The first block's node had been in use for about 11 hours
+   (x0-start at 09:46Z, block start at 20:58Z), through all the exploration
+   runs. This block began 11 minutes after the node first answered. The
+   control's restarts are higher early in this block: 4, 4, 1, 1, 3, 4 in pairs
+   1 to 6, a mean of 2.83, against 1.21 in pairs 7 to 20. So a warming node may
+   explain part of the shift. It can't explain all of it: pairs 7 to 20 alone
+   are 2 of 14 clean, against 11 of 20 before.
+3. The control image. ctrl3 is a new build (sha256:7c21374b…), and ctrl2
+   (sha256:40427c58…) is gone with the old registry. The source and
+   dependencies are as above. ctrl3 was built with go1.26.10, from its own
+   build info. ctrl2's toolchain wasn't recorded and can't be read back, so a
+   different toolchain can't be ruled out, though go.mod requires 1.26.10
+   either way. Both rebuilt the alpine:3.20 base at build time, and the binary
+   is static.
+4. The interleaved arm. The control's neighbours in ABBA order were final2's
+   runs before and new3's now. Each run has its own namespace and container,
+   cleaned before the next, so nothing carries over by design. Not measured.
+
+Which could explain the control's shift: 1 and 2 most plausibly. The control
+sits at the edge of its limit. Its clean and killed runs overlap in peak working
+set (re-run clean 234 to 236 MiB, killed 235 to 255; first block clean 233 to
+250, killed 233 to 255), so small changes in timing, GC pacing or page-cache
+behaviour can move whether a run crosses 256Mi. A different host could make
+those changes. 3 is possible only through the toolchain, which wasn't recorded.
+The records can't settle it. **The cause isn't established.** Node and node age
+are the leading candidates, and that is not a finding.
+
+Whether any of it flatters new3:
+- new3's own results don't depend on the control. 20 of 20 and 10 of 10 clean,
+  as in the first block (20 of 20 and 10 of 10). Peak working set 201 to 218
+  MiB, against 202 to 221 before. The clean lines of the bar are absolute, so
+  they aren't flattered.
+- The ramp contrast is. "20 against 2" overstates the gap the first block
+  showed, 20 against 11. The difference between the arms here is partly the
+  control's shift. Read the ramp line as "new3 clean in every run; the control
+  between 2 and 11 of 20 across two blocks".
+- Throughput, measured against the control's clean runs, rests on only 2 clean
+  control runs here (2.19 and 2.28 Observes/s), against 11 in the first block
+  (median 2.00). new3's 6.12 is about three times either, so the line holds
+  either way, but its basis here is thin.
+- new3's throughput rose more than an environment change that slowed or sped
+  up both arms alike would explain: ramp +17% (5.25 to 6.12) and cold +22%
+  (16.50 to 20.06), while the control moved +4% and -4%. That fits the gate
+  moving into the queue. It doesn't rule out a host difference that affects
+  the two arms differently.
