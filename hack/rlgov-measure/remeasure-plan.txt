@@ -169,9 +169,21 @@ What changed in the harness at the rebase (done 2026-11-08):
   compiling. So the arms differ in controller-runtime as well as in the
   library. The question is "what users run before and after", so that is
   right, and the report will say so.
-- New images for both arms. The guards in block.sh and cpu_block.sh now also
-  cover burn.go and the harness's go.mod and go.sum, so a block refuses an
-  image built before these changes.
+- New images for both arms, built locally at 6d76a36 and not pushed
+  (results/image-new3.txt, results/image-ctrl3.txt):
+  new3 sha256:ceb79357975eed7fc20b4eec005a83d546e8910d953642fd54a1e150492de58d,
+  controller-runtime v0.25.2, apimachinery v0.37.2;
+  ctrl3 sha256:7c21374b46d7ea7388ee79c89791d9f0c2f548a2531c108e856a383b4f95eb4d,
+  v1.10.0 with controller-runtime v0.23.3, apimachinery v0.35.3, -tags=ctrl.
+  Both linux/amd64, entrypoint /measure, user 65532, read back from the
+  tarballs. Pushing changes the reference, not the digest. The guards in
+  block.sh and cpu_block.sh also cover burn.go and the harness's go.mod and
+  go.sum, so a block refuses an image built before these changes.
+- The memory block re-run uses ctrl3, not ctrl2 (built with the old harness),
+  and writes b2-* runs and results/block2-settings.txt, so the first block's
+  committed b-* logs and block-settings.txt are never overwritten.
+  block_report.py takes the prefix (b2 by default, b for the first block) and
+  prints local, calls in flight and cuts for each run.
 - The STAT lines carry burn_* fields, "na" in the memory modes. The reports
   ignore them there.
 

@@ -1,10 +1,23 @@
 """The confirmation block, from the raw logs. Every run, then each arm against the
 bar. A run counts as clean with 0 restarts and at most 0 terminations recorded.
 Throughput is Observes per second the controller was up.
+
+Usage: block_report.py [prefix]   (default b2, the re-run; b is the first block)
+
+local, cuts and calls in flight show engagement: with the local gate in the queue
+the new arm defers nothing for local capacity, so its deferrals don't. local and
+calls in flight are means over the run's STAT lines; cuts are the "lowering
+local capacity" lines.
 """
-import glob, os, re, statistics
+import glob, os, re, statistics, sys
 
 R = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+PREFIX = sys.argv[1] if len(sys.argv) > 1 else "b2"
+
+
+def mean(xs):
+    xs = [float(x) for x in xs if x not in (None, "-", "na")]
+    return statistics.mean(xs) if xs else None
 
 
 def run(path):
@@ -28,6 +41,9 @@ def run(path):
         discarded=re.findall(r"^# DISCARDED (.*)$", t, re.M),
         rollout=re.search(r"# rollout=(\S+)", t).group(1),
         rows=len(rows),
+        local=mean(r.get("local") for r in rows),
+        inflight=mean(r.get("inflight") for r in rows),
+        cuts=len(re.findall(r"^LOG Controller saturated", t, re.M)),
     )
 
 
@@ -39,13 +55,17 @@ for mode in ("ramp", "cold"):
     print(f"== {mode}")
     arms = {}
     for arm in ("new", "ctrl"):
-        runs = sorted((run(p) for p in glob.glob(f"{R}/b-{mode}-{arm}-*.log")), key=key)
+        runs = sorted((run(p) for p in glob.glob(f"{R}/{PREFIX}-{mode}-{arm}-*.log")), key=key)
         arms[arm] = runs
         for r in runs:
             print(f"{r['name']:18} restarts={r['restarts']} terms={r['terms']} oom={r['oom']} liveness={r['liveness']} unhealthy={r['unhealthy']} "
-                  f"obs/s={r['thr']:.2f} peakWS={r['peak']:.0f} load={r['load']:.2f}/{r['maxload']:.2f} rollout={r['rollout']} other={r['other']} discarded={len(r['discarded'])}")
+                  f"obs/s={r['thr']:.2f} peakWS={r['peak']:.0f} load={r['load']:.2f}/{r['maxload']:.2f} rollout={r['rollout']} other={r['other']} discarded={len(r['discarded'])} "
+                  f"local={r['local'] and round(r['local'], 1)} inflight={r['inflight'] and round(r['inflight'], 1)} cuts={r['cuts']}")
     for arm, runs in arms.items():
-        clean = [r for r in runs if r["restarts"] == 0 and r["terms"] == 0]
+        if not runs:
+            print(f"-- {arm}: no runs")
+            continue
+        clean =[r for r in runs if r["restarts"] == 0 and r["terms"] == 0]
         thr = [r["thr"] for r in runs]
         cthr = [r["thr"] for r in clean]
         print(f"-- {arm}: {len(runs)} runs, clean {len(clean)}, restarts {[r['restarts'] for r in runs]}, restarts total {sum(r['restarts'] for r in runs)}, "

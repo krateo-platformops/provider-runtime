@@ -1,8 +1,11 @@
 #!/bin/bash
 # Usage: block.sh <image tag of the fixed commit>
 #
-# The confirmation block: design §11 item 16. Settings are fixed before it starts
-# and don't change during it. Every run is reported.
+# The confirmation block, re-run on the combined code: design §11 item 16, with the
+# same design as the first block (results/b-*.log, block-settings.txt), whose files
+# this one never touches: its runs are b2-* and its settings block2-settings.txt.
+# Settings are fixed before it starts and don't change during it. Every run is
+# reported. See remeasure-plan.txt.
 #
 #   ramp: 20 new, 20 control. cold: 10 new, 10 control.
 #
@@ -11,7 +14,7 @@
 # commit its image was built from (results/image-<tag>.txt), the control is
 # v1.10.0, d0632f1.
 #
-# results/block-settings.txt is written and committed before the first run. The
+# results/block2-settings.txt is written and committed before the first run. The
 # block refuses to start if the source differs from what the image was built
 # from. The node's identity is recorded after every run, so a repair or an upgrade
 # is tied to a run. A run prun.sh discards stays in the count. A failed setup
@@ -23,7 +26,7 @@
 # are on disk.
 cd "$(dirname "$0")" || exit 1
 NEW=${1:?usage: block.sh <image tag of the fixed commit>}
-CTRL=ctrl2
+CTRL=ctrl3
 M="SATURATION=true EXPERIMENTAL_MEMORY=true"
 root=$(git rev-parse --show-toplevel)
 rel=hack/rlgov-measure
@@ -44,21 +47,21 @@ Claude-Session: https://claude.ai/code/session_01N8HNbCRkKScdEeft3u5kfr" || echo
 }
 
 r() {
-  bash prun.sh "$@" || { echo "BLOCK-STOPPED at $1"; bash nodeid.sh block-stopped; exit 2; }
+  bash prun.sh "$@" || { echo "BLOCK-STOPPED at $1"; bash nodeid.sh block2-stopped; exit 2; }
   bash nodeid.sh "after-$1"
 }
 
 pair() { # index mode prefix
   local i=$1 mode=$2 p=$3
   if [ $((i % 2)) = 1 ]; then
-    r "b-$p-new-$i" "$mode" 240 "$NEW" $M
-    r "b-$p-ctrl-$i" "$mode" 240 "$CTRL" $M
+    r "b2-$p-new-$i" "$mode" 240 "$NEW" $M
+    r "b2-$p-ctrl-$i" "$mode" 240 "$CTRL" $M
   else
-    r "b-$p-ctrl-$i" "$mode" 240 "$CTRL" $M
-    r "b-$p-new-$i" "$mode" 240 "$NEW" $M
+    r "b2-$p-ctrl-$i" "$mode" 240 "$CTRL" $M
+    r "b2-$p-new-$i" "$mode" 240 "$NEW" $M
   fi
-  commit_results "chore(hack): confirmation block, $p pair $i" \
-    "$rel/results/b-$p-new-$i.log" "$rel/results/b-$p-ctrl-$i.log" "$rel/results/node-identity.txt"
+  commit_results "chore(hack): confirmation block re-run, $p pair $i" \
+    "$rel/results/b2-$p-new-$i.log" "$rel/results/b2-$p-ctrl-$i.log" "$rel/results/node-identity.txt"
 }
 
 for f in "results/image-$NEW.txt" "results/image-$CTRL.txt"; do
@@ -75,7 +78,9 @@ if [ -n "$(git -C "$root" status --short -- pkg apis examples go.mod go.sum "$re
 fi
 
 {
-  echo "block started $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "confirmation block re-run started $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "why a re-run: the first block measured the code before the local gate moved into the queue (#40); the new arm is now main at d271115 plus the memory commits. Same design and bar as the first block, decided before any run of this one."
+  echo "engagement in the new arm: local, the logged cuts and calls in flight. It defers nothing for local capacity, so its deferral counts are not engagement; the control's still are."
   echo "new arm:     $(cat "results/image-$NEW.txt")"
   echo "control arm: $(cat "results/image-$CTRL.txt")"
   echo "env, both arms: $M"
@@ -86,12 +91,12 @@ fi
   echo "order: ABBA, ramp pairs 1 to 20, then cold pairs 1 to 10; pair i runs new first when i is odd"
   echo "driver power: $(pmset -g ps | head -1)"
   echo "driver sleep setting: $(pmset -g | grep -E '^ *sleep ' | cut -c1-100)"
-} > results/block-settings.txt
-bash nodeid.sh block-start
-commit_results "chore(hack): settings for the confirmation block" "$rel/results/block-settings.txt" "$rel/results/node-identity.txt"
+} > results/block2-settings.txt
+bash nodeid.sh block2-start
+commit_results "chore(hack): settings for the confirmation block re-run" "$rel/results/block2-settings.txt" "$rel/results/node-identity.txt"
 
 for i in $(seq 1 20); do pair "$i" ramp ramp; done
 for i in $(seq 1 10); do pair "$i" burst cold; done
-bash nodeid.sh block-end
-commit_results "chore(hack): confirmation block finished" "$rel/results/node-identity.txt"
+bash nodeid.sh block2-end
+commit_results "chore(hack): confirmation block re-run finished" "$rel/results/node-identity.txt"
 echo BLOCK-DONE
