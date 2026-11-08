@@ -76,6 +76,29 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   provider declares them. The first cut per key is logged at Info, once until
   the key goes a whole `RecoveryInterval` clean, and every cut is counted in
   the new `provider_runtime.ratelimit.hold_clamped{key}` counter.
+- **With `ExperimentalMemory` on, the runtime sets the Go memory limit** at 0.8 of
+  `memory.max` and logs it, unless `GOMEMLIMIT`, the program or
+  `ExperimentalGoMemoryLimit` already gave a value. With the input off it never
+  touches the limit.
+- **The input is now the headroom under that limit**, read from `runtime/metrics`
+  with no I/O: the live heap plus the runtime's non-heap memory, with one soft cut
+  at 15%. With the limit on, the working set sits on a plateau and stops tracking
+  load. The working-set ratios remain the input when there is no limit.
+- **Breaking, for the experimental option:** `ExperimentalMemoryWorkingSet` is now
+  `ExperimentalMemory`, with no alias. It's experimental and no Krateo repository
+  sets it.
+- New API: `ExperimentalGoMemoryLimit`, `ExperimentalGoMemoryHeadroomRatio`,
+  `DefaultGoMemoryLimitRatio`, `DefaultGoMemoryHeadroomRatio`,
+  `InputGoMemoryHeadroom`. A third input appears on the saturation gauges.
+- **The memory input's confirmation block, re-run on this release's code,
+  cleared every line it ran**, alternating with v1.10.0 on one GKE node: 20 of
+  20 clean on the overcommitted ramp at 6.12 Observes/s against 2 of 20 at 2.15
+  for the control, all its restarts OOMKilled, and 10 of 10 on cold start
+  against 7 of 10. The control was 11 of 20 on the ramp in the first block,
+  and the cause of that shift isn't established. The sampler costs under
+  0.06% of a core. **The default stays off:** it hasn't run on a real provider,
+  the last line of the bar
+  ([configuration](./configuration.md#confirmation-of-the-memory-input)).
 
 ## 2026-11-08 — v1.11.0: scale idle controllers to zero
 - **`pkg/scaletozero`**, for owners that run one controller Deployment per

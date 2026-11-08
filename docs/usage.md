@@ -236,15 +236,19 @@ For Krateo, that's core-provider#310.
     saturation input reports as disabled. And every controller must be built
     with `ForControllerRuntime`: the governor logs an error at start if more
     reconcilers use it than controllers had their queue gated.
-  - *Memory is not protected.* The saturation flag reads CPU only. The working
-    set is a separate input,
-    `o.RateLimit.Saturation.ExperimentalMemoryWorkingSet`, off by default and
-    experimental. Don't turn it on expecting OOM protection: it did not
-    prevent OOMKills in 0 of 19 runs on an overcommitted workload, or a crash
-    loop after one (see
-    [configuration](./configuration.md#re-measurement-of-the-memory-input)).
-    Keep workers times the largest call well under the memory limit. A sample
-    period below 1s only matters to this input.
+  - *Memory is experimental.* The saturation flag reads CPU only. Memory is a
+    separate input, `o.RateLimit.Saturation.ExperimentalMemory`, off by default.
+    With it on, the runtime sets the Go memory limit at 0.8 of `memory.max`,
+    unless `GOMEMLIMIT`, your own `debug.SetMemoryLimit` call or
+    `ExperimentalGoMemoryLimit` says otherwise, and halves `local` when headroom
+    under that limit falls to 15%. Before the local gate moved into the queue it
+    ran clean in 20 of 20 runs on an overcommitted synthetic workload, against 11
+    of 20 for v1.10.0; it is to be measured again on the combined code. It hasn't
+    run on a real provider and it's no guarantee: see
+    [configuration](./configuration.md#confirmation-of-the-memory-input). Keep
+    workers times the largest call well under the memory limit. A sample period
+    below 1s only matters to this input. `ExperimentalMemory` replaced
+    `ExperimentalMemoryWorkingSet`, with no alias.
   - *Keying.* A keyer is needed only for per-endpoint API rate limits.
     Implement `reconciler.RateLimitKeyer` on the connecter, the client, or
     both. Only calls of a connecter or client that implements it are gated

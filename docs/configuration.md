@@ -81,8 +81,8 @@ no effect.
 
 The governor slows reconciles down by itself when an external API signals a
 rate limit, per endpoint key, or when the controller's own container is
-CPU-saturated. It is not memory protection: see
-[the experimental memory input](#the-pressure-thresholds-are-provisional).
+CPU-saturated. Memory is a separate experimental input, off by default: see
+[the confirmation block](#confirmation-of-the-memory-input).
 The design is in [design-rate-limit-governor](./design-rate-limit-governor.md).
 
 It is off by default. With nothing set, behaviour is the same as before the
@@ -107,12 +107,14 @@ example provider declares `--rate-limit-governor` /
 | `--rate-limit-recovery-interval` / `<NAME>_PROVIDER_RATE_LIMIT_RECOVERY_INTERVAL` | `RateLimit.RecoveryInterval` | `30s` | yes | How long a key must go clean before its capacity rises by one, and the same for the local capacity after any cut. Also the upper bound of the "waiting for capacity" requeue delay (1s to this value). |
 | `--rate-limit-max-hold` / `<NAME>_PROVIDER_RATE_LIMIT_MAX_HOLD` | `RateLimit.MaxHold` (`*time.Duration`) | `1h` (`nil`) | yes | The longest a server's refusal holds its key. A `Retry-After` or reset time past it is cut to it; after the cut hold one call goes through, and if the server still refuses, the key is held again. `0` means no cap: the server's deadline holds in full. Negative is an error. A pointer, so that unset (`1h`) and `0` (no cap) differ. The first cut for a key is logged at Info with the key, the deadline the server asked for and the cap; not again until the key has gone a whole `RecoveryInterval` clean. Every cut is counted in `ratelimit.hold_clamped`. |
 | `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, each controller's queue takes a local slot before every reconcile and gives it back when the reconcile returns, so low capacity behaves like fewer workers ([design](./design-local-slot-before-pop.md)). Needs the controller built with `ForControllerRuntime`, and `UsePriorityQueue` left unset or true. |
-| `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemoryWorkingSet` | `false` | yes (off) | **Experimental, and not OOM protection.** Adds the memory working set to the local input. It [did not prevent OOMKills](#re-measurement-of-the-memory-input): 0 of 19 runs clean on an overcommitted workload. |
+| `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemory` | `false` | yes (off) | **Experimental, and off by default.** Adds memory to the local input. At `Start` it sets the Go memory limit, unless something else did, and while a Go memory limit is in effect the input is the headroom under it. With no limit (`GOMEMLIMIT=off`) the input is the working-set ratios. It [cleared the bar on an overcommitted synthetic workload](#confirmation-of-the-memory-input), but it has not run on a real provider. Renamed from `ExperimentalMemoryWorkingSet`, with no alias. |
+| none | `RateLimit.Saturation.ExperimentalGoMemoryLimit` | `0` | yes | Experimental. The Go memory limit `Start` sets, in bytes. `0` derives it: 0.8 of `memory.max` (provisional), when that is a real limit, read once at `Start`. Read only with `ExperimentalMemory`. An explicit value always wins: `GOMEMLIMIT` first, `off` included, then a limit the program set itself, then this option. With the input off the runtime doesn't touch the limit. It logs what it set. |
+| none | `RateLimit.Saturation.ExperimentalGoMemoryHeadroomRatio` | `0.15` (**provisional**) | yes | Experimental. Share of the Go memory limit left free at or below which local capacity halves. Read only with `ExperimentalMemory`. There is no hard level. Headroom counts the live heap at the last GC plus the runtime's non-heap memory, read from `runtime/metrics` with no I/O. |
 | `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. Local capacity halves at most once per sample. A shorter period only matters to the experimental memory input: CPU pressure's `avg10` is already a 10-second average, so sampling it faster gains nothing and costs CPU in the container it protects. |
 | `--saturation-startup-ramp-interval` / `<NAME>_PROVIDER_SATURATION_STARTUP_RAMP_INTERVAL` | `RateLimit.Saturation.StartupRampInterval` | `2s` | yes | Local capacity starts at 1 and rises by one per this interval until its first cut, so 16 workers are all admitted after about 30s. Not tied to the sample period. After any cut, `RecoveryInterval` applies instead. A call deferred on the ramp requeues in 1s to the time the ramp still needs, capped at `RecoveryInterval`. |
 | `--saturation-cpu-pressure-threshold` / `<NAME>_PROVIDER_SATURATION_CPU_PRESSURE_THRESHOLD` | `RateLimit.Saturation.CPUPressureThreshold` | `50` (**provisional**) | yes | `cpu.pressure` `some avg10` percentage above which the controller counts as saturated. |
-| `--saturation-working-set-soft-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_SOFT_RATIO` | `RateLimit.Saturation.WorkingSetSoftRatio` | `0.80` (**provisional**) | yes | Experimental memory input only. Working set (`memory.current` minus `inactive_file`) as a share of `memory.max` at which local capacity halves. |
-| `--saturation-working-set-hard-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_HARD_RATIO` | `RateLimit.Saturation.WorkingSetHardRatio` | `0.90` (**provisional**) | yes | Experimental memory input only. Working-set share at which local capacity drops straight to 1. |
+| `--saturation-working-set-soft-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_SOFT_RATIO` | `RateLimit.Saturation.WorkingSetSoftRatio` | `0.80` (**provisional**) | yes | Experimental memory input only, and only with no Go memory limit in effect. Working set (`memory.current` minus `inactive_file`) as a share of `memory.max` at which local capacity halves. |
+| `--saturation-working-set-hard-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_HARD_RATIO` | `RateLimit.Saturation.WorkingSetHardRatio` | `0.90` (**provisional**) | yes | Experimental memory input only, and only with no Go memory limit in effect. Working-set share at which local capacity drops straight to 1. |
 | none | `RateLimit.Saturation.CgroupDir` | the process's own cgroup (`/sys/fs/cgroup` joined with the path in `/proc/self/cgroup`, else `/sys/fs/cgroup`) | yes | The cgroup v2 directory to read. Tests point it at fixtures. |
 | none | `RateLimit.Metrics` | `nil` | yes | Records the governor's metrics, for example `*telemetry.Metrics`. |
 | `--max-reconcile-rate` / `<NAME>_PROVIDER_MAX_RECONCILE_RATE` (existing) | `controller.Options.MaxConcurrentReconciles` | the provider's existing default | yes | Each controller's worker count. The governor's ceiling is this times the number of reconcilers registered with it, so enabling the governor never holds a healthy endpoint below today's total workers. Unset counts as 1. |
@@ -140,21 +142,26 @@ system.
 
 `SetupRateLimitGovernor` rejects contradictory values: a soft ratio above the
 hard ratio, a ratio above 1, a CPU pressure threshold outside (0, 100], a
-negative interval or `MaxHold`, or saturation with `UsePriorityQueue` set to false. Leaving a
-field unset never errors.
+negative interval, `MaxHold` or Go memory limit, a headroom ratio outside (0, 1],
+or saturation with `UsePriorityQueue` set to false. Leaving a field unset never
+errors.
 
 ### The pressure thresholds are provisional
 
-**This release ships rate-limit and CPU slow-down. It does not ship memory
-protection.** The user decided what follows from the kind measurements below
+**Rate-limit and CPU slow-down are on the supported path. Memory is experimental
+and off by default.** The user decided what follows from the measurements below
 (design open question 5, and §11):
 
 - Saturation reads CPU pressure only, on a 1s sample. The threshold, 50%, stays
   provisional: core-provider is validating it.
-- The memory working set is a separate, experimental input, off by default. It
-  [did not prevent OOMKills](#re-measurement-of-the-memory-input) in 0 of 19
-  runs on an overcommitted workload, so turning it on does not protect a
-  controller from them. 0.80 and 0.90 are its provisional ratios.
+- Memory is a separate, experimental input, off by default. With it on, the
+  runtime sets the Go memory limit at 0.8 of `memory.max` and halves `local` at
+  15% of headroom under that limit. Both values are provisional. The first
+  version of this input, the working-set ratios alone,
+  [did not prevent OOMKills](#re-measurement-of-the-memory-input). The current
+  one [cleared the confirmation block](#confirmation-of-the-memory-input) on a
+  synthetic workload, and hasn't run on a real provider, so the default stays
+  off.
 - `local` starts at 1 and rises by 1 per `StartupRampInterval` (2s) until its
   first cut. After any cut, it rises by 1 per clean `RecoveryInterval` (30s),
   the same as API limits.
@@ -166,8 +173,10 @@ protection.** The user decided what follows from the kind measurements below
 - `memory.pressure` is no longer an input. It read 0.00 up to every OOMKill.
 - Saturation bounds every reconcile, with or without a keyer.
 
-Keep workers times the largest call well under the memory limit. The governor
-can't rescue a controller whose workers can overrun it.
+Keep workers times the largest call well under the memory limit. The memory
+input improves the odds on a workload that overruns it, and it is not a
+guarantee: the calls admitted between two samples, and the one call the floor
+always lets through, can still cross the limit.
 
 #### CPU at the final code
 
@@ -203,14 +212,139 @@ too slow, raise the threshold or the CPU limit.
 The sampler's own cost is below, with [the re-measurement](#re-measurement-of-the-memory-input).
 
 
+#### Confirmation of the memory input
+
+The bar is §11 item 16 of the [design](./design-rate-limit-governor.md). On the
+overcommitted workload, the memory input **cleared every line that was run**, on
+the code before the local gate moved into the queue; the block is to be run
+again on the combined code. One line remains: **it has not run on a real
+provider, so the bar is not fully met and the default stays off.**
+
+**Setup.** One GKE node, `e2-standard-4`, Kubernetes 1.35.8, Container-Optimized
+OS, kernel 6.12.94+, cgroup v2, with `cpu.pressure` present. Node load averaged
+0.13 to 0.21 and peaked at 0.84. The node's name, boot ID and kubelet version
+didn't change. The workloads are the
+[first measurement's](#before-first-measurement-1s--090--095-local-starting-at-the-ceiling):
+16 workers, 256Mi and 2 CPUs. **Ramp** holds 16 MiB for 1s per `Observe` with a
+500ms poll and adds 2 Greetings every 5s. **Cold start** has 64 Greetings before
+the controller starts and holds 16 MiB for 300ms. Each run lasted 240s and is
+clean with 0 restarts. A run on this node isn't comparable with the kind figures
+below, so only the alternating control counts.
+
+Settings were fixed and committed before the first run. 60 runs, one at a time,
+alternating in ABBA order, with none discarded.
+
+- **New:** `ExperimentalMemory` alone, all defaults: Go limit at 0.8 of
+  `memory.max` (214748364 bytes here), a soft cut at 15% of headroom, a 1s sample.
+- **Control:** v1.10.0 with the same flag, so working-set ratios 0.80/0.90 and no
+  Go limit.
+
+| Workload | Arm | Runs | Clean | Restarts (all OOMKilled) | Liveness kills | Failed probes | Observes/s, median (range) | Peak working set |
+|---|---|---|---|---|---|---|---|---|
+| Ramp | new | 20 | **20** | 0 | 0 | 0 | 5.25 (4.78 to 5.48) | 202 to 210 MiB |
+| Ramp | control | 20 | 11 | 14 | 0 | 3 | 2.06 (1.81 to 2.34) | 233 to 255 MiB |
+| Cold start | new | 10 | **10** | 0 | 0 | 0 | 16.50 (16.03 to 17.13) | 203 to 221 MiB |
+| Cold start | control | 10 | 7 | 4 | 0 | 3 | 7.02 (6.60 to 8.07) | 227 to 236 MiB |
+
+Observes/s counts the seconds the controller was up. Restarts per control run:
+ramp 1, 2, 0, 0, 2, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 2, 0, 1, 3, 0; cold start 1, 0,
+2, 0, 1, 0, 0, 0, 0, 0. No run crash-looped for its whole window. The most was 3
+restarts, in one control run.
+
+| Line of the bar | Required | Result | Met |
+|---|---|---|---|
+| Clean on the overcommitted workload | at least 18 of 20 | 20 of 20 | yes |
+| No crash loop on cold start, backlog present first | at least 9 of 10 | 10 of 10 | yes: **no harm on cold start** |
+| Control alternating in the same block | yes | v1.10.0, ABBA | yes |
+| Restarts split by cause | yes | new 0; control 18, all OOMKilled; 0 liveness kills in either arm | yes |
+| Throughput not below the old code's clean runs | at or above | ramp 5.25 against 2.00, cold start 16.50 against 7.11, medians of clean control runs | yes |
+| Sampler cost at the chosen period, in a container | reported | see [the sampler's cost](#the-samplers-cost-at-the-confirmation) | yes |
+| A run on a real provider | yes | **not done**: git-provider's rollout is on hold | **no** |
+
+**Cold start is a no-harm check.** The control ran clean in 4 of 4 in exploration
+and 7 of 10 here, with 4 OOM restarts. 10 against 7 is a small sample, so this
+line shows no harm on cold start, not an improvement. The ramp line carries the
+case.
+
+**What this doesn't show.**
+
+- It hasn't run on a real provider. This is the example provider under synthetic
+  load.
+- It covers one workload shape, one call size and one limit. A burst that arrives
+  with `local` already at the ceiling wasn't tested, and neither was a smaller
+  limit or a larger call.
+- Headroom counts Go's memory only. Cgo and other memory outside the Go runtime
+  isn't in it, and the 20% between the limit and `memory.max` is all that covers
+  it.
+- The live heap updates at each GC, so on an idle controller the reading can be
+  old. This is reasoning, not a measurement.
+- The limit is read once, so an in-place resize doesn't move it.
+- **The figures measure the code before the local gate moved into the queue
+  (#40), not throttling itself.** That code ran the gate after the workqueue
+  pop, so a deferred object slept a jittered 1s to 30s and could miss a slot
+  that freed meanwhile, while others took it. core-provider found this
+  inversion in unstructured-runtime#72. The bar result stands as measured, but
+  the gate has since moved, so these figures don't carry over to the current
+  code. The block is to be run again on it, with the same design
+  (`hack/rlgov-measure/remeasure-plan.txt`). Per-object service wasn't
+  measured: the logs are aggregate.
+
+**How the settings were chosen.** Exploration ran on the same node before the
+settings were fixed. It is not evidence for the bar, and every run is in
+`hack/rlgov-measure/results/`.
+
+| Arm | Workload | Runs | Clean | Observes/s | Peak working set | GC share of CPU |
+|---|---|---|---|---|---|---|
+| Limit 0.8, working-set ratios 0.80/0.90 | ramp | 4 | 4 | 6.07 to 6.31 | 217 MiB | 22 to 26% |
+| Limit 0.8, working-set ratios 0.80/0.90 | cold start | 2 | 2 | 13.56, 20.31 | 217, 218 MiB | 14, 20% |
+| Limit 0.75, working-set ratios 0.80/0.90 | ramp | 2 | 1 | 5.68, 6.29 | 216, 217 MiB | 25, 33% |
+| Live headroom, 15% soft, no hard level | ramp | 3 | 3 | 5.32 to 5.54 | 202 to 205 MiB | 11 to 12% |
+| Live headroom, 15% soft, no hard level | cold start | 2 | 2 | 16.47, 16.49 | 203, 205 MiB | 13% |
+| Live headroom, 20% soft, 10% hard | ramp | 2 | 2 | 2.80, 4.71 | 202 MiB | 10 to 11% |
+| Mapped headroom, 10% soft, 5% hard | ramp | 2 | 2 | 1.66, 1.78 | 201, 203 MiB | 9% |
+
+- **With the limit on, the working set stops tracking load.** It sits flat at about
+  201 MiB, 78.5% of `memory.max`, just under the 0.80 soft ratio. It cut only one
+  16 MiB step past the limit, after the limit had been overrun.
+- **That worked by coincidence of 0.80 and 0.80.** At limit 0.75 the plateau sits
+  further under the ratio, and one of two runs was OOMKilled with all 16 slots
+  open and no cut logged in that container. One run, but it's the failure this
+  predicts.
+- **Headroom counts live memory, not everything mapped.** With a limit, the GC
+  fills the room up to it whatever the load, so a figure that includes garbage
+  sits at the limit. That's the mapped arm: it cut hardest and ran slowest.
+- **The hard level gained nothing.** It dropped `local` from 16 to 1 in one run,
+  and the margin stayed the same.
+- **The trade-off.** Headroom ran about 13% below the working-set arm on the ramp.
+  It left 14 MiB more room, held calls in flight to 10 or fewer against 12, and
+  spent about half the GC CPU. The user chose headroom.
+
+#### The sampler's cost at the confirmation
+
+Process CPU over 60s against an idle baseline, at the chosen 1s period with the
+memory input on, in a container with a 1-CPU limit reading real cgroup files, 3
+runs each, alternating, on the node above:
+
+| Arm | Reads | Net CPU per second | Share of one core | Share of a 250m limit |
+|---|---|---|---|---|
+| New | `cpu.pressure`, `runtime/metrics` | 407, 426, 510µs | 0.041 to 0.051% | 0.16 to 0.20% |
+| v1.10.0 | `cpu.pressure`, `memory.current`, `memory.stat`, `memory.max` | 670, 699, 774µs | 0.067 to 0.077% | 0.27 to 0.31% |
+
+Headroom costs less than the working set, as item 15 expected, because it skips
+`memory.stat`. Earlier sessions saw this cost move about tenfold with host load
+([table](#re-measurement-of-the-memory-input)), so read the direction, not the
+absolute figures.
+
 #### Re-measurement of the memory input
 
-These runs measured 250ms, 0.80/0.90, a slow start and +1 per clean sample, the
-settings before the user's final decision. They are why the memory input is
-experimental. The startup and recovery rules above came after them, and the
-memory input has not been measured with those rules.
+These runs measured 250ms, 0.80/0.90, a slow start and +1 per clean sample, on
+kind on Docker Desktop. They are why the memory input became experimental. The
+startup and recovery rules above came after them, and so did the Go memory limit
+and the headroom. They don't compare with
+[the confirmation block](#confirmation-of-the-memory-input), which ran different
+code on a different kernel.
 
-**The memory input did not prevent OOMKills on this workload.** It ran clean in
+**The working-set ratios did not prevent OOMKills on this workload.** They ran clean in
 0 of 19 runs. The workload is harsh on purpose: 16 workers each holding 16 MiB
 is 100% of the 256Mi limit before the controller's own memory, so it is
 overcommitted by construction. These numbers come from the example provider
@@ -264,8 +398,8 @@ separately.
 - **`GOMEMLIMIT` helped more than any governor setting.** With the new defaults,
   throughput rose from 2.1-2.6 to 6.3-7.2 Observes/s and restarts fell to 2 or
   fewer, but only 1 of 5 runs was clean. Without saturation it didn't help
-  (5, 5), so the two work together. It is a chart setting, out of this library's
-  scope (§7).
+  (5, 5), so the two work together. This is why the experimental input now sets
+  it (§11 item 14).
 
 **Cold start.** 64 Greetings exist before the controller starts; each `Observe`
 holds 16 MiB for 300ms.
@@ -386,7 +520,7 @@ Recorded when `RateLimit.Metrics` is set (meter
 | `provider_runtime.ratelimit.capacity` | observable gauge | `key` | Current concurrency the governor allows for the key: the number operators used to tune by hand. |
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |
 | `provider_runtime.ratelimit.local.capacity` | observable gauge | none | Current process-wide capacity the controller's own saturation allows. With saturation on it starts at 1 and ramps up per clean sample. With saturation off it reports nothing: no local capacity is enforced then. |
-| `provider_runtime.ratelimit.saturation.input` | observable gauge (`%`) | `input` (`cpu_pressure`, `memory_working_set`) | Each enabled input's last value: `some avg10` for `cpu_pressure`, the share of `memory.max` for `memory_working_set`. A disabled input has no data point: 0 would read as healthy. |
+| `provider_runtime.ratelimit.saturation.input` | observable gauge (`%`) | `input` (`cpu_pressure`, `memory_working_set`, `go_memory_headroom`) | Each enabled input's last value: `some avg10` for `cpu_pressure`, the share of `memory.max` for `memory_working_set`, the share of the Go memory limit left free for `go_memory_headroom`. A disabled input has no data point: 0 would read as healthy. |
 | `provider_runtime.ratelimit.saturation.input.enabled` | observable gauge | `input` | 1 when the input is read, 0 when it is disabled (no cgroup v2, no PSI, `memory.max` is `max`, saturation off, or, for `memory_working_set`, the experimental option unset). |
 
 A missing input disables that input only. It is logged once at Info, and the

@@ -13,7 +13,7 @@ docs/design-scale-to-zero.md: design (implemented, unreleased) for owners to run
 pkg/scaletozero/scaletozero.go: Exists, Decide and Reconcile, the scale-to-zero helper owners call (live reader required; nothing else may write spec.replicas)
 pkg/ratelimit/signal.go: the rate-limit Signal, Report and the context sink
 pkg/ratelimit/governor.go: the per-key governor and its non-blocking Acquire
-pkg/ratelimit/saturation.go: the cgroup v2 saturation sampler (local capacity)
+pkg/ratelimit/saturation.go: the saturation sampler (local capacity): cgroup v2 CPU pressure, and the experimental memory input, which sets the Go memory limit and reads the headroom under it
 pkg/ratelimit/queue.go: the gated queue: the local slot is taken before the pop and given back in Done
 docs/design-local-slot-before-pop.md: design (implemented) for taking the local slot before the pop
 pkg/ratelimit/httpsignal/httpsignal.go: http.RoundTripper reporting GitHub and Azure DevOps rate-limit headers
