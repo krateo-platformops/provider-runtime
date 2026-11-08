@@ -593,6 +593,8 @@ func (c *deferralCounter) IncRateLimitDeferral(_ context.Context, key string, _ 
 
 func (*deferralCounter) IncRateLimitSignal(context.Context, string, SignalKind) {}
 
+func (*deferralCounter) IncRateLimitHoldClamped(context.Context, string) {}
+
 func (*deferralCounter) ObserveRateLimit(func() Snapshot) {}
 
 // The deferrals metric counts the key that stopped the call, so a dashboard

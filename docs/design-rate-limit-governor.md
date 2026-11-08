@@ -170,7 +170,11 @@ type RateLimitKeyer interface {
 `Acquire` doesn't wait. When the key is throttled, or at capacity, it returns
 a deferral immediately:
 
-- **Throttled:** defer until the server's deadline.
+- **Throttled:** defer until the server's deadline, cut to `MaxHold` (1h by
+  default, 0 for no cap) after the refusal when the server asks for longer.
+  Added in v1.12.0: an unbounded hold let a broken or hostile server freeze
+  every object on a key, deletions included
+  ([configuration](./configuration.md#rate-limit-governor-controlleroptionsratelimit)).
 - **At capacity:** defer for a short, jittered interval, by default a random
   value between 1s and the current `RecoveryInterval`. It isn't a deadline,
   so the condition message says "waiting for capacity" rather than a time.
@@ -373,6 +377,7 @@ Tests, each written so it fails without the behaviour it checks:
 | A multi-key call is all or nothing | With either of its keys throttled or full, no external call is made, the object names that key, and the keys with room hold no slot afterwards. It takes one local slot, and waits for the latest of several deadlines. |
 | No worker is parked | With `MaxConcurrentReconciles=N` and one throttled key, N reconciles of a second key still run concurrently. |
 | The server's deadline is respected | `RetryAfter=30s` defers for at least 30s, never less. |
+| A hold is bounded | A deadline past `MaxHold` is cut to it, logged once per key and counted; 0 is no cap; a refusal after the cut hold holds the key again. |
 | Recovery is additive | Capacity returns to the ceiling in N steps of `RecoveryInterval`, not one. |
 | Off by default | With no governor: no gate, no deferrals, and the existing suite passes unchanged. |
 | Providers really report | A conformance helper in `pkg/reconciler/reconcilertest`, alongside `AssertObserveSetsReady`: feed the provider's client a recorded 429 and a recorded Azure DevOps advisory 200, and assert that a `Signal` was reported. |

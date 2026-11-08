@@ -94,7 +94,8 @@ The library reads no flags or environment itself. The flag and env names
 below are the suggested convention: each provider declares its own, following
 the `<NAME>_PROVIDER_<SETTING>` env pattern providers already use. The
 example provider declares `--rate-limit-governor` /
-`GREETING_PROVIDER_RATE_LIMIT_GOVERNOR`, `--saturation-governor` /
+`GREETING_PROVIDER_RATE_LIMIT_GOVERNOR`, `--rate-limit-max-hold` /
+`GREETING_PROVIDER_RATE_LIMIT_MAX_HOLD`, `--saturation-governor` /
 `GREETING_PROVIDER_SATURATION_GOVERNOR` and
 `--saturation-experimental-memory` /
 `GREETING_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY`
@@ -104,6 +105,7 @@ example provider declares `--rate-limit-governor` /
 |---|---|---|---|---|
 | `--rate-limit-governor` / `<NAME>_PROVIDER_RATE_LIMIT_GOVERNOR` | `controller.Options.RateLimit.Enabled` | `false` | yes (off) | Turns on the rate-limit input: calls are gated per key, and the signals the provider reports slow that key down. |
 | `--rate-limit-recovery-interval` / `<NAME>_PROVIDER_RATE_LIMIT_RECOVERY_INTERVAL` | `RateLimit.RecoveryInterval` | `30s` | yes | How long a key must go clean before its capacity rises by one, and the same for the local capacity after any cut. Also the upper bound of the "waiting for capacity" requeue delay (1s to this value). |
+| `--rate-limit-max-hold` / `<NAME>_PROVIDER_RATE_LIMIT_MAX_HOLD` | `RateLimit.MaxHold` (`*time.Duration`) | `1h` (`nil`) | yes | The longest a server's refusal holds its key. A `Retry-After` or reset time past it is cut to it; after the cut hold one call goes through, and if the server still refuses, the key is held again. `0` means no cap: the server's deadline holds in full. Negative is an error. A pointer, so that unset (`1h`) and `0` (no cap) differ. The first cut for a key is logged at Info with the key, the deadline the server asked for and the cap; not again until the key has gone a whole `RecoveryInterval` clean. Every cut is counted in `ratelimit.hold_clamped`. |
 | `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, each controller's queue takes a local slot before every reconcile and gives it back when the reconcile returns, so low capacity behaves like fewer workers ([design](./design-local-slot-before-pop.md)). Needs the controller built with `ForControllerRuntime`, and `UsePriorityQueue` left unset or true. |
 | `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemoryWorkingSet` | `false` | yes (off) | **Experimental, and not OOM protection.** Adds the memory working set to the local input. It [did not prevent OOMKills](#re-measurement-of-the-memory-input): 0 of 19 runs clean on an overcommitted workload. |
 | `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. Local capacity halves at most once per sample. A shorter period only matters to the experimental memory input: CPU pressure's `avg10` is already a 10-second average, so sampling it faster gains nothing and costs CPU in the container it protects. |
@@ -127,9 +129,18 @@ implement `reconciler.RateLimitKeyer` on its connecter or client (or
 signals with `ratelimit.Report` or the `pkg/ratelimit/httpsignal` transport.
 See [usage](./usage.md#the-pieces-you-opt-into).
 
+A refused key is held for as long as the server asks, up to `MaxHold` (1h by
+default). A hold longer than `MaxHold` is retried at `MaxHold` intervals, so a
+server asking for 6h receives 6 requests instead of 1. Set it to 0 to honour
+any hold in full. The hold includes deleted objects: removing the finalizer needs
+`Connect` and `Observe`, which are gated, so a deletion on a held key waits for
+the hold too. An object annotated `krateo.io/deletion-policy: orphan` skips the
+gate when it is deleted: its finalizer comes off without calling the external
+system.
+
 `SetupRateLimitGovernor` rejects contradictory values: a soft ratio above the
 hard ratio, a ratio above 1, a CPU pressure threshold outside (0, 100], a
-negative interval, or saturation with `UsePriorityQueue` set to false. Leaving a
+negative interval or `MaxHold`, or saturation with `UsePriorityQueue` set to false. Leaving a
 field unset never errors.
 
 ### The pressure thresholds are provisional
@@ -371,6 +382,7 @@ Recorded when `RateLimit.Metrics` is set (meter
 |---|---|---|---|
 | `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`) | External calls the governor deferred on a rate-limit key: `throttled` while a key is held after a refusal, `capacity` when a key's capacity is full. `key` is the key that stopped the call. The local saturation capacity defers nothing since it moved into the queue; it shows as `ratelimit.local.capacity`. |
 | `provider_runtime.ratelimit.signals` | counter | `key`, `kind` (`throttled`, `advisory`) | Signals providers reported that changed a key's state. Healthy quota reports are not counted. |
+| `provider_runtime.ratelimit.hold_clamped` | counter | `key` | Throttled signals whose deadline was past `MaxHold` and was cut to it. Every cut counts, including the ones not logged. A key that keeps rising here has a server asking for holds longer than the cap. |
 | `provider_runtime.ratelimit.capacity` | observable gauge | `key` | Current concurrency the governor allows for the key: the number operators used to tune by hand. |
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |
 | `provider_runtime.ratelimit.local.capacity` | observable gauge | none | Current process-wide capacity the controller's own saturation allows. With saturation on it starts at 1 and ramps up per clean sample. With saturation off it reports nothing: no local capacity is enforced then. |

@@ -78,6 +78,13 @@ type RateLimitOptions struct {
 	// before its capacity rises by one. Default 30s.
 	RecoveryInterval time.Duration
 
+	// MaxHold caps how long a server's refusal holds its key: a Retry-After
+	// or reset time past it is cut to it, and after the cut hold one call goes
+	// through. nil means ratelimit.DefaultMaxHold (1h), a pointer to 0 means
+	// no cap, and a negative value is an error. A pointer so that unset and 0
+	// differ; flag.Duration returns one. See ratelimit.Options.MaxHold.
+	MaxHold *time.Duration
+
 	// Saturation turns on and tunes the local input, the controller's own CPU
 	// saturation, independently of Enabled. Default off, and its threshold
 	// defaults to a provisional value. Memory is a separate, experimental
@@ -124,6 +131,7 @@ func (o *Options) SetupRateLimitGovernor(mgr RunnableAdder) error {
 		MaxConcurrentReconciles: max(1, o.MaxConcurrentReconciles),
 		IgnoreSignals:           !rl.Enabled,
 		RecoveryInterval:        rl.RecoveryInterval,
+		MaxHold:                 rl.MaxHold,
 		Saturation:              rl.Saturation,
 		Logger:                  logger.WithName("ratelimit"),
 		Metrics:                 rl.Metrics,

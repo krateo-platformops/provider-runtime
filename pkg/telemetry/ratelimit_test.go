@@ -158,9 +158,37 @@ func TestLocalCapacityReportsNothingWithSaturationOff(t *testing.T) {
 	}
 }
 
+// A hold cut to MaxHold is counted per key; a deadline within it is not.
+func TestHoldClampedMetric(t *testing.T) {
+	reader := metric.NewManualReader()
+	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	m, err := newMetrics(provider.Meter("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := ratelimit.New(ratelimit.Options{MaxConcurrentReconciles: 4, Metrics: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Observe(ratelimit.Signal{Key: "api.github.com", Throttled: true, RetryAfter: 24 * time.Hour})
+	g.Observe(ratelimit.Signal{Key: "api.github.com", Throttled: true, ResetAt: time.Now().AddDate(1, 0, 0)})
+	g.Observe(ratelimit.Signal{Key: "dev.azure.com", Throttled: true, RetryAfter: time.Minute})
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	if got := points(t, rm, "provider_runtime.ratelimit.hold_clamped", "key"); got["api.github.com"] != 2 || len(got) != 1 {
+		t.Errorf("hold_clamped by key = %v, want api.github.com 2 and nothing else", got)
+	}
+	if got := points(t, rm, "provider_runtime.ratelimit.seconds_to_reset", "key"); got["api.github.com"] > ratelimit.DefaultMaxHold.Seconds() {
+		t.Errorf("seconds_to_reset by key = %v, want api.github.com at most %v", got, ratelimit.DefaultMaxHold.Seconds())
+	}
+}
+
 func TestRateLimitMetricsAreNilSafe(t *testing.T) {
 	var m *Metrics
 	m.IncRateLimitDeferral(context.Background(), "k", ratelimit.DeferThrottled)
 	m.IncRateLimitSignal(context.Background(), "k", ratelimit.SignalAdvisory)
+	m.IncRateLimitHoldClamped(context.Background(), "k")
 	m.ObserveRateLimit(func() ratelimit.Snapshot { return ratelimit.Snapshot{} })
 }
