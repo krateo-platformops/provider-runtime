@@ -33,8 +33,19 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   `SetupRateLimitGovernor`. `Start` logs an error when a reconciler's controller
   wasn't built with `ForControllerRuntime`, and warns when a second Governor with
   saturation runs in the process.
-- Design: [design-local-slot-before-pop](./design-local-slot-before-pop.md). Not
-  measured on a cluster yet.
+- Design: [design-local-slot-before-pop](./design-local-slot-before-pop.md).
+- **Measured on GKE on 2026-11-08,** on an e2-standard-4 node, with a 250m CPU
+  limit, 16 workers and a liveness probe. Each call used 20ms of CPU plus a
+  400ms wait. Saturation off, threshold 75 and threshold 50 had 5 runs each.
+  No run had a restart, a failed probe or a discard. With saturation off, CPU
+  sat at the limit, with pressure at 53-60%. Threshold 75 never engaged. At
+  threshold 50 the queue slowed reconciles down at the limit as designed, but
+  overshot: it settled at about 177ms/s, roughly 70% of the limit, with 31%
+  less throughput. The cause is the step rule, not the gate. It halves on every
+  1s sample of a 10s-average signal, then recovers by one slot every 30s. A
+  data-driven replacement, which sizes concurrency from the limits and the
+  measured cost of each reconcile, is being designed. Until it ships,
+  saturation stays opt-in and off by default.
 - **The release also moves to controller-runtime v0.25.2 and `k8s.io/*`
   v0.37,** from v0.23.3 and v0.35 (`k8s.io/api`, `apimachinery`, `client-go`
   and `apiextensions-apiserver` v0.37.2; `controller-tools` v0.22.0). The
