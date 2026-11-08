@@ -369,7 +369,7 @@ Recorded when `RateLimit.Metrics` is set (meter
 
 | Instrument | Kind | Attributes | Meaning |
 |---|---|---|---|
-| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`) | External calls the governor deferred. `ramping` is a deferral on the startup ramp, which is quiet on the object, so this is where a restart shows. `key` is the key that stopped the call. It is empty for a call deferred only by the local capacity with no key (a provider without a keyer) or with several keys, where no one key stopped it. |
+| `provider_runtime.ratelimit.deferrals` | counter | `key`, `cause` (`throttled`, `capacity`) | External calls the governor deferred on a rate-limit key: `throttled` while a key is held after a refusal, `capacity` when a key's capacity is full. `key` is the key that stopped the call. The local saturation capacity defers nothing since it moved into the queue; it shows as `ratelimit.local.capacity`. |
 | `provider_runtime.ratelimit.signals` | counter | `key`, `kind` (`throttled`, `advisory`) | Signals providers reported that changed a key's state. Healthy quota reports are not counted. |
 | `provider_runtime.ratelimit.capacity` | observable gauge | `key` | Current concurrency the governor allows for the key: the number operators used to tune by hand. |
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |
