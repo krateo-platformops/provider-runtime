@@ -413,15 +413,35 @@ It also breaks foreground-deletion cycles (§11.8).
       includes a P that is being deleted *with* the finalizer: the patch
       adds no new finalizer, so it is allowed, and the epoch still moves;
     - **Deleting**: the patch is rejected as **422 Invalid**, with a
-      Forbidden cause on `metadata.finalizers`, because P is being deleted
-      and lacks the finalizer (§2). An RBAC **403 Forbidden** is *not* this
-      outcome: it is an Acquire error (§10.7). A new holder gets `MustNotConnect`. For an established
-      holder this is **Degraded**, the one term this doc uses for every
-      fail-open (§8);
+      Forbidden-type cause on `metadata.finalizers`, because P is being
+      deleted and lacks the finalizer (§2). That is class (a) below, and
+      nothing else is. A new holder gets `MustNotConnect`. For an
+      established holder this is **Degraded**, the one term this doc uses
+      for every fail-open (§8);
     - **Missing**: NotFound;
     - **Degraded**: any other error. A new holder fails closed and an
       established one proceeds (§8).
 - **A3.** Only then Connect.
+
+**Classifying A2 and index-write errors.** Every place that classifies an
+error from A2, from an index write (§10.6), or from a live read in the
+gate, reads the status's code, reason, message and **causes**. It never
+uses `IsForbidden` or `IsInvalid` alone, because two different 422s and two
+different 403s exist (core-provider found this; verified in
+`k8s.io/apiserver@v0.37.2`):
+
+| Class | Status | How it is recognised | Meaning |
+|---|---|---|---|
+| (a) **Deleting** | 422, reason Invalid | a cause of type `FieldValueForbidden` on field `metadata.finalizers` (`ValidateNoNewFinalizers`, via `NewInvalid` in `pkg/registry/rest/update.go:157`) | P is being deleted and lacks the finalizer |
+| (b) **policy denial** | 403, reason Forbidden | message prefix `ValidatingAdmissionPolicy '`, and not (c). Our policy sets `reason: Forbidden` on its validation (§10.6.1), so its denials are 403 | an admission policy refused the write |
+| (c) **policy config error** | 422, reason Invalid | message contains `failed to configure binding`, and **no** `metadata.finalizers` cause | a policy binding couldn't be configured, for example `cu-policy-params` missing (§10.6.1) |
+| (d) **RBAC** | 403, reason Forbidden | no `ValidatingAdmissionPolicy` prefix | the caller lacks the permission |
+
+**Only (a) is the Deleting outcome.** (b), (c) and (d) are Acquire errors
+under R4's rules: fail closed for a new holder, fail open (Degraded) for an
+established one. The brief retry for RBAC propagation in PerNamePoll
+(§10.7.2) applies to (d) only. A 422 is never read as Deleting without the
+`metadata.finalizers` cause, so (c) can't be mistaken for (a).
 
 **The releaser** works on one holder kind K and one namespace N at a time,
 for the set of protected objects pending there (R7). For each pending P:
@@ -1523,8 +1543,8 @@ Secrets hold that data anyway.
 The core builds cluster-wide informers. A caller that restricts them to
 some namespaces (`SharedOptions.Namespaces`) can't cache refs outside those
 namespaces. Such a ref is read live, every pass. If even the live read is
-forbidden there, Acquire returns an error: fail closed for a new holder,
-fail open for an established one (§8). The doc text says so, and that such
+denied there (class (d) of §6.2, RBAC), Acquire returns an error: fail
+closed for a new holder, fail open for an established one (§8). The doc text says so, and that such
 refs need §13's cluster-scoped RBAC.
 
 ### 10.6 PerName mode: the index ConfigMap (M1)
@@ -1629,6 +1649,7 @@ proves it.
           only cu-index-* ConfigMaps from the management namespace's service accounts,
           events, and Kubernetes' own kube-root-ca.crt and default ServiceAccount
           may be written in krateo-credential-use
+        reason: Forbidden   # without it a denial is 422 Invalid (dispatcher.go:309-315)
   ---
   apiVersion: admissionregistration.k8s.io/v1
   kind: ValidatingAdmissionPolicyBinding
@@ -1701,6 +1722,17 @@ proves it.
   For core-provider, the effect is that composition.krateo.io objects are
   refused there, along with everything else not on the list.
 
+  **Every validation sets `reason: Forbidden`**, as the sketch does. A
+  ValidatingAdmissionPolicy denial with no `reason` is **422, reason
+  Invalid**, not 403. The dispatcher builds it with `admission.NewForbidden`,
+  then sets the reason to Invalid when the decision's is empty, and derives
+  the code from it (`pkg/admission/plugin/policy/validating/dispatcher.go:309-315`,
+  `policy_decision.go:73-89`, which maps Invalid to 422). With the reason
+  set, an ordinary denial is a 403, and can never be confused with A2's
+  Deleting outcome, which is also a 422 (§6.2). **The config-error path
+  stays 422 Invalid** whatever the validations say. It is built by
+  `addConfigError`, which sets no reason (`dispatcher.go:75-100`).
+
   **Subresources aren't matched.** `resources: ["*"]` matches a request
   only when it has no subresource. The matcher splits each rule into a
   resource and a subresource, and `"*"` has an empty subresource
@@ -1725,11 +1757,14 @@ proves it.
      (`policy/validating/dispatcher.go:75-100`). So **every** CREATE and
      UPDATE in `krateo-credential-use` is denied, including
      kube-controller-manager's `kube-root-ca.crt` and the `default`
-     ServiceAccount. `cu-index-*` writes fail with a Forbidden that names
-     the binding, so new holders fail closed and established ones are
-     Degraded (§10.6.4). **An operator could misread this as missing
-     RBAC.** The message names the policy binding, not a role, and the
-     runbook says to check that `cu-policy-params` exists first.
+     ServiceAccount. `cu-index-*` writes fail with **422 Invalid**, not a
+     Forbidden: class (c) of §6.2. New holders fail closed and established
+     ones are Degraded. **An operator could misread this as missing RBAC,
+     or as a Deleting outcome.** So the tracker, and the runbook, **match
+     the symptom by message, not by code**: it contains both
+     `ValidatingAdmissionPolicy 'krateo-credential-use-namespace'` and
+     `failed to configure binding: no params found`. The runbook's first
+     step on that message is to check that `cu-policy-params` exists.
 
   **Why Deny, not Allow.** With `Allow`, a missing parameter would let
   every write through. Anyone able to delete one ConfigMap could then
@@ -2021,10 +2056,10 @@ the index line, then waits for the grant (§10.7.2), then runs A2. To drop
 one, R3, then the prune, then the provisioner's revoke. **An A2 never runs
 before its grant.** The earlier revision's "RBAC, then the index line" is
 replaced: the grant now follows from the line, which comes first. An A2 that
-runs without its grant fails with **403 Forbidden**. That looks like a
-credential problem, but it is an ordering or provisioning defect, and it is
-reported as an Acquire error, never as the outcome Deleting, which is a 422
-(§6.2).
+runs without its grant fails with an **RBAC 403**, class (d) of §6.2. That
+looks like a credential problem, but it is an ordering or provisioning
+defect, and it is reported as an Acquire error, never as the outcome
+Deleting, which is a 422 with a `metadata.finalizers` cause (§6.2).
 
 **Proof against the reviewer's interleaving:**
 
@@ -2060,7 +2095,8 @@ act on.
 
 RBAC propagates to each API server through that server's own informer, so a
 grant that one server already applies can still be denied by another for a
-moment. **A 403 on A2 is retried without sleeping in a worker** (L2). The
+moment. **An RBAC 403 on A2 (class (d) of §6.2, never (b)) is retried
+without sleeping in a worker** (L2). The
 pass returns a short `RequeueAfter` (0.5s, then 1s, 2s, 4s, tracked per
 holder and ref in memory). Once about 8s in all have passed, the 403 is
 reported as an Acquire error, the ordering or provisioning defect. For a new
@@ -2764,6 +2800,19 @@ on krateo-057:
   403 that is reported as an Acquire error, not as Deleting; a failed
   provisioning fails closed for a new holder and is Degraded for an
   established one.
+- **Error classification** (§6.2): each of the four classes is produced
+  for real in envtest and classified correctly:
+  - (a) an A2 on an object being deleted without the finalizer;
+  - (b) a write the namespace policy denies, which is a 403 because of
+    `reason: Forbidden`;
+  - (c) a write with `cu-policy-params` deleted, a **422 that must not be
+    read as Deleting**, because it has no `metadata.finalizers` cause;
+  - (d) an A2 without RBAC.
+
+  Only (a) yields Deleting. (b) to (d) are Acquire errors, failing closed
+  for a new holder and Degraded for an established one, and only (d) is
+  retried as RBAC propagation. A policy with no `reason` is also tested,
+  to pin that it yields 422.
 - The Deleting outcome is recognised by its 422 Invalid with a Forbidden
   cause on `metadata.finalizers`, and never by a 403.
 - **The provisioner** (§10.7.1): grants follow the index, coalesced to one
@@ -3416,6 +3465,16 @@ were not retried.
 | The symptom of its absence, verified in apiserver v0.37.2: every write in the namespace is denied before any expression runs; `cu-index-*` writes fail with a Forbidden naming the binding (new holders fail closed, established ones are Degraded); it can be misread as missing RBAC | §10.6.1 |
 | Why `Deny` stays: `Allow` would let one ConfigMap deletion switch the protection off | §10.6.1 |
 | core-provider's check that `resources: ["*"]` doesn't match subresources such as `serviceaccounts/token`, verified in the matcher | §10.6.1 |
+
+**Revision 15** (crediting core-provider, who found that a policy denial with no `reason` is a 422):
+
+| Item | Resolved in |
+|---|---|
+| A ValidatingAdmissionPolicy denial without `reason` is 422 Invalid (`dispatcher.go:309-315`, `policy_decision.go`), so the sketch sets `reason: Forbidden` and its denials are 403; the config-error path stays 422 whatever the validations say | §10.6.1 |
+| Error classification by code, reason, message and causes, never `IsForbidden` or `IsInvalid` alone: (a) Deleting, (b) policy denial, (c) policy config error, (d) RBAC; only (a) is Deleting; the PerNamePoll RBAC retry is for (d) only; every spot that relied on "Forbidden" fixed | §6.2, §10.5, §10.7.1 |
+| The missing-params symptom corrected to 422 Invalid, and matched by message in the tracker and the runbook | §10.6.1 |
+| Tests for each class, including a missing-params 422 that must not be read as Deleting | §14 |
+| Correcting revision 14's report: the "Forbidden naming the binding" there was wrong; it is a 422 | §10.6.1 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
