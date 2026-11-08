@@ -420,9 +420,22 @@ It also breaks foreground-deletion cycles (§11.8).
 for the set of protected objects pending there (R7). For each pending P:
 
 - **R0. Fast path.** Ask the holder informer's index for users of P in N,
-  leaving out the holders §6.1 excludes. If P is not being deleted and a
-  user exists, stop. This settles the usual case, where one of several users
-  leaves.
+  leaving out the holders §6.1 excludes. Stop if either:
+  - P is not being deleted, and a user exists. This settles the usual case,
+    where one of several users leaves;
+  - P is being deleted, and the cache shows a **deleting** user (L1). §5
+    keeps P in every row while a user is deleting.
+
+  A stale cache can only keep a hold longer, which is always safe. The
+  release then runs on the event that shows the user gone.
+
+  **The teardown cost**, for a namespace with M held Secrets and H holders
+  deleting:
+  - *before*, every holder event re-ran the whole batch: up to H × (M GETs,
+    one Namespace GET and one list);
+  - *after*, those batches stop at R0, and one full batch (M GETs, one
+    Namespace GET, one list) runs once the cache shows the last deleting
+    user gone.
 - **R1. Get P live.** Note its resourceVersion, the index *i* of the
   finalizer in `metadata.finalizers`, the epoch *e*, and its
   `deletionTimestamp`.
@@ -1315,15 +1328,26 @@ recoverable residual.
 
 **The opposite shape: an intermediate elsewhere, with the Secret at home.**
 H and S are in A, and C is in B, which hasn't consented. S is held and C
-isn't. The tracker still follows C's `Next`, with a live GET each pass, so S
+isn't. The tracker still follows C's `Next`, with a shared live read, so S
 is found and held. Tearing down A deletes S, which is held, and never C. So
 H's deletion reads both. The remaining case is again B being deleted while
 H lives: C is gone, and H fails until C is recreated, which is
 recoverable.
 
 **The cost of an unheld hop.** It isn't labelled, so §9.2's enqueue doesn't
-see it re-pointed, and it is read live on every pass rather than from the
-cache. A re-point of C is then picked up on the holder's next pass.
+see it re-pointed, and it isn't in the label-scoped cache. It is read live,
+and **that read is shared** (L6). Holders reconciled within one pass batch,
+or within a 10s TTL, reuse it, so a Configuration shared by many holders
+costs one GET per 10s, not one per holder pass. A re-point of C is then
+picked up within 10s plus the holder's next pass.
+
+**Why reusing the read is safe.** No decision to *release* reads an unheld
+hop. Its read only decides which refs lie behind it, and each of those is
+then gated and held with its own live checks. A read up to 10s stale can,
+at worst, keep holding a ref the hop stopped naming, which is released by
+the normal protocol once the record drops it. Or it can find a newly named
+ref up to 10s late, which is the re-point window of §9.2 that already
+exists.
 
 ## 10. Watches, caches and memory
 
@@ -1404,8 +1428,16 @@ The releaser re-checks the grace itself in R1, so an early or duplicate
 enqueue is harmless.
 
 **Any change to K's finalizer or epoch on a protected object** also
-enqueues its (K, N) batch. R0's fast path settles it at once when users
-exist. It is the backstop for an A2 issued from a stale view (§11.3).
+enqueues its (K, N) batch, in the watched modes. R0's fast path settles it
+at once when users exist.
+
+**And the acquirer enqueues the batch itself** after any A2 issued from a
+view it can't vouch for (L2). That is always so for a cross-namespace ref,
+whose consent can change under it, and for every A2 in PerNamePoll mode,
+where no watch would deliver the A2's write. Both are the backstop for an
+A2 from a stale view (§11.3). The self-enqueue doesn't depend on the mode.
+Because it runs after the A2 returns, the batch's consistent list (R2) runs
+after the A2 too.
 
 **On startup**, the protected informers' initial list enqueues a release
 batch for every (K, N) of every held object. In PerName mode, the index
@@ -1918,7 +1950,12 @@ namespace other than the holder's is held **only if the target consents**
 credential-use.krateo.io/allow-holders-from: "team-a,team-b"
 ```
 
-The value is a comma-separated list of holder namespaces.
+The value is a comma-separated list of holder namespaces. **Consent is the
+union of the object's list and its Namespace's list** (L3, the user's
+decision). A holder namespace named in either is allowed. An object's list
+can add to what its Namespace grants, but **can't narrow it**. The
+implication for owners: to restrict one Secret, don't grant at the
+Namespace level. Grant on each object that should be shared.
 
 **`*` is allowed on the target object, and not on a Namespace.** On an
 object, `*` is one owner's deliberate choice about one object: a platform
@@ -1964,9 +2001,9 @@ recreated. Alternatively, the holder's owner can set deletion-policy
 from its next pass.
 
 **Consent withdrawn: the hold is released** (the user's decision). The
-target owner's consent is authoritative. When `allow-holders-from` no
-longer names a holder's namespace, either on the object or on its
-Namespace, that holder's hold is dropped:
+target owner's consent is authoritative. When **neither** the object's nor
+its Namespace's `allow-holders-from` names a holder's namespace any longer
+(the union, above), that holder's hold is dropped:
 
 - **from the record.** The holder's next pass writes A1 without the ref;
 - **from the index and the grant**, through the normal path: R3, then the
@@ -1976,18 +2013,42 @@ Namespace, that holder's hold is dropped:
   all lose consent together, so the finalizer for (K, N) goes once the last
   of them has dropped the ref.
 
-**How the withdrawal is seen.**
+**The gate runs on every pass** (M1), for every held cross-namespace ref,
+not only before A2:
+
+- **On a pass that skips A2** (§6.3), consent is read from the cache. The
+  label-scoped informer keeps `credential-use.*` annotations on the target
+  (§10.1), and the Namespace informer covers the Namespace. In PerNamePoll
+  mode it is read from the live GET that the skip already makes (§10.7.3).
+- **On a pass that runs A2**, consent is read live, before the A2, as it is
+  before the line, the grant and the A2 of every new hold. **The live read is
+  mandatory in the adding direction.**
+- **On a withdrawal, the pass drops the ref in A1**, in the same pass.
+
+**Dropping on a stale cached withdrawal is the safe direction.** If the
+cache shows a withdrawal that has since been reversed, the hold is released
+by the normal protocol. The next pass then sees the ref as new, and
+re-acquires it through the live check. The cost is churn and a short spell
+unheld, which is today's behaviour. A deleting holder never skips A2, so it
+always reads consent live: a stale cache can't release a hold during a
+holder's deletion.
+
+**How a withdrawal reaches the holders.**
 
 - **A change to the target's annotation** is delivered by the label-scoped
-  informer, whose transform keeps `credential-use.*` annotations (§10.1).
-  It enqueues the target's holders through the index.
-- **A change to the Namespace's annotation** is delivered by a
-  metadata-only informer on Namespaces, with the same kind of transform,
-  and enqueues the holders of every held object in that namespace.
-- **In PerNamePoll mode**, the target object isn't watched. Its annotation
-  is seen by the held-object poll, within its backoff (§10.7.3), at most 5
-  minutes, and at once by any pass that runs A2 (below). A Namespace isn't a
-  protected kind, so its informer runs in PerNamePoll too.
+  informer, and enqueues the target's holders through the index.
+- **A change to a Namespace** is delivered by a metadata-only informer on
+  Namespaces. Its transform keeps the name, UID, resourceVersion,
+  `deletionTimestamp` and `credential-use.*` annotations. **Its handler
+  compares the transformed old and new objects** (L5), and acts only on a
+  change to a `credential-use.*` annotation or to the `deletionTimestamp`.
+  On either, it enqueues the holders of every held object in that
+  namespace, and on a new `deletionTimestamp`, those objects' release
+  batches too (§5).
+- **In PerNamePoll mode**, the target isn't watched. Its annotation is seen
+  by the next pass's skip GET, by the held-object poll (at most 5 minutes),
+  and by any pass that runs A2. A Namespace isn't a protected kind, so its
+  informer runs in PerNamePoll too.
 
 A `CredentialConsentWithdrawn` Warning event is recorded on the target and
 on each affected holder, and `credentialuse_consent_withdrawn_total` is
@@ -2013,9 +2074,11 @@ credential-use.krateo.io/unheld: [{"ref":"team-b/Secret/db-creds","reason":"Cons
 - **The same write.** It is written in the A1 merge patch, together with
   the record, whenever either changes, so it costs no extra write. The
   holder event filter treats it like the record (§7.5).
-- **It is bounded.** It holds at most 16 entries, most recent first. Beyond
-  that, the last entry is
-  `{"ref":"…","reason":"More","count":<n>}`. With refs of at most about 350
+- **It is bounded.** It holds at most 16 entries. **When it has to trim,
+  it keeps `ConsentWithdrawn` entries ahead of `NotConsented` ones** (L4),
+  because a withdrawal is the cause a later not-found needs explained.
+  Within each reason, the most recent come first. Beyond 16, the last entry
+  is `{"ref":"…","reason":"More","count":<n>}`. With refs of at most about 350
   characters, it stays under 6 KB.
 - **An entry goes** when the ref is held again, or when the holder no longer
   names it.
@@ -2043,21 +2106,24 @@ the holder's own live namespace, with deletion-policy `orphan` or a
 re-point.
 
 **Why the drop can't race an A2 into a stranded or unindexed finalizer.**
-Two rules close it:
+Three rules close it:
 
 1. **Every A2 of a cross-namespace ref is preceded by a live consent read in
    the same pass**, as is every new hold (line, grant, A2). A pass that runs
-   A2 after the withdrawal therefore sees it, writes no A2, and drops the
-   ref instead. A pass whose A2 is skipped (§6.3) writes nothing. Deletion
-   passes never skip, so they always read consent live.
-2. **Every change to K's finalizer or epoch on a protected object enqueues
-   its (K, N) release batch.** That covers any A2 still in flight. Say
-   process Y's pass read consent before the withdrawal and its A2 lands
-   after a release has already removed the finalizer. The A2's own write
-   is delivered as a change to P, which enqueues a batch. That batch's
-   consistent list (R2) runs after the A2, finds no record naming P, and
-   releases it by §5. The same backstop covers any A2 issued from a stale
-   view of a holder's record, consent or not.
+   A2 after the withdrawal sees it, writes no A2, and drops the ref instead.
+2. **A pass that skips A2 still checks consent**, from the cache or from the
+   skip's live GET, and drops the ref if it is withdrawn. A skip writes
+   nothing to P, so it can't re-add a finalizer, and a stale cache only
+   delays the drop to a later pass.
+3. **After every A2 of a cross-namespace ref, and after every A2 in
+   PerNamePoll mode, the acquirer enqueues the (K, N) release batch
+   itself** (§10.2). That covers an A2 still in flight. Say process Y's pass
+   read consent live just before the withdrawal, and its A2 lands after a
+   release has already removed the finalizer. Y's self-enqueued batch runs
+   after the A2. Its consistent list (R2) finds no record naming P, because
+   the dropping pass's A1 has removed it, and releases P by §5. In the
+   watched modes, the A2's write also arrives as an informer event, which
+   enqueues the same batch.
 
 So no finalizer is left without a record and a pending release check. A2
 still runs only after its index line (§10.6.3), so none is left without a
@@ -2069,8 +2135,8 @@ whatever namespace the previous hop was in, because the hold and its
 finalizer belong to the holder (§3). **An unheld hop doesn't stop the
 chain.** Its `Next` is still followed, so a same-namespace Secret behind a
 cross-namespace intermediate is still held. Because the unheld hop isn't
-labelled, it isn't in the label-scoped cache, so it is read with a live GET
-on each pass. §9.4 works through both shapes.
+labelled, it isn't in the label-scoped cache, so it is read live, and the
+read is shared for up to 10s (§9.4). §9.4 works through both shapes.
 
 **The provisioner never grants a ref that isn't held.** A ref without
 consent never gets an index line, and the provisioner grants only what the
@@ -2497,6 +2563,18 @@ on krateo-057:
   on A2 requeues without holding a worker (L2).
 - Disown and Degraded leave Connect working under the split ClusterRoles
   (M1).
+- **The gate on every pass** (M1): an established holder that skips A2
+  sees a withdrawal in its cache, drops the ref in A1, and the hold is
+  released. The same in PerNamePoll mode, through the skip's live GET. A
+  stale cached withdrawal releases and then re-acquires. A deleting holder
+  always reads live.
+- R0 stops for a deleting P with a deleting user in the cache (L1). In
+  PerNamePoll, an A2 enqueues its own release batch (L2). Consent is the
+  union of the two lists, and an object's list can't narrow its
+  Namespace's (L3). Trimming keeps `ConsentWithdrawn` first (L4). The
+  Namespace handler ignores changes that aren't to `credential-use.*` or
+  the `deletionTimestamp` (L5). A shared unheld hop is read once per 10s
+  (L6).
 - **The unheld record and its pointer:** a ConsentWithdrawn ref plus a
   not-found Connect error produce Synced=False/ReconcileError whose message
   ends with the exact suffix, under 160 characters. A successful pass, and
@@ -2995,6 +3073,18 @@ were not retried.
 | oasgen's coverage claim narrowed to what was measured, with what wasn't checked stated | §16.2 |
 | The holder-side event names the target, the withdrawing namespace and the release; a durable, bounded `credential-use.krateo.io/unheld` annotation (`NotConsented`, `ConsentWithdrawn`) written in the same patch as the record; how to read it next to a not-found | §11.3, §7.1, §7.5 |
 | A pointer to the `unheld` annotation appended to Synced=False on a failing Connect or Observe: the exact suffix, its length bound, when it's added, neutral guidance for outside runtimes, and a test | §12, §14 |
+
+**Revision 9:**
+
+| Item | Resolved in |
+|---|---|
+| M1 The consent gate on every pass for every held cross-namespace ref: cached (or the PerNamePoll skip's live GET) on skipping passes, live before every A2 and every new hold; a withdrawal drops the ref in A1; why a stale cached drop is safe; the rule-1 contradiction fixed; a test | §11.3, §14 |
+| L1 R0 stops for a deleting P with a deleting user in the cache; the teardown cost before and after | §6.2 R0 |
+| L2 The acquirer enqueues its own release batch after any A2 from a view it can't vouch for: every cross-namespace A2, and every A2 in PerNamePoll | §10.2, §11.3 |
+| L3 Consent is the union of the object's and the Namespace's lists; an object can't narrow its Namespace; the advice to owners | §11.3 |
+| L4 Trimming keeps `ConsentWithdrawn` ahead of `NotConsented` | §11.3 |
+| L5 The Namespace handler compares transformed objects, and acts only on `credential-use.*` annotations or the `deletionTimestamp` | §11.3 |
+| L6 A shared unheld hop's live read is reused per pass batch or 10s TTL; why that is safe | §9.4 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
 ## 18. Open questions for the user
