@@ -15,7 +15,7 @@ Usage:
   KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.37.0) \\
     python3 hack/revert-check-credential-use-1.py > hack/revert-check-credential-use-1.txt
 """
-import hashlib, os, re, subprocess, sys
+import hashlib, os, re, signal, subprocess, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG = "pkg/credentialuse/"
@@ -46,12 +46,18 @@ MUTANTS = [
     # ref.go and record.go: the record (§4).
     ("the record isn't deduplicated", "ref.go", [("\treturn slices.Compact(out)\n", "\treturn out\n")]),
     ("the record isn't sorted", "ref.go", [("\tslices.SortFunc(out, compareIDs)\n", "")]),
-    ("unknown fields are accepted", "record.go", [("\tdec.DisallowUnknownFields()\n", "")]),
-    ("trailing data is accepted", "record.go", [("\tif dec.More() {\n", "\tif false && dec.More() {\n")]),
-    ("null reads as an empty record", "record.go", [
-        ('\tif ids == nil {\n\t\t// "null" is not an array.\n', '\tif false && ids == nil {\n\t\t// "null" is not an array.\n')]),
+    # M1 of the review of #53: each way a lenient decoder fails unsafe.
+    ("an unknown key is accepted", "record.go", [("\t\tif !ok || !slices.Contains(recordKeys, key) {\n", "\t\tif !ok {\n")]),
+    ("keys are read in any case", "record.go", [("\t\tif !ok || !slices.Contains(recordKeys, key) {\n", "\t\tif !ok || !slices.Contains(recordKeys, strings.ToLower(key)) {\n")]),
+    ("a duplicate key is accepted", "record.go", [("\t\tif _, dup := values[key]; dup {\n", "\t\tif _, dup := values[key]; false && dup {\n")]),
+    ("a null value reads as empty", "record.go", [
+        ('\t\tif !ok {\n\t\t\treturn ID{}, fmt.Errorf("record entry\'s %q is %v, not a string", key, t)', '\t\tif !ok && t != nil {\n\t\t\treturn ID{}, fmt.Errorf("record entry\'s %q is %v, not a string", key, t)')]),
+    ("a missing key reads as empty", "record.go", [("\tif len(values) != len(recordKeys) {\n", "\tif false && len(values) != len(recordKeys) {\n")]),
+    ("trailing data is accepted", "record.go", [("\tif t, err := dec.Token(); !errors.Is(err, io.EOF) {\n", "\tif t, err := dec.Token(); false && !errors.Is(err, io.EOF) {\n")]),
+    ("the array's closing ] isn't checked", "record.go", [("\tif err := expectDelim(dec, ']'); err != nil {\n", "\tif err := expectDelim(dec, ']'); false && err != nil {\n")]),
     ("an entry without a kind or name is read", "record.go", [
-        ('\t\tif id.Kind == "" || id.Name == "" {\n\t\t\treturn nil, fmt.Errorf("record entry', '\t\tif false {\n\t\t\treturn nil, fmt.Errorf("record entry')]),
+        ('\tif id.Kind == "" || id.Name == "" {\n\t\treturn ID{}, fmt.Errorf("record entry', '\tif false {\n\t\treturn ID{}, fmt.Errorf("record entry')]),
+    ("Names relies on sorted IDs", "record.go", [("\treturn slices.Contains(r.IDs, id)\n", "\t_, found := slices.BinarySearchFunc(r.IDs, id, compareIDs)\n\treturn found\n")]),
     ("an unparseable record names nothing", "record.go", [
         ("\tif r.Unparseable {\n\t\treturn true\n\t}\n", "\tif r.Unparseable {\n\t\treturn false\n\t}\n")]),
     ("no refs encode as null", "record.go", [("\tif ids == nil {\n\t\tids = []ID{}\n\t}\n", "")]),
@@ -76,11 +82,16 @@ MUTANTS = [
     ("a config error reads as a denial", "classify.go", [("\t\t\t\tconfig = true\n", "")]),
     ("any 403 without a policy is RBAC (revision 15's rule)", "classify.go", [("\t\tcase rbacMessage.MatchString(st.Message):\n", "\t\tcase true:\n")]),
     ("RBAC is never recognised", "classify.go", [("\t\tcase rbacMessage.MatchString(st.Message):\n", "\t\tcase false:\n")]),
-    ("an RBAC message may have trailing text without a colon", "classify.go", [('|path "[^"]*")(?::|$)`)', '|path "[^"]*")`)')]),
+    ("an RBAC message may have trailing text without a colon", "classify.go", [("+ quoted + `)(?::|$)`)", "+ quoted + `)`)")]),
+    ("a quoted part can't hold an escaped quote", "classify.go", [(r'const quoted = `"(?:[^"\\]|\\.)*"`', 'const quoted = `"[^"]*"`')]),
+    ("a 403 with another reason is Other", "classify.go", [("\t\t\t// A 403 the authorizer didn't write: an admission denial.\n\t\t\treturn ClassAdmissionDenied\n", "\t\t\treturn ClassOther\n")]),
+    ("Deleting without ValidateNoNewFinalizers' message", "classify.go", [(' && strings.HasPrefix(c.Message, noNewFinalizers)', '')]),
     ("AlreadyExists is a conflict", "classify.go", [
         ("\t\tif st.Reason == metav1.StatusReasonAlreadyExists {\n\t\t\treturn ClassAlreadyExists\n\t\t}\n", "")]),
-    ("a JSON-patch 422 with causes is a state change", "classify.go", [
-        ("st.Reason == metav1.StatusReasonInvalid && !hasCauses(st) {", "st.Reason == metav1.StatusReasonInvalid {")]),
+    ("a JSON-patch 422 with causes is a state change", "classify.go", [(" && !hasCauses(st) && st.Message == genericInvalid {", " && st.Message == genericInvalid {")]),
+    ("any causeless 422 is a state change", "classify.go", [(" && !hasCauses(st) && st.Message == genericInvalid {", " && !hasCauses(st) {")]),
+    ("any causeless error is a state change", "classify.go", [
+        ("\tif st.Code == http.StatusUnprocessableEntity && st.Reason == metav1.StatusReasonInvalid && !hasCauses(st) && st.Message == genericInvalid {", "\tif !hasCauses(st) {")]),
     ("ClassifyJSONPatch can return Deleting", "classify.go", [
         ("\tif c != ClassOther && c != ClassDeleting {\n", "\tif c != ClassOther {\n")]),
     ("a non-API error is classified by its text", "classify.go", [
@@ -95,8 +106,11 @@ MUTANTS = [
     ("A2 (guarded) duplicates a held finalizer", "patch.go", [("\tif !slices.Contains(finalizers, k.finalizer) {\n\t\tfinalizers = append", "\tif true {\n\t\tfinalizers = append")]),
     ("R3 doesn't test the epoch", "patch.go", [("\t\t{Op: \"test\", Path: annotation, Value: epoch},\n", "")]),
     ("R3 doesn't test the index", "patch.go", [("\t\t{Op: \"test\", Path: index, Value: k.finalizer},\n", "")]),
-    ("R3 doesn't test the whole array", "patch.go", [
-        ('\tif removeMarker || removeHeld {\n\t\tops = append(ops, jsonPatchOp{Op: "test", Path: "/metadata/finalizers"', '\tif false {\n\t\tops = append(ops, jsonPatchOp{Op: "test", Path: "/metadata/finalizers"')]),
+    ("R3 doesn't test the whole array", "patch.go", [('\t\t{Op: "test", Path: "/metadata/finalizers", Value: finalizers},\n', "")]),
+    ("R3 tests the whole array only when a label goes (revision 16's rule)", "patch.go", [
+        ('\t\t{Op: "test", Path: "/metadata/finalizers", Value: finalizers},\n\t}\n', "\t}\n\tif removeMarker || removeHeld {\n\t\tops = append(ops, jsonPatchOp{Op: \"test\", Path: \"/metadata/finalizers\", Value: finalizers})\n\t}\n")]),
+    ("R3 doesn't test the uid", "patch.go", [('\t\t{Op: "test", Path: "/metadata/uid", Value: string(uid)},\n', "")]),
+    ("R3 is built without a uid", "patch.go", [('\tif uid == "" {\n', "\tif false {\n")]),
     ("R3 doesn't test the marker's value", "patch.go", [
         ('\tif removeMarker {\n\t\tops = append(ops, jsonPatchOp{Op: "test", Path: markerPath', '\tif false {\n\t\tops = append(ops, jsonPatchOp{Op: "test", Path: markerPath')]),
     ("R3 doesn't test the held label's value", "patch.go", [
@@ -195,6 +209,20 @@ if base.returncode != 0:
     sys.exit(1)
 print("baseline passed\n")
 
+# A run stopped by a signal restores the file it is mutating before it exits:
+# a terminated process skips finally blocks.
+restore = None
+
+
+def on_signal(signum, _frame):
+    if restore:
+        open(restore[0], "w").write(restore[1])
+    sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, on_signal)
+signal.signal(signal.SIGINT, on_signal)
+
 counts = {}
 for name, f, edits in MUTANTS:
     full = os.path.join(ROOT, PKG, f)
@@ -207,6 +235,7 @@ for name, f, edits in MUTANTS:
     mutated = src
     for old, new in edits:
         mutated = mutated.replace(old, new)
+    restore = (full, src)
     try:
         open(full, "w").write(mutated)
         state, detail = classify(go_test())

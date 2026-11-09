@@ -23,7 +23,7 @@ const (
 	// including errors that carry no API status.
 	ClassOther
 	// ClassDeleting, class (a): 422 Invalid with a FieldValueForbidden cause
-	// on metadata.finalizers. P is being deleted and lacks the finalizer, so
+	// on metadata.finalizers, whose message is ValidateNoNewFinalizers'. P is being deleted and lacks the finalizer, so
 	// no new finalizer can be added. The only class that is the Deleting
 	// outcome.
 	ClassDeleting
@@ -40,8 +40,10 @@ const (
 	// retries as RBAC propagation (§10.7.2).
 	ClassRBAC
 	// ClassAdmissionDenied, class (e): any other 403, such as a webhook
-	// denial, or NamespaceLifecycle refusing a create in a terminating
-	// namespace. An Acquire error at once (IP1).
+	// denial, NamespaceLifecycle refusing a create in a terminating
+	// namespace, or a 403 whose reason isn't Forbidden. An Acquire error at
+	// once (IP1), and counted, so an RBAC message the pattern stops matching
+	// shows up (L3 of the review of revision 16).
 	ClassAdmissionDenied
 	// ClassNotFound: the object doesn't exist (the Missing outcome of A2).
 	ClassNotFound
@@ -91,8 +93,22 @@ var policyConfigTexts = []string{"failed to configure binding:", "failed to conf
 // cannot <verb> resource "<r>" in API group "<g>" in the namespace "<ns>"`, or
 // `at the cluster scope`, or `cannot <verb> path "<p>"`, optionally followed
 // by `: <reason>` (k8s.io/apiserver@v0.37.2
-// pkg/endpoints/handlers/responsewriters/errors.go:44-80).
-var rbacMessage = regexp.MustCompile(`(?:^|forbidden: )User "[^"]*" cannot [^ ]+ (?:resource "[^"]*" in API group "[^"]*" (?:in the namespace "[^"]*"|at the cluster scope)|path "[^"]*")(?::|$)`)
+// pkg/endpoints/handlers/responsewriters/errors.go:44-80). Every quoted part
+// is written with %q, so it may hold escaped quotes and backslashes.
+var rbacMessage = regexp.MustCompile(`(?:^|forbidden: )User ` + quoted + ` cannot [^ ]+ (?:resource ` + quoted + ` in API group ` + quoted + ` (?:in the namespace ` + quoted + `|at the cluster scope)|path ` + quoted + `)(?::|$)`)
+
+// quoted matches a Go %q string.
+const quoted = `"(?:[^"\\]|\\.)*"`
+
+// noNewFinalizers starts the cause ValidateNoNewFinalizers gives (k8s.io/
+// apimachinery@v0.37.2 pkg/api/validation/objectmeta.go:131): a field.Error's
+// body is its type, then its detail.
+const noNewFinalizers = "Forbidden: no new finalizers can be added if the object is being deleted"
+
+// genericInvalid is the message NewGenericServerResponse gives a 422, which a
+// failed JSON-patch op gets (k8s.io/apimachinery@v0.37.2
+// pkg/api/errors/errors.go:476-478).
+const genericInvalid = "the server rejected our request due to an error in our request"
 
 // Classify returns the class of an error from an acquiring write (A2), an
 // index write (§10.6) or a live read in the consent gate (§6.2). Errors from
@@ -130,7 +146,8 @@ func Classify(err error) Class {
 		return ClassOther
 	case http.StatusForbidden:
 		if st.Reason != metav1.StatusReasonForbidden {
-			return ClassOther
+			// A 403 the authorizer didn't write: an admission denial.
+			return ClassAdmissionDenied
 		}
 		policy, config := policyOf(st)
 		switch {
@@ -154,7 +171,8 @@ func Classify(err error) Class {
 // json-patch's own text (k8s.io/apiserver@v0.37.2
 // pkg/endpoints/handlers/patch.go:423-426). A remove at an index that has
 // moved looks the same. Both mean the object changed since it was read, so
-// such a 422 is ClassStateChanged. A 422 that carries a policy's text is
+// such a 422, with exactly that message, is ClassStateChanged; any other
+// causeless error is ClassOther. A 422 that carries a policy's text is
 // ClassPolicyDenied or ClassPolicyConfig, and is never read as a state change.
 // The Deleting outcome doesn't apply to a patch that only removes finalizers,
 // so ClassDeleting is never returned.
@@ -167,7 +185,7 @@ func ClassifyJSONPatch(err error) Class {
 	if !ok {
 		return ClassOther
 	}
-	if st.Code == http.StatusUnprocessableEntity && st.Reason == metav1.StatusReasonInvalid && !hasCauses(st) {
+	if st.Code == http.StatusUnprocessableEntity && st.Reason == metav1.StatusReasonInvalid && !hasCauses(st) && st.Message == genericInvalid {
 		return ClassStateChanged
 	}
 	return ClassOther
@@ -213,7 +231,7 @@ func hasFinalizersForbiddenCause(st metav1.Status) bool {
 		return false
 	}
 	for _, c := range st.Details.Causes {
-		if c.Type == metav1.CauseTypeForbidden && c.Field == "metadata.finalizers" {
+		if c.Type == metav1.CauseTypeForbidden && c.Field == "metadata.finalizers" && strings.HasPrefix(c.Message, noNewFinalizers) {
 			return true
 		}
 	}

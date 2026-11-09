@@ -445,11 +445,11 @@ different 403s exist (core-provider found this; verified in
 
 | Class | Status | How it is recognised | Meaning |
 |---|---|---|---|
-| (a) **Deleting** | 422, reason Invalid | a cause of type `FieldValueForbidden` on field `metadata.finalizers` (`ValidateNoNewFinalizers`, via `NewInvalid` in `pkg/registry/rest/update.go:157`) | P is being deleted and lacks the finalizer |
+| (a) **Deleting** | 422, reason Invalid | a cause of type `FieldValueForbidden` on field `metadata.finalizers`, whose message starts `Forbidden: no new finalizers can be added if the object is being deleted` (`ValidateNoNewFinalizers`, `objectmeta.go:131`, via `NewInvalid` in `pkg/registry/rest/update.go:157`) | P is being deleted and lacks the finalizer |
 | (b) **policy denial** | 403, reason Forbidden | a policy's text (below), and not (c). Our policy sets `reason: Forbidden` on its validation (§10.6.1), so its denials are 403 | an admission policy refused the write |
 | (c) **policy config error** | 422, reason Invalid | a policy's text containing `failed to configure binding`, and **no** `metadata.finalizers` cause | a policy binding couldn't be configured, for example `cu-policy-params` missing (§10.6.1) |
-| (d) **RBAC** | 403, reason Forbidden | the authorizer's own message, `User "<name>" cannot <verb> resource "<resource>" in API group "<group>"`, followed by ` in the namespace "<ns>"` or ` at the cluster scope` (`pkg/endpoints/handlers/responsewriters/errors.go:60-80`). The exact text is pinned by an envtest | the caller lacks the permission |
-| (e) **other admission denial** | 403, reason Forbidden | neither (b) nor (d): a webhook denial, or NamespaceLifecycle refusing a create in a terminating namespace (`pkg/admission/plugin/namespace/lifecycle/admission.go:179`). Counted in `credentialuse_admission_denied_total`, so an RBAC message the pattern no longer matches shows up | an admission plugin refused the write |
+| (d) **RBAC** | 403, reason Forbidden | the authorizer's own message, `User "<name>" cannot <verb> resource "<resource>" in API group "<group>"` (each part written with `%q`, so escaped quotes are allowed), followed by ` in the namespace "<ns>"` or ` at the cluster scope` (`pkg/endpoints/handlers/responsewriters/errors.go:60-80`). The exact text is pinned by an envtest | the caller lacks the permission |
+| (e) **other admission denial** | 403 | neither (b) nor (d), or a 403 whose reason isn't Forbidden: a webhook denial, or NamespaceLifecycle refusing a create in a terminating namespace (`pkg/admission/plugin/namespace/lifecycle/admission.go:179`). Counted in `credentialuse_admission_denied_total`, so an RBAC message the pattern no longer matches shows up | an admission plugin refused the write |
 
 **A policy's text is not a message prefix** (corrected in revision 16). The
 dispatcher wraps a denial in `admission.NewForbidden`, so the status message
@@ -541,19 +541,31 @@ for the set of protected objects pending there (R7). For each pending P:
 - **R3. Release** each P the table says to release, with one JSON patch:
 
   ```json
-  [{"op":"test",   "path":"/metadata/annotations/<F escaped>", "value":"<e>"},
+  [{"op":"test",   "path":"/metadata/uid",                     "value":"<P's uid>"},
+   {"op":"test",   "path":"/metadata/annotations/<F escaped>", "value":"<e>"},
    {"op":"test",   "path":"/metadata/finalizers/<i>",          "value":"<F>"},
+   {"op":"test",   "path":"/metadata/finalizers",              "value":[<the array R1 read>]},
    {"op":"remove", "path":"/metadata/finalizers/<i>"},
    {"op":"remove", "path":"/metadata/annotations/<F escaped>"}]
   ```
 
   `<F escaped>` is the finalizer name with `/` written as `~1` (RFC 6901).
-  Two cases add to the patch, and both then also test the whole
-  `/metadata/finalizers` array as R1 read it:
+  Two cases add to the patch:
   - when F is K's last finalizer on P (no other namespace's), the patch
     also removes K's marker label;
   - when F is the last `credential-use.` finalizer of any kind, it also
     removes the held label.
+
+  **The uid and the whole array are always tested** (L5 and L1 of the review
+  of #53, the latter the user's decision). An earlier revision tested the
+  array only when a label went. The uid test keeps a release built from one
+  incarnation off another with the same name and keys. The array test means
+  no two releasers can apply from one read: two releasers of K, for
+  namespaces a and b, that both read `[Fa, Fb]` are neither last, so without
+  it both would apply and leave the labels on an object nothing holds. With
+  it, the second fails, re-reads `[Fb]`, is last, and removes them. The cost
+  is a retry whenever the array changed since R1, for any reason. Finalizer
+  arrays change rarely, and the retries are bounded (above).
 
   **Every value the patch removes is tested first** (L1 of the review of
   revision 16): the epoch, the finalizer at *i*, and each label it removes,
@@ -633,7 +645,9 @@ tG, whose R2 list reads at tL > tG, and whose R3 patch lands at tR > tL.
   *e*, and R3's first test fails. This holds even if another releaser
   removed the finalizer between tG and tW and A2 re-added it: the epoch is
   still fresh. The releaser starts again from R1. Its next list is after
-  tW > tA, so it sees H.
+  tW > tA, so it sees H. R3 also tests the uid and the whole finalizer array
+  as R1 read it (§6.2), so any other write to the array in between breaks
+  it too, and so does a recreate behind the same name.
 - **tW > tR.** The finalizer was gone before A2. A2 adds it back (held), or
   is rejected because P is being deleted (Deleting), and the acquirer
   knows which.

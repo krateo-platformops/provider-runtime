@@ -113,6 +113,23 @@ func TestReadRecord(t *testing.T) {
 		"an unknown field":      {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","namespace":"ns","name":"x","key":"token"}]`}, Record{Present: true, Unparseable: true}},
 		"an entry with no name": {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","namespace":"ns","name":""}]`}, Record{Present: true, Unparseable: true}},
 		"trailing data":         {map[string]string{AnnotationRefs: `[] []`}, Record{Present: true, Unparseable: true}},
+		// M1 of the review of #53: a lenient decoder reads each of these as
+		// another object, and the holder then doesn't count as a user.
+		"a missing namespace":               {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","name":"creds"}]`}, Record{Present: true, Unparseable: true}},
+		"a null namespace":                  {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","namespace":null,"name":"creds"}]`}, Record{Present: true, Unparseable: true}},
+		"a missing group":                   {map[string]string{AnnotationRefs: `[{"kind":"Target","namespace":"ns","name":"t"}]`}, Record{Present: true, Unparseable: true}},
+		"a null group":                      {map[string]string{AnnotationRefs: `[{"group":null,"kind":"Target","namespace":"ns","name":"t"}]`}, Record{Present: true, Unparseable: true}},
+		"a key in another case":             {map[string]string{AnnotationRefs: `[{"Group":"","kind":"Secret","namespace":"ns","name":"x"}]`}, Record{Present: true, Unparseable: true}},
+		"a duplicate key":                   {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","namespace":"ns","namespace":"other","name":"x"}]`}, Record{Present: true, Unparseable: true}},
+		"a trailing ]":                      {map[string]string{AnnotationRefs: `[]]`}, Record{Present: true, Unparseable: true}},
+		"a trailing }":                      {map[string]string{AnnotationRefs: `[]}`}, Record{Present: true, Unparseable: true}},
+		"a number":                          {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","namespace":"ns","name":1}]`}, Record{Present: true, Unparseable: true}},
+		"a nested array":                    {map[string]string{AnnotationRefs: `[[{"group":"","kind":"Secret","namespace":"ns","name":"x"}]]`}, Record{Present: true, Unparseable: true}},
+		"an unclosed entry":                 {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","namespace":"ns","name":"x"`}, Record{Present: true, Unparseable: true}},
+		"an unclosed array":                 {map[string]string{AnnotationRefs: `[`}, Record{Present: true, Unparseable: true}},
+		"an array left open after an entry": {map[string]string{AnnotationRefs: `[{"group":"","kind":"Secret","namespace":"ns","name":"x"}`}, Record{Present: true, Unparseable: true}},
+		"an explicit empty namespace (cluster-scoped)": {map[string]string{AnnotationRefs: `[{"group":"g.io","kind":"Thing","namespace":"","name":"x"}]`}, Record{Present: true, IDs: []ID{{Group: "g.io", Kind: "Thing", Name: "x"}}}},
+		"spacing is fine": {map[string]string{AnnotationRefs: " [ { \"name\" : \"x\" , \"group\":\"\", \"namespace\":\"ns\", \"kind\":\"Secret\" } ] \n"}, Record{Present: true, IDs: []ID{x}}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -150,5 +167,13 @@ func TestRecordNames(t *testing.T) {
 	}
 	if !(Record{Present: true, Unparseable: true}).Names(y) {
 		t.Error("an unparseable record doesn't name every ref (§4: it fails safe)")
+	}
+	// A Record built by hand needn't be sorted (L7 of the review of #53).
+	a := ID{Kind: "Secret", Namespace: "ns", Name: "a"}
+	unsorted := Record{Present: true, IDs: []ID{y, x, a}}
+	for _, id := range []ID{a, x, y} {
+		if !unsorted.Names(id) {
+			t.Errorf("an unsorted record doesn't name %s", id)
+		}
 	}
 }

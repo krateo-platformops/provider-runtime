@@ -78,8 +78,16 @@ func TestClassify(t *testing.T) {
 		// The pattern ends at the authorizer's text, or at ": <reason>": a
 		// message that only starts like it isn't RBAC.
 		"RBAC-like text with more after it": {apierrors.NewForbidden(secrets, "s", errors.New(`User "u" cannot patch resource "secrets" in API group "" in the namespace "a" because a webhook said so`)), ClassAdmissionDenied},
-		"(e) NamespaceLifecycle":            {apierrors.NewForbidden(secrets, "s", errors.New("unable to create new content in namespace rlgov-probe because it is being terminated")), ClassAdmissionDenied},
-		"(e) a webhook":                     {apierrors.NewForbidden(secrets, "s", errors.New(`admission webhook "v.example.com" denied the request: no`)), ClassAdmissionDenied},
+		// The authorizer writes every part with %q (L4 of the review of #53).
+		"(d) RBAC, a username with a quote": {apierrors.NewForbidden(secrets, "s", fmt.Errorf("User %q cannot patch resource %q in API group %q in the namespace %q", `we"ird\user`, "secrets", "", "a")), ClassRBAC},
+		// A 403 the authorizer didn't write (L4 of the review of #53).
+		"(e) a 403 with another reason": {func() error {
+			e := apierrors.NewForbidden(secrets, "s", errors.New(`User "u" cannot patch resource "secrets" in API group "" in the namespace "a"`))
+			e.ErrStatus.Reason = metav1.StatusReasonUnauthorized
+			return e
+		}(), ClassAdmissionDenied},
+		"(e) NamespaceLifecycle": {apierrors.NewForbidden(secrets, "s", errors.New("unable to create new content in namespace rlgov-probe because it is being terminated")), ClassAdmissionDenied},
+		"(e) a webhook":          {apierrors.NewForbidden(secrets, "s", errors.New(`admission webhook "v.example.com" denied the request: no`)), ClassAdmissionDenied},
 		// A 403 is never Deleting, whatever its causes (§6.2).
 		"a 403 with a finalizers cause": {func() error {
 			e := apierrors.NewForbidden(secrets, "s", errors.New("x"))
@@ -89,12 +97,15 @@ func TestClassify(t *testing.T) {
 		// A 422 without the finalizers cause is never Deleting.
 		"a 422 on another field":          {apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "s", field.ErrorList{field.Forbidden(field.NewPath("metadata", "labels"), "x")}), ClassOther},
 		"a 422 with an Invalid finalizer": {apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "s", field.ErrorList{field.Invalid(field.NewPath("metadata", "finalizers"), "x", "bad")}), ClassOther},
-		"a failed JSON-patch test":        {testFailedError(), ClassOther},
-		"not found":                       {apierrors.NewNotFound(secrets, "s"), ClassNotFound},
-		"conflict":                        {apierrors.NewConflict(secrets, "s", errors.New("the object has been modified")), ClassConflict},
-		"already exists":                  {apierrors.NewAlreadyExists(secrets, "s"), ClassAlreadyExists},
-		"too many requests":               {apierrors.NewTooManyRequests("slow down", 1), ClassOther},
-		"internal error":                  {apierrors.NewInternalError(errors.New("etcd")), ClassOther},
+		// Class (a) also needs ValidateNoNewFinalizers' message (L2 of the
+		// review of #53).
+		"a Forbidden finalizers cause with another message": {apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "s", field.ErrorList{field.Forbidden(field.NewPath("metadata", "finalizers"), "some other rule")}), ClassOther},
+		"a failed JSON-patch test":                          {testFailedError(), ClassOther},
+		"not found":                                         {apierrors.NewNotFound(secrets, "s"), ClassNotFound},
+		"conflict":                                          {apierrors.NewConflict(secrets, "s", errors.New("the object has been modified")), ClassConflict},
+		"already exists":                                    {apierrors.NewAlreadyExists(secrets, "s"), ClassAlreadyExists},
+		"too many requests":                                 {apierrors.NewTooManyRequests("slow down", 1), ClassOther},
+		"internal error":                                    {apierrors.NewInternalError(errors.New("etcd")), ClassOther},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -120,6 +131,13 @@ func TestClassifyJSONPatch(t *testing.T) {
 		"conflict":              {apierrors.NewConflict(secrets, "s", errors.New("x")), ClassConflict},
 		// A 422 with causes isn't a failed test op.
 		"a 422 with causes": {apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "s", field.ErrorList{field.Invalid(field.NewPath("metadata", "labels"), "x", "bad")}), ClassOther},
+		// L3 of the review of #53: only the 422 a failed op gets is a state
+		// change, not any causeless error.
+		"a causeless 504":                      {apierrors.NewTimeoutError("the server was too slow", 1), ClassOther},
+		"a causeless 422 with another message": {&apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusUnprocessableEntity, Reason: metav1.StatusReasonInvalid, Message: "something else"}}, ClassOther},
+		// A 422 whose body the client couldn't decode has the generic message
+		// too, with an UnexpectedServerResponse cause: no failed test op.
+		"a 422 the client couldn't decode": {apierrors.NewGenericServerResponse(http.StatusUnprocessableEntity, "", schema.GroupResource{}, "", "<html>", 0, true), ClassOther},
 		// Removing finalizers can't be the Deleting outcome.
 		"a deleting-shaped 422": {deletingError(), ClassOther},
 		"not an API error":      {errors.New("x"), ClassOther},

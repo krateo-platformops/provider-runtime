@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -203,9 +204,8 @@ func TestEscapePointer(t *testing.T) {
 func TestReleasePatch(t *testing.T) {
 	marker, otherMarker := MarkerLabel(repoGK), MarkerLabel(otherGK)
 	cases := map[string]struct {
-		in       metav1.ObjectMeta
-		want     metav1.ObjectMeta
-		fullTest bool
+		in   metav1.ObjectMeta
+		want metav1.ObjectMeta
 	}{
 		"K's last and the last of any kind: both labels go": {
 			in: metav1.ObjectMeta{
@@ -218,7 +218,6 @@ func TestReleasePatch(t *testing.T) {
 				Labels:      map[string]string{"app": "x"},
 				Annotations: map[string]string{"note": "n"},
 			},
-			fullTest: true,
 		},
 		"another namespace of K still holds: both labels stay": {
 			in: metav1.ObjectMeta{
@@ -243,9 +242,8 @@ func TestReleasePatch(t *testing.T) {
 				Labels:      map[string]string{LabelHeld: "true", otherMarker: "true"},
 				Annotations: map[string]string{fOtherA: "e0"},
 			},
-			fullTest: true,
 		},
-		"labels already stripped: nothing to remove, no full test": {
+		"labels already stripped: nothing to remove": {
 			in: metav1.ObjectMeta{
 				Finalizers:  []string{fRepoA},
 				Annotations: map[string]string{fRepoA: "e1"},
@@ -260,13 +258,12 @@ func TestReleasePatch(t *testing.T) {
 				Labels:      map[string]string{LabelHeld: "", marker: ""},
 				Annotations: map[string]string{fRepoA: "e1"},
 			},
-			want:     metav1.ObjectMeta{},
-			fullTest: true,
+			want: metav1.ObjectMeta{},
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			tc.in.Name, tc.in.ResourceVersion = "s", "1"
+			tc.in.Name, tc.in.ResourceVersion, tc.in.UID = "s", "1", "u1"
 			p, err := ReleasePatch(&tc.in, repoGK, "a")
 			if err != nil {
 				t.Fatal(err)
@@ -274,15 +271,19 @@ func TestReleasePatch(t *testing.T) {
 			if p.Type != types.JSONPatchType {
 				t.Fatalf("type = %q, want a JSON patch", p.Type)
 			}
-			if got := strings.Contains(string(p.Data), `"path":"/metadata/finalizers","value"`); got != tc.fullTest {
-				t.Errorf("tests the whole finalizer array = %v, want %v\n%s", got, tc.fullTest, p.Data)
+			// L1 of the review of #53: the whole array, and the uid, are
+			// always tested.
+			for _, want := range []string{`"path":"/metadata/finalizers","value"`, `{"op":"test","path":"/metadata/uid","value":"u1"}`} {
+				if !strings.Contains(string(p.Data), want) {
+					t.Errorf("the patch doesn't contain %s:\n%s", want, p.Data)
+				}
 			}
 			out, err := apply(t, secretJSON(t, tc.in), p)
 			if err != nil {
 				t.Fatalf("the release didn't apply to the state it was built from: %v\n%s", err, p.Data)
 			}
 			got := metaOf(t, out)
-			tc.want.Name, tc.want.ResourceVersion = "s", "1"
+			tc.want.Name, tc.want.ResourceVersion, tc.want.UID = "s", "1", "u1"
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("after the release (-want +got):\n%s", diff)
 			}
@@ -291,11 +292,11 @@ func TestReleasePatch(t *testing.T) {
 }
 
 // A release must fail, whole, against any state but the one it was built
-// from in the ways that matter (§6.4): a moved epoch, a moved index, or, when
-// it removes a label, any change to the finalizer array.
+// from (§6.4): another incarnation, a moved epoch, a moved index, any change
+// to the finalizer array, or a changed label it removes.
 func TestReleasePatchFailsOnAChangedState(t *testing.T) {
 	read := metav1.ObjectMeta{
-		Name: "s", ResourceVersion: "1",
+		Name: "s", ResourceVersion: "1", UID: "u1",
 		Finalizers:  []string{"example.com/other", fRepoA},
 		Labels:      map[string]string{LabelHeld: "true", MarkerLabel(repoGK): "true"},
 		Annotations: map[string]string{fRepoA: "e1"},
@@ -310,12 +311,15 @@ func TestReleasePatchFailsOnAChangedState(t *testing.T) {
 		return m
 	}
 	cases := map[string]metav1.ObjectMeta{
+		// Released, deleted and recreated with the same name and the same
+		// keys (L5 of the review of #53).
+		"another incarnation": change(func(m *metav1.ObjectMeta) { m.UID = "u2" }),
 		// An acquiring write landed after R1: a fresh epoch (§6.4, tG < tW < tR).
 		"a new epoch": change(func(m *metav1.ObjectMeta) { m.Annotations[fRepoA] = "e2" }),
 		// Another releaser removed the finalizer, and an A2 re-added it at
 		// another index.
 		"re-added at another index": change(func(m *metav1.ObjectMeta) { m.Finalizers = []string{fRepoA, "example.com/other"} }),
-		// A finalizer before it went, so index i now names something else.
+		// A finalizer before it went, so index i is out of range.
 		"the index moved, out of range": change(func(m *metav1.ObjectMeta) { m.Finalizers = []string{fRepoA} }),
 		// Another namespace of K acquired: the marker label must stay.
 		"another namespace of K acquired": change(func(m *metav1.ObjectMeta) {
@@ -346,14 +350,29 @@ func TestReleasePatchFailsOnAChangedState(t *testing.T) {
 	}
 }
 
-// The index test is what keeps a release from removing someone else's
-// finalizer after an index shift that leaves the epoch alone. Here no label
-// is removed (another namespace of K still holds), so there is no full-array
-// test to catch it: a finalizer before F goes, F moves down, and index i now
-// names the other namespace's hold.
-func TestReleasePatchIndexShiftWithoutALabelRemoval(t *testing.T) {
+// withoutOp returns p's JSON patch without the ops on path.
+func withoutOp(t *testing.T, p Patch, path string) Patch {
+	t.Helper()
+	var ops []map[string]any
+	if err := json.Unmarshal(p.Data, &ops); err != nil {
+		t.Fatal(err)
+	}
+	ops = slices.DeleteFunc(ops, func(o map[string]any) bool { return o["path"] == path })
+	data, err := json.Marshal(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Patch{Type: p.Type, Data: data}
+}
+
+// The index test on its own keeps a release from removing someone else's
+// finalizer after an index shift that leaves the epoch alone: a finalizer
+// before F goes, F moves down, and index i now names another namespace's
+// hold. The full-array test catches that too, so the index test is checked
+// with the full-array test taken out.
+func TestReleasePatchIndexTest(t *testing.T) {
 	read := metav1.ObjectMeta{
-		Name: "s", ResourceVersion: "1",
+		Name: "s", ResourceVersion: "1", UID: "u1",
 		Finalizers:  []string{"example.com/other", fRepoA, fRepoB},
 		Labels:      map[string]string{LabelHeld: "true", MarkerLabel(repoGK): "true"},
 		Annotations: map[string]string{fRepoA: "e1", fRepoB: "e2"},
@@ -362,14 +381,54 @@ func TestReleasePatchIndexShiftWithoutALabelRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(p.Data), `"path":"/metadata/finalizers","value"`) {
-		t.Fatalf("the case needs no full-array test, but the patch has one:\n%s", p.Data)
-	}
 	current := *read.DeepCopy()
 	current.Finalizers = []string{fRepoA, fRepoB}
-	out, err := apply(t, secretJSON(t, current), p)
-	if err == nil {
+	if out, err := apply(t, secretJSON(t, current), p); err == nil {
 		t.Fatalf("the release applied after an index shift, leaving finalizers %v", metaOf(t, out).Finalizers)
+	}
+	if out, err := apply(t, secretJSON(t, current), withoutOp(t, p, "/metadata/finalizers")); err == nil {
+		t.Fatalf("without the full-array test, the release applied after an index shift, leaving finalizers %v", metaOf(t, out).Finalizers)
+	}
+}
+
+// Two releasers of K, for namespaces a and b, read [Fa, Fb]: neither is last,
+// so neither removes the labels. Without the full-array test both would apply
+// and leave the labels on an object nothing holds. With it, the second fails,
+// and its retry, from a new read, is last and removes them (L1 of the review
+// of #53).
+func TestReleasePatchTwoReleasersFromOneRead(t *testing.T) {
+	read := metav1.ObjectMeta{
+		Name: "s", ResourceVersion: "1", UID: "u1",
+		Finalizers:  []string{fRepoA, fRepoB},
+		Labels:      map[string]string{LabelHeld: "true", MarkerLabel(repoGK): "true"},
+		Annotations: map[string]string{fRepoA: "e1", fRepoB: "e2"},
+	}
+	pa, err := ReleasePatch(&read, repoGK, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := ReleasePatch(&read, repoGK, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterA, err := apply(t, secretJSON(t, read), pa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := apply(t, afterA, pb); err == nil {
+		t.Fatalf("both releases applied from one read, leaving labels %v", metaOf(t, out).Labels)
+	}
+	reread := metaOf(t, afterA)
+	pb2, err := ReleasePatch(&reread, repoGK, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := apply(t, afterA, pb2)
+	if err != nil {
+		t.Fatalf("the retry from a new read didn't apply: %v", err)
+	}
+	if got := metaOf(t, out); len(got.Labels) != 0 || len(got.Finalizers) != 0 {
+		t.Errorf("after both releases: finalizers %v, labels %v; want none", got.Finalizers, got.Labels)
 	}
 }
 
@@ -382,6 +441,9 @@ func TestReleasePatchErrors(t *testing.T) {
 	}
 	if _, err := ReleasePatch(&metav1.ObjectMeta{Finalizers: []string{fRepoA}, Annotations: map[string]string{fRepoA: ""}}, repoGK, "a"); !errors.Is(err, ErrNoEpoch) {
 		t.Errorf("with an empty epoch: %v, want ErrNoEpoch", err)
+	}
+	if _, err := ReleasePatch(&metav1.ObjectMeta{Finalizers: []string{fRepoA}, Annotations: map[string]string{fRepoA: "e1"}}, repoGK, "a"); err == nil {
+		t.Error("a release without the object's uid was built")
 	}
 }
 

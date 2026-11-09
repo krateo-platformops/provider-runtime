@@ -6,6 +6,7 @@ package credentialuse_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -216,10 +217,12 @@ func TestPremiseClassDeleting(t *testing.T) {
 			t.Errorf("status %d %s, want 422 Invalid: %v", st.Code, st.Reason, err)
 		}
 		found := st.Details != nil && slices.ContainsFunc(st.Details.Causes, func(c metav1.StatusCause) bool {
-			return c.Type == metav1.CauseTypeForbidden && c.Field == "metadata.finalizers"
+			// L2 of the review of #53: the message is ValidateNoNewFinalizers'.
+			return c.Type == metav1.CauseTypeForbidden && c.Field == "metadata.finalizers" &&
+				strings.HasPrefix(c.Message, "Forbidden: no new finalizers can be added if the object is being deleted")
 		})
 		if !found {
-			t.Errorf("no FieldValueForbidden cause on metadata.finalizers: %+v", st.Details)
+			t.Errorf("no FieldValueForbidden cause on metadata.finalizers with ValidateNoNewFinalizers' message: %+v", st.Details)
 		}
 		if c := cu.Classify(err); c != cu.ClassDeleting {
 			t.Errorf("Classify = %v, want Deleting", c)
@@ -545,19 +548,48 @@ func TestPremiseJSONPatchFailures(t *testing.T) {
 		checkStateChanged(t, err)
 	})
 	t.Run("a moved index", func(t *testing.T) {
-		r3, err := cu.ReleasePatch(read(t), repoGK, ns)
+		// M2 of the review of #53: the index must really move, and the 422
+		// must come from the index test. Two namespaces of K hold the
+		// object, so no label is removed, and a finalizer sits before F.
+		createSecret(t, ns, "shift")
+		acquireNamed(t, ns, "shift")
+		acquire(t, ns, "team-x", "shift")
+		if _, err := r.Patch(ctx, "shift", types.JSONPatchType, fmt.Appendf(nil, `[{"op":"add","path":"/metadata/finalizers/0","value":%q}]`, other), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		m, err := r.Get(ctx, "shift", metav1.GetOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The finalizer before it goes, so index i is out of range.
-		m := read(t)
-		i := slices.Index(m.Finalizers, other)
-		if _, err := r.Patch(ctx, "s", types.JSONPatchType, fmt.Appendf(nil, `[{"op":"remove","path":"/metadata/finalizers/%d"}]`, i), metav1.PatchOptions{}); err != nil {
+		i := slices.Index(m.Finalizers, mustFinalizer(t, ns))
+		if m.Finalizers[0] != other || i < 1 {
+			t.Fatalf("finalizers %v: want %s first and F after it", m.Finalizers, other)
+		}
+		r3, err := cu.ReleasePatch(m, repoGK, ns)
+		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = send(ctx, r, "s", r3)
+		// The finalizer before F goes: F moves down, and index i names
+		// another namespace's hold, or nothing.
+		if _, err := r.Patch(ctx, "shift", types.JSONPatchType, []byte(`[{"op":"remove","path":"/metadata/finalizers/0"}]`), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		ops := opsOf(t, r3)
+		if got := ops[2]["path"]; got != fmt.Sprintf("/metadata/finalizers/%d", i) {
+			t.Fatalf("op 3 is %v, want the index test", ops[2])
+		}
+		// The uid and epoch tests still hold, so the index test is the one
+		// that fails.
+		if _, err := send(ctx, r, "shift", opsPatch(t, ops[:2])); err != nil {
+			t.Fatalf("the uid and epoch tests alone failed: %v", err)
+		}
+		_, err = send(ctx, r, "shift", opsPatch(t, ops[:3]))
+		checkStateChanged(t, err)
+		// And the whole release fails with it.
+		_, err = send(ctx, r, "shift", r3)
 		checkStateChanged(t, err)
 	})
+
 	t.Run("a restored epoch from a stale read", func(t *testing.T) {
 		stale := read(t)
 		acquire(t, ns, ns, "s")
@@ -679,4 +711,24 @@ func TestPremiseLabelSelectedWatch(t *testing.T) {
 	waitFor("add", "delete")
 	acquire(t, ns, ns, "s")
 	waitFor("add", "delete", "add")
+}
+
+// opsOf decodes a JSON patch's ops.
+func opsOf(t *testing.T, p cu.Patch) []map[string]any {
+	t.Helper()
+	var ops []map[string]any
+	if err := json.Unmarshal(p.Data, &ops); err != nil {
+		t.Fatal(err)
+	}
+	return ops
+}
+
+// opsPatch encodes ops as a JSON patch.
+func opsPatch(t *testing.T, ops []map[string]any) cu.Patch {
+	t.Helper()
+	data, err := json.Marshal(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cu.Patch{Type: types.JSONPatchType, Data: data}
 }

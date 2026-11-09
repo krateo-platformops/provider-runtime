@@ -54,7 +54,9 @@ func keysFor(holder schema.GroupKind, namespace string) (keys, error) {
 // ConfigMap (§6.2): one strategic merge patch, sent with no precondition. It
 // merges the finalizer into metadata.finalizers as a set, sets the epoch, and
 // sets the held label and K's marker label. Finalizers are tagged
-// patchStrategy:"merge", so the patch can't drop or duplicate anyone else's.
+// patchStrategy:"merge", so the patch can't drop anyone else's, and never
+// adds a duplicate. It does deduplicate the list: an entry someone else had
+// twice comes out once.
 //
 // Custom resources don't accept strategic merge patches: use
 // AcquireGuardedPatch for them.
@@ -124,19 +126,28 @@ func escapePointer(key string) string {
 // ReleasePatch builds R3 for holder kind K in holder namespace N, from the
 // object as R1 read it (§6.2):
 //
+//	test   metadata.uid is the incarnation R1 read
 //	test   the epoch annotation is the one R1 read
 //	test   metadata.finalizers[i] is the finalizer
+//	test   metadata.finalizers is the whole array R1 read
 //	remove metadata.finalizers[i]
 //	remove the epoch annotation
 //
 // When the finalizer is K's last on the object, the patch also removes K's
 // marker label, and when it is the last credential-use finalizer of any kind,
-// the held label. Either way it then also tests the whole finalizer array as R1
-// read it, so that a concurrent acquiring write of any kind, which adds its
-// finalizer, breaks the patch before a label it needs is removed. A label that
-// is already absent is left alone, so that its remove can't fail, and a label
-// it removes is tested first with its value as read. So the patch tests every
-// value it removes, and applies to exactly the state it was built from.
+// the held label, each tested first with its value as read. A label that is
+// already absent is left alone, so that its remove can't fail. So the patch
+// tests every value it removes, and applies to exactly the state it was built
+// from.
+//
+// The whole array is always tested (L1 of the review of #53, the user's
+// decision), not only when a label goes. Then no two releasers can both apply
+// from one read: say K's releasers for namespaces a and b each read [Fa, Fb],
+// so neither is last, and both remove their finalizer and leave the labels.
+// With the array tested, the second fails, re-reads [Fb], is last, and
+// removes the labels. The cost is a retry whenever the array changed since R1,
+// for any reason; finalizer arrays change rarely, and the retries are bounded
+// (§6.2, "JSON patches are classified apart").
 //
 // The epoch test is what makes a concurrent A2 break the release: every A2
 // writes a fresh epoch (§6.4). A failed test is ClassStateChanged
@@ -184,12 +195,15 @@ func ReleasePatch(read metav1.Object, holder schema.GroupKind, namespace string)
 	// Every value the patch removes is tested first, as R1 read it (L1 of
 	// the review of revision 16): a failure then always means a change, and
 	// a failure against an unchanged object is a defect, not contention.
+	uid := read.GetUID()
+	if uid == "" {
+		return Patch{}, fmt.Errorf("credential-use: a release needs the object's uid")
+	}
 	ops := []jsonPatchOp{
+		{Op: "test", Path: "/metadata/uid", Value: string(uid)},
 		{Op: "test", Path: annotation, Value: epoch},
 		{Op: "test", Path: index, Value: k.finalizer},
-	}
-	if removeMarker || removeHeld {
-		ops = append(ops, jsonPatchOp{Op: "test", Path: "/metadata/finalizers", Value: finalizers})
+		{Op: "test", Path: "/metadata/finalizers", Value: finalizers},
 	}
 	if removeMarker {
 		ops = append(ops, jsonPatchOp{Op: "test", Path: markerPath, Value: markerValue})
