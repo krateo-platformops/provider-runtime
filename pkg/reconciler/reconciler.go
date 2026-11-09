@@ -1038,11 +1038,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			meta.RemoveAnnotations(managed, meta.AnnotationKeyExternalCreatePending)
 
 			// A plain Update, deliberately NOT UpdateCriticalAnnotations. That helper captures the
-			// object's annotations, re-Gets the object from the API server, and then ADDS the
-			// captured set back — so an annotation removed locally is restored by the re-Get and
-			// written straight back. It can add and overwrite; it cannot delete. Using it here
-			// would leave the marker in place and the resource wedged exactly as before, with
-			// nothing failing to indicate it.
+			// runtime's own keys (external-name, the create-* markers and the trace marker),
+			// re-Gets the object from the API server, and then ADDS them back. So an annotation
+			// removed locally is restored by the re-Get and written straight back. It can add and
+			// overwrite; it cannot delete. Using it here would leave the marker in place and the
+			// resource wedged exactly as before, with nothing failing to indicate it.
 			if err := r.client.Update(ctx, managed); err != nil {
 				if kerrors.IsConflict(err) {
 					// Someone else wrote first; re-read and retry rather than fight over it.
@@ -1260,10 +1260,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// will refuse to proceed, because it won't know whether or not
 		// it created an external resource. This is also important in
 		// cases where we must record an external-name annotation set by
-		// the Create call. Any other changes made during Create will be
-		// reverted when annotations are updated; at the time of writing
-		// Create implementations are advised not to alter status, but
-		// we may revisit this in future.
+		// the Create call. The updater writes back only the runtime's own
+		// keys (external-name, the create-* markers and the trace marker),
+		// onto a fresh read. Any other change made during Create, other
+		// annotations included, is reset to the API server's copy; at the
+		// time of writing Create implementations are advised not to alter
+		// status, but we may revisit this in future.
 		meta.SetExternalCreateSucceeded(managed, time.Now())
 		if err := r.managed.UpdateCriticalAnnotations(ctx, managed); err != nil {
 			log.Error(err, errUpdateManagedAnnotations)

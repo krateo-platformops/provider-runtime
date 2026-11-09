@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -39,6 +41,9 @@ type storedObject struct {
 	gets      int
 	updates   []*fake.Managed
 	beforeGet func(n int, stored *fake.Managed)
+	// updateErrs, when set, are returned by the Updates in order, one each,
+	// without storing anything; an Update past the list stores as usual.
+	updateErrs []error
 }
 
 func (s *storedObject) client() *test.MockClient {
@@ -56,6 +61,11 @@ func (s *storedObject) client() *test.MockClient {
 	c.MockUpdate = func(_ context.Context, obj client.Object, _ ...client.UpdateOption) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if len(s.updateErrs) > 0 {
+			err := s.updateErrs[0]
+			s.updateErrs = s.updateErrs[1:]
+			return err
+		}
 		s.obj = obj.DeepCopyObject().(*fake.Managed)
 		s.updates = append(s.updates, s.obj.DeepCopyObject().(*fake.Managed))
 		return nil
@@ -94,6 +104,7 @@ func TestUpdateCriticalAnnotationsWritesOnlyRuntimeKeys(t *testing.T) {
 		meta.AnnotationKeyExternalName:            "ext-1",
 		meta.AnnotationKeyExternalCreatePending:   now,
 		meta.AnnotationKeyExternalCreateSucceeded: now,
+		meta.AnnotationKeyExternalCreateFailed:    now,
 		meta.AnnotationKeyTraceparentContinued:    traceparentA,
 		"example.com/only-in-memory":              "never-persisted",
 	})
@@ -110,6 +121,7 @@ func TestUpdateCriticalAnnotationsWritesOnlyRuntimeKeys(t *testing.T) {
 		meta.AnnotationKeyExternalName:            "ext-1",
 		meta.AnnotationKeyExternalCreatePending:   now,
 		meta.AnnotationKeyExternalCreateSucceeded: now,
+		meta.AnnotationKeyExternalCreateFailed:    now,
 		meta.AnnotationKeyTraceparentContinued:    traceparentA,
 	}
 	if diff := cmp.Diff(want, srv.annotations()); diff != "" {
@@ -155,6 +167,13 @@ func TestUpdateCriticalAnnotationsError(t *testing.T) {
 // annotation updater, so the runtime's own write path is what's tested.
 func reconcileWithStored(t *testing.T, srv *storedObject, ec ExternalClient) {
 	t.Helper()
+	if _, err := reconcileStored(srv, ec); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+}
+
+// reconcileStored is reconcileWithStored returning Reconcile's error.
+func reconcileStored(srv *storedObject, ec ExternalClient) (reconcile.Result, error) {
 	r := NewReconciler(&fake.Manager{Client: srv.client(), Scheme: fake.SchemeWith(&fake.Managed{})},
 		resource.ManagedKind(fake.GVK(&fake.Managed{})),
 		WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, _ resource.Managed) (ExternalClient, error) {
@@ -162,9 +181,7 @@ func reconcileWithStored(t *testing.T, srv *storedObject, ec ExternalClient) {
 		})),
 		WithFinalizer(resource.FinalizerFns{AddFinalizerFn: func(_ context.Context, _ resource.Object) error { return nil }}),
 	)
-	if _, err := r.Reconcile(context.Background(), reconcile.Request{}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
+	return r.Reconcile(context.Background(), reconcile.Request{})
 }
 
 // design-tracing §10, test 14. A fresh traceparent B, written by another
@@ -244,5 +261,94 @@ func TestCriticalWriteOnHandshakeAdoptionKeepsAFreshTraceparent(t *testing.T) {
 	}
 	if got[meta.AnnotationKeyExternalCreateSucceeded] == "" {
 		t.Error("krateo.io/external-create-succeeded was not persisted")
+	}
+}
+
+// The failed-Create path (reconciler.go, the critical write after a Create
+// error): create-failed is persisted, and a traceparent B written by another
+// controller while Create ran survives, as on the success path.
+func TestCriticalWriteAfterFailedCreateKeepsAFreshTraceparent(t *testing.T) {
+	stored := &fake.Managed{}
+	stored.SetName("cool")
+	stored.SetAnnotations(map[string]string{keyTraceparent: traceparentA})
+	srv := &storedObject{obj: stored}
+	srv.beforeGet = func(n int, s *fake.Managed) {
+		if n == 2 {
+			meta.AddAnnotations(s, map[string]string{keyTraceparent: traceparentB, keyOther: "set-during-create"})
+		}
+	}
+
+	errBoom := errors.New("boom")
+	_, err := reconcileStored(srv, &ExternalClientFns{
+		ObserveFn: func(_ context.Context, _ resource.Managed) (ExternalObservation, error) {
+			return ExternalObservation{ResourceExists: false}, nil
+		},
+		CreateFn: func(_ context.Context, _ resource.Managed) error { return errBoom },
+	})
+	if diff := cmp.Diff(errors.Wrap(errBoom, errReconcileCreate), err, test.EquateErrors()); diff != "" {
+		t.Errorf("Reconcile error: -want, +got:\n%s", diff)
+	}
+
+	got := srv.annotations()
+	if got[meta.AnnotationKeyExternalCreateFailed] == "" {
+		t.Error("krateo.io/external-create-failed was not persisted after the failed Create")
+	}
+	if got[keyTraceparent] != traceparentB {
+		t.Errorf("krateo.io/traceparent = %q after the critical write, want the fresh %q", got[keyTraceparent], traceparentB)
+	}
+	if got[keyOther] != "set-during-create" {
+		t.Errorf("%s = %q after the critical write, want it kept", keyOther, got[keyOther])
+	}
+}
+
+// The retry path. The first Update returns a Conflict; the second attempt
+// re-reads the object and writes the runtime's keys onto that fresh read. A
+// value another writer set between the attempts survives, and the keys the
+// caller set in memory are still written.
+//
+// This doesn't tell a capture taken once, before the loop, from one taken
+// inside it. A failed Update leaves the object as it was (client-go's
+// Result.Into returns before decoding), so the first attempt's merged
+// annotations are still on it, and a capture inside the loop takes the same
+// keys again. The two are equivalent; the capture stays before the loop
+// because that says what's meant.
+func TestUpdateCriticalAnnotationsRetriesOnConflict(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	stored := &fake.Managed{}
+	stored.SetName("cool")
+	stored.SetAnnotations(map[string]string{keyTraceparent: traceparentA})
+	srv := &storedObject{obj: stored}
+	srv.updateErrs = []error{kerrors.NewConflict(schema.GroupResource{Resource: "manageds"}, "cool", errors.New("modified"))}
+	// Get 1 is the first attempt's read. Get 2 is the retry's: another writer
+	// has stamped B and a third annotation since.
+	srv.beforeGet = func(n int, s *fake.Managed) {
+		if n == 2 {
+			meta.AddAnnotations(s, map[string]string{keyTraceparent: traceparentB, keyOther: "set-between-attempts"})
+		}
+	}
+
+	inMemory := &fake.Managed{}
+	inMemory.SetName("cool")
+	inMemory.SetAnnotations(map[string]string{
+		keyTraceparent:                         traceparentA,
+		meta.AnnotationKeyExternalName:         "ext-1",
+		meta.AnnotationKeyExternalCreateFailed: now,
+	})
+
+	if err := NewRetryingCriticalAnnotationUpdater(srv.client()).UpdateCriticalAnnotations(context.Background(), inMemory); err != nil {
+		t.Fatalf("UpdateCriticalAnnotations: %v", err)
+	}
+	if srv.gets != 2 || len(srv.updates) != 1 {
+		t.Fatalf("gets = %d, stored updates = %d; want 2 reads and 1 stored update after one conflict", srv.gets, len(srv.updates))
+	}
+
+	want := map[string]string{
+		keyTraceparent:                         traceparentB,
+		keyOther:                               "set-between-attempts",
+		meta.AnnotationKeyExternalName:         "ext-1",
+		meta.AnnotationKeyExternalCreateFailed: now,
+	}
+	if diff := cmp.Diff(want, srv.annotations()); diff != "" {
+		t.Errorf("stored annotations after the retry: -want, +got:\n%s", diff)
 	}
 }
