@@ -223,8 +223,15 @@ func envFloat(k string) float64 {
 	return v
 }
 
+// readFile reads a cgroup file through an os.Root opened at the cgroup mount,
+// so name can't reach outside it (gosec G304), as pkg/ratelimit's sampler does.
 func readFile(name string) string {
-	b, _ := os.ReadFile("/sys/fs/cgroup/" + name)
+	root, err := os.OpenRoot("/sys/fs/cgroup")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = root.Close() }()
+	b, _ := root.ReadFile(name)
 	return strings.TrimSpace(string(b))
 }
 
