@@ -259,6 +259,13 @@ re-reads), §6.1 to §6.8, and §14's unit tests for the races.
 The model's self-write filter schedule (§14 "the epoch-only and label-only
 self-write filter") lands with the filter in PR 4.
 
+**The model's state-space reduction** (after #59's review): the two-process
+scenario's searches are too large for CI as it stands, 2.6 million schedules
+with one fault. A sound reduction of the scheduler is specified in
+[credential-use-model-reduction](./credential-use-model-reduction.md). That
+is a spec under soundness review, not implemented: it needs changes to the
+model's base semantics, which need the user's decision.
+
 **Reviewer attack** (§14): the `written`/`observed` skip, and any way
 `t_obs < t_issue` can hold for a record that wasn't visible when the write was
 issued (clock source, leader change, away and back); R3's tests (the epoch,
