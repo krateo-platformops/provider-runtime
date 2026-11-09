@@ -244,7 +244,7 @@ func script(t *testing.T, b backend, ns string) map[string]outcome {
 	return got
 }
 
-func TestModelAgreesWithTheAPIServer(t *testing.T) {
+func TestAPIModelAgreesWithTheAPIServer(t *testing.T) {
 	cutest.Require(t, env)
 	ns := fmt.Sprintf("diff-%d", time.Now().UnixNano()%1_000_000)
 	real := script(t, envBackend{env}, ns)
