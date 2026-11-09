@@ -477,7 +477,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 
 	if books.SlotSeconds > 0 && c.shareShift(books, alpha) {
 		c.c.reset()
-		c.cStart, c.since = books.End, 0
+		c.cStart, c.since, c.restartC = books.End, 0, true
 		c.win, c.pend, c.wn = costWindow{from: books.End}, nil, 0
 		c.rewarmD(books.End)
 		res.Restarted = true
@@ -516,16 +516,17 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		g = c.capped(s, books, from, limit, bg, nbar, &res)
 	default:
 		switch {
+		case c.restartC:
+			// §17.8 item 5: after a ĉ restart, with CPU but no completion its
+			// denominator counts, the active law holds (reported as such, not
+			// as unresolvable).
+			res.CHold = true
 		case !cok || ch <= 0 || (c.c.n >= 3 && ch < 2*seC):
 			res.Unresolvable = true
 			if used < rho*limit {
 				g = float64(ceiling)
 				res.Paced = true
 			}
-		case c.restartC:
-			// §17.8 item 5: after a ĉ restart, with CPU but no completion its
-			// denominator counts, the active law holds.
-			res.CHold = true
 		case !dok:
 			res.DHold = true
 		default:

@@ -2343,7 +2343,8 @@ yet completed, so `c_W` includes their CPU without their completions, and the
 capped rule's first term undershoots, towards less CPU, as §4.3's single crossing
 allows. After a cost increase, the band's lower edge is
 min(θ⌊S*'⌋, S*'·(D_mix/D*')·C_W/(C_W + N₀)), frozen from the plant (N₀ = ⌈S_pre⌉,
-C_W = X'_cap·|W| from the frozen curve, D(S*') = dStar), until the window after
+C_W = X'_cap·|W| from the frozen curve, with |W| = ⌈N₀/X'_cap⌉ + 1, the window
+while capped, D(S*') = dStar), until the window after
 ĉ's restart has closed; θ⌊S*'⌋ after. (The first version computed the floor from
 the run's own values; the review of `a1b144f` froze it from the plant.)
 
@@ -2411,7 +2412,12 @@ the run's own values; the review of `a1b144f` froze it from the plant.)
     saturated: they use whatever the container doesn't, up to `N − share`. CFS is
     work-conserving, so a node whose share for the container is contended is busy
     (confirmed by the reviewer at the review of `5c2bf42`). If the node model gains
-    explicit other cgroups, their usage comes from it instead.
+    explicit other cgroups, their usage comes from it instead. In the quota
+    cases with no node share, Temporal's host fallback (taken when the cgroup
+    reading is exactly 0) treats the node's other cgroups as idle: faithful to
+    Temporal's behaviour, and stated here because it reads the node as emptier
+    than a busy one. Where a case's node model gives a share, the other cgroups'
+    usage is fed from it (the review of `8fdfbd4`).
   - **Memory is unmodelled in PR 1**: taken as constant and under its target, so
     that its signal (5·(0.8 − m), derivative 0) exceeds 0.25 throughout, which
     requires `m < 0.75` (`pidDecision`, lines 375–378, the memory target's hard
