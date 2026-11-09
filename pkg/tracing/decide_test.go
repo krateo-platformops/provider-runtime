@@ -53,7 +53,7 @@ func TestDecide(t *testing.T) {
 			window:      window, mode: NoParent, write: Never,
 		},
 		"Rule2MarkerMatches": {
-			annotations: ann(meta.AnnotationKeyTraceparent, tpA, markerKey, tpA),
+			annotations: ann(meta.AnnotationKeyTraceparent, tpA, meta.AnnotationKeyTraceparentContinued, tpA),
 			window:      window, mode: Link, write: Never,
 		},
 		"Rule2RememberedMatches": {
@@ -61,15 +61,15 @@ func TestDecide(t *testing.T) {
 			remembered:  tpA, window: window, mode: Link, write: Never,
 		},
 		"Rule2OnlyFlagsChanged": {
-			annotations: ann(meta.AnnotationKeyTraceparent, tpAUnsampled, markerKey, tpA),
+			annotations: ann(meta.AnnotationKeyTraceparent, tpAUnsampled, meta.AnnotationKeyTraceparentContinued, tpA),
 			window:      window, mode: Link, write: Never,
 		},
 		"Rule2OnlyTracestateChanged": {
-			annotations: ann(meta.AnnotationKeyTraceparent, tpA, meta.AnnotationKeyTracestate, "vendor=new", markerKey, tpA),
+			annotations: ann(meta.AnnotationKeyTraceparent, tpA, meta.AnnotationKeyTracestate, "vendor=new", meta.AnnotationKeyTraceparentContinued, tpA),
 			window:      window, mode: Link, write: Never,
 		},
 		"Rule2WindowZeroStillLinksWhenContinued": {
-			annotations: ann(meta.AnnotationKeyTraceparent, tpA, markerKey, tpA),
+			annotations: ann(meta.AnnotationKeyTraceparent, tpA, meta.AnnotationKeyTraceparentContinued, tpA),
 			window:      0, mode: Link, write: Never,
 		},
 		"Rule3WindowZero": {
@@ -86,15 +86,15 @@ func TestDecide(t *testing.T) {
 			mode: Parent, write: BeforeFirstAction, marker: tpA,
 		},
 		"Rule4NewSpanIDIsNew": {
-			annotations: ann(meta.AnnotationKeyTraceparent, tpB, markerKey, tpA),
+			annotations: ann(meta.AnnotationKeyTraceparent, tpB, meta.AnnotationKeyTraceparentContinued, tpA),
 			window:      window, mode: Parent, write: BeforeFirstAction, marker: tpB,
 		},
 		"Rule4NewTraceIsNew": {
-			annotations: ann(meta.AnnotationKeyTraceparent, tpC, markerKey, tpA),
+			annotations: ann(meta.AnnotationKeyTraceparent, tpC, meta.AnnotationKeyTraceparentContinued, tpA),
 			remembered:  tpA, window: window, mode: Parent, write: BeforeFirstAction, marker: tpC,
 		},
 		"Rule4InvalidMarkerCountsAsAbsent": {
-			annotations: ann(meta.AnnotationKeyTraceparent, tpA, markerKey, "garbage"),
+			annotations: ann(meta.AnnotationKeyTraceparent, tpA, meta.AnnotationKeyTraceparentContinued, "garbage"),
 			window:      window, mode: Parent, write: BeforeFirstAction, marker: tpA,
 		},
 		// A later version's traceparent is canonicalised to version 00, with only

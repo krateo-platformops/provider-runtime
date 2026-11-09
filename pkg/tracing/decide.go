@@ -10,11 +10,6 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 )
 
-// markerKey is krateo.io/traceparent-continued. It is
-// meta.AnnotationKeyTraceparentContinued, which lands in a separate change;
-// the reconciler wiring replaces this constant with it.
-const markerKey = "krateo.io/traceparent-continued"
-
 // Mode is how a reconcile's root span relates to the object's
 // krateo.io/traceparent (docs/design-tracing.md §6.2).
 type Mode int
@@ -110,7 +105,7 @@ func Decide(annotations map[string]string, remembered string, firstSeen, now tim
 	if !r.IsValid() {
 		return Decision{}
 	}
-	if continues(annotations[markerKey], r) || continues(remembered, r) {
+	if continues(annotations[meta.AnnotationKeyTraceparentContinued], r) || continues(remembered, r) {
 		return Decision{Mode: Link, Remote: r}
 	}
 	d := Decision{Remote: r, Marker: Canonical(r)}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -18,6 +19,7 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
+	"github.com/krateo-platformops/provider-runtime/pkg/tracing"
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -153,6 +155,11 @@ func (fn CriticalAnnotationUpdateFn) UpdateCriticalAnnotations(ctx context.Conte
 
 // An ExternalConnecter produces a new ExternalClient given the supplied
 // Managed resource.
+//
+// With tracing on, Connect's ctx holds the reconcile's connect span, which
+// ends when Connect returns. An ExternalClient built here must not keep that
+// ctx for later calls: each ExternalClient method gets its own ctx, with its own
+// span, and must use that one (docs/design-tracing.md §4.4).
 type ExternalConnecter interface {
 	// Connect to the provider specified by the supplied managed resource and
 	// produce an ExternalClient.
@@ -236,6 +243,11 @@ func (fns ExternalConnectDisconnecterFns) Disconnect(ctx context.Context) error 
 // idempotent. For example, Create call should not return AlreadyExists error
 // if it's called again with the same parameters or Delete call should not
 // return error if there is an ongoing deletion or resource does not exist.
+//
+// Each method's ctx holds its own child span of the reconcile (observe,
+// create, update or delete) with tracing on: use it for the calls the method
+// makes, and bind a Logger to it with logging.WithContext, so they join the
+// trace. Never use a ctx kept from Connect.
 type ExternalClient interface {
 	// Observe the external resource the supplied Managed resource
 	// represents, if any. Observe implementations must not modify the
@@ -394,6 +406,8 @@ type Reconciler struct {
 	// kind names the managed kind (Kind.group) in reports about it, because a typed object
 	// read through the client does not reliably carry its own TypeMeta.
 	kind string
+	// objectKind is the Kind alone, the reconcile span's k8s.object.kind.
+	objectKind string
 
 	pollInterval        time.Duration
 	pollIntervalHook    PollIntervalHook
@@ -423,6 +437,15 @@ type Reconciler struct {
 	// governor gates external calls; nil (the default) gates nothing.
 	governor  *ratelimit.Governor
 	keyErrors keyErrorLog
+
+	// tracerProv is the TracerProvider WithTracerProvider set, or nil to use
+	// tracing.TracerProvider() (docs/design-tracing.md §3.3).
+	tracerProv trace.TracerProvider
+	// traceWindow is how long a new traceparent value keeps making Parent
+	// passes that don't act (§6.2).
+	traceWindow time.Duration
+	// traces is the in-memory record of traceparent values seen and marked.
+	traces traceMemo
 }
 
 type mrManaged struct {
@@ -714,6 +737,8 @@ func NewReconciler(m manager.Manager, of resource.ManagedKind, o ...ReconcilerOp
 		client:              m.GetClient(),
 		newManaged:          nm,
 		kind:                schema.GroupVersionKind(of).GroupKind().String(),
+		objectKind:          schema.GroupVersionKind(of).Kind,
+		traceWindow:         defaultTraceContinueWindow,
 		pollInterval:        defaultpollInterval,
 		pollIntervalHook:    defaultPollIntervalHook,
 		creationGracePeriod: defaultGracePeriod,
@@ -740,61 +765,100 @@ func NewReconciler(m manager.Manager, of resource.ManagedKind, o ...ReconcilerOp
 }
 
 // Reconcile a managed resource with an external resource.
-func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (result reconcile.Result, err error) { //nolint:gocyclo // See note below.
-	// Bound to the incoming ctx, so every record carries the span in it (when there is one) to a
-	// handler that correlates logs with traces. It is the incoming ctx rather than the timeout one
+//
+// It reads the object, then opens the reconcile root span, start-stamped at the
+// top of Reconcile so it covers the read, as the parent-or-link decision says
+// (docs/design-tracing.md §4.1, §6.2). It binds the per-reconcile Logger to the
+// span's context, and runs the pass with the span in every context it hands
+// on. With tracing off no span starts.
+func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (result reconcile.Result, err error) {
+	started := time.Now()
+	inCtx := ctx
+
+	if r.metrics != nil {
+		r.metrics.AddReconcileInFlight(1)
+		defer r.metrics.AddReconcileInFlight(-1)
+		defer func() {
+			r.metrics.RecordReconcileDuration(inCtx, time.Since(started))
+			if err != nil {
+				r.metrics.IncReconcileFailure(inCtx)
+				r.metrics.IncReconcileErrorRequeue(inCtx)
+				return
+			}
+
+			r.metrics.IncReconcileSuccess(inCtx)
+			switch {
+			case result.RequeueAfter > 0:
+				r.metrics.IncReconcileRequeueAfter(inCtx)
+			case isRateLimitedRequeue(result):
+				r.metrics.IncReconcileRequeueImmediate(inCtx)
+			}
+		}()
+	}
+
+	deadline := started.Add(r.timeout + reconcileGracePeriod)
+	getCtx, cancelGet := context.WithDeadline(ctx, deadline)
+	managed := r.newManaged()
+	err = r.client.Get(getCtx, req.NamespacedName, managed)
+	cancelGet()
+	r.recordGet(inCtx, started, err)
+
+	tp := r.tracerProvider()
+	if kerrors.IsNotFound(err) {
+		// The object is gone: no span, as in unstructured-runtime.
+		if tp != nil {
+			r.traces.forget(req.NamespacedName)
+		}
+		logging.WithContext(r.log.WithValues("request", req), ctx).Error(err, "Cannot get managed resource")
+		return reconcile.Result{}, errors.Wrap(resource.IgnoreNotFound(err), errGetManaged)
+	}
+
+	var d tracing.Decision
+	if err == nil {
+		d = r.traces.decide(tp, req.NamespacedName, managed, time.Now(), r.traceWindow)
+	}
+	spanCtx, span := tracing.StartReconcile(ctx, tp, tracing.Object{Kind: r.objectKind, Name: req.Name, Namespace: req.Namespace}, d, started)
+	pass := &tracePass{tp: tp, span: span, d: d, key: req.NamespacedName, uid: managed.GetUID(), memo: &r.traces}
+	panicked := true
+	defer func() { pass.end(err, panicked) }()
+
+	// Bound to the span's context, which is the incoming ctx plus the span: not the timeout one
 	// below, so a record logged after the deadline still carries a live context to the exporter.
-	log := logging.WithContext(r.log.WithValues("request", req), ctx)
+	log := logging.WithContext(r.log.WithValues("request", req), spanCtx)
 	log.Debug("Reconciling")
+	if err != nil {
+		// We'll be requeued implicitly because we return an error.
+		log.Error(err, "Cannot get managed resource")
+		panicked = false
+		return reconcile.Result{}, errors.Wrap(err, errGetManaged)
+	}
 
-	ctx, cancel := context.WithTimeout(ctx, r.timeout+reconcileGracePeriod)
+	ctx, cancel := context.WithDeadline(spanCtx, deadline)
 	defer cancel()
-
-	externalCtx, externalCancel := context.WithTimeout(ctx, r.timeout)
+	externalCtx, externalCancel := context.WithDeadline(ctx, started.Add(r.timeout))
 	defer externalCancel()
 	if r.governor != nil {
 		// Signals the provider reports during its calls reach the governor.
 		externalCtx = ratelimit.WithSink(externalCtx, r.governor)
 	}
 
+	result, err = r.reconcile(ctx, externalCtx, log, managed, pass)
+	panicked = false
+	return result, err
+}
+
+// reconcile is one pass over managed, which Reconcile has read. ctx holds the
+// reconcile span; externalCtx is the provider calls' context, with the external
+// timeout. The pass's own spans, events and the marker go through pass.
+func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Logger, managed resource.Managed, pass *tracePass) (reconcile.Result, error) { //nolint:gocyclo // See note below.
 	statusUpdate := func(updateFn func() error) error {
 		started := time.Now()
 		updateErr := updateFn()
 		r.recordStatusUpdate(ctx, started, updateErr)
 		return updateErr
 	}
-
-	started := time.Now()
-	if r.metrics != nil {
-		r.metrics.AddReconcileInFlight(1)
-		defer r.metrics.AddReconcileInFlight(-1)
-		defer func() {
-			r.metrics.RecordReconcileDuration(ctx, time.Since(started))
-			if err != nil {
-				r.metrics.IncReconcileFailure(ctx)
-				r.metrics.IncReconcileErrorRequeue(ctx)
-				return
-			}
-
-			r.metrics.IncReconcileSuccess(ctx)
-			switch {
-			case result.RequeueAfter > 0:
-				r.metrics.IncReconcileRequeueAfter(ctx)
-			case isRateLimitedRequeue(result):
-				r.metrics.IncReconcileRequeueImmediate(ctx)
-			}
-		}()
-	}
-
-	managed := r.newManaged()
-	err = r.client.Get(ctx, req.NamespacedName, managed)
-	r.recordGet(ctx, started, err)
-	if err != nil {
-		// There's no need to requeue if we no longer exist. Otherwise we'll be
-		// requeued implicitly because we return an error.
-		log.Error(err, "Cannot get managed resource")
-		return reconcile.Result{}, errors.Wrap(resource.IgnoreNotFound(err), errGetManaged)
-	}
+	var started time.Time
+	var err error
 
 	record := r.record
 	throttledRecorder := r.throttledRecorder
@@ -807,6 +871,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	// Check the pause annotation and return if it has the value "true"
 	// after logging, publishing an event and updating the SYNC status condition
 	if meta.IsPaused(managed) {
+		pass.event(tracing.EventReconcilePaused)
 		log.Debug("Reconciliation is paused via the pause annotation", "annotation", meta.AnnotationKeyReconciliationPaused, "value", "true")
 		record.Event(managed, event.Normal(reasonReconciliationPaused, actionProcessEvent, "Reconciliation is paused via the pause annotation"))
 		managed.SetConditions(prv1.ReconcilePaused())
@@ -834,6 +899,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// backoff.
 			log.Error(err, "Cannot remove managed resource finalizer")
 			if kerrors.IsConflict(err) {
+				pass.conflict(tracing.StepFinalizer)
 				return rateLimitedRequeue(), nil
 			}
 			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
@@ -842,6 +908,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			}
 			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 		}
+		pass.forget()
 
 		// We've successfully unpublished our managed resource's connection
 		// details and removed our finalizer. If we assume we were the only
@@ -861,6 +928,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	// Instead, carry the unresolved handshake forward and let Observe answer it below. The window
 	// between SetExternalCreatePending and the terminal annotation is ~2s of pure bookkeeping, so
 	// the overwhelmingly common interruption is one where the external work actually completed.
+	// The marker the decision says to write now (its window closed, or the window is 0): past the
+	// pause and Orphan checks, before anything acts and before pristine is taken (§6.2).
+	if res, stop := r.writeMarkerIf(ctx, log, managed, pass, tracing.Now); stop {
+		return res, nil
+	}
+
 	unresolvedCreate := meta.ExternalCreateIncomplete(managed)
 	if unresolvedCreate {
 		log.Debug("Create handshake is unresolved; asking Observe whether the external resource exists")
@@ -874,6 +947,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	}
 	// deferred ends a pass whose next external call the governor deferred.
 	deferred := func(d *ratelimit.Deferral) (reconcile.Result, error) {
+		pass.deferred(d)
 		return r.deferReconcile(log, managed, pristine, d, func() error {
 			return statusUpdate(func() error { return r.client.Status().Update(ctx, managed) })
 		})
@@ -885,7 +959,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	}
 	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
-	external, err := r.external.Connect(externalCtx, managed)
+	connectCtx, connectSpan := pass.step(externalCtx, tracing.SpanConnect)
+	external, err := r.external.Connect(connectCtx, managed)
+	pass.endStep(connectSpan, err)
 	release()
 	r.recordConnect(ctx, started, err)
 	if err != nil {
@@ -896,6 +972,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// backoff.
 		log.Error(err, "Cannot connect to provider")
 		if kerrors.IsConflict(err) {
+			pass.conflict(tracing.StepConnect)
 			return rateLimitedRequeue(), nil
 		}
 		throttledRecorder.Event(managed, event.Warning(reasonCannotConnect, actionProcessEvent, err))
@@ -926,7 +1003,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 	}
 	defer release() // a backstop if the call panics; release is idempotent
 	started = time.Now()
-	observation, err := external.Observe(externalCtx, managed)
+	observeCtx, observeSpan := pass.step(externalCtx, tracing.SpanObserve)
+	observation, err := external.Observe(observeCtx, managed)
+	pass.endStep(observeSpan, err)
 	release()
 	r.recordObserve(ctx, started, err)
 	if err != nil {
@@ -938,6 +1017,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// trigger backoff.
 		log.Error(err, "Cannot observe external resource")
 		if kerrors.IsConflict(err) {
+			pass.conflict(tracing.StepObserve)
 			return rateLimitedRequeue(), nil
 		}
 		throttledRecorder.Event(managed, event.Warning(reasonCannotObserve, actionObserveExternalResource, err))
@@ -1013,6 +1093,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			if err := statusUpdate(func() error { return r.client.Status().Update(ctx, managed) }); err != nil {
 				return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 			}
+			// The one path that writes ReconcileError and returns nil: it marks the root itself (§7).
+			pass.markError(errors.New(errCreateIncomplete))
 			return reconcile.Result{RequeueAfter: r.createRecoveryReobserveInterval}, nil
 
 		default:
@@ -1046,6 +1128,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			if err := r.client.Update(ctx, managed); err != nil {
 				if kerrors.IsConflict(err) {
 					// Someone else wrote first; re-read and retry rather than fight over it.
+					pass.conflict(tracing.StepHandshake)
 					return rateLimitedRequeue(), nil
 				}
 				log.Error(err, errUpdateManagedAnnotations)
@@ -1088,8 +1171,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				return deferred(deferral)
 			}
 			defer release() // a backstop if the call panics; release is idempotent
+			if res, stop := r.writeMarkerIf(ctx, log, managed, pass, tracing.BeforeFirstAction); stop {
+				return res, nil
+			}
 			started = time.Now()
-			err = external.Delete(externalCtx, managed)
+			deleteCtx, deleteSpan := pass.step(externalCtx, tracing.SpanDelete)
+			err = external.Delete(deleteCtx, managed)
+			pass.endStep(deleteSpan, err)
 			release()
 			r.recordDelete(ctx, started, err)
 			if err != nil {
@@ -1134,6 +1222,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// backoff.
 			log.Error(err, "Cannot remove managed resource finalizer")
 			if kerrors.IsConflict(err) {
+				pass.conflict(tracing.StepFinalizer)
 				return rateLimitedRequeue(), nil
 			}
 			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
@@ -1142,6 +1231,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			}
 			return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
 		}
+		pass.forget()
 
 		// We've successfully deleted our external resource (if necessary) and
 		// removed our finalizer. If we assume we were the only controller that
@@ -1160,6 +1250,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// not, we requeue explicitly, which will trigger backoff.
 		log.Error(err, "Cannot add managed resource finalizer")
 		if kerrors.IsConflict(err) {
+			pass.conflict(tracing.StepFinalizer)
 			return rateLimitedRequeue(), nil
 		}
 		managed.SetConditions(prv1.ReconcileError(err))
@@ -1179,6 +1270,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		}
 		defer releaseCreate() // also a backstop if Create panics; release is idempotent
 
+		// The marker goes in its own locked patch, before create-pending: a conflict there ends the
+		// pass before any write that starts a create handshake (§6.2).
+		if res, stop := r.writeMarkerIf(ctx, log, managed, pass, tracing.BeforeFirstAction); stop {
+			return res, nil
+		}
+
 		// We write this annotation for two reasons. Firstly, it helps
 		// us to detect the case in which we fail to persist critical
 		// information (like the external name) that may be set by the
@@ -1190,6 +1287,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		if err := r.client.Update(ctx, managed); err != nil {
 			log.Error(err, "Cannot update managed resource")
 			if kerrors.IsConflict(err) {
+				pass.conflict(tracing.StepCreatePending)
 				return rateLimitedRequeue(), nil
 			}
 			throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, errors.Wrap(err, errUpdateManaged)))
@@ -1201,7 +1299,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		}
 
 		started = time.Now()
-		err = external.Create(externalCtx, managed)
+		createCtx, createSpan := pass.step(externalCtx, tracing.SpanCreate)
+		err = external.Create(createCtx, managed)
+		pass.endStep(createSpan, err)
 		releaseCreate()
 		r.recordCreate(ctx, started, err)
 		if err != nil {
@@ -1239,6 +1339,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// A conflict is transient: someone else wrote the object first. Retry promptly rather
 			// than report it as a create failure; the next pass observes before it creates again.
 			if kerrors.IsConflict(err) {
+				pass.conflict(tracing.StepCreate)
 				return rateLimitedRequeue(), nil
 			}
 			throttledRecorder.Event(managed, event.Warning(reasonCannotCreate, actionCreateExternalResource, err))
@@ -1303,6 +1404,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 			// late-initialize again from a fresh read, as every other write to the managed resource
 			// does, rather than report a ReconcileError and wait out error backoff.
 			if kerrors.IsConflict(err) {
+				pass.conflict(tracing.StepLateInit)
 				return rateLimitedRequeue(), nil
 			}
 			log.Error(err, "Cannot update managed resource")
@@ -1351,8 +1453,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		return deferred(deferral)
 	}
 	defer release() // a backstop if the call panics; release is idempotent
+	if res, stop := r.writeMarkerIf(ctx, log, managed, pass, tracing.BeforeFirstAction); stop {
+		return res, nil
+	}
 	started = time.Now()
-	err = external.Update(externalCtx, managed)
+	updateCtx, updateSpan := pass.step(externalCtx, tracing.SpanUpdate)
+	err = external.Update(updateCtx, managed)
+	pass.endStep(updateSpan, err)
 	release()
 	r.recordUpdate(ctx, started, err)
 	if err != nil {

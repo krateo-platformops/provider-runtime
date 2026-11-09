@@ -58,8 +58,8 @@ func TestInject(t *testing.T) {
 		},
 		"NeverWritesTheMarker": {
 			ctx:  spanContext(t, tpB, ""),
-			in:   ann(markerKey, tpA),
-			want: ann(markerKey, tpA, meta.AnnotationKeyTraceparent, tpB),
+			in:   ann(meta.AnnotationKeyTraceparentContinued, tpA),
+			want: ann(meta.AnnotationKeyTraceparentContinued, tpA, meta.AnnotationKeyTraceparent, tpB),
 			ok:   true,
 		},
 	}
