@@ -4,7 +4,7 @@ title: provider-runtime — index
 description: The map of the provider-runtime documentation bundle, the Go library every Krateo provider controller is built on.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, managed-resource, reconciler]
-timestamp: 2026-11-05T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # provider-runtime
@@ -28,3 +28,4 @@ It is consumed as a plain Go module — no image, no chart, no CRDs shipped.
 - [log](./log.md) — curated history
 - [design: scale to zero](./design-scale-to-zero.md) — a helper owners call to run a per-Kind controller Deployment at 0 replicas while its Kind is empty (implemented, unreleased)
 - [design: rate-limit governor](./design-rate-limit-governor.md) — automatic slow-down under server-side rate limits and controller CPU saturation (implemented, off by default; CPU threshold provisional; memory input experimental)
+- [design: saturation cost model](./design-saturation-cost-model.md) — sizing local capacity from what reconciles cost against the container's CPU and memory limits, replacing the halve-and-recover step (decided, not built)
