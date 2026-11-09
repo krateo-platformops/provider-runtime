@@ -716,7 +716,7 @@ plan author's summary of the reviewer's reasons.
   `2k_θ − 1 + (n_W − 1)` samples, `k_θ` from the slots at the dip's end", with
   `k_θ = ⌈ln(S_end/(S*(1 + 3r̄)))/ln(1/θ)⌉`. The dip's stall distribution is
   reported. (`k_θ`'s formula is the long drain's, with the slots at the dip's end
-  in place of `N̄₀`: the plan author's reading.) The reason, the reviewer's: "some
+  in place of `N̄₀`: confirmed by the reviewer at the review of `a1b144f`.) The reason, the reviewer's: "some
   of the dip's samples stall under CPUPressureThreshold, so their stretched lives
   qualify for D̂ and the law may rise in them, since §6 blocks only above the
   threshold; after the dip the excess descends at the capped rule's pace."

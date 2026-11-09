@@ -1799,6 +1799,18 @@ for code.
 | Medium | The plan's §4.5: the units error in (a), the reasons in (b) and (e), (f) as the faster mechanism, `ℓ_min`'s definition, and the counts | The plan's §4.5, the reviewer's text verbatim |
 | Low | Cap-stretched lives entering `D̂`; Little's fallback during a rise | §17.8 item 7 |
 
+**The re-review of `5c2bf42`, 2026-11-09.** Nothing High or Medium remains for
+the cost model. One Medium in the reservation baseline, from the reviewer's spot
+check of Temporal's source (every line cited checked out), and three Lows.
+
+| Item | Finding | Answer |
+|---|---|---|
+| Medium | The baseline's decision cadence: Temporal retries every 10 ms while refused, and decides no sooner than the ramp throttle after an issue; fixed 50 ms ticks understate the derivative five times and the decisions while refused | §17.8 item 6: Temporal's cadence, with the PID updated at each decision; one reservation loop |
+| Text | Host CPU with no limit; (e)'s `k_θ` | §17.8 item 6: the other cgroups saturated, up to `N − share`; the plan's §4.5: `k_θ` confirmed by the reviewer |
+| Low (a) | Memory unmodelled | §17.8 item 6: constant and under its target, `m < 0.75`, cited |
+| Low (b) | The floor used a value the controller produced | §17.8 item 7(c): the base plant's frozen `D` |
+| Low (c) | Temporal's activity `MaxSlots` | §17.8 item 6: the ceiling is its analogue |
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -2351,14 +2363,28 @@ the run's own values; the review of `a1b144f` froze it from the plant.)
 - **A reservation-gating baseline, modelled on Temporal's resource-based tuner
   as read in its source** (§17.6), with no claim of parity, revised at the review
   of `a1b144f`, whose two errors both counted against it:
-  - **It runs inside the engine, at 50 ms decision ticks**, Temporal's ramp
-    throttle for activities (`internal/resource_tuner.go` at `705a0db`,
-    `DefaultActivityResourceBasedSlotSupplierOptions`, lines 148–154: `RampThrottle` 50 ms,
-    `MinSlots` 1). At each tick with work waiting it may issue one slot: always
-    when fewer than the minimum are issued; otherwise, below the maximum (the
-    ceiling), only when the PID's output exceeds 0.05 (`CpuOutputThreshold`, line 294; the decision, `pidDecision`, lines 362–391),
-    the PID re-checked before each issue. Each issue raises the capacity by one;
-    a completion releases its slot. It does not publish a per-sample capacity.
+  - **It runs inside the engine**, with Temporal's decision cadence
+    (`internal/resource_tuner.go` at `705a0db`: `ReserveSlot` and
+    `TryReserveSlot`, lines 185–239, and `retryReserveInterval`, line 21).
+    Decisions: no sooner than RampThrottle (50ms) after the last issue, and every
+    retryReserveInterval (10ms, line 21) while the controller refuses; the PID is
+    updated at each decision with dt the time since the previous one. The
+    defaults are `DefaultActivityResourceBasedSlotSupplierOptions`, lines
+    148–154: `RampThrottle` 50 ms, `MinSlots` 1. A decision issues one slot
+    always when fewer than the minimum are issued (without consulting the PID,
+    line 190); otherwise, below the maximum, only when the PID's output exceeds
+    0.05 (`CpuOutputThreshold`, line 294; the decision, `pidDecision`, lines
+    362–391). Each issue raises the capacity by one; a completion releases its
+    slot. It does not publish a per-sample capacity. (The first version of this
+    item decided at fixed 50 ms ticks, which gives a derivative five times
+    smaller, the first decision after a new reading seeing `Δe/0.01s`, and
+    decisions five times rarer while refused; corrected at the review of
+    `5c2bf42`.)
+  - **One reservation loop**, with one slot request outstanding whenever work is
+    waiting: the simplest faithful choice. Temporal runs one `ReserveSlot` loop
+    per poller that wants a slot; with several, decisions would come more often.
+  - **The maximum** is the simulation's ceiling, the analogue of Temporal's
+    activity `MaxSlots`, 10,000 (line 151).
   - **Its CPU reading has its own interval, from Temporal's source**:
     `contrib/sysinfo/sysinfo.go` at `3f64d34`, `maybeRefresh`, lines 77–86,
     re-reads the CPU only when at least 100 ms have passed since the last read
@@ -2378,13 +2404,19 @@ the run's own values; the review of `a1b144f` froze it from the plant.)
   - **With no CPU limit, "host CPU" is the node's whole utilization**
     (`sysinfo.go` lines 93 and 74: gopsutil's `cpu.Percent` over the host when the
     cgroup reading is 0): in the simulation, the container's CPU plus the other
-    cgroups' CPU the node model runs, over the node's CPUs. Where the node model
-    gives the container a share, the other cgroups are taken to use the rest of
-    the node's CPUs: a modelling assumption, stated with the case.
+    cgroups' CPU, over the node's CPUs `N`. The other cgroups are taken to be
+    saturated: they use whatever the container doesn't, up to `N − share`. CFS is
+    work-conserving, so a node whose share for the container is contended is busy
+    (confirmed by the reviewer at the review of `5c2bf42`). If the node model gains
+    explicit other cgroups, their usage comes from it instead.
+  - **Memory is unmodelled in PR 1**: taken as constant and under its target, so
+    that its signal (5·(0.8 − m), derivative 0) exceeds 0.25 throughout, which
+    requires `m < 0.75` (`pidDecision`, lines 375–378, the memory target's hard
+    stop, and line 389, the memory threshold in the decision).
   - Until it runs this way, its column in the gate says nothing about Temporal's
     design.
 
-**7. Two lows, stated:**
+**7. Lows, stated:**
 
 - **(a)** Transitional cap-stretched lives enter `D̂`: a life whose window didn't
   read capped but whose reconcile was stretched by throttling before the window
@@ -2393,6 +2425,9 @@ the run's own values; the review of `a1b144f` froze it from the plant.)
 - **(b)** Little's fallback is used only within a hold, or at an `S` that hasn't
   moved by a slot or more in the last `τ`, because `A/C` reads high during a rise:
   the slot-seconds of the reconciles just admitted come before their completions.
+- **(c)** Item 4's floor uses the base plant's frozen `D` at `S_pre` (`dStar` of
+  "base") for `D_mix`, not the controller's `D̂_q`, so the floor contains no value
+  the controller produced.
 
 **What this revision doesn't change:** the law, `(ρL − B̂)·D̂/ĉ`; the deferral;
 the ratio estimator's standard error; the limit change's handling (§17.2); the
