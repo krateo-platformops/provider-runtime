@@ -4,12 +4,13 @@ title: provider-runtime — credential-use finalizer, implementation plan
 description: Plan, nothing built, for implementing the credential-use finalizer design as a stack of eleven PRs that ships as v1.13.0, with each PR's scope, design sections, tests, review focus, dependencies and size, plus the design's ambiguities and the premises to verify.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [plan, design, finalizer, deletion, credentials, reconciler]
-timestamp: 2026-11-08T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # Credential-use finalizer: implementation plan
 
-**Status:** plan only. Nothing is built. The spec is
+**Status:** approved by the user on 2026-11-09, with the decisions in §8.
+The design doc was amended to match, as its revision 16. The spec is
 [design-credential-use-finalizer](./design-credential-use-finalizer.md) as
 merged at `cfd9b0f` (PR #47, 15 revisions). Section numbers (§) are the
 design's. The work ships as **v1.13.0**, and nothing is tagged until the whole
@@ -162,7 +163,10 @@ patches, R3's patch), §10.1 (labels).
   - (c) a binding whose `paramRef` is missing, with
     `parameterNotFoundAction: Deny`: 422, with `failed to configure binding`
     and no `metadata.finalizers` cause;
-  - (d) an A2 by an impersonated ServiceAccount without `patch`: 403;
+  - (d) an A2 by an impersonated ServiceAccount without `patch`: 403, with
+    the authorizer's exact message pinned, for a namespaced and a
+    cluster-scoped object;
+  - (e) NamespaceLifecycle's 403 on a create in a terminating namespace;
   - the classifier gives each real error its class, and Deleting comes only
     from (a), never from a 403;
   - R3's failed `test` op: the exact status (§14 "R3's failed test op"; see
@@ -700,8 +704,12 @@ a grant past the acquirer's retry budget.
 
 ### PR 10: `scaletozero.WithHeld` and `WithHeldIndex`
 
-**Scope.** `pkg/scaletozero`: variadic options on `Exists` and `Reconcile`,
-backward compatible (A16). `WithHeld` lists by K's marker label with
+**Scope.** `pkg/scaletozero`, additively (A16, decided): new
+`ReconcileWithOptions` and `ExistsWithOptions` take `...Option`. `Reconcile`
+and `Exists` keep their signatures, and `Reconcile` calls
+`ReconcileWithOptions` with no options. `ReconcileWithOptions` takes the
+RESTMapper from `c.RESTMapper()`; `ExistsWithOptions` needs
+`WithRESTMapper(m)` alongside `WithHeld`. `WithHeld` lists by K's marker label with
 `Limit: 1`, stops at the first object with K's prefix, and pages past a hash
 collision. A Disown switch that hasn't settled counts as an instance.
 `WithHeldIndex` GETs index lines until one still carries K's prefix, and a
@@ -940,7 +948,8 @@ the holders' records", and also that in PerName mode it reads the index.
 The index is the superset of the holds, and the records have to be stripped
 anyway.
 
-**A16. §11.6, `scaletozero.WithHeld(protected ...)` (user).**
+**A16. §11.6, `scaletozero.WithHeld(protected ...)` (user; decided
+otherwise, see §8).**
 
 - It must read the holder CRD's Disown switch. `Exists` has only a
   `client.Reader` and a GVK, and a CRD's name needs the plural.
@@ -1069,21 +1078,30 @@ with 1,600 of tests; `pkg/scaletozero` is 347 with 1,040).
 PR 3 is the one most likely to need splitting during review. If so, the
 prober and the janitor move to a PR 3b of about 500 lines.
 
-## 8. For the user
+## 8. The user's decisions
 
-These choices change an API or a rule the design states, so I won't build
-them without the user's agreement:
+The user approved the plan on 2026-11-09, as eleven stacked PRs. Each PR
+merges only with the user's approval, once it is green and independently
+reviewed. No tag is cut until PR 11. The five choices, recorded in the design
+as IP1 to IP5:
 
-1. **A2:** recognise RBAC 403s positively, and treat every other 403 as an
-   admission denial that is never retried as RBAC propagation.
-2. **A5:** `Acquired.RetryAfter`. During the 403 window, established holders
-   also stop before Connect, for up to about 8s.
-3. **A9:** the predicate becomes a method, `r.IgnoreCredentialUseRecord()`,
-   which changes the builder line in §7.5.
-4. **A12:** two runnables, the informers unelected and the loops elected, so
-   that `EnableWarmup` works.
-5. **A16:** `scaletozero.WithHeld` takes a RESTMapper, and `Reconcile` takes
-   the options too.
+1. **A2 (IP1), accepted:** RBAC 403s are recognised positively, by the
+   authorizer's own message, whose exact text an envtest pins. Every other
+   403 is an admission denial: an Acquire error at once.
+2. **A5 (IP2), accepted:** `Acquired.RetryAfter`. During the 403 window,
+   established holders also stop before Connect, for up to about 8s. Building
+   it into the design text showed it needs a second field,
+   `Acquired.Pending`, so that the caller can tell "don't connect" from
+   "proceed and requeue".
+3. **A9 (IP3), accepted:** the predicate is a method,
+   `r.IgnoreCredentialUseRecord()`, which changes the builder line in §7.5.
+4. **A12 (IP4), accepted:** two runnables, the informers without leader
+   election and the write loops with it.
+5. **A16 (IP5), decided otherwise:** scale-to-zero is additive. `Reconcile`
+   stays unchanged, and `ReconcileWithOptions(ctx, …, opts ...Option)` takes
+   `WithHeld` and `WithHeldIndex`; `Reconcile` calls it with no options.
+   `ExistsWithOptions` is added the same way, with `WithRESTMapper`, for
+   owners that check outside a reconcile.
 
-Everything else in §5 is an implementation choice within the design. It will
-be recorded in the design doc's "what the build found" section in PR 11.
+Every other item in §5 is an implementation choice within the design. All of
+them are recorded in the design doc's §17, "Revision 16".

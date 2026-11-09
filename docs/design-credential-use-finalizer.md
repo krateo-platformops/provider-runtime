@@ -4,15 +4,19 @@ title: provider-runtime — credential-use finalizer
 description: Design, not built, for holding the Secrets (and the objects that lead to them) that a managed resource reads, for as long as losing them would be unrecoverable, so a namespace deletion can't wedge on a managed resource whose credentials were deleted first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, finalizer, deletion, credentials, reconciler]
-timestamp: 2026-11-08T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # Credential-use finalizer
 
-**Status:** design, final revision. Nothing is built. The
+**Status:** design, revision 16. Nothing is built yet; the build follows
+[the implementation plan](./plan-credential-use-implementation.md), eleven
+stacked PRs that ship as v1.13.0. The
 user chose the approach: a finalizer on each Secret an object uses, the
 analog of Crossplane's ProviderConfigUsage. The user's decisions are
-binding here: U1 to U7 on the first review, and NQ1 to NQ4 on the second.
+binding here: U1 to U7 on the first review, NQ1 to NQ4 on the second, and
+IP1 to IP5 on the implementation plan. Revision 16 amends the text where
+the plan found it ambiguous once coded (§17, "Revision 16").
 §17 maps every review item to the section that resolves it, and §18 holds
 what is still open.
 
@@ -388,8 +392,13 @@ It also breaks foreground-deletion cycles (§11.8).
 **The acquirer**, for each ref P of holder H, in every pass, before Connect:
 
 - **A1. Announce.** If H's record differs from the refs just computed,
-  write the new record with a merge patch guarded by H's resourceVersion
-  (`client.MergeFromWithOptimisticLock`). A conflict requeues, for any
+  write the new record with a merge patch guarded by H's resourceVersion.
+  The core builds it itself, as a JSON merge patch that carries
+  `metadata.resourceVersion`, sent through the metadata client. That is the
+  patch controller-runtime's `client.MergeFromWithOptimisticLock` makes,
+  without depending on controller-runtime (§7.1). The returned
+  resourceVersion and annotations are copied onto the caller's object, which
+  is otherwise unchanged, because the patch touches only annotations. A conflict requeues, for any
   holder: it is a conflict on the holder itself, and the next pass is
   immediate. The in-memory object takes the patched resourceVersion. **In
   the same pass, synchronously**, A1 drops the `observed` entries for refs it
@@ -402,7 +411,7 @@ It also breaks foreground-deletion cycles (§11.8).
     (§10.1). A strategic merge patch can't drop or duplicate anyone else's
     finalizers.
   - **Custom resources:** a live GET, then a merge patch guarded by
-    resourceVersion (`MergeFromWithOptimisticLock`) that writes the full
+    resourceVersion (built as A1's is) that writes the full
     finalizer list with the finalizer added, the fresh epoch, and both
     labels. On a conflict it GETs and retries, up to 3 times. If the
     retries run out, a new holder requeues (fail closed), and an
@@ -433,15 +442,42 @@ different 403s exist (core-provider found this; verified in
 | Class | Status | How it is recognised | Meaning |
 |---|---|---|---|
 | (a) **Deleting** | 422, reason Invalid | a cause of type `FieldValueForbidden` on field `metadata.finalizers` (`ValidateNoNewFinalizers`, via `NewInvalid` in `pkg/registry/rest/update.go:157`) | P is being deleted and lacks the finalizer |
-| (b) **policy denial** | 403, reason Forbidden | message prefix `ValidatingAdmissionPolicy '`, and not (c). Our policy sets `reason: Forbidden` on its validation (§10.6.1), so its denials are 403 | an admission policy refused the write |
-| (c) **policy config error** | 422, reason Invalid | message contains `failed to configure binding`, and **no** `metadata.finalizers` cause | a policy binding couldn't be configured, for example `cu-policy-params` missing (§10.6.1) |
-| (d) **RBAC** | 403, reason Forbidden | no `ValidatingAdmissionPolicy` prefix | the caller lacks the permission |
+| (b) **policy denial** | 403, reason Forbidden | a policy's text (below), and not (c). Our policy sets `reason: Forbidden` on its validation (§10.6.1), so its denials are 403 | an admission policy refused the write |
+| (c) **policy config error** | 422, reason Invalid | a policy's text containing `failed to configure binding`, and **no** `metadata.finalizers` cause | a policy binding couldn't be configured, for example `cu-policy-params` missing (§10.6.1) |
+| (d) **RBAC** | 403, reason Forbidden | the authorizer's own message, `User "<name>" cannot <verb> resource "<resource>" in API group "<group>"`, followed by ` in the namespace "<ns>"` or ` at the cluster scope` (`pkg/endpoints/handlers/responsewriters/errors.go:60-80`). The exact text is pinned by an envtest | the caller lacks the permission |
+| (e) **other admission denial** | 403, reason Forbidden | neither (b) nor (d): a webhook denial, or NamespaceLifecycle refusing a create in a terminating namespace (`pkg/admission/plugin/namespace/lifecycle/admission.go:179`) | an admission plugin refused the write |
 
-**Only (a) is the Deleting outcome.** (b), (c) and (d) are Acquire errors
+**A policy's text is not a message prefix** (corrected in revision 16). The
+dispatcher wraps a denial in `admission.NewForbidden`, so the status message
+reads `configmaps "cu-index-x" is forbidden: ValidatingAdmissionPolicy '…' with binding '…' denied request: …`.
+It also appends a cause, with no type and no field, whose message is the bare
+text starting `ValidatingAdmissionPolicy '`
+(`pkg/admission/plugin/policy/validating/dispatcher.go:300-317`;
+apimachinery `pkg/api/errors/errors.go:209-229`). (b) and (c) are recognised
+by that cause, falling back to the substring
+`is forbidden: ValidatingAdmissionPolicy '` in the message.
+
+**(d) is recognised positively** (IP1, the user's decision). An earlier
+revision defined it as "a 403 without a policy's text", which also caught
+webhook denials and NamespaceLifecycle's 403. PerNamePoll would have retried
+those as RBAC propagation.
+
+**Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an
-established one. The brief retry for RBAC propagation in PerNamePoll
+established one, at once. The brief retry for RBAC propagation in PerNamePoll
 (§10.7.2) applies to (d) only. A 422 is never read as Deleting without the
 `metadata.finalizers` cause, so (c) can't be mistaken for (a).
+
+**JSON patches are classified apart.** R3's patch, Disown's strips and the
+label janitor's patch (§10.1) are never classified with the table above. A
+failed `test` op there is also a 422 Invalid, but the patch handler builds it
+with `NewGenericServerResponse(422, …)` (`pkg/endpoints/handlers/patch.go:423-426`),
+which drops json-patch's text. What remains is the generic message
+"the server rejected our request due to an error in our request", and no
+causes. A `remove` at an index that has moved looks the same. Either means
+**the state changed**: the releaser goes back to R1, at most 5 times per
+batch, and then requeues the batch with backoff. A 422 with a policy's text
+is (c) there too, and anything else is an error for the batch.
 
 **The releaser** works on one holder kind K and one namespace N at a time,
 for the set of protected objects pending there (R7). For each pending P:
@@ -495,8 +531,9 @@ for the set of protected objects pending there (R7). For each pending P:
   - when F is the last `credential-use.` finalizer of any kind, it also
     removes the held label.
 
-  If a test fails, the API server rejects the whole patch. The exact status
-  code is pinned by a test, and is treated as a conflict: P goes back to R1.
+  If a test fails, the API server rejects the whole patch, with the 422
+  described under "JSON patches are classified apart" above. The exact
+  status is pinned by a test, and is treated as a conflict: P goes back to R1.
   No other writer's change can be clobbered: the patch removes one index it
   has just tested, and keys only this kind writes. When R3 succeeds, this
   process drops its `written` entries for P at once, synchronously.
@@ -657,6 +694,20 @@ only come after the write it reports.
   That forces one A2 per (P, K, N) after each relist, coalesced as after a
   restart (§6.6). client-go has no silent gaps: a gap always ends in a
   relist. The residual is the relist's own latency.
+
+  **How a relist is seen** (revision 16). An event handler can't see one.
+  client-go turns `Replaced` and `ReplacedAll` deltas into ordinary
+  `OnAdd`, `OnUpdate` and `OnDelete` calls
+  (`client-go@v0.37.2/tools/cache/controller.go:823-870`, `:972-1002`). And
+  with `WatchListClient` on by default since client-go 1.35
+  (`features/known_features.go:141-144`), a relist is usually a watch with
+  `sendInitialEvents`, not a List. So the core builds its informers on its
+  own ListerWatcher wrapper, which records when each list completes: when a
+  List returns, or when the `k8s.io/initial-events-end` bookmark passes
+  (`tools/cache/reflector.go:1061`). Then
+  `t_obs = max(observed, recordSince, lastListCompleted)`. That is the reset
+  of every holder's entry, in constant time. After the first list it is
+  §6.3's `t_sync`.
 - **A recreate behind a cached UID** (L6). P is released and removed, and
   recreated under the same name. A process other than the releaser drops
   its `written` entries for the old UID only when its informer delivers
@@ -738,12 +789,14 @@ reconciling any holder. Part by part:
   releasers. A losing releaser re-reads from R1.
 - **The index** (§10.6). Every write is guarded and merges on conflict. The
   superset proof (§10.6.3) is between any acquirer and any pruner, in any
-  processes. The CRD pointer is written once, with a test that it is
-  absent, so only one process wins.
+  processes. The CRD pointer is written once, after a GET that finds it
+  absent, by a merge patch guarded by resourceVersion, so only one process
+  wins (§7.3, "Writing the CRD").
 - **Disown and the count** (§7.4). The strips are R3's patches. Every
-  process counts the same cluster, live. The count fields are written with
-  tests of their previous values, and `disown-settled` only with a test
-  that `held-count` is `"0"`. A process that reads a non-zero count written
+  process counts the same cluster, live. The count fields are written by
+  merge patches guarded by the CRD's resourceVersion, after a GET that read
+  their previous values, and `disown-settled` only when that GET read
+  `held-count` as `"0"`. A process that reads a non-zero count written
   by another resets its own zero counter.
 - **Old pods in an overlapping rollout** that run a runtime without this
   feature don't acquire, and don't `Forget`. A holder whose owner finalizer
@@ -802,6 +855,10 @@ type Clients struct {
 	Metadata metadata.Interface
 	Dynamic  dynamic.Interface
 	Mapper   meta.RESTMapper
+	// Events records §12's events on holders, protected objects and the
+	// index (k8s.io/client-go/tools/events). Nil records none. The core
+	// throttles them itself.
+	Events events.EventRecorder
 }
 
 type Options struct {
@@ -815,6 +872,10 @@ type Options struct {
 	ProbeInterval  time.Duration            // missing-ref prober; default 15s (§10.3)
 	DisownInterval time.Duration            // §7.4; default 60s
 	DisownPasses   int                      // §7.4; consecutive zero passes, default 5
+	// TimeoutBound is the kind's largest reconcile or request timeout. It is
+	// required: §7.3 checks DisownPasses × DisownInterval against twice it,
+	// and publishes it. provider-runtime passes its timeout plus grace, 90s.
+	TimeoutBound   time.Duration
 	Logger         logging.Logger
 	Metrics        MetricsRecorder
 }
@@ -851,9 +912,20 @@ func (t *Tracker) BeforeEstablish(ctx context.Context, obj metav1.Object, a Acqu
 func (t *Tracker) Forget(obj metav1.Object) (changed bool)
 func (t *Tracker) Users(ctx context.Context, p Ref, namespace string) ([]types.NamespacedName, error)
 
+// IsOwnRecordWrite reports whether the only change from old to new is the
+// record or the unheld annotation, and both equal what this process last
+// wrote for that holder: the holder event filter of §7.2 item 5 and §7.5.
+func (t *Tracker) IsOwnRecordWrite(old, new metav1.Object) bool
+
+// CheckRead reports a read of a protected kind that holder's record doesn't
+// name (§11.9). Runtimes wrap their own clients around it.
+func (t *Tracker) CheckRead(holder metav1.Object, gk schema.GroupKind, namespace, name string)
+
 type Acquired struct {
 	Held     []Ref
-	Unheld   []Unheld // each with a Reason: Missing, Deleting
+	// Unheld refs, each with a Reason: Missing, Deleting, NotConsented,
+	// ConsentWithdrawn, ReadDenied (§11.3), or Disowned (§7.4).
+	Unheld   []Unheld
 	Resolved map[Ref]*unstructured.Unstructured // objects read while following Next (§9.2)
 	// MustNotConnect: a ref is Deleting and unheld, and obj lacks its owner
 	// finalizer, or the acquire failed for an object without one (§8).
@@ -862,6 +934,13 @@ type Acquired struct {
 	// (fail open, §8). The error is in Err.
 	Degraded bool
 	Err      error
+	// RetryAfter, when set, asks the caller to requeue after it, with no
+	// failure backoff (IP2): the RBAC-propagation retry of §10.7.2, and a
+	// failed live consent read that kept its hold (§11.3).
+	RetryAfter time.Duration
+	// Pending: an A2 is waiting for its grant to propagate (§10.7.2), so the
+	// pass must not connect, whether or not obj is established.
+	Pending bool
 }
 
 // Resolved returns the object the tracker read for ref in this pass.
@@ -869,6 +948,17 @@ func WithResolved(ctx context.Context, a Acquired) context.Context
 func Resolved(ctx context.Context, ref Ref) (*unstructured.Unstructured, bool)
 
 func FinalizerName(holder schema.GroupKind, namespace string) (string, error)
+
+// DisownPrefix strips a deleted holder kind's holds (§7.4).
+func DisownPrefix(ctx context.Context, c Clients, o DisownPrefixOptions) (DisownReport, error)
+
+type DisownPrefixOptions struct {
+	Holder    schema.GroupKind
+	Protected []schema.GroupVersionKind
+	Index     *types.NamespacedName // PerName and PerNamePoll: the index to read
+	Names     []Ref                 // or an explicit list of objects
+	DryRun    bool                  // report only
+}
 
 const (
 	AnnotationRefs = "credential-use.krateo.io/refs.v1"
@@ -895,6 +985,11 @@ For unstructured-runtime:
    - If `a.MustNotConnect`, don't read credentials. Report it (§12), and
      requeue with backoff.
    - If `a.Degraded`, proceed: log once, record an event.
+   - If `a.Pending`, an A2 is waiting for its grant to propagate
+     (§10.7.2): don't read credentials, and requeue after `a.RetryAfter`
+     with no failure backoff.
+   - Otherwise, if `a.RetryAfter` is set (a failed live consent read that
+     kept its hold, §11.3), proceed, and requeue after it.
    - Pass `WithResolved(ctx, a)` to whatever reads the chain.
 3. **Just before adding its own finalizer:** `t.BeforeEstablish(ctx, obj, a)`.
    It live-reads refs that were Missing and holds any that now exist. On an
@@ -906,8 +1001,8 @@ For unstructured-runtime:
 5. **Enqueue, and the holder event filter:** pass `Options.Enqueue` that adds
    a holder to its workqueue (§10.2). It is required: `Track` fails without
    it, for the reason §7.5 gives for the source (M4). Filter holder update
-   events whose only change is the record, as `IgnoreCredentialUseRecord`
-   does (M6).
+   events whose only change is the record, with `t.IsOwnRecordWrite`, as
+   provider-runtime's `r.IgnoreCredentialUseRecord()` does (M6).
 6. RBAC as in §13. In PerName or PerNamePoll mode, also set
    `SharedOptions.IndexNamespace` (§10.6.1).
 
@@ -942,8 +1037,8 @@ exported for diagnostics and tests.
   (U2).
 - **Settings every process of a kind must share are published on the holder
   CRD** (L3), in the same way as the index pointer. The first process writes
-  `credential-use.krateo.io/config` with a patch that tests the annotation
-  is absent:
+  `credential-use.krateo.io/config` once, after a GET that finds it absent
+  (see "Writing the CRD" below):
 
   ```json
   {"deletionGrace":"60s","disownPasses":5,"disownInterval":"60s","timeoutBound":"90s"}
@@ -959,6 +1054,17 @@ exported for diagnostics and tests.
   and release reads only records. But it **churns**: two versions keep
   rewriting a holder's record back and forth, and each rewrite triggers A1
   and a release batch, until the rollout finishes.
+- **Writing the CRD** (revision 16). Every CRD write (this config, the index
+  pointer of §10.6.1, and Disown's count fields of §7.4) is a GET, then a
+  merge patch guarded by the CRD's resourceVersion. A conflict re-reads and
+  decides again. An earlier revision asked for "a patch that tests the
+  annotation is absent", but RFC 6902 has no test for absence: json-patch v4
+  passes a `test` with `null` on a missing key only when the parent map
+  exists (`gopkg.in/evanphx/json-patch.v4@v4.13.0/patch.go:677-693`), a
+  library quirk, and a first count write has no previous value to test. The
+  guarded merge keeps every guarantee: written once, no older count over a
+  newer one, and `disown-settled` only over a `held-count` of `"0"`. It also
+  conflicts with unrelated CRD writes, which cost only a retry.
 
 ### 7.4 Disown
 
@@ -989,8 +1095,10 @@ a ConfigMap in the provider's namespace:
 **What Disown does.** While the switch is on, for every tracker of the kind
 in every process:
 
-- `Acquire` acquires nothing. It returns every ref Unheld, the object
-  proceeds as today, and nothing is ever `MustNotConnect`.
+- `Acquire` acquires nothing. It returns every ref Unheld, with the reason
+  `Disowned`, the object proceeds as today, and nothing is ever
+  `MustNotConnect`. `Disowned` is never written to the `unheld` annotation,
+  which Disown strips with the record.
 - The loop strips the record from every holder of K, with a merge patch
   guarded by resourceVersion.
 - It removes every finalizer with K's prefix, and its epoch, from every
@@ -1032,8 +1140,9 @@ or uninstalling is safe once `held-count` is `0` and `disown-settled` is
 `true`.** Any process can write the fields, because each one counts the
 same cluster, live.
 
-**Writing the fields** (L5, L6). Every write of these fields is a JSON patch
-that tests the field's previous value. Of two processes racing, one fails
+**Writing the fields** (L5, L6). Every write of these fields is a merge patch
+guarded by the CRD's resourceVersion, after a GET that read the previous
+values (§7.3, "Writing the CRD"). Of two processes racing, one conflicts
 and re-reads, so neither overwrites a newer count with an older one. **A
 CRD write makes the API server rebuild its OpenAPI**, so the fields are
 written only when they change. Apart from the one-time index pointer
@@ -1055,14 +1164,16 @@ strip. §10.6.8, interleaving 3, shows why consecutive zero passes catch it.
 **Namespaces outside `SharedOptions.Namespaces`.** Disown doesn't use the
 caches. Its lists are live and cluster-wide, so it reaches every namespace,
 including those the caches don't cover. Under `resourceNames` RBAC, where
-cluster-wide lists aren't allowed, it works from the holders' records
-instead: it GETs and patches each named object.
+cluster-wide lists aren't allowed, it works from the union of the index's
+lines and the holders' records: it GETs and patches each named object. The
+index is the superset of the holds (§10.6.3), and the records have to be
+stripped anyway.
 
 **Disown with no holder kind, for a deleted CRD** (L5). When the holder CRD
 is gone, its objects are gone too: a CRD's deletion removes its custom
 resources first. But finalizers with its prefix may remain on protected
-objects. `credentialuse.DisownPrefix(ctx, clients, holder schema.GroupKind,
-protected []schema.GroupVersionKind)` needs no holder kind and no switch. It
+objects. `credentialuse.DisownPrefix(ctx, clients, DisownPrefixOptions{Holder,
+Protected, Index, Names, DryRun})` (§7.1) needs no holder kind and no switch. It
 lists the protected kinds live by K's marker label, removes every finalizer
 with the prefix `credential-use.<kind>.<group>/` and its epoch, and removes
 the labels as above. In PerName mode it takes the names from the index,
@@ -1091,16 +1202,46 @@ refs are needed before Connect, when there is no client yet.
 
 `NewReconciler` then:
 
-- gets the per-manager `Shared` (built once from `mgr.GetConfig()` and
-  `mgr.GetRESTMapper()`) and adds its `Run` to the manager as a runnable
-  that needs leader election;
-- calls `Track`.
+- gets the per-manager `Shared`, built once from `mgr.GetConfig()` and
+  `mgr.GetRESTMapper()` with the default `SharedOptions`, and kept in a
+  registry keyed by the manager, so a second `NewReconciler` on the same
+  manager reuses it;
+- adds it to the manager as **two runnables** (IP4, the user's decision):
+  - **the informers**, which are read-only and need no leader election, as
+    the manager's own cache doesn't. They start at the first of the
+    runnable's `Start` and `CredentialUseSource`'s `Start`;
+  - **the write loops**: the release loop, the prober, Disown and the label
+    janitor. They need leader election.
+
+  One leader-elected runnable would break controller-runtime's
+  `EnableWarmup` (`pkg/config/controller.go:70-78`): sources then start
+  before election, and the source's `WaitForSync` would time out on
+  informers that hadn't started. Safety doesn't depend on the split
+  (§6.8);
+- calls `Track`. Its `Enqueue` forwards to the queue `CredentialUseSource`
+  receives in `Start`, and does nothing before then. Nothing is lost by
+  that: no `Reconcile` runs before the source has started and synced, and
+  the controller's own `For` source delivers every holder once at start.
+
+**Configuring it.** Per-kind settings (protected kinds, watch mode,
+`Content`, the grace and the intervals) are
+`reconciler.WithCredentialUse(credentialuse.KindOptions)`. The default
+protects Secrets, LabelScoped. The implicit `Shared` uses the default
+`SharedOptions`. A provider that needs others (`Namespaces`,
+`IndexNamespace`, `Listers`) builds its own `Shared` and passes
+`reconciler.WithCredentialUseShared(s)`, which is supported in production as
+well as in tests. The adapter sets `TimeoutBound` to its reconcile timeout
+plus grace.
 
 **The owner finalizer under a custom `WithFinalizer`.** `APIFinalizer`
 gains `FinalizerName() string`, through a new optional interface,
 `resource.NamedFinalizer`. A custom `resource.Finalizer` that doesn't
 implement it, on a connecter that implements `CredentialRefsProvider`, is a
 setup error: the runtime can't tell established holders from new ones.
+`NamedFinalizer`'s contract is that `RemoveFinalizer` writes the object's
+annotations together with the finalizer change, as `APIFinalizer`'s Update
+does, so that `Forget` lands in the same write (§8). Where a custom one
+doesn't, §6.1's exclusion still keeps the stale record harmless.
 While provider-runtime#46 migrates the finalizer's name, the adapter passes
 both the old and the new name in `OwnerFinalizers`, for the whole migration.
 
@@ -1113,19 +1254,21 @@ needs a handle on the controller the provider builds after
 r := reconciler.NewReconciler(mgr, kind, reconciler.WithExternalConnecter(c), ...)
 return ctrl.NewControllerManagedBy(mgr).
 	Named("myresource").
-	For(&v1alpha1.MyResource{}, builder.WithPredicates(reconciler.IgnoreCredentialUseRecord())).
+	For(&v1alpha1.MyResource{}, builder.WithPredicates(r.IgnoreCredentialUseRecord())).
 	WatchesRawSource(r.CredentialUseSource()).
 	WithOptions(o.ForControllerRuntime()).
 	Complete(r)
 ```
 
-`IgnoreCredentialUseRecord` drops a holder update event only if its only
+`r.IgnoreCredentialUseRecord()` drops a holder update event only if its only
 change is the record or the `unheld` annotation (setting aside
 `resourceVersion` and `managedFields`), **and** both equal what this process
 last wrote for that holder (L8). A hand edit of the record, or another process's
 write, still triggers a pass. That removes the extra pass A1 would otherwise
-cause (§6.6, M6), and nothing else. An outside runtime filters its holder
-events the same way.
+cause (§6.6, M6), and nothing else. **It is a method on the reconciler**
+(IP3, the user's decision), not a package-level function as an earlier
+revision showed: what this process last wrote is tracker state. An outside
+runtime filters its holder events the same way, with `t.IsOwnRecordWrite`.
 
 **`CredentialUseSource` is a `source.TypedSyncingSource`** (L1). Its
 `WaitForSync` waits on `HasSynced` of the event-handler registration on the
@@ -1152,8 +1295,8 @@ before the source has delivered the protected objects' initial state.
   then, that `Reconcile` does nothing (no Acquire, no Connect) and signals
   the runnable, whose `Start` returns
   `credential-use source for <kind> was not started: add .WatchesRawSource(r.CredentialUseSource()) to the controller`.
-  If no `Reconcile` comes, the runnable also fails 2 minutes after leader
-  election with the source still unstarted.
+  If no `Reconcile` comes, the write-loop runnable also fails 2 minutes
+  after leader election with the source still unstarted.
 
 U2's rule is that acquiring without its supporting pieces must not run.
 Without the source, third-party stripping, re-pointed intermediates and
@@ -1201,6 +1344,14 @@ per key. In order:
      event (`CredentialUseDegraded`), count the metric, and proceed to
      Connect as today. It never gets `MustNotConnect`. An A2 rejected as
      Deleting (422) is Degraded in the same way (§11.4).
+   - **`a.Pending` and `a.RetryAfter`** (IP2). In the RBAC-propagation
+     window of §10.7.2 (`a.Pending`), the pass stops before Connect, new and
+     established holders alike, writes nothing, and
+     returns `RequeueAfter: a.RetryAfter` with a nil error, so no failure
+     backoff is consumed and no worker sleeps. This is the one exception to
+     "return the error so backoff applies". After a failed live consent read
+     that kept its hold (§11.3), the pass proceeds to Connect, and requeues
+     at the smaller of `a.RetryAfter` and its poll interval.
    - `WithResolved(externalCtx, a)` puts the resolved chain on Connect's
      context (§9.2).
    - The gate's `pristine` copy (`:870`) is taken after Acquire, so that a
@@ -1446,7 +1597,9 @@ A2's write sets the labels, so from then on the object is in the cache.
 There is one metadata-only informer per holder kind, with a transform that
 keeps the UID, resourceVersion, `deletionTimestamp`, finalizers and the
 record. That is about 300 bytes plus about 100 bytes per ref, so 10,000
-holders cost about 5 MB. Its handler maintains `recordSince` (§6.3).
+holders cost about 5 MB. Under provider-runtime, the manager's cache also
+watches the holder kind, with typed objects. The core can't use that cache
+(§7.1), so the kind is watched twice. Its handler maintains `recordSince` (§6.3).
 
 Its index maps each recorded ref to holders. The index serves:
 
@@ -1783,7 +1936,8 @@ proves it.
   kind has one controller.
 - **The location is fixed once, on the holder CRD.** The first process of
   the kind writes `credential-use.krateo.io/index: <namespace>/<name>` on
-  the CRD, with a patch that tests the annotation is absent. Every later
+  the CRD, once, after a GET that finds it absent, with a merge patch guarded
+  by resourceVersion (§7.3, "Writing the CRD"). Every later
   process reads it. A process whose `IndexNamespace` disagrees with the
   CRD's refuses to start (§7.3), so two processes of one kind can never keep
   two indexes. Moving the index means Disown, then re-pointing the
@@ -1824,6 +1978,11 @@ another writer's change.
   2. After that write succeeds, it **live-GETs each pruned P**. If P carries
      a finalizer with K's prefix again (a concurrent A2 re-added it), it
      adds the line back.
+- **Lines for Missing refs** (revision 16). The line is added before A2,
+  so a ref whose A2 finds NotFound has a line but no hold. It is kept while
+  some holder's record names the ref: PerNamePoll needs its grant for the
+  prober's GET (§10.3). The release batch prunes it, under the rule above,
+  once no record names the ref and the object carries no finalizer of K.
 - **The startup recheck's prune** follows the same rule. It prunes the lines
   whose objects carry no finalizer with K's prefix, then live-GETs those
   objects, and adds back any that now do.
@@ -1876,8 +2035,8 @@ line. The marker label still finds it (§10.6.6).
   At about 400 bytes a line, which is the worst case (a 253-character name,
   a 63-character namespace, a long group), 2,000 lines fit in a
   ConfigMap's 1 MiB. PerName is for hundreds of names, not thousands.
-- **The hard ceiling** is about 17,000 lines of typical size (60 bytes)
-  in 1 MiB. Setup rejects a cap above it. Every write also checks the byte
+- **The hard ceiling** is 17,000 lines, about what fits of typical size
+  (60 bytes) in 1 MiB. It is a constant, and setup rejects a cap above it. Every write also checks the byte
   size, so lines longer than typical meet the 1 MiB limit before the cap.
 - **At 80% of the cap**, the tracker records a Warning event on the index
   ConfigMap and sets `credentialuse_index_fill_ratio`.
@@ -2095,10 +2254,12 @@ act on.
 
 RBAC propagates to each API server through that server's own informer, so a
 grant that one server already applies can still be denied by another for a
-moment. **An RBAC 403 on A2 (class (d) of §6.2, never (b)) is retried
+moment. **An RBAC 403 on A2 (class (d) of §6.2, never (b) or (e)) is retried
 without sleeping in a worker** (L2). The
-pass returns a short `RequeueAfter` (0.5s, then 1s, 2s, 4s, tracked per
-holder and ref in memory). Once about 8s in all have passed, the 403 is
+pass stops before Connect, for a new holder and for an established one alike,
+and sets `Acquired.RetryAfter` to 0.5s, then 1s, 2s, 4s (tracked per
+holder and ref in memory), which the caller returns as `RequeueAfter` with no
+failure backoff (IP2, §8 step 5). Once about 8s in all have passed, the 403 is
 reported as an Acquire error, the ordering or provisioning defect. For a new
 holder, the pass then fails closed and requeues with backoff. **For an established holder it is
 Degraded, and that is harmless**: Degraded is today's behaviour for one
@@ -2268,8 +2429,9 @@ not only before A2:
     A1;
   - if either does, it keeps the hold. That is the case of a stale cache,
     or of a source still syncing after a restart;
-  - **if the live read fails, it keeps the hold and requeues**, with two
-    exceptions:
+  - **if the live read fails, it keeps the hold and requeues**: the ref
+    stays held, so the pass proceeds to Connect, and `Acquired.RetryAfter`
+    asks for the requeue (§8 step 5, IP2). There are two exceptions:
     - **NotFound means the target is gone, not a failed read** (L1). If the
       object, or its Namespace, is NotFound, the ref is treated as
       **Missing** (§6.2). There is nothing left to hold, and nothing is
@@ -2466,11 +2628,25 @@ manages, and the RBAC that keeps it working must not live there either
 
 ### 11.6 Scale to zero (R11)
 
-At 0 replicas, nothing releases. So **`scaletozero.Exists` also counts, as
+At 0 replicas, nothing releases. So **scale-to-zero also counts, as
 instances, protected objects that carry a finalizer with the Kind's
 prefix**. A new option asks for it,
-`scaletozero.WithHeld(protected ...schema.GroupVersionKind)`. With it, if
-the instance list finds nothing, `Exists` lists each protected kind
+`scaletozero.WithHeld(protected ...schema.GroupVersionKind)`.
+
+**The change is additive** (IP5, the user's decision). `Exists` and
+`Reconcile` keep their signatures and behaviour. Two functions are added,
+and take the options:
+
+- `ReconcileWithOptions(ctx, c, deploy, gvk, sel, lastSeen, holdDown, active, opts ...Option)`.
+  `Reconcile` calls it with no options. It takes the RESTMapper it needs
+  for the holder CRD's name from `c.RESTMapper()`;
+- `ExistsWithOptions(ctx, r, gvk, sel, opts ...Option)`, for owners that ask
+  outside a reconcile, as core-provider's `Undeploy` does (§16.3). A
+  `client.Reader` carries no RESTMapper, so with `WithHeld` it also needs
+  `WithRESTMapper(m)`, and fails without it.
+
+With `WithHeld`, if
+the instance list finds nothing, the check lists each protected kind
 metadata-only, selected by **K's marker label** (§10.1), with `Limit: 1`. It
 stops at the first object whose finalizers include the prefix
 `credential-use.<kind>.<group>/`, and pages on only past a hash collision
@@ -2527,9 +2703,12 @@ These are the cases the bookkeeping misses, and how each is handled:
      `Protected` kind, that isn't in the object's refs after `Next`. It also
      fails when a path resolves to nothing, so a mistyped path doesn't
      silently protect nothing (§16.2);
-   - **at run time:** `credentialuse.CheckingReader(reader, tracker)` wraps
-     the provider's client. A read of a protected kind absent from the
-     object's record logs once per object and counts in a metric.
+   - **at run time:** `reconciler.CredentialUseCheckingReader(reader, ...)`
+     wraps the provider's controller-runtime client. A read of a protected
+     kind absent from the object's record logs once per object and counts in
+     `credentialuse_unrecorded_reads_total`. The core can't wrap a
+     controller-runtime client (§7.1), so it exposes `t.CheckRead`, and
+     outside runtimes wrap their own clients around it.
 3. **`RefsFunc` or `Next` fails:** fail closed for a new holder, open for an
    established one (§8). Release never calls them.
 4. **The record removed or edited by hand:** the next pass re-announces and
@@ -2597,6 +2776,17 @@ object, finalizer) pairs with the kind's prefix in the process's cache. A
 labelled object whose finalizers are gone doesn't count, and the janitor in
 §10.1 removes its label. The cluster-wide, live count for Disown is
 separate, and is written on the CRD (§7.4).
+
+**The metrics**, all labelled `holder_kind`:
+`credentialuse_held_objects` and `credentialuse_waiting_objects` (gauges),
+`credentialuse_index_fill_ratio` (gauge, PerName and PerNamePoll),
+`credentialuse_degraded_total{reason}` (every fail-open of §8, which earlier
+revisions counted without naming), `credentialuse_refs_not_held_total`,
+`credentialuse_consent_withdrawn_total`, `credentialuse_refs_read_denied_total`,
+`credentialuse_index_tampered_total` and
+`credentialuse_unrecorded_reads_total` (§11.9). The core defines them as a
+`MetricsRecorder` interface, and `pkg/telemetry` implements it with
+OpenTelemetry.
 
 ## 13. RBAC (U7)
 
@@ -2695,9 +2885,12 @@ Doc text for consumers:
 
 ## 14. Tests, and what the reviewer should attack
 
-**Envtest: namespace teardown** (`pkg/credentialuse`, with its own
-`TestMain` and `requireAPIServer`, modelled on
-`pkg/scaletozero/envtest_test.go`). A manager runs the real reconciler for
+**Envtest: namespace teardown** (modelled on
+`pkg/scaletozero/envtest_test.go`, with its own `TestMain` and
+`requireAPIServer`). It runs twice. In `pkg/credentialuse`, a minimal
+reconcile loop that follows §7.2 drives the core. In
+`pkg/credentialuse/e2e`, a test-only package, so that the core's tests don't
+depend on `pkg/reconciler`, a manager runs the real reconciler for
 a test CRD (`Widget`). Its connecter implements `CredentialRefs` and reads
 the Secret in Connect, and its client records Delete calls. envtest has no
 namespace controller, so the test plays that controller, in the order seen
@@ -2800,19 +2993,22 @@ on krateo-057:
   403 that is reported as an Acquire error, not as Deleting; a failed
   provisioning fails closed for a new holder and is Degraded for an
   established one.
-- **Error classification** (§6.2): each of the four classes is produced
+- **Error classification** (§6.2): each of the five classes is produced
   for real in envtest and classified correctly:
   - (a) an A2 on an object being deleted without the finalizer;
   - (b) a write the namespace policy denies, which is a 403 because of
     `reason: Forbidden`;
   - (c) a write with `cu-policy-params` deleted, a **422 that must not be
     read as Deleting**, because it has no `metadata.finalizers` cause;
-  - (d) an A2 without RBAC.
+  - (d) an A2 without RBAC, **with the authorizer's exact message pinned**,
+    for a namespaced and a cluster-scoped object;
+  - (e) NamespaceLifecycle's 403 on a create in a terminating namespace.
 
-  Only (a) yields Deleting. (b) to (d) are Acquire errors, failing closed
+  Only (a) yields Deleting. (b) to (e) are Acquire errors, failing closed
   for a new holder and Degraded for an established one, and only (d) is
   retried as RBAC propagation. A policy with no `reason` is also tested,
-  to pin that it yields 422.
+  to pin that it yields 422. So is R3's failed `test` op, the 422 with the
+  generic message and no causes, and a `remove` at a moved index.
 - The Deleting outcome is recognised by its 422 Invalid with a Forbidden
   cause on `metadata.finalizers`, and never by a 403.
 - **The provisioner** (§10.7.1): grants follow the index, coalesced to one
@@ -2901,11 +3097,13 @@ on krateo-057:
 - A foreground-deleted holder that owns its Secret completes (§11.8).
 - Setup after start, and `Track` twice with equal and with different
   Options.
-- `scaletozero.Exists` with `WithHeld`, stopping at the first object with
+- `scaletozero.ExistsWithOptions` and `ReconcileWithOptions` with `WithHeld`,
+  and `Exists` and `Reconcile` unchanged without options, stopping at the first object with
   K's marker label, and paging past a forced hash collision.
-- `Watch: PerName` against `resourceNames` RBAC, on an envtest API server
-  started with `--authorization-mode=RBAC`, through an impersonated
-  ServiceAccount.
+- `Watch: PerName` against `resourceNames` RBAC, through an impersonated
+  ServiceAccount. envtest's API server already runs
+  `--authorization-mode=RBAC`
+  (`controller-runtime@v0.25.2/pkg/internal/testing/controlplane/apiserver.go:303`).
 
 **Unit tests for the races (§6)** run on an in-memory API model: a
 linearizable store with resourceVersions, `ValidateNoNewFinalizers`,
@@ -3208,7 +3406,7 @@ instance goes. Two cases matter:
 
 - `Undeploy` treats held objects as instances, in both the `!SkipCRD` and
   the `SkipCRD` paths. It refuses with `ErrCompositionStillExist`, or a new
-  error, while `scaletozero.Exists(... WithHeld(...))` (or `WithHeldIndex`
+  error, while `scaletozero.ExistsWithOptions(... WithHeld(...))` (or `WithHeldIndex`
   in PerName mode) finds a hold under the kind's prefix that this
   definition's RBAC is the only grant for.
 - **"The only grant" is computed, not read** (CP3b). It is the name's
@@ -3477,9 +3675,48 @@ were not retried.
 | Correcting revision 14's report: the "Forbidden naming the binding" there was wrong; it is a 422 | §10.6.1 |
 | **Our own finding, recorded:** the backfill figures in §6.6 were twice too high in revisions 3 to 6 (8 and 16 minutes). Revision 7 corrected them to 4 and 8 | §6.6 |
 
+**Revision 16** (the implementation plan,
+[plan-credential-use-implementation](./plan-credential-use-implementation.md)).
+The plan found 23 places where the text was ambiguous or wrong once coded.
+The user decided the five that change an API or a rule:
+
+| Item | Resolved in |
+|---|---|
+| IP1 RBAC 403s are recognised positively, by the authorizer's own message, whose exact text an envtest pins; every other 403 is an admission denial, an Acquire error at once, never retried as RBAC propagation | §6.2 (classes (d) and (e)), §10.7.2, §14 |
+| IP2 `Acquired.RetryAfter`: the RBAC-propagation window stops the pass before Connect for new and established holders and requeues with no backoff; a failed live consent read keeps its hold, proceeds and requeues | §7.1, §8 step 5, §10.7.2, §11.3 |
+| IP3 The predicate is a method, `r.IgnoreCredentialUseRecord()`, which changes the builder line; the core's `t.IsOwnRecordWrite` for outside runtimes | §7.1, §7.2, §7.5 |
+| IP4 Two runnables: the informers without leader election, the write loops with it, so `EnableWarmup` works | §7.5 |
+| IP5 scale-to-zero is additive: `ReconcileWithOptions` and `ExistsWithOptions` take `WithHeld` and `WithHeldIndex`; `Reconcile` and `Exists` are unchanged, and `Reconcile` calls `ReconcileWithOptions` with no options. `ExistsWithOptions` also takes `WithRESTMapper` with `WithHeld`, because a reader has no RESTMapper | §11.6, §14, §16.3 |
+
+The other items, which stay within the design:
+
+| Item (plan §5) | Resolved in |
+|---|---|
+| A1 A policy's text is a cause message and a substring of the status message, not a prefix (`dispatcher.go:300-317`) | §6.2 |
+| A3 R3's failed `test` op is a 422 with the generic message and no causes (`patch.go:423-426`); JSON patches are classified apart, and "state changed" goes back to R1, at most 5 times per batch | §6.2 |
+| A4 No "test that it is absent": every CRD write is a GET, then a merge patch guarded by resourceVersion | §6.8, §7.3, §7.4, §10.6.1 |
+| A6 `Options.TimeoutBound`, required | §7.1, §7.5 |
+| A7 `Clients.Events`; the metrics named, including `credentialuse_degraded_total` and `credentialuse_unrecorded_reads_total`; the otel implementation in `pkg/telemetry` | §7.1, §12 |
+| A8 `DisownPrefix` takes `DisownPrefixOptions`, with `Index`, `Names` and `DryRun` | §7.1, §7.4 |
+| A10 `CheckingReader` is `reconciler.CredentialUseCheckingReader`; the core exposes `t.CheckRead` | §7.1, §11.9 |
+| A11 Configuring it: `WithCredentialUse(KindOptions)`; `WithCredentialUseShared(s)` for non-default `SharedOptions`, in production too; a per-manager registry | §7.5 |
+| A13 Disown's unheld refs have the reason `Disowned`, never written to `unheld` | §7.1, §7.4 |
+| A14 Index lines for Missing refs are kept while a record names the ref, and pruned by the batch after | §10.6.2 |
+| A15 Disown under `resourceNames` RBAC works from the index's lines and the records | §7.4 |
+| A17 `NamedFinalizer`'s contract: `RemoveFinalizer` writes the annotations with the finalizer change; §6.1 covers a custom one that doesn't | §7.5 |
+| A18 A1 and the custom-resource A2 build the optimistic-lock merge patch in the core, on client-go only | §6.2 |
+| A19 The index ceiling is the constant 17,000 lines | §10.6.4 |
+| A20 A relist is seen through the core's own ListerWatcher wrapper, on List's return or the initial-events-end bookmark, because handlers can't see one and watch-list is on by default | §6.5 |
+| A21 The reconciler-driven envtests live in the test-only `pkg/credentialuse/e2e` | §14 |
+| A22 The adapter's `Enqueue` forwards to the source's queue once it starts | §7.5 |
+| A23 The holder kind is watched twice under provider-runtime, so its memory is doubled | §10.2 |
+
+A2, A5, A9, A12 and A16 are IP1 to IP5 above.
+
 ## 18. Open questions for the user
 
 **Decided since the last revision**: NQ1 (a 60s grace, §5), NQ2 (no cap,
-§5.2), NQ3 (the builder line, §7.5) and NQ4 (provider-runtime#46).
+§5.2), NQ3 (the builder line, §7.5) and NQ4 (provider-runtime#46). In
+revision 16, IP1 to IP5 (§17).
 
 Nothing is open. No question needs the user.
