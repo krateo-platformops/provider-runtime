@@ -1,0 +1,209 @@
+Re-measure plan, 2026-11-08. Approved as written by the coordinator the same
+day. Nothing here has run, and nothing runs on a cluster until the user approves
+it. Both blocks run on the new arm: main at d271115 (#40's gated queue, #43's
+controller-runtime v0.25.2 with k8s 0.37.2, and v1.11.0's scale-to-zero package,
+which the harness doesn't use) plus the memory input's commits, rebuilt on top of
+it on 2026-11-08. The original history, with every block's settings committed
+before its first run, is on the local branch memory-input-history at 8e656c1.
+
+== 1. The CPU workload's calibration (done on this branch)
+
+What was wrong. LOAD_CPU_MS=3000 meant 3000 sha256 rounds over 64 KiB, meant as
+about 100ms of CPU a call. On GKE's amd64 node it cost about 0.72s of process CPU
+per Observe: every one of the first block's 15 runs reads 0.70 to 0.78s (CPU
+over Observes, from 30s on). At 250m, one call takes about 3s of wall time.
+
+The calibration alone didn't cause the tie, though. In the 50 and 75 arms local
+sat at 1, one call in flight, and pressure still read 57 and 66 (off: 80). A
+worker that runs CPU-bound calls back to back, with a backlog that never
+empties, wants a whole core. At 250m it is throttled about 75% of the time,
+whatever each call costs, so local=1 could not bring the pressure under the
+threshold. For the arms to differ, a call has to spend part of its time off the
+CPU, as a real provider's Observe does while it waits on an external API. So the
+re-run adds a wait after the CPU (LOAD_HOLD_MS, which the memory modes already
+use), as well as fixing the calibration.
+
+How. LOAD_CPU_MS is now milliseconds of CPU time measured on the calling
+thread: burn.go locks the goroutine to its OS thread and hashes in small chunks
+until clock_gettime(CLOCK_THREAD_CPUTIME_ID) shows the target spent. Overshoot
+is one chunk, tens of microseconds. I chose this clock over
+getrusage(RUSAGE_THREAD) because it is one call with nanosecond resolution,
+reading the same scheduler accounting on Linux, and it also exists on macOS, so
+the unit test runs on the driver's machine. Throttling stretches the call's wall
+time, never its CPU.
+
+Unit test (burn_test.go, Linux and macOS). Asking for 5ms or 50ms must measure
+the request to the request plus 2ms on the thread, and 90% to 130% of the
+request plus 5ms in the process's own getrusage, which doesn't use the thread
+clock. Four 50ms calls sharing one CPU must each measure 50ms, and take at
+least 180ms of wall time. On the driver: asked 50ms, thread 50.03ms, process
+50.10ms; four calls on one CPU took 205ms of wall time for 200ms of CPU.
+
+STAT lines gain burn_cpu_ms/call and burn_wall_ms/call, for the calls that
+finished in that second. The first confirms the setting on the node. The second
+shows how much throttling stretched the CPU part. cpu_ms/s over obs/s gives the
+whole reconcile's CPU, the controller's own work included.
+
+== 2. CPU block re-run: settings, approved by the coordinator on 2026-11-08
+
+The workload changed between the first CPU block and this one. The first block
+couldn't separate the arms by construction: its calls were CPU-bound with no
+time off the CPU, so one call in flight kept 250m saturated, and no threshold
+could lower the pressure. This workload, 20ms of measured CPU and then a 400ms
+wait, was decided from the first block's logs and the model below, before any
+run of the new block, not after seeing its results. The two blocks' figures
+don't compare with each other.
+
+Unchanged from the first block: three arms, off, 75 and 50 (SAT_CPU), 5 runs
+each, order rotating each round, one run at a time. The memory input is off.
+incident-provider's probe (period 10s, timeout 1s, failure 3). 250m, 512Mi,
+64 Greetings, poll 1s, 16 workers.
+
+Changed:
+- Per call: 20ms of CPU, then a 400ms wait (LOAD_CPU_MS=20 LOAD_HOLD_MS=400).
+  The controller's own work adds about 5ms per reconcile. That is a guess from
+  the memory block's 8 to 9ms per reconcile, which includes touching 16 MiB; the
+  STAT lines will show the real figure.
+- Runs of 360s, not 240s. After a cut, local recovers one step per 30s, so
+  240s holds about two cut-and-recover cycles and 360s about three.
+- Runs named c2-*, settings in results/cpu2-settings.txt, so the first block's
+  committed c-* logs and cpu-settings.txt stay as they are.
+
+Why these numbers. A reconcile costs about 25ms of CPU, and 250m allows 250ms
+a second, so at most about 10 reconciles a second. One worker unthrottled runs
+a call every 425ms, using about 0.06 of a core, so:
+- off, 16 workers, would want 37 a second, about 3.8 times the quota. The
+  backlog (64 Greetings at 1s against 10 a second) never empties. About 12 of
+  the 16 workers are runnable at any moment, the quota is spent in every
+  period, and the cgroup is never without a runnable thread. Expected pressure
+  for off (cpu.pressure some avg10): about 75 to 85. The first block's off
+  arm, whose workers were also always runnable, read 79 to 81. CPU at the
+  limit, about 250ms/s; Observes about 9 to 10 a second.
+- About four calls in flight use the quota. So 50 should cut when local passes
+  about 5 and settle between about 2 and 5. Observes would then be about 5 to 9
+  a second against off's 9 to 10. That gap is the cost the block measures.
+- 75 sits close to off's expected pressure. It may engage only part of the
+  time, or not at all. The block reports which.
+- Each call's CPU, 20ms, is under the 25ms quota of one 100ms CFS period. So a
+  lone call isn't throttled by its own size, unlike the first block's 0.8s
+  calls.
+These are expectations from a simple model, not tuned on the cluster.
+
+Rules written down before run 1 (they are in cpu_block.sh's settings text):
+- Benefit: the off arm gets liveness kills, and 50 removes or clearly cuts
+  them, reported by cause. "Clearly" means off has 3 or more liveness kills
+  across its 5 runs and 50 at most half as many. If off has no liveness kills,
+  the result is "no benefit shown here". The workload and the probe are not
+  tuned to produce kills. (The first block's off arm had none: 3 single failed
+  probes in 5 runs.)
+- Cost: Observes per second, median of 5 runs, against off; and failed probes
+  that did not kill, per arm.
+- Also reported: whether 75 engaged, as cuts, local below 16 and calls in
+  flight. Not as deferrals: with the gate in the queue a gated arm defers
+  nothing for local capacity.
+- Validity, checked per run and reported, never used to drop a run: the median
+  burn_cpu_ms/call is 20.0 to 20.5. In off, CPU is at least 225ms/s, 12 or more
+  calls are in flight and pressure is over 50 (the in-flight check was dropped
+  after the calibration below, before run 1). If off doesn't saturate, the
+  block shows nothing about the threshold, and that is the result; the workload
+  is not retuned mid-block.
+- A calibration check before the block (approved): one 120s off run, not
+  counted, to confirm 20ms a call and saturation on the node. If it doesn't
+  saturate, stop and re-propose rather than tune.
+
+Calibration, 2026-11-08 (results/c2cal-off-2.log). CPU 250ms/s, throttled 2s a
+second; pressure 59.6; 20.1ms a call; calls in flight median 11. So the check of
+12 or more in flight failed, and the run stopped there, untuned. That check was
+mis-specified: it counts calls inside Observe, not reconciles, and all 16
+workers were busy while it read about 11. The coordinator's correction, made
+before run 1 and written into cpu2-settings.txt: off's validity is CPU at least
+225ms/s and pressure over 50, calls in flight are a diagnostic only, and the
+workload is unchanged. At about 60% pressure the 75 arm will likely not engage.
+It reads "did not engage" unless it does, and the arms aren't changed for it.
+Order changed too: the memory block and the overhead runs first, then this
+block.
+
+== 3. Memory block re-run: plan
+
+Same design as the first block (§11 item 16): ramp 20 pairs and cold 10 pairs,
+ABBA, 240s a run, one at a time. 2 CPU, 256Mi, the memory input on in both arms,
+nothing else set, the harness's default probe (period 2s, timeout 1s, failure 3),
+as before, so the two blocks compare. Settings fixed and committed before run
+1. Every run reported; discarded runs counted. The same bar lines.
+
+The arms:
+- new: main at d271115 plus the memory commits. That means the memory input
+  (ExperimentalMemory, Go memory limit, headroom cut at 15%) from this branch,
+  rebuilt on main; the local gate in the queue (#40) with its shutdown fix; and
+  controller-runtime v0.25.2 with k8s 0.37.2 (#43). The image records the exact
+  commit (results/image-<tag>.txt).
+- control: v1.10.0, d0632f1, as before. v1.10.1 differs only in the
+  QueueWaitRecorder wrapper, which the harness doesn't set, so v1.10.0 stays
+  the control and the comparison with the first block holds.
+
+What changes now that the local gate is in the queue:
+- No ramping or saturated deferrals in the new arm. The control still has
+  them. The harness's deferral map (STAT deferrals=) stays as a diagnostic,
+  but no report may count it as engagement. block_report.py doesn't read it;
+  cpu_report.py no longer judges engagement by it. Engagement in the new arm is
+  local below 16, the "Controller saturated: lowering local capacity" lines
+  (same text on main) and calls in flight.
+- Throughput means something else now. Before, a deferred item slept a
+  jittered 1s to 30s and could miss a slot that freed meanwhile (the inversion
+  core-provider found in unstructured-runtime#72). Now it waits in the queue
+  and takes the next slot. The new arm should be faster still. The throughput
+  line is measured again; this is the re-measurement the draft's last paragraph
+  of item 16 says a moved gate needs.
+- Cold start. local still starts at 1 and rises one step per 2s. But the
+  backlog now waits in the queue instead of being popped and quietly deferred.
+  The cold-start line compares again.
+- Memory per call in flight shouldn't change. The 16 MiB is allocated inside
+  Observe, and calls in flight are bounded by local in both versions. An idle
+  worker now holds no slot and no popped item, which matters for throughput,
+  not memory.
+- The local.capacity gauge now reports nothing with saturation off. The
+  harness reads Snapshot.LocalCapacity directly, and both arms run with
+  saturation on, so nothing changes for it.
+- The shutdown fix affects only a queue's shutdown. A run ends by deleting
+  its namespace, so it isn't measured.
+
+What changed in the harness at the rebase (done 2026-11-08):
+- The harness go.mod follows main to controller-runtime v0.25.2 and k8s 0.37.2
+  for the new arm. main.go builds and vets against v0.25.2 unchanged: manager
+  options, metrics server and healthz kept their API.
+- build.sh gains --local: both images are built for linux/amd64 into
+  images/measure-<tag>.tar, gitignored, and not pushed, because the registry is
+  gone. A cluster run needs them pushed to a registry it can pull from, set up
+  with the cluster.
+- The control builds from ctrl/go.mod and ctrl/go.sum, committed now, pinned to
+  v1.10.0's own controller-runtime v0.23.3 and apimachinery v0.35.3.
+  build.sh used to derive them from go.mod, which after the upgrade would have
+  built v1.10.0 against v0.25.2: not the code users run, and maybe not
+  compiling. So the arms differ in controller-runtime as well as in the
+  library. The question is "what users run before and after", so that is
+  right, and the report will say so.
+- New images for both arms, built locally at 6d76a36 and not pushed
+  (results/image-new3.txt, results/image-ctrl3.txt):
+  new3 sha256:ceb79357975eed7fc20b4eec005a83d546e8910d953642fd54a1e150492de58d,
+  controller-runtime v0.25.2, apimachinery v0.37.2;
+  ctrl3 sha256:7c21374b46d7ea7388ee79c89791d9f0c2f548a2531c108e856a383b4f95eb4d,
+  v1.10.0 with controller-runtime v0.23.3, apimachinery v0.35.3, -tags=ctrl.
+  Both linux/amd64, entrypoint /measure, user 65532, read back from the
+  tarballs. Pushing changes the reference, not the digest. The guards in
+  block.sh and cpu_block.sh also cover burn.go and the harness's go.mod and
+  go.sum, so a block refuses an image built before these changes.
+- The memory block re-run uses ctrl3, not ctrl2 (built with the old harness),
+  and writes b2-* runs and results/block2-settings.txt, so the first block's
+  committed b-* logs and block-settings.txt are never overwritten.
+  block_report.py takes the prefix (b2 by default, b for the first block) and
+  prints local, calls in flight and cuts for each run.
+- The STAT lines carry burn_* fields, "na" in the memory modes. The reports
+  ignore them there.
+
+Not changed: prun.sh's ramp and burst modes, the node identity record, the
+discard rules, ABBA order, and the bar. The real-provider line stays not done
+until git-provider adopts.
+
+Order and cost: two separate blocks, one at a time. CPU: 15 runs of about 7
+minutes, about 1h50m. Memory: 60 runs of about 5.5 minutes, about 5h30m. Each
+block is reported apart.

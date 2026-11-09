@@ -1,0 +1,21 @@
+== off
+c2-off-1   restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.28 cpu_some=56.2 local=None min=None inflight_med=12.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=613.5 cpu_ms/s=250 deferrals={} node_load=0.41 discarded=0
+c2-off-2   restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.29 cpu_some=59.5 local=None min=None inflight_med=11.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=566.4 cpu_ms/s=250 deferrals={} node_load=0.54 discarded=0
+c2-off-3   restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.34 cpu_some=55.6 local=None min=None inflight_med=11.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=540.7 cpu_ms/s=250 deferrals={} node_load=0.40 discarded=0
+c2-off-4   restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.36 cpu_some=56.4 local=None min=None inflight_med=12.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=609.4 cpu_ms/s=250 deferrals={} node_load=0.25 discarded=0
+c2-off-5   restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.28 cpu_some=53.5 local=None min=None inflight_med=12.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=597.8 cpu_ms/s=250 deferrals={} node_load=0.43 discarded=0
+-- 5 runs: restarts 0, liveness kills 0, oom 0, failed probes 0, obs/s median 11.29 range 11.28-11.36, cpu_some mean 56.2, cuts 0, discarded 0
+== 75
+c2-75-1    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.07 cpu_some=60.1 local=15.997014925373135 min=15.0 inflight_med=11.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=513.4 cpu_ms/s=250 deferrals={} node_load=0.38 discarded=0
+c2-75-2    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.19 cpu_some=56.8 local=16.0 min=16.0 inflight_med=11.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=514.6 cpu_ms/s=250 deferrals={} node_load=0.13 discarded=0
+c2-75-3    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.13 cpu_some=61.3 local=16.0 min=16.0 inflight_med=11.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=514.15 cpu_ms/s=250 deferrals={} node_load=0.41 discarded=0
+c2-75-4    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.21 cpu_some=57.1 local=16.0 min=16.0 inflight_med=12.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=559.2 cpu_ms/s=250 deferrals={} node_load=0.46 discarded=0
+c2-75-5    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=11.07 cpu_some=59.8 local=16.0 min=16.0 inflight_med=11.0 cuts=0 burn_cpu_ms/call=20.1 burn_wall_ms/call=521.2 cpu_ms/s=249 deferrals={} node_load=0.50 discarded=0
+-- 5 runs: restarts 0, liveness kills 0, oom 0, failed probes 0, obs/s median 11.13 range 11.07-11.21, cpu_some mean 59.0, cuts 0, discarded 0
+== 50
+c2-50-1    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=7.78 cpu_some=15.1 local=3.747826086956522 min=1.0 inflight_med=3.0 cuts=6 burn_cpu_ms/call=20.1 burn_wall_ms/call=24.1 cpu_ms/s=177 deferrals={} node_load=0.18 discarded=0
+c2-50-2    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=7.78 cpu_some=18.1 local=3.809384164222874 min=1.0 inflight_med=4.0 cuts=4 burn_cpu_ms/call=20.1 burn_wall_ms/call=26.3 cpu_ms/s=177 deferrals={} node_load=0.29 discarded=0
+c2-50-3    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=7.98 cpu_some=18.3 local=3.9504643962848296 min=1.0 inflight_med=4.0 cuts=4 burn_cpu_ms/call=20.1 burn_wall_ms/call=56.4 cpu_ms/s=182 deferrals={} node_load=0.21 discarded=0
+c2-50-4    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=7.72 cpu_some=17.7 local=3.764872521246459 min=1.0 inflight_med=4.0 cuts=3 burn_cpu_ms/call=20.1 burn_wall_ms/call=50.1 cpu_ms/s=175 deferrals={} node_load=0.21 discarded=0
+c2-50-5    restarts=0 liveness_kills=0 oom=0 other=[] failed_probes=0 obs/s=7.62 cpu_some=15.4 local=3.701117318435754 min=1.0 inflight_med=4.0 cuts=6 burn_cpu_ms/call=20.1 burn_wall_ms/call=38.0 cpu_ms/s=174 deferrals={} node_load=0.24 discarded=0
+-- 5 runs: restarts 0, liveness kills 0, oom 0, failed probes 0, obs/s median 7.78 range 7.62-7.98, cpu_some mean 17.0, cuts 23, discarded 0
