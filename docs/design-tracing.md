@@ -11,8 +11,8 @@ timestamp: 2026-11-09T00:00:00Z
 
 **Status:** design, for review. Nothing is built. It builds on
 [#58](https://github.com/krateo-platformops/provider-runtime/pull/58)
-(`logging.ContextLogger`, `logging.WithContext`), which is open at `cda449d`
-and has to merge first. The user decided its six open questions on
+(`logging.ContextLogger`, `logging.WithContext`). That's merged, and it
+shipped in v1.13.0 (`3ab2917`). The user decided its six open questions on
 2026-11-09, and §13 records them (D1 to D6). The sixth came from the review on
 #60.
 
@@ -21,13 +21,15 @@ and has to merge first. The user decided its six open questions on
 reconcile traces by bumping provider-runtime, calling `telemetry.Setup` in
 main, and setting env. No provider writes span code.
 
-**References.** Code is provider-runtime at `c9cc298` (main). `UR` is
+**References.** Code is provider-runtime at `3ab2917` (main, v1.13.0). `UR` is
 `krateo-platformops/unstructured-runtime` at tag `v1.12.0` (`5b4dbff`), read with
 `gh api`. `CR/` is `sigs.k8s.io/controller-runtime@v0.25.2`, and `SDK/` is
 `go.opentelemetry.io/otel/sdk@v1.45.0`. `API/` is `go.opentelemetry.io/otel@v1.45.0`
 and `go.opentelemetry.io/otel/trace@v1.45.0`, and `HTTP/` is
-`go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.45.0`. These
-are the versions in `go.mod`, read in the module cache. The consumers were read
+`go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.45.0`. All
+were read in the module cache. The OTel versions are the ones in `go.mod`;
+otlptracehttp isn't in `go.mod` yet. It's a **new dependency**, at v1.45.0 to
+match `otel` v1.45.0 (§3.1). The consumers were read
 on their `main` branches: core-provider `bfc5903`, alert-provider `b7deac4`,
 incident-provider `395c94d`, git-provider `8bc9e3c` and observability `56e7ea4`.
 §14 lists what was checked and what wasn't.
@@ -36,8 +38,9 @@ incident-provider `395c94d`, git-provider `8bc9e3c` and observability `56e7ea4`.
 
 provider-runtime has no `TracerProvider` and starts no span.
 `pkg/telemetry` exports metrics only (`metrics.go:120`). `pkg/logging/otel.go:79`
-stamps `trace_id` and `span_id` when the record's context holds a span, and
-#58 binds the reconciler's Logger to its `ctx`. But nothing ever puts a span
+stamps `trace_id` and `span_id` when the record's context holds a span. Since
+v1.13.0 (#58) the reconciler binds its Logger to its `ctx`
+(`reconciler.go:747`). But nothing ever puts a span
 there: `CR/pkg/internal/controller/controller.go:464-481` (`reconcileHandler`)
 passes `Reconcile` only a context carrying a logger and a reconcile ID, and
 controller-runtime imports no OpenTelemetry package outside its tests.
@@ -93,11 +96,13 @@ Where provider-runtime differs on purpose:
    (`worker.go:843,863`), which `RecordSpanError` marks as Error. provider-runtime's
    deferral returns a nil error (`pkg/reconciler/ratelimit.go:180-199`), and its
    span stays Unset, with an event (§7).
-4. **With tracing off, logs aren't stamped with someone else's trace.** UR's
+4. **With tracing off, nothing is stamped with someone else's trace.** UR's
    no-op tracer puts the remote span context in `ctx` as the active span
-   (`API/internal/global/trace.go:185`), so every log of a disabled controller
-   carries the upstream `trace_id` and `span_id`. provider-runtime carries the
-   inbound context for propagation only (§6.4).
+   (`API/internal/global/trace.go:185`). So every log of a disabled controller
+   carries the upstream `trace_id` and `span_id`, and so does every outbound
+   call its instrumentation makes. provider-runtime carries the inbound context
+   only onto the Kubernetes objects it writes, through `Inject`. It doesn't
+   stamp its logs with it, and doesn't send it over HTTP (§6.4).
 5. **provider-runtime's own carriers never send baggage.** The annotations and
    the HTTP transport carry `traceparent` and `tracestate` only. Platform
    baggage carries a portal session (observability's
@@ -107,6 +112,31 @@ Where provider-runtime differs on purpose:
    reconciler in its own span, the `reconcile` span would still be a root, or a
    child of the annotation's remote parent. That keeps the parent-or-link rule
    exact (§6.2) and the audit join's assumption true (§11.3).
+
+**Changes to code that exists today.** Besides the new code, three things
+behave differently. Each goes in `docs/log.md` when it ships; the entry is
+already there, under this design.
+- **`RetryingCriticalAnnotationUpdater` writes only the runtime's own keys**
+  (§6.2, "The critical write").
+  - **Today** it captures the whole annotation map, re-Gets the object, adds
+    the captured map back, and Updates (`pkg/reconciler/api.go:41-51`). So it
+    writes back a stale `krateo.io/traceparent` and `tracestate` over a fresh
+    one written in between, and it reverts any other writer's annotations the
+    same way.
+  - **After,** it carries only `krateo.io/external-name`, the
+    `krateo.io/external-create-*` markers and `krateo.io/traceparent-continued`.
+    A provider that sets another annotation in memory and relies on this write
+    to persist it would lose it. None of the consumers read for §11 does: git-,
+    incident- and alert-provider set no annotation on their managed resources,
+    and core-provider's annotation writes are its own (`getters.go:279-299`).
+- **`telemetry.Setup` sets the global propagator on every call** (§3.1).
+  OTel's default global propagator is a no-op
+  (`API/internal/global/propagator.go:29,55`). So a provider's own `otelhttp`
+  starts extracting and injecting W3C context and baggage once it calls Setup,
+  tracing on or off. core-provider already sets the same propagator itself, so
+  it sees no change.
+- **httpsignal sets `traceparent` on outbound requests when tracing is on**
+  (§6.6). With tracing off, it sends nothing.
 
 ## 3. The API
 
@@ -151,14 +181,26 @@ func ConfigFromEnv() (Config, error)
 - **The global propagator is always set.** Setup calls
   `otel.SetTextMapPropagator(TraceContext, Baggage)` before it checks either
   gate, as UR does (`tracing.go:41`), so an `otelhttp` handler or client in the
-  provider honours an inbound context even with export off.
-  provider-runtime's own extraction and injection use `propagation.TraceContext{}`
-  directly, so they work even when Setup is never called.
-- **Protocol.** OTLP/HTTP only. `otlptracehttp` ignores
-  `OTEL_EXPORTER_OTLP_PROTOCOL`: there is no reference to it in `HTTP/`. So
-  Setup returns an error when `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` or
-  `OTEL_EXPORTER_OTLP_PROTOCOL` is set to anything other than `http/protobuf`.
-  Without that check, protobuf would go to a gRPC port with nothing said.
+  provider honours an inbound context even with export off. That's what the
+  brief asks for ("installed even when export is off"). It changes behaviour
+  for existing Setup callers, so it's in §2's list and in `docs/log.md`.
+  - **Why not set it only with tracing on:** a provider would then honour an
+    inbound context depending on its export switch. core-provider already sets
+    it unconditionally (`tracing.go:32`).
+  - **provider-runtime's own carriers ignore the global.** Its extraction and
+    `Inject` use `propagation.TraceContext{}` directly, so they behave the same
+    even when Setup is never called.
+- **Protocol, checked only with tracing on.** OTLP/HTTP only. `otlptracehttp`
+  ignores `OTEL_EXPORTER_OTLP_PROTOCOL`: there is no reference to it in
+  `HTTP/`. So when `TracingEnabled` is true, Setup returns an error if
+  `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` or `OTEL_EXPORTER_OTLP_PROTOCOL` is set
+  to anything other than `http/protobuf`. Without that check, protobuf would go
+  to a gRPC port with nothing said. With tracing off there's no trace exporter
+  to misconfigure, so a metrics-only provider with a gRPC protocol variable set
+  for another tool doesn't start failing.
+- **A new dependency.** `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp`
+  v1.45.0, which pulls in `otlptrace` v1.45.0. Neither is in `go.mod` today.
+  Only `pkg/telemetry` imports it.
 - **Shutdown flushes.** The returned function shuts down the TracerProvider
   first, then the MeterProvider, and joins their errors.
   `TracerProvider.Shutdown` shuts down each span processor
@@ -195,10 +237,13 @@ const ScopeName = "github.com/krateo-platformops/provider-runtime"
 func SetTracerProvider(tp trace.TracerProvider)
 func TracerProvider() trace.TracerProvider // nil when off
 
-// Decide applies §6.2's rule. It is pure: firstSeen is when this process first
-// saw the annotation's current value (§6.2, "The window"), and the zero time if
-// it hasn't yet.
-func Decide(annotations map[string]string, firstSeen, now time.Time, window time.Duration) Decision
+// Decide applies §6.2's rule. It is pure.
+//   - remembered is the value this process already marked, or failed to mark,
+//     on this object (§6.2, "The memo"), or "".
+//   - firstSeen is when this process first saw the annotation's current value.
+//     The zero time means first sight, with the window open.
+//   - window == 0 means Parent with WriteMarker = Now: the first-sight rule.
+func Decide(annotations map[string]string, remembered string, firstSeen, now time.Time, window time.Duration) Decision
 
 type Mode int  // NoParent, Parent, Link
 type When int  // Never, BeforeFirstAction, Now
@@ -209,10 +254,11 @@ type Decision struct {
 	WriteMarker When              // when the reconciler writes Marker
 }
 
-// StartReconcile opens the reconcile root span for obj, starting at start (§4.1).
-// With tp nil it starts nothing: it returns ctx carrying the inbound context for
-// Inject and the transport (§6.4), the no-op span, and a Decision with no Marker.
-func StartReconcile(ctx context.Context, tp trace.TracerProvider, obj Object, start time.Time) (context.Context, trace.Span, Decision)
+// StartReconcile opens the reconcile root span for obj as d says, starting at
+// start (§4.1). The reconciler computes d, from its memo and Decide, before it
+// calls this. With tp nil it starts nothing. It returns ctx carrying d.Remote,
+// when that's valid, for Inject only (§6.4), and the no-op span.
+func StartReconcile(ctx context.Context, tp trace.TracerProvider, obj Object, d Decision, start time.Time) (context.Context, trace.Span)
 
 type Object struct {
 	Kind, Name, Namespace string
@@ -224,7 +270,8 @@ type Object struct {
 func Inject(ctx context.Context, obj metav1.Object) bool
 func InjectAnnotations(ctx context.Context, annotations map[string]string) bool
 
-// InjectHeader sets traceparent and tracestate on h (§6.6).
+// InjectHeader sets traceparent and tracestate on h from ctx's active span
+// only, never from the inbound context, so it sends nothing with tracing off (§6.6).
 func InjectHeader(ctx context.Context, h http.Header) bool
 ```
 
@@ -233,6 +280,9 @@ unstructured-runtime could adopt the same rule without copying it. Changing UR i
 for UR's own session. `pkg/meta` gains `AnnotationKeyTraceparent`,
 `AnnotationKeyTracestate` (the same strings as UR's `meta.go:19,22`) and
 `AnnotationKeyTraceparentContinued` (§6.2).
+
+The reconciler gains two options: `WithTracerProvider` (§3.3) and
+`WithTraceContinueWindow` (§6.2).
 
 ### 3.3 How the reconciler gets a tracer
 
@@ -280,12 +330,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	getErr := r.client.Get(getCtx, req.NamespacedName, managed)
 	cancelGet()
 	if kerrors.IsNotFound(getErr) {
-		return reconcile.Result{}, nil // the object is gone: no span, as in UR (worker.go:451-456)
+		r.traces.forget(req.NamespacedName) // §6.2, "The memo"
+		return reconcile.Result{}, nil       // the object is gone: no span, as in UR (worker.go:451-456)
 	}
-	spanCtx, span, d := tracing.StartReconcile(ctx, r.tracerProvider(), objectOf(r.objectKind, req, managed, getErr), started)
+	tp := r.tracerProvider()
+	d := r.traces.decide(tp, req.NamespacedName, managed, time.Now()) // the memo, then tracing.Decide; no entry when tp is nil
+	spanCtx, span := tracing.StartReconcile(ctx, tp, objectOf(r.objectKind, req, managed, getErr), d, started)
 	panicked := true
 	defer func() { endReconcileSpan(span, panicked, ...) }()
-	log := logging.WithContext(r.log.WithValues("request", req), spanCtx) // #58, now with a span
+	log := logging.WithContext(r.log.WithValues("request", req), spanCtx) // v1.13.0 binds ctx here (reconciler.go:747); now it holds a span
 	log.Debug("Reconciling")
 	// ctx and externalCtx are derived from spanCtx with today's deadlines, so every
 	// call below, and every provider method, gets the span.
@@ -301,6 +354,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
   `schema.GroupVersionKind(of).Kind` from `NewReconciler`, because its `kind`
   field is `Kind.group` (`reconciler.go:716`), and a typed object read through
   the client doesn't reliably carry its TypeMeta (`reconciler.go:394-396`).
+- **Today's binding moves.** v1.13.0 binds the Logger at the top of
+  `Reconcile`, before the Get (`reconciler.go:747`). The binding moves to after
+  the span starts, and "Reconciling" moves with it.
 - **A failed Get that isn't NotFound** still gets a span. Its attributes
   come from `req` and the error is recorded. UR returns before its span here
   (`worker.go:451-456`), so this error never reaches a trace there.
@@ -314,12 +370,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 
 The span starts before the per-reconcile Logger is bound, and the Logger is
 bound to `spanCtx`. That's the incoming context plus the span, with no
-deadline, which is the same reason #58 binds the incoming context and not the
-timeout one. So "Reconciling" and every reconciler log after it carry the root
-span's `trace_id` and `span_id`. With #58, a provider that binds its own Logger
+deadline, which is the same reason v1.13.0 binds the incoming context and not
+the timeout one. So "Reconciling" and every reconciler log after it carry the
+root span's `trace_id` and `span_id`. Since v1.13.0, a provider that binds its
+own Logger
 in an ExternalClient method (`logging.WithContext(e.log, ctx)`) gets that
 child span's ids (§4.4). This needs a slog-backed Logger: a logr-backed Logger
-can't carry a context (#58's `docs/api.md` text), which matters for
+can't carry a context (`docs/api.md`, since v1.13.0), which matters for
 git-provider (§11.1).
 
 ### 4.3 The gated queue and the slot wait
@@ -359,16 +416,21 @@ named in lower case:
 
 | Span | Around | Line today |
 |---|---|---|
-| `connect` | `r.external.Connect(externalCtx, managed)` | `reconciler.go:885` |
-| `observe` | `external.Observe(externalCtx, managed)` | `:926` |
-| `create` | `external.Create(externalCtx, managed)` | `:1201` |
-| `update` | `external.Update(externalCtx, managed)` | `:1350` |
-| `delete` | `external.Delete(externalCtx, managed)` | `:1089` |
+| `connect` | `r.external.Connect(externalCtx, managed)` | `reconciler.go:888` |
+| `observe` | `external.Observe(externalCtx, managed)` | `:929` |
+| `create` | `external.Create(externalCtx, managed)` | `:1204` |
+| `update` | `external.Update(externalCtx, managed)` | `:1353` |
+| `delete` | `external.Delete(externalCtx, managed)` | `:1092` |
 
 - **Around the call itself.** Each child is started after its `gate` returns
   without a deferral and ended when the call returns. A deferred call makes no
   span. The provider's method gets the child's context, so the HTTP calls it
   makes and the spans it opens are children of `observe`, `create` and so on.
+- **Each method's own `ctx`.** A provider must use the `ctx` each method is
+  given. A client built in Connect that keeps Connect's `ctx` and uses it
+  later would parent its Observe-time calls onto the `connect` span, which
+  has already ended. The doc comments of `ExternalConnecter` and
+  `ExternalClient` say so.
 - **No attributes.** They inherit the root's object by being its children.
   A provider can add its own with `trace.SpanFromContext(ctx).SetAttributes(...)`
   in its method (§11.3).
@@ -387,12 +449,16 @@ Event names are fixed, and their attributes are under `provider_runtime.`:
 | Event | When | Attributes |
 |---|---|---|
 | `ratelimit.deferred` | a `gate` returns a Deferral (`ratelimit.go:140-162`) | `provider_runtime.ratelimit.key`, `.cause` (`throttled`, `capacity`, from `DeferReason.Cause()`), `.requeue_after_s`, and `.until` (RFC 3339) for throttled only |
-| `reconcile.paused` | the pause short-circuit (`reconciler.go:806`) | none |
-| `k8s.conflict` | a path that requeues on `kerrors.IsConflict` | `provider_runtime.step` (`connect`, `observe`, `create`, `update`, `delete`, `finalizer`) |
-| `trace.marker_failed` | the §6.2 marker write failed | `exception.message` |
+| `reconcile.paused` | the pause short-circuit (`reconciler.go:809`) | none |
+| `k8s.conflict` | a path that requeues because `kerrors.IsConflict(err)` | `provider_runtime.step`: `connect` (`reconciler.go:898`), `observe` (`:940`), `handshake` (the marker-removing Update, `:1047`), `finalizer` (`:836`, `:1136`, `:1162`), `create_pending` (`:1192`), `create` (`:1241`), `late_init` (`:1303`), or `marker` (§6.2) |
+| `trace.marker_failed` | the §6.2 marker write failed with anything but a conflict | `exception.message` |
 | `credentialuse.acquire`, `credentialuse.release` | reserved: credential-use isn't wired into the reconciler yet (`pkg/credentialuse/doc.go`: "nothing in provider-runtime uses this package yet"; the plan's PR 7 wires it) | named when PR 7 is designed: the number of refs and the outcome class, never a Secret's data |
 
-A deferral is at most one event per pass, because the pass ends on it.
+A deferral is at most one event per pass, because the pass ends on it. The
+`step` set is every `IsConflict` site in `reconciler.go` at `3ab2917`. A source
+test (§10) fails if one is added without a step. The event keys on
+`IsConflict` only: a conflict that a path wraps or turns into a
+`ReconcileError` is not this event.
 
 ## 5. Resource attributes
 
@@ -455,84 +521,178 @@ The value is the canonical form of the span context that was continued:
 `00-<32 hex>-<16 hex>-<2 hex>`, as `TraceContext.Inject` writes it, in lower
 case (`trace_context.go:39-64`). A value that doesn't parse counts as absent.
 
-**The rule.** `Decide` sets R to the annotation's remote span context (§6.1)
-and M to the parsed marker. A value is *continued* when M has R's trace ID and
-span ID.
+**The rule.** `Decide(annotations, remembered, firstSeen, now, window)` sets R
+to the annotation's remote span context (§6.1) and M to the parsed marker. A
+value is *continued* when M, or `remembered`, has R's trace ID and span ID.
 
 1. R isn't valid: **NoParent.** The root is a new root with no link
-   (`trace.WithNewRoot()`). No marker.
-2. R is valid and continued: **Link.** The root is a new root
-   (`trace.WithNewRoot()`) with one link, `trace.Link{SpanContext: R}`. No
-   marker.
-3. R is valid and not continued, and the window is still open (below):
-   **Parent.** The root's parent is R (`trace.ContextWithRemoteSpanContext`).
-   `Marker` is `canonical(R)`, and `WriteMarker` is `BeforeFirstAction`: the
-   marker is written only if the pass is about to act.
-4. R is valid and not continued, and the window has closed: **Link,** with
-   `WriteMarker` set to `Now`. The pass writes the marker right after its span
-   starts, and from then on every pass links (decision D6, §13).
+   (`trace.WithNewRoot()`). `WriteMarker` is `Never`.
+2. R is continued: **Link.** The root is a new root (`trace.WithNewRoot()`)
+   with one link, `trace.Link{SpanContext: R}`. `WriteMarker` is `Never`.
+3. R isn't continued and `window` is 0: **Parent**, with `WriteMarker` set to
+   `Now`. That's the earlier first-sight rule, kept as an option.
+4. R isn't continued, and `firstSeen` is zero or `now - firstSeen < window`:
+   **Parent.** The root's parent is R (`trace.ContextWithRemoteSpanContext`),
+   `Marker` is `canonical(R)`, and `WriteMarker` is `BeforeFirstAction`.
+5. R isn't continued, and `now - firstSeen >= window`: **Link,** with
+   `WriteMarker` set to `Now` (decision D6, §13).
 
-The pass that **first acts** on a new value is its child, not the pass that
-first sees it (D6). A pass acts when it calls the provider's Create, Update or
-Delete. A pass that only connects and observes stays a child of R and writes
-nothing, so the next pass is still a Parent pass. That's what lets a change
-that arrives in two writes, the context first and the trigger after, put the
-work in the context's trace (§11.3, step 5).
+The reconciler computes the Decision before it starts the span, from its memo
+and `Decide`, and passes it to `StartReconcile` (§3.2). So the mode a test
+asserts is the mode the span gets.
+
+**Which pass is the child.** The pass that **first acts** on a new value is
+its child, not the pass that first sees it (D6).
+- **What "acts" means.** A pass acts when the runtime calls the provider's
+  `Create`, `Update` or `Delete`. That's the runtime's calls only: it can't see
+  what a provider does inside Observe. alert-provider starts incident firings
+  from Observe (`internal/controllers/alert/alert.go:442-473`), and those don't
+  count. Observe-time work like that joins the upstream trace for as long as
+  the window keeps passes Parent, and no longer.
+- **A pass that only connects and observes** stays a child of R and writes
+  nothing, so the next pass is still a Parent pass. That's what lets a change
+  that arrives in two writes, the context first and the trigger after, put the
+  work in the context's trace (§11.3, step 5).
 
 Only a new traceparent value makes a Parent pass (decision D3, §13). The
 marker is keyed on the value, not on whether an annotation is present. So when
 a writer overwrites the annotation with a fresh context, the next pass that
 sees it is a Parent pass, even though the object carried a traceparent before.
-alert-provider's `Incident` is the case: the traceparent stamped at create, in
-Analyzing, is continued once. A fresh one, stamped from `incident.analyze` when
-the Incident goes to Open, is new and parents again (§11.3, step 5). Only the
-trace ID and span ID count as new: a change to the flags or to `tracestate`
-alone isn't a new causal event. A generation change with the same value is a
-Link pass. That covers a spec edit by a writer that doesn't restamp the
-annotation, and the deletion (§6.2, "Deletion").
+- **alert-provider's `Incident` is the case.** The traceparent stamped at
+  create, in Analyzing, is continued once. A fresh one, stamped from
+  `incident.analyze` before the Incident goes to Open, is new and parents
+  again (§11.3, step 5).
+- **What counts as new.** Only the trace ID and span ID: a change to the flags
+  or to `tracestate` alone isn't a new causal event.
+- **What doesn't.** A generation change with the same value is a Link pass.
+  That covers a spec edit by a writer that doesn't restamp the annotation, and
+  the deletion ("Deletion", below).
 
 **The generation isn't needed, and it isn't in the marker.** The plan agreed
 with marketing first made a generation change a Parent pass too, and only
 that needed the generation recorded. Nothing else does:
 - Retries are bounded by the marker, written before the acting call, and by
-  the window (below).
+  the window.
 - A restart reads the marker from the object.
 - A writer that is in the trace restamps the annotation, and its new value
   makes the Parent pass.
 
-**The write, before the first action.** In a Parent pass with tracing on,
-the reconciler writes the marker just before the first call to `Create`,
-`Update` or `Delete`. That's after that call's `gate` lets it through, and
-before the call's child span starts. So a pass the governor defers doesn't
-act and doesn't write.
-- **On the create path,** the marker goes into the `Update` that already
-  writes `krateo.io/external-create-pending` just before `Create`
-  (`reconciler.go:1177-1197`). That's one write, not two.
-- **On the update and delete paths,** it's a JSON merge patch of only that
-  annotation, with no resourceVersion precondition, so it can't overwrite
-  another field and can't conflict. The patch is sent on a metadata-only copy,
-  not on `managed`. `managed` holds what Observe computed in memory, and
-  decoding the response into it would throw that away. The reconciler then
-  copies only the new resourceVersion and the marker onto `managed`, so later
-  writes in the pass, the provider's own included, carry the right version.
+**The write, with an optimistic lock.** Every marker write is a JSON merge
+patch of only that annotation, built with
+`client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})`
+(`CR/pkg/client/patch.go:68,83-86,158`). The patch then carries the
+resourceVersion the pass read, and the API server refuses it with a conflict
+if the object has changed since.
+- **Sent on a copy.** The patch goes on a deep copy of `managed`, never on
+  `managed` itself. `managed` holds what Observe computed in memory, and
+  decoding the response into it would throw that away.
+- **What's copied back.** When the patch succeeds, the reconciler copies only
+  the new resourceVersion and the marker onto `managed`. The lock guarantees
+  the stored object is the one the pass read plus the marker, so `managed` with
+  the new version is still exactly that object plus the pass's own changes.
+  Later writes in the pass stay version-checked, including the status Update
+  after each acting call (`reconciler.go:1380`, `:1121`), and the provider's
+  own writes. A status Update with a stale version is refused
+  (`status_strategy.go:79-81`).
+- **Why the lock.** Without it, an unconditioned patch would succeed against
+  whatever the object had become, and copying its version onto `managed`
+  would switch optimistic concurrency off for the rest of the pass. Say
+  alert-provider's reanalysis `Status().Patch`es new scripts between
+  incident-provider's Get and its marker patch. incident-provider's
+  `Status().Update(managed)` would then silently overwrite them. A pass that
+  read a stale cache would also parent and act a second time.
+- **On a conflict:** `rateLimitedRequeue()`, before the pass acts, with
+  `k8s.conflict` and step `marker`. The memo entry stays as it was, so the next
+  pass reads the object afresh and, if the value is still new, is a Parent pass
+  again. D6 holds.
+
+**When each write happens.**
+- **`BeforeFirstAction`:** just before the first `Create`, `Update` or
+  `Delete` call, after that call's `gate` lets it through, and before its child
+  span starts. A pass the governor defers doesn't act and doesn't write.
+  - **On the create path,** it's a separate locked patch, just before the
+    `krateo.io/external-create-pending` Update (`reconciler.go:1189-1200`).
+    That's one more write per Parent create. Folding the marker into the
+    create-pending Update would save the write. But a create-pending write
+    rejected only because of the marker would then block the create, and a
+    conflict there would mean something else. One failure rule for every
+    marker write is worth the extra write.
+- **`Now`** (rules 3 and 5): after the pause check (`reconciler.go:809`) and
+  the Orphan-deletion path (`:824-851`), and before the governor's `pristine`
+  copy (`:873`). A paused object, or one released under the Orphan policy,
+  gets no marker write: nothing on it acts, and writing to a paused object
+  would be the runtime acting on it.
 
 Writing before the acting call bounds the trace. If the call fails and the
 pass is retried with backoff, the retries link and don't parent. With the
 marker written at the end, a permanently failing object would parent every
 retry onto the upstream trace, forever.
 
+**A crash between the marker write and the act** loses the parent. The next
+pass sees the marker, links, and does the work in a linked root. That's the
+accepted cost of writing first, and it only happens when the process dies
+inside that gap.
+
+**The critical write carries only the runtime's own keys.** The reconciler's
+default `CriticalAnnotationUpdater` today captures the whole annotation map,
+re-Gets the object, adds the map back and Updates (`pkg/reconciler/api.go:41-51`).
+It runs after `Create` (`reconciler.go:1228`, `:1268`) and when an unresolved
+handshake adopts the resource (`:989`). So a fresh traceparent B, written by
+another controller while `Create` ran, would be reverted to the A the pass had
+read, and B would be lost. The updater changes to capture only
+`krateo.io/external-name`, the `krateo.io/external-create-pending`,
+`-succeeded` and `-failed` markers, and `krateo.io/traceparent-continued`. That
+also stops it reverting any other writer's annotations. It's a change to
+existing code, listed in §2.
+
+**The memo: what the reconciler keeps in memory.** One entry per object, in a
+map keyed by `types.NamespacedName` and holding the object's UID:
+
+| Field | Meaning |
+|---|---|
+| `uid` | the object the entry is about |
+| `value` | the canonical traceparent last seen |
+| `firstSeen` | when this process first saw `value`, monotonic |
+| `state` | `seen` (not continued yet), `marked` (this process wrote the marker), `failed` (the write failed with something other than a conflict) |
+
+- **No entry when tracing is off.** With no TracerProvider, the reconciler
+  calls `Decide` with an empty `remembered` and a zero `firstSeen`, and keeps
+  nothing.
+- **Created** on the first Parent decision for a value, as `seen`.
+- **Replaced** when the value changes, or when the UID differs. A deleted and
+  recreated object with the same name starts fresh.
+- **`marked`** after a successful marker write. It stays until a Get shows the
+  marker on the object, then it's dropped. Until then, `remembered` makes the
+  pass Link, so a cache that lags behind the write doesn't produce a second
+  Parent pass.
+- **`failed`** after a write that failed with anything other than a conflict
+  (RBAC, a webhook). The pass records `trace.marker_failed` and logs once per
+  object, and later passes in this process link through `remembered`.
+  Without it, an object whose marker can never be written would parent every
+  pass. After a restart, such an object parents again until its next acting
+  pass or the end of the window.
+- **Dropped** on NotFound, when the finalizer is removed, when the annotation
+  goes away or stops parsing, and as above.
+- **Locking.** One `sync.Mutex` per Reconciler guards the map. It's held only
+  to read or update an entry, never across an API call. controller-runtime
+  never runs two passes of one key at once, so two passes never race on one
+  entry; the mutex protects the map across keys.
+- **Growth.** At most one entry per object the controller has reconciled that
+  carries a traceparent whose marker isn't confirmed yet. `seen` entries end
+  within a window and a pass. `marked` entries end at the next read. `failed`
+  entries last while the object lives. NotFound and finalizer removal drop
+  them, so the memo never outgrows the set of live annotated objects.
+
 **The window: when a new value stops parenting without an action.** A value
 that never leads to an action would otherwise make every pass a Parent pass,
 forever.
-- **How it's measured.** The reconciler keeps, in memory and by UID, the
-  value it last saw and when it first saw it. Each pass reads the time and
-  passes it to `Decide` as `firstSeen`. The entry is replaced when the value
-  changes, and dropped when the marker is written or the object is deleted.
-- **When it closes.** It closes when `now - firstSeen >= window`. The next pass
-  then writes the marker and links (rule 4).
+- **How it's measured.** From the memo's `firstSeen`, this process's first
+  sight of the value, by the monotonic clock. It closes when
+  `now - firstSeen >= window`. The next pass then links and writes the marker
+  (rule 5).
 - **The setting.** `window` is a Reconciler option,
   `reconciler.WithTraceContinueWindow(d)`, defaulting to 10 minutes. 0 means
-  "continue on the first pass", which is the earlier first-sight rule.
+  "continue on the first pass" (rule 3).
 
 Why 10 minutes:
 - **Every default poll fits at least three times.** provider-runtime's
@@ -542,16 +702,26 @@ Why 10 minutes:
   core-provider poll every 3 minutes (git-provider `main.go:37`, core-provider
   `main.go:66`).
 - **Failure backoff saturates well inside it.** The controller's failure
-  backoff caps at 60 s (`pkg/controller/options.go:159`).
-- **The growth stays small.** At most about ten observe-only passes, or about
-  fifteen failing retries, join one upstream trace before it closes.
+  backoff starts at 1 s and caps at 60 s (`pkg/controller/options.go:159`).
 - **A two-write change lands in milliseconds.** The context and the trigger
-  are written back to back, so the window only matters for a value that never
+  are written back to back, so the window matters only for a value that never
   leads to an action.
 
 It's an option, not a constant, because a provider polling much more slowly
 (say every 30 minutes) needs a window longer than its poll. Only then does a
 change that waits for the next poll still parent.
+
+**How many passes join one upstream trace,** for each new value, before the
+window closes. These are upper bounds, from arithmetic:
+
+| What the passes are | How many in 10 minutes | Why |
+|---|---|---|
+| Observe-only polls | about 10 | at a 1-minute poll |
+| Failing retries | about 15 | backoff 1, 2, 4 … 32 s, then 60 s each |
+| At-capacity deferrals | about 40 | each requeues after a random 1 s to `RecoveryInterval` (default 30 s), with no backoff (`pkg/ratelimit/governor.go:21,72-75,554`) |
+
+Each deferred pass is a Parent root with a `ratelimit.deferred` event and no
+children. The deferral row is the bound that matters.
 
 **Across a restart before the first action.** The first-sight time is in
 memory, so a restart, a failover or a new replica starts the window again from
@@ -561,24 +731,24 @@ marker is the durable part: once a pass has acted, every process links.
 
 **What the rule guarantees, and what it doesn't.**
 - **What it doesn't guarantee.** It raises the chance that the pass that does
-  the work is the child of the context that caused it. Another pass may act
-  first, for an unrelated reason, or the window may close first. A pass that
-  misses still links to the context, so a reader can get from it to the
-  upstream trace.
+  the work is the child of the context that caused it. It doesn't make it
+  certain:
+  - Another pass may act first, for an unrelated reason.
+  - The window may close first.
+  - A throttled hold lasts until the server's deadline, cut to `MaxHold`
+    (default 1 hour, `governor.go:27`). That can outlast the window, so the
+    acting pass after a long hold links.
+  - A crash between the write and the act loses the parent (above).
+
+  A pass that misses still links to the context, so a reader can get from it
+  to the upstream trace.
 - **Bounded growth.** For each new value, the trace gains at most the passes
-  within the window, plus one acting pass, plus one more window per restart.
-  It's never the open-ended growth of parenting every pass (UR today).
+  in the table, plus one acting pass, plus one more window per restart. It's
+  never the open-ended growth of parenting every pass (UR today).
 - **D3 still holds.** Only a new traceparent value opens a window and makes
   Parent passes. A generation change, a spec edit or a deletion with the same
   value is a Link pass, as decided. D6 changes only which pass consumes a new
   value, not what counts as new.
-
-**When the write fails** (RBAC, a webhook, the object gone): the pass goes
-on, records `trace.marker_failed`, and logs once per object. The reconciler then
-remembers the marker in memory, keyed by UID and dropped on deletion, so that
-within this process the next passes link. Without that, an object whose marker
-can never be written would parent every pass. After a restart, such an object
-parents again until its next acting pass or the end of the window.
 
 **Why the marker survives restarts.** The marker lives on the object, so a
 restart, a leader failover or a new replica decides exactly as the old process
@@ -599,28 +769,38 @@ would have. Nothing else on the object can stand in for it:
 doesn't restamp the annotation. A `helm uninstall` can't. So the deletion pass
 is a Link pass, linked to the last stamper's trace, and not attributed to it.
 A marker patch on an object being deleted is allowed. If the object is gone,
-the patch returns NotFound, which counts as success.
+the patch returns NotFound, which counts as success, and the memo entry is
+dropped.
 
 ### 6.3 What the marker costs
 
 - **Writes.** At most one marker write per new traceparent value, only on
-  objects that carry `krateo.io/traceparent`, and only with tracing on. On the
-  create path it rides the existing create-pending `Update`, so it costs no
-  extra write there. A value that never leads to an action costs its write when
-  the window closes. The
-  composition-dynamic-controller stamps a child only when its release really
-  changes: the per-reconcile traceparent is stripped before the release digest
+  objects that carry `krateo.io/traceparent`, and only with tracing on. A
+  value that never leads to an action costs its write when the window closes.
+  The composition-dynamic-controller stamps a child only when its release
+  really changes: the per-reconcile traceparent is stripped before the release
+  digest
   (`go/composition-dynamic-controller/internal/tools/processor/processor.go:39-44,92-117`).
   So stamps arrive as often as upstream changes do.
-- **The passes inside the window.** An observe-only pass inside the window is
-  a child of the upstream trace (§6.2), so for each new value the trace gains
-  up to the window's worth of passes. For an object that acts on its first
-  pass, the usual case for a composition's child, that's none.
-- **One extra reconcile per separate write.** The patch changes the
-  resourceVersion, and a watch event follows. The extra pass sees the marker
-  match and runs in Link mode. That's one more Observe against the external API. A provider whose
+- **The passes inside the window.** Up to the bounds in §6.2's table join the
+  upstream trace for each new value. The at-capacity deferrals are the
+  largest. For an object that acts on its first pass, the usual case for a
+  composition's child, it's none.
+- **One extra reconcile per write.** The patch changes the resourceVersion,
+  and a watch event follows. The extra pass sees the marker match and runs in
+  Link mode. That's one more Observe against the external API. A provider whose
   predicates already drop annotation-only updates doesn't pay it. alert-provider's
   `changed` lets annotation changes through (`internal/controllers/alert/alert.go:120-139`).
+- **Turning tracing on is a burst.** No marker is written while tracing is
+  off. So when it turns on, every annotated object's existing value is new at
+  once. For each object:
+  - up to a window of Parent passes, onto an upstream trace that may be days
+    old, such as the composition controller's last apply;
+  - then one marker write and one extra reconcile.
+
+  All of it lands across the fleet within the first window after the rollout.
+  The backend shows those spans as late additions to old traces. The
+  adoption steps (§11.5) say to expect it.
 - **The platform's "nothing stamped" rule.** The audit join was built so that
   nothing is stamped on the user's object (observability's
   `ops/audit-reconcile-join/README.md`, first paragraph). This marker is such a
@@ -629,16 +809,20 @@ the patch returns NotFound, which counts as success.
 
 ### 6.4 With tracing off
 
-With no TracerProvider, `StartReconcile` starts no span and writes no marker.
-When R is valid, it puts R in `ctx` under a `pkg/tracing` key that only
-`Inject`, `InjectAnnotations` and `InjectHeader` read. It's not the active
-span. So a disabled provider still passes an upstream context on to the
-objects it writes, and to its HTTP calls (UR's reason, in
-`go/composition-dynamic-controller/internal/composition/composition.go:495-507`).
-But its logs aren't stamped with a trace it took no part in, which is
-difference 4 in §2. Because no marker is written while off, turning tracing
-on makes each annotated object's value new once. Its first acting pass, or the
-window, then consumes it.
+With no TracerProvider, `StartReconcile` starts no span, the reconciler
+writes no marker and keeps no memo entry.
+- **Inbound context, for `Inject` only.** When R is valid, it's put in `ctx`
+  under a `pkg/tracing` key that only `Inject` and `InjectAnnotations` read.
+  It isn't the active span. So a disabled provider still passes an upstream
+  context on to the Krateo objects it writes, which is UR's reason
+  (`go/composition-dynamic-controller/internal/composition/composition.go:495-507`).
+- **Not on HTTP.** `InjectHeader` reads only the active span, so a disabled
+  provider sends no `traceparent` on its HTTP calls.
+- **Not in logs.** Its logs aren't stamped with a trace it took no part in,
+  which is difference 4 in §2.
+
+Turning tracing on later makes every annotated object's value new once (§6.3,
+"Turning tracing on is a burst").
 
 ### 6.5 Onto Kubernetes objects: `Inject`
 
@@ -667,7 +851,7 @@ The rules on the caller, in its doc comment:
   resource being reconciled, whose annotation is input.
 - **Only on a write the caller makes anyway:** a create, or an update that
   changes the object. A write made only to refresh the annotation makes every
-  pass a new "first sight" downstream, plus a watch event. The
+  pass a new value downstream, plus a watch event. The
   composition-dynamic-controller avoids exactly this by excluding the annotation
   from its digest (§6.3).
 - **Never in a status write.** A status-subresource write keeps only `status`
@@ -680,13 +864,14 @@ The rules on the caller, in its doc comment:
   sees the change acts and is a child too. In the other order, the acting pass
   sees the old value, which may already be continued, so it links. alert-provider's
   Open transition is the case (§11.3, step 5).
-
-This rule and the ones above are in the doc comments of `Inject` and
-`InjectAnnotations`. They also go in `docs/usage.md`, in the section on
-propagating to another controller, which lands with the implementation, and
-`docs/api.md` lists them with the functions.
 - **Never copy `krateo.io/traceparent-continued`.** It belongs to the object
   it's written on.
+
+Where these rules are documented:
+- the doc comments of `Inject` and `InjectAnnotations`;
+- `docs/usage.md`, in a section on propagating to another controller, which
+  lands with the implementation;
+- `docs/api.md`, with the functions.
 
 The reconciler never injects anything by itself, because providers mostly
 don't write such objects.
@@ -694,14 +879,18 @@ don't write such objects.
 ### 6.6 Outbound HTTP
 
 `httpsignal.Transport.RoundTrip` sets `traceparent`, and `tracestate` when
-there is one, from `req.Context()`, through `tracing.InjectHeader`. It does
-nothing when:
+there is one, from the **active span** in `req.Context()`, through
+`tracing.InjectHeader`. It never uses §6.4's inbound context. It does nothing
+when:
 
-- the context has no valid trace context, which is the case for every
-  request today, so nothing changes;
-- the request already has a `traceparent`, for example from an `otelhttp`
-  transport wrapped outside it. That one is the more specific parent;
-- `Transport.NoTracePropagation` is true, for a provider whose external
+- **There's no active span.** That's always the case with tracing off, so
+  bumping provider-runtime alone changes no request. With tracing on, every
+  request a reconcile makes through httpsignal carries the `traceparent` of
+  `connect`, `observe`, `create`, `update` or `delete`. That's the behaviour
+  change in §2's list.
+- **The request already has a `traceparent`,** for example from an `otelhttp`
+  transport wrapped outside it. That one is the more specific parent.
+- **`Transport.NoTracePropagation` is true,** for a provider whose external
   host must not receive a trace header.
 
 It clones the request before setting a header, because a RoundTripper must not
@@ -728,10 +917,10 @@ The root's status follows how the pass ended:
 | How the pass ended | Synced | Root status | On the root |
 |---|---|---|---|
 | `Reconcile` returns a non-nil error | `ReconcileError` on most paths | Error, with `err.Error()` as description | `RecordError(err)` |
-| The unresolved create handshake, inside its recovery window (`reconciler.go:1009-1013`): `ReconcileError` written, nil returned | False, `ReconcileError` | Error, with the condition's message | `RecordError` |
+| The unresolved create handshake, inside its recovery window (`reconciler.go:1012-1016`): `ReconcileError` written, nil returned | False, `ReconcileError` | Error, with the condition's message | `RecordError` |
 | A governor deferral (`ratelimit.go:180-199`) | False, `ReconcileDeferred` | Unset | `ratelimit.deferred` |
-| A conflict requeue (`rateLimitedRequeue()` on `IsConflict`) | unchanged | Unset | `k8s.conflict` |
-| Paused (`reconciler.go:806-815`) | False, `ReconcilePaused` | Unset | `reconcile.paused` |
+| A conflict requeue (`rateLimitedRequeue()` on `IsConflict`), the marker's included | unchanged | Unset | `k8s.conflict`, with its step (§4.5) |
+| Paused (`reconciler.go:809-818`) | False, `ReconcilePaused` | Unset | `reconcile.paused` |
 | Success, including `RequeueAfter` | True, `ReconcileSuccess` | Unset, never Ok | none |
 | A panic | none written | Error, `panic` | none |
 | Get NotFound | none written | no span | none |
@@ -833,43 +1022,54 @@ All with `SDK/trace/tracetest`. For deterministic assertions, use a
 `SpanRecorder` registered with `WithSpanProcessor`, or an `InMemoryExporter`
 behind `WithSyncer`. Those are test-only: production never syncs. Each test
 gets its own provider through `WithTracerProvider`, so no test touches the
-globals.
+globals. Marker tests run against a fake client that records patches and
+enforces the resourceVersion precondition. The lock tests (12, 13 and 21) run
+on envtest, so the API server's own conflict handling is what's tested.
 
 1. **Shape.** A pass that observes and updates makes exactly `reconcile`
    (Server), `observe` and `update` (Internal). The children's parent is the
    root, and the root has exactly the three attributes, with the Kind alone.
    A cluster-scoped object gets `k8s.object.namespace = ""`. The root's start
    is no later than the Get (§4.1).
-2. **Each mode of §6.2**, on a fake client that records patches:
-   - NoParent: no annotation, so no parent, no link and no patch.
-   - Parent: a valid annotation and no marker give a remote parent equal to R.
-   - Observe-only: a Parent pass whose Observe reports up to date writes no
+2. **Each rule of §6.2.** Each case asserts the span's **mode**: its parent,
+   whether it's a new root, and its links. Each also asserts the Decision's
+   `WriteMarker`, and the writes the fake client saw.
+   - **Rule 1:** no annotation is NoParent, with no link and no patch.
+   - **Rule 4:** a valid annotation and no marker give a remote parent equal
+     to R.
+   - **Observe-only:** a Parent pass whose Observe reports up to date writes no
      marker. The next pass is a Parent pass again.
-   - First action: a Parent pass that updates writes exactly the marker, and
-     the fake client records it **before** `Update` is called. The child span
-     `update` starts after the write. On the create path, the marker is in the
-     create-pending `Update`, with no separate patch, and `managed` keeps
-     Observe's in-memory changes after the patch.
-   - Deferred action: the governor defers the `Update`, so no marker is
+   - **The first action:** a Parent pass that updates writes exactly the
+     marker, locked, and the fake client records it **before** `Update` is
+     called. The child span `update` starts after the write, and `managed`
+     keeps Observe's in-memory changes, with the new resourceVersion. On the
+     create path, the locked patch comes just before the create-pending Update.
+   - **A deferred action:** the governor defers the `Update`, so no marker is
      written.
-   - Window: with a fake clock, a value first seen `window` ago gives Link
-     with `WriteMarker = Now`, and the marker is written at the start of the
-     pass. `WithTraceContinueWindow(0)` writes it on the first pass.
-   - Link: run the same object again with the marker in place. The pass is a
-     new root with one link to R, and makes no patch.
-   - New value: a new span ID gives Parent again.
-   - Generation only: bump the generation with the same traceparent. That's
+   - **Rule 2:** run the same object again with the marker in place. It's a new
+     root with one link to R, and makes no patch.
+   - **A new value:** a new span ID gives Parent again.
+   - **Generation only:** bump the generation with the same traceparent. It's
      Link, with no patch (D3). A deletion with the same traceparent is also Link.
-   - An invalid traceparent, and an invalid marker.
-   - Flags or `tracestate` changed alone: Link.
-   - An in-process parent span in the incoming context is not the root's
+   - **Invalid input:** an invalid traceparent, and an invalid marker.
+   - **Flags or `tracestate` changed alone:** Link.
+   - **An in-process parent span** in the incoming context is not the root's
      parent (difference 6).
-3. **Restart.**
+3. **Window 0, and a zero `firstSeen`** (reviewer's 4).
+   - `Decide` with `window = 0` returns Parent with `WriteMarker = Now`.
+   - A zero `firstSeen` with a positive window returns Parent with
+     `BeforeFirstAction`.
+   - The span's mode matches in both. `WithTraceContinueWindow(0)` writes
+     the marker on the first pass, after the pause check.
+4. **The window closes.** With a fake clock, a value first seen `window` ago
+   gives Link with `WriteMarker = Now`, and the marker is written after the
+   pause check and before the gates.
+5. **Restart.**
    - A second `Reconciler`, built from scratch, on the object the first one
      marked: Link. This is what "doesn't break across restarts" means, tested.
    - A second `Reconciler` on an object whose value was seen but not acted on:
      its own window starts, so it parents until it acts or its window closes.
-4. **acmp's Analyzing → Open sequence,** on an Incident-shaped fake provider
+6. **acmp's Analyzing → Open sequence,** on an Incident-shaped fake provider
    whose Observe acts only when a script is set, as incident-provider's
    `checkDue` does:
    1. Create with traceparent A, in Analyzing: an acting pass, which writes
@@ -883,46 +1083,96 @@ globals.
    The same sequence with the status write first: the Open pass links (to A)
    and acts. The test pins that the order in §6.5 is what makes the
    difference.
-5. **A failed marker write.** The patch is forbidden: the pass completes and
-   records `trace.marker_failed`, and the next pass in the same process links.
-   A new process parents again until its next acting pass or the end of the
-   window.
-6. **A failed pass after acting.** Update fails after the marker is written,
+7. **A failed marker write.** The patch is forbidden: the pass completes,
+   records `trace.marker_failed`, and the entry becomes `failed`, so the next
+   pass in the same process links. A new process parents again until its next
+   acting pass or the end of the window.
+8. **A failed pass after acting.** Update fails after the marker is written,
    so the retry links. Observe failing before any action leaves the retry a
    Parent pass, until the window closes.
-7. **Status mapping**, one test per row of §7. That includes the deferral's
-   event and its attributes, the handshake path, `k8s.conflict` with its
-   step, a panic (Error, and the panic still reaches controller-runtime), and
-   Get NotFound (no span). A source test lists every `SetConditions(...ReconcileError(...))`
-   in `reconciler.go`, and fails when one is followed by a nil-error return
-   without marking the root.
-8. **Log correlation.** A `NewSlogLogger` over `NewOTelJSONHandler` into a
-   buffer: the "Reconciling" record and a later reconciler record carry the
-   root's `trace_id` and `span_id`. A provider Observe that logs through
-   `logging.WithContext(log, ctx)` carries `observe`'s span ID. With tracing
-   off, no record carries a `trace_id`, even with an annotation (§6.4).
-9. **Off is a no-op.** No provider and no option set: nothing is recorded by
-   a recorder registered on the global, and the fake client sees no patch.
-   `testing.AllocsPerRun` on `StartReconcile` with a nil provider and an object
-   without the annotation is 0. With the annotation, `Inject` and `InjectHeader`
-   propagate R.
-10. **Inject.** It overwrites both keys, removes a stale `tracestate`, does
+9. **Status mapping**, one test per row of §7.
+   - It includes the deferral's event and its attributes, the handshake path,
+     a panic (Error, and the panic still reaches controller-runtime), and Get
+     NotFound (no span).
+   - `k8s.conflict` is tested at every step in §4.5's list.
+   - A source test lists every `SetConditions(...ReconcileError(...))` in
+     `reconciler.go`, and fails when one is followed by a nil-error return
+     without marking the root.
+   - A second source test lists every `kerrors.IsConflict` in `reconciler.go`,
+     and fails when one has no step.
+10. **Log correlation.** A `NewSlogLogger` over `NewOTelJSONHandler` into a
+    buffer: the "Reconciling" record and a later reconciler record carry the
+    root's `trace_id` and `span_id`. A provider Observe that logs through
+    `logging.WithContext(log, ctx)` carries `observe`'s span ID. With tracing
+    off, no record carries a `trace_id`, even with an annotation (§6.4).
+11. **Off is a no-op.**
+    - No provider and no option set: a recorder registered on the global
+      records nothing, and the fake client sees no patch.
+    - `testing.AllocsPerRun` on `StartReconcile` with a nil provider and an
+      object without the annotation is 0.
+    - With the annotation, `Inject` propagates R, and `InjectHeader` and the
+      transport send **no** header.
+12. **A concurrent writer between the Get and the marker patch** (reviewer's
+    1). Another client `Status().Patch`es the object after the pass's Get and
+    before its marker patch. The locked patch conflicts, and the pass requeues
+    before acting, with `k8s.conflict` and step `marker`. The other writer's
+    status survives, and the next pass is Parent.
+13. **A stale-cache second pass** (reviewer's 2).
+    - Pass 1 marks. Pass 2 runs on a cached object that doesn't show the
+      marker yet. The `marked` memo entry makes pass 2 Link, and it doesn't act
+      as a child.
+    - The same with the memo cleared, as after a restart, against an object
+      whose resourceVersion has moved on: the locked patch conflicts, and
+      nothing acts twice.
+14. **A fresh B survives the post-Create critical write** (reviewer's 3).
+    - Another client writes traceparent B while `Create` runs. After the
+      critical write (`reconciler.go:1228`, `:1268`), the object still carries
+      B, not the A the pass read.
+    - A third annotation written meanwhile survives too.
+    - The same through the handshake adoption (`:989`).
+15. **Tracing off, past the window** (reviewer's 5): an annotated object
+    reconciled for longer than the window with tracing off. No patch, no memo
+    entry, no header.
+16. **NotFound, and delete and recreate** (reviewer's 6).
+    - NotFound drops the entry.
+    - Finalizer removal drops it.
+    - An object recreated under the same name, with a new UID, starts with no
+      entry and is decided afresh.
+17. **A deferral storm** (reviewer's 7). With the governor at capacity, the
+    deferred passes inside the window are Parent roots with
+    `ratelimit.deferred` and no marker. Their number is within §6.2's bound,
+    and the first pass after the window links and writes the marker.
+18. **A paused object past the window** (reviewer's 8): no marker write while
+    it's paused, and the pass after it's unpaused writes it.
+19. **A marker conflict** (reviewer's 9): rules 3 and 5's `Now` write and the
+    `BeforeFirstAction` write each conflict, each requeues before acting with
+    step `marker`, and each leaves the entry `seen`.
+20. **A create-pending write rejected only because of the marker**
+    (reviewer's 10). The locked marker patch conflicts, so the pass requeues
+    before create-pending is written. No unresolved create handshake is left
+    behind, and the next pass creates.
+21. **The protocol check with tracing off** (reviewer's 11). With
+    `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, Setup succeeds when only metrics are
+    on, and fails when tracing is on.
+22. **Inject.** It overwrites both keys, removes a stale `tracestate`, does
     nothing without a context, and never writes the marker key.
-11. **Transport.** Against an `httptest.Server`: `traceparent` matches the
-    context's span, and there is no header without one. An existing header is
-    kept, and `NoTracePropagation` sends none. There's never a baggage header.
-    The caller's request is not changed. The literal form gets propagation too.
-12. **Setup.** Tracing off returns a working no-op shutdown and sets no
+23. **Transport.** Against an `httptest.Server`:
+    - `traceparent` matches the active span, and there's no header without
+      one, including with only an inbound context.
+    - An existing header is kept, and `NoTracePropagation` sends none.
+    - There's never a baggage header.
+    - The caller's request is not changed.
+    - The literal form gets propagation too.
+24. **Setup.** Tracing off returns a working no-op shutdown and sets no
     provider. On, it sets both providers without dialling, because
-    `otlptracehttp.New` doesn't connect. `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` is
-    an error. The resource table of §5, including env precedence, extends
-    `resource_test.go`. Metrics and traces get an equal resource. Shutdown
-    exports spans ended before it, through a real batcher over an in-memory
-    exporter. That's the drain test.
-13. **Concurrency** (as required for concurrent code). N workers reconcile
+    `otlptracehttp.New` doesn't connect. The resource table of §5, including
+    env precedence, extends `resource_test.go`. Metrics and traces get an
+    equal resource. Shutdown exports spans ended before it, through a real
+    batcher over an in-memory exporter. That's the drain test.
+25. **Concurrency** (as required for concurrent code). N workers reconcile
     distinct objects at once under `-race`. Every span's parent and link
-    belong to its own object. The first-sight map and the marker fallback map
-    stay consistent while objects are deleted and values change.
+    belong to its own object. The memo stays consistent while objects are
+    deleted, recreated and restamped.
 
 ## 11. Adoption
 
@@ -948,6 +1198,10 @@ What each consumer sets. The changes belong to each consumer's own session.
   - `OTEL_ENABLED`, only if it also wants metrics.
 - **Before `OTEL_TRACING_ENABLED=true`:** observability lists its `service.name`
   in the tail sampler (§11.5).
+- **Expect a burst when it turns on** (§6.3). For every git-provider object
+  that carries a `krateo.io/traceparent`, there's up to a window of Parent
+  passes onto the last stamper's trace, then a marker write and an extra
+  reconcile, all within the first 10 minutes.
 - **RBAC.** It already has `patch` on its kinds
   (`templates/clusterrole.yaml:13-23`), which the marker needs.
 - **Outbound.** Propagation comes with the bump, through httpsignal (§6.6).
@@ -957,7 +1211,7 @@ What each consumer sets. The changes belong to each consumer's own session.
 - **Bump** from v1.8.2. That's several minors: the governor, the gated queue
   and the Ready contract came in between (`docs/log.md`).
 - **Main and chart** as git-provider, with `OTEL_SERVICE_NAME=incident-provider` (§11.5). Its Logger is already slog over
-  `NewOTelJSONHandler` (`main.go:63-64`), so logs correlate after #58.
+  `NewOTelJSONHandler` (`main.go:63-64`), so logs correlate since v1.13.0 (#58).
 - **Inject** nothing. It writes Pods and ConfigMaps
   (`internal/controllers/incident/incident.go:360-368`, `apply.go:384-395`),
   which no Krateo controller reconciles.
@@ -1083,6 +1337,13 @@ When a provider's chart turns tracing on, observability adds that provider's
   every trace from a provider not on the list is kept at 100% (§9).
 - **Order.** The sampler entry ships first. The provider's chart change that
   sets `OTEL_TRACING_ENABLED=true` ships after it.
+- **The burst at rollout** (§6.3). When the chart turns tracing on, every
+  annotated object of that provider has a new value. observability sees:
+  - Parent passes onto possibly days-old upstream traces, for up to a window;
+  - then one marker write and one extra reconcile per object.
+
+  They're spread over the first window. Under `sample-5pct` most of those
+  passes aren't stored, and the ones that fail are.
 - **What the audit join then finds.** With a provider under `sample-5pct`,
   observability#127's join finds a provider object's reconcile after a write
   about 1 time in 20 when that reconcile succeeded, and every time when it
@@ -1147,6 +1408,15 @@ names only composition controllers (§13, D5).
   child (§11.3, step 5).
 - **A window without a marker.** It would close only in memory, so every
   restart would reopen it for every annotated object.
+- **An unconditioned marker patch.** Copying its resourceVersion onto
+  `managed` switches optimistic concurrency off for the rest of the pass
+  (§6.2, "The write, with an optimistic lock").
+- **The marker folded into the create-pending Update.** It saves a write, but
+  a rejection caused only by the marker blocks the create (§6.2).
+- **Leaving the critical write as it is.** It reverts a fresh traceparent
+  written during `Create`, and every other writer's annotations (§6.2).
+- **Sending the inbound context over HTTP with tracing off.** A disabled
+  provider would forward a trace header it took no part in (§6.4).
 - **Backdating the root to enqueue time, or a queue span.** These change what
   `reconcile` duration means and what the audit join's timestamp means, and
   nothing carries the per-item number to the reconcile (§4.3).
@@ -1177,7 +1447,13 @@ starts a span stream.
 **D2. The marker annotation is accepted.** This was option (a), and it's the
 only option that survives restarts (§6.2). Its cost is one metadata patch, plus
 one extra reconcile, per new traceparent value, only on annotated objects and
-only with tracing on (§6.3). Rejected:
+only with tracing on (§6.3). The review on #60 added two things:
+- **A burst at rollout.** Because no marker is written while off, turning
+  tracing on makes every annotated object's value new at once. That's a
+  fleet-wide burst of marker writes and extra reconciles, plus Parent passes
+  onto possibly days-old traces, within the first window (§6.3).
+- **The patch is locked.** Every marker write uses an optimistic lock, and a
+  conflict requeues before acting (§6.2). Rejected:
 - (b) An in-memory memo, which loses the first sight after a restart or a
   failover.
 - (c) Parenting every pass, as UR does, which grows traces without bound.
@@ -1236,7 +1512,13 @@ Incident's remediation joins the RCA's trace.
     passes link.
   - Writers stamp before the change that triggers the work.
 
-  §6.2, §6.3, §6.5, §10 and §11.3 specify it.
+  §6.2, §6.3, §6.5, §10 and §11.3 specify it. After the independent review
+  on #60, §6.2 also specifies:
+  - the optimistic lock on every marker write;
+  - the memo's keys, states, locking and growth;
+  - the deferral bound;
+  - what "acts" covers;
+  - the crash gap.
 - **D3 still holds:** only a new value parents (§6.2).
 - **Rejected:**
   - (b) Moving incident-provider's trigger out of status, so one write
@@ -1261,8 +1543,19 @@ Checked in source:
   `OTEL_EXPORTER_OTLP_PROTOCOL`.
 - **Kubernetes:** a CRD's generation rule, the status strategy, the
   generation bump on graceful deletion, and the downward API's field list.
+- **For the independent review's fixes:**
+  - controller-runtime v0.25.2's `MergeFromWithOptimisticLock`;
+  - provider-runtime's code at `3ab2917`: the critical updater's
+    capture-everything write (`pkg/reconciler/api.go:41-51`), every
+    `IsConflict` site and acting call in `reconciler.go`, and the governor's
+    at-capacity jitter and `MaxHold` default (`governor.go:21,27,72-75,554`);
+  - that OTel's default global propagator is a no-op
+    (`API/internal/global/propagator.go:29,55`);
+  - that `otlptracehttp` isn't in `go.mod`.
+- **What alert-provider does in Observe:** it starts its firings there
+  (`alert.go:442-473`).
 - **The consumers:** every consumer file cited in §11, observability's join,
-  Service and tail-sampler files, and #58's diff.
+  Service and tail-sampler files, and #58 as merged in v1.13.0.
 
 Not checked:
 
