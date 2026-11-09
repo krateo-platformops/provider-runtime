@@ -59,6 +59,39 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   signals raises concurrency up to the ceiling; provider-runtime#50 is the
   follow-up.
 
+## 2026-11-09 — unreleased, designed, not built: trace every reconcile
+- **Design:** [design-tracing](./design-tracing.md), in review on #60.
+  - `telemetry.Setup` gains a TracerProvider, and the reconciler opens a
+    `reconcile` root span with `connect`, `observe`, `create`, `update` and
+    `delete` children.
+  - A new `krateo.io/traceparent` value is continued by the first pass that
+    acts on it, within a 10-minute window, and is linked after that.
+  - The marker is the `krateo.io/traceparent-continued` annotation, written
+    with an optimistic lock.
+- **Changes to existing behaviour, when it is built:**
+  - **The critical write carries only the runtime's own keys.**
+    `RetryingCriticalAnnotationUpdater` writes back only
+    `krateo.io/external-name`, the `krateo.io/external-create-*` markers and
+    `krateo.io/traceparent-continued`. Today it writes back every annotation
+    it captured, which reverts a fresh `krateo.io/traceparent`, and any other
+    writer's annotations, set while `Create` ran.
+  - **`telemetry.Setup` sets the global propagator** (W3C TraceContext and
+    Baggage) on every call, tracing on or off. OTel's default is a no-op, so a
+    provider's own `otelhttp` starts honouring and forwarding W3C context and
+    baggage. core-provider and oasgen-provider already set the same
+    propagator themselves.
+  - **httpsignal sets `traceparent`** on outbound requests when tracing is
+    on. With tracing off, it sends nothing.
+  - **With tracing on, a concurrent write requeues before acting.** A write
+    to the object between the pass's Get and the locked marker patch makes the
+    update and delete paths requeue before they act, backing off from 1 s to
+    60 s. Today the act runs, and the status Update fails instead. An object
+    written more often than one Connect and Observe can see its act slip until
+    the 10-minute window closes. That's bounded, and it's what the create path
+    already does with its create-pending Update.
+- **New dependency, when it is built:**
+  `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` v1.45.0.
+
 ## 2026-11-08 — v1.12.0: the local slot is taken before the pop
 - **With saturation on, each controller's queue takes the local slot before it
   pops an item,** and gives it back when the reconcile returns. Low capacity

@@ -29,3 +29,4 @@ It is consumed as a plain Go module — no image, no chart, no CRDs shipped.
 - [design: scale to zero](./design-scale-to-zero.md) — a helper owners call to run a per-Kind controller Deployment at 0 replicas while its Kind is empty (implemented, unreleased)
 - [design: rate-limit governor](./design-rate-limit-governor.md) — automatic slow-down under server-side rate limits and controller CPU saturation (implemented, off by default; CPU threshold provisional; memory input experimental)
 - [design: saturation cost model](./design-saturation-cost-model.md) — sizing local capacity from what reconciles cost against the container's CPU and memory limits, replacing the halve-and-recover step (decided, not built)
+- [design: tracing](./design-tracing.md) — a reconcile root span with connect/observe/create/update/delete children, the `krateo.io/traceparent` parent-or-link rule, and W3C propagation on outbound HTTP, from `telemetry.Setup` (design, for review; not built)
