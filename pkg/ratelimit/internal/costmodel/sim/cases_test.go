@@ -11,7 +11,10 @@ import (
 
 func seeds(t *testing.T) []uint64 {
 	n := 20
-	if testing.Short() {
+	switch {
+	case raceEnabled:
+		n = 2
+	case testing.Short():
 		n = 5
 	}
 	s := make([]uint64, n)

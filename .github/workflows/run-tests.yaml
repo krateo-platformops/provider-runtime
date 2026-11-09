@@ -30,6 +30,11 @@ jobs:
           echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
       - name: Run coverage
         run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+      # The cost model's §10 simulation: every case over 20 seeds, which the
+      # race-enabled run above cuts to 2. It is the gate for the cost-model
+      # stack (docs/plan-saturation-cost-model-implementation.md §4).
+      - name: Cost-model simulation, 20 seeds
+        run: go test -timeout 30m ./pkg/ratelimit/internal/costmodel/sim/
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
