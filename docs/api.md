@@ -4,7 +4,7 @@ title: provider-runtime — api
 description: The exported Go API surface of provider-runtime, package by package, plus the OTLP metric instruments it emits.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-api, reconciler, metrics]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # API
@@ -88,6 +88,18 @@ Called by an owner (core-provider, oasgen-provider) from its own reconcile to ru
 ## `pkg/logging`
 
 `Logger` interface (`Info`, `Debug`, `Warn`, `Error`, `WithValues`, `WithName`); `NewNopLogger`, `NewLogrLogger`, `NewSlogLogger`; OTel log model: `NewOTelJSONHandler(level, w, attrs...)`, `NewOTelHandler(level, w, serviceName)` (tees JSON stream + otelslog bridge), `ServiceNameAttr(serviceName)`.
+
+Unreleased (v1.13.0, additive): `ContextLogger` — `WithContext(ctx) Logger`, an optional interface, so a `Logger` written without it still compiles; `WithContext(l Logger, ctx) Logger` binds `l` to `ctx` when it is a `ContextLogger` and returns it unchanged otherwise. All three built-in Loggers implement it:
+
+- `NewSlogLogger`: the bound Logger passes `ctx` with every record (`InfoContext`, `DebugContext`, `WarnContext`, `ErrorContext`), and the Loggers its `WithName` and `WithValues` return keep it. Binding again replaces the context.
+- `NewNopLogger`: still a nop.
+- `NewLogrLogger`: returned unchanged. logr has no path that carries a context to its sink: `logr.LogSink`'s `Info` and `Error` take none, and logr's slog adapter (`logr.FromSlogHandler`) calls the handler with `context.Background()`. A logr-backed Logger never stamps trace ids.
+
+### Log-to-trace correlation
+
+A record correlates with a trace when three things hold: the Logger is slog-backed (`NewSlogLogger`) and bound with `WithContext`; the bound `ctx` holds a valid span context (one a tracer started, or one `trace.ContextWithSpanContext` put there); and the slog handler reads it. `NewOTelJSONHandler`, and so `NewOTelHandler`'s JSON stream, adds `trace_id` and `span_id`. `NewOTelHandler`'s otelslog bridge hands `ctx` to the global LoggerProvider, whose SDK sets the OTLP record's trace context, once the binary's main has installed one with `go.opentelemetry.io/otel/log/global.SetLoggerProvider`; this module installs none. A plain `slog.NewJSONHandler` ignores the context. Without a span, nothing is stamped.
+
+`Reconciler.Reconcile` binds its per-reconcile Logger (the one built from `WithLogger` with the `request` value) to the `ctx` it is given, so its own records correlate whenever that `ctx` holds a span. It binds the incoming `ctx`, not the timeout one it derives. Neither provider-runtime nor controller-runtime (v0.25) starts a span around a reconcile, so that `ctx` holds one only if the provider wraps the `Reconciler` in a `reconcile.Reconciler` that starts it. The provider's `Connect` and `ExternalClient` methods get a `ctx` but not this Logger: bind their own with `logging.WithContext(log, ctx)`.
 
 ## `pkg/telemetry`
 
