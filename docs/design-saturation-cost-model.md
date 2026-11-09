@@ -1771,6 +1771,21 @@ that with them nothing High or Medium remains.
 | Low | The fold-back's weight, the test's own statistics, the residual phase bias, the fallback's direction | §17.1: the warm-start weight `max(α, 1/n)` counted in `n`, with the test's mean and variance folded back; the residual bias up to `r̄` towards more slots, a third of the `3r̄` edge; Little's fallback reads low |
 | The plan's §4.5 | The counts, `c`, and the new cases' conditions | The plan's §4.5, the reviewer's text verbatim |
 
+**The statistical review of the gate's first run, `4fdd385`, 2026-11-09.** The
+reviewer saw the results: the cost model viable after a bounded set of fixes;
+the level-PI baseline not better. The design's answers are §17.8; the
+conditions the reviewer corrected after seeing results are the plan's §4.5.
+
+| Item | Finding | Answer |
+|---|---|---|
+| 1, High | The long drain: one reconcile's CPU burst exceeds the quota in every period at any `S`, so the per-sample capped test reads the burst's phase, `D̂` qualifies no life, and the slots stay at 1–3 against 6.95 | §17.8, item 1: capped decided over `c_W`'s window by its total CPU, the counter test dropped over it; the counts gain `⌈W/Δt⌉ − 1`; "false restarts, 30s" INVALID unless `S` reaches its band |
+| 2, High | Cost doubles: at about five completions a sample a doubling is only about 3σ of `cᵢ` | §17.8, item 2: the change test on consecutive `c_W` windows; detection about two windows |
+| 3, Medium-high | The warm-start restart on `N̄`, which alternates under error diffusion, missed a cut of 1.5 slots | §17.8, item 3: on the published `S`, threshold `max(3σ, 1 slot)` |
+| 4, Medium | The first term's undershoot after a cost increase, unstated | §17.8, item 4: the predicted floor `S*'·C_W/(C_W + N̄_W)`, and the band's lower edge at the smaller of it and `θ⌊S*⌋` |
+| Code, (a)–(c) | Little's fallback skipped samples without completions; `τ_ĉ` ignored the fallback's `D̂`; after a `ĉ` restart the law and the pacing used completions the denominator doesn't count | §17.8, item 5 |
+| Baselines | The level PI's `K_p` at the grid's edge; no baseline shaped like Temporal's | §17.8, item 6: the grid extended and re-tuned; a reservation-gating baseline modelled on Temporal's tuner at its defaults |
+| Conditions | The reviewer's own errors in §4.5 | The plan's §4.5, "Corrected after seeing results" |
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -2227,3 +2242,103 @@ and reports them side by side, with the same conditions.
   the node cases.
 - §16: the draining kind and the learned limit leave the budget; the
   per-reconcile `D̂`, `c_W`, the deferral and the baseline join it.
+
+### 17.8 Revision after the statistical review of the gate's first run, `4fdd385`
+
+**For review before any code.** The statistical review of PR 1's first gate run
+(`4fdd385`, §15) judged the cost model viable after a bounded set of fixes, and
+the level-PI baseline not better. These are the design's fixes, in the
+reviewer's terms; the plan's §4.5 records the conditions the reviewer corrected
+after seeing results.
+
+**1. High: "capped" decided over `c_W`'s window, not per sample.** In the long
+drain, one reconcile's CPU burst (1.5s of CPU at 250m) is longer than the
+quota allows in any period, so a single thread throttles every period it runs,
+at any `S`, even at one slot. The per-sample test then reads the burst's phase,
+not the operating point: every sample with a burst in it is capped, every life
+overlaps one, `D̂` never qualifies a life, and the capped rule's `θN̄` holds the
+slots at about 1 to 3 against a target of 6.95 (the first run). Amended:
+
+- A sample is **capped over its window `W`**, the window `c_W` uses (the most
+  recent samples spanning at least max(the longest lifetime among the
+  completions in the window, `a_oldest`) + `Δt`, §17.1): capped when
+  `ΣΔU over W ≥ L·|W| − slack·n_W`, with `|W|` the window's length, `n_W` its
+  samples and `slack` §3.2's. The every-period counter test is dropped over `W`:
+  over a window that holds whole lives, total CPU at the limit means the
+  reconciles' demand is at the limit, whatever any one period did.
+- Only a sample capped over its window is a capped sample: the capped rule
+  applies to it, and `D̂` excludes the lives that overlapped it (§17.1). A sample
+  whose own periods were all throttled but whose window is under the limit is
+  active.
+- When reconciles are short, as in the measured workload, `W` is one or two
+  samples and the rule is §3.2's within a sample's slack. When they are long,
+  the cap is seen a window late. **The cost-doubling and limit-halving counts
+  gain `⌈W/Δt⌉ − 1`** (the plan's §4.5).
+- "False restarts, 30s" is **INVALID unless `S` reaches its plant's band** before
+  the restarts are counted: in the first run it passed with 0 restarts while the
+  slots sat near the floor.
+
+**2. High: `ĉ`'s change test over consecutive `c_W` windows.** With about five
+completions per sample, a doubling of the CPU per reconcile is only about 3σ of
+the per-sample `cᵢ`, whose spread the completions' granularity sets; in 12 of 20
+seeds the cost-doubling case's test didn't fire as its count assumed. The test
+now runs on **consecutive, non-overlapping `c_W` windows**: each closed window's
+`c_W` is one observation for the 3σ test, its deferral and its two-in-a-row
+restart (§17.1). The sums are still fed every sample, and the test still removes
+nothing from them. A window holds whole lives, so its `c_W` has the phase noise
+removed and its spread is the work's. Detection takes about two windows, so the
+change test's term in the cost-doubling count is `2⌈W/Δt⌉` samples (the plan's
+§4.5).
+
+**3. Medium-high: the warm-start restart detects a move of the published `S`.**
+§17.4 restarted `D̂`'s warm start when `N̄` moved by more than 3σ of its own
+steps. Under error diffusion `N̄` alternates between `⌊S⌋` and `⌊S⌋ + 1`, so its
+step spread is about a slot and a real cut of 1.5 slots stayed under 3σ (12 of
+20 cost-doubling seeds). The detector now runs on the **published real-valued
+`S`**, with the threshold `max(3σ of S's own steps, 1 slot)`: a move of a slot or
+more is always a move.
+
+**4. Medium: the first term's floor after a cost increase.** After the CPU per
+reconcile rises, the reconciles in flight have spent CPU at the new cost and not
+yet completed, so `c_W` includes their CPU without their completions. With
+`C_W` completions in the window and `N̄_W` in flight at its end, for CPU-first
+reconciles `c_W ≤ c'·(1 + N̄_W/C_W)`, so the capped rule's first term is at least
+`S*'·C_W/(C_W + N̄_W)`: the **predicted floor**, an undershoot towards less CPU
+that §4.3's single crossing allows. The band's lower edge in the cases that
+follow a cost increase is `min(θ⌊S*⌋, the predicted floor)`, with the floor
+computed from the run's own `C_W` and `N̄_W` and stated in the report.
+
+**5. Three corrections to the code's reading of §17.1:**
+
+- **Little's fallback takes every uncapped sample with work**, not only those
+  with completions: a sample's slot-seconds belong in `ΣA` whether a reconcile
+  ended in it or not (its denominator is then 0).
+- **`τ_ĉ` uses the `D̂` in force**, the fallback included, not only the
+  per-reconcile estimate.
+- **After a `ĉ` restart, while the sample has CPU but no completion that the
+  restarted denominator counts, the active law holds**, and the pacing of rises
+  (§7) counts the completions `ĉ`'s denominator counts, not every completion.
+
+**6. Baselines** (§17.6, for the comparison only):
+
+- **The level PI is re-tuned** with `K_p ∈ {0, 0.01, 0.03}` added to the grid,
+  since the first tuning chose `K_p` at the grid's lower edge; the same rule, on
+  the headline case, seeds 101–120, the gains committed before the gate.
+- **A reservation-gating baseline, modelled on Temporal's resource-based tuner
+  as read in its source** (§17.6), with no claim of parity. A PID on the CPU
+  error, `e = 0.9 − U/L` (the container's CPU against its limit), with Temporal's
+  defaults: `K_p = 5`, `K_i = 0`, `K_d = 1`. It issues a slot at a reservation only
+  when the PID's output exceeds 0.05, at most one per 50 ms ramp throttle,
+  always when fewer than the minimum of slots (1) are issued, and never beyond
+  the maximum (the ceiling). In the simulation, where the controller acts once
+  per sample, the capacity it publishes is the reconciles in flight plus the
+  issues the next sample allows: as many as the ramp throttle permits (20 in a
+  1s sample) while the output is over the threshold, none otherwise. The PID
+  sees one CPU reading per sample, so its derivative acts at the first decision
+  after a reading and is 0 at the others. Its gains are Temporal's defaults, not
+  tuned, and frozen the same way. With no CPU limit it reads the host's CPU, as
+  Temporal's does, which in the simulation is the node's CPUs.
+
+**What this revision doesn't change:** the law, `(ρL − B̂)·D̂/ĉ`; the deferral;
+the ratio estimator's standard error; the limit change's handling (§17.2); the
+removed draining kind; and, with no CPU limit, pressure only blocking (§5.1).

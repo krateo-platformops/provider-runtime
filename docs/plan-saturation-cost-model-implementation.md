@@ -687,6 +687,74 @@ it, at most `1 + (⌈D̂/Δt⌉ + 1)` samples, with the excursion's size reporte
 **Unchanged:** the conditions §4.4 lists as unchanged, and the seeds: 20, all of
 which must pass.
 
+**Corrected after seeing results, by the reviewer** (the statistical review of
+the gate's first run, `4fdd385`). Each is a correction of the reviewer's own
+conditions above, made after the reviewer had seen the results. The conditions
+are the reviewer's; the sentence after each, on what it corrects and why, is the
+plan author's summary of the reviewer's reasons.
+
+- **(a) Start from one slot, and the rising cost's entry:** `c₁` is frozen from an
+  iteration that includes the predicted excess of `ĉ` while reconciles are in
+  flight, `ĉₙ = c·(1 + N̄ₙ·D/(Σ completions to n))`, or the entry allows
+  `c₁ + 1 + ⌈D̂/Δt⌉`. The noise-free iteration assumed `ĉ` exact from the first
+  sample, which §17.1's in-flight term makes it not.
+- **(b) Limit halves:** "a capped sample at its first term, **or an active sample
+  at the law with `D̂` restarted under the new limit**, within `ℓ + 1`". The first
+  sample wholly at the new limit need not cap: when the change's own sample has
+  already cut to the new target, it is active, and the law with the restarted
+  `D̂` is the mechanism.
+- **(c) Limit halves, `S₁`:** `S₁ = min(S₀, (ρL' − B̂)N̄₁/(min(U₁, L') − B̂))` when
+  `U₁ > ρL'`, and `S₁ = S₀` otherwise. The condition `S₁ ≤ θ'N̄₁` can hold only
+  when `U₁ ≥ L'`, since the L11 value is at least `θ'N̄₁` whenever `U₁ < L'`; this
+  states what §17.2 computes, with the sign guard.
+- **(d) Rising cost, max `S`:** untrusted samples are judged at
+  `max(own SE, r̄)×3`, or excluded and counted, as in the outside rule; the
+  condition had judged every sample at `r̄`.
+- **(e) Contention below the quota:** "during the dip, no rise in a sample over
+  `CPUPressureThreshold`; after the dip's end, `S` above `S*(1 + 3r̄)` in at most
+  `2k_θ − 1` samples, `k_θ` from the slots at the dip's end", with
+  `k_θ = ⌈ln(S_end/(S*(1 + 3r̄)))/ln(1/θ)⌉`. The dip's stall distribution is
+  reported. (`k_θ`'s formula is the long drain's, with the slots at the dip's end
+  in place of `N̄₀`: the plan author's reading.) The first form allowed no excursion with item 2's exclusion, but the
+  slots held at the dip's start descend from there at the capped rule's pace.
+- **(f) Mix shift, "out of the cap":** within
+  `min(⌈ln(32/S*)/ln(1/θ)⌉, ⌈W/Δt⌉ + 1)` samples, the slower of the `θ` descent
+  from the ceiling and the window's latency bounding it, not a fixed 6.
+
+**Also corrected by the reviewer:**
+
+- **Every count is in samples after the change's own sample `i0`.** Limit halves
+  becomes "within 1 after `i0`".
+- **`ℓ_min` is asserted as a measured value**: the samples from the change until
+  the first sample whose lives are all at the new cost, measured in the run.
+- **The long drain's precondition:** the run is at steady state before the change,
+  at least `τ_ĉ` plus 60 completions after entering the 30s plant's band, checked;
+  and the `k_θ` precondition (`N̄₀ > S*'(1 + 3r̄)`, so that there is a descent to
+  count) is tested. A run that fails either is INVALID, not passed.
+- **The PI baseline's falls are attributed by its filtered `Ū`**, the value it
+  acts on, not the raw `U`.
+- **H1 with bursts above one slot:** the mean CPU is reported against the
+  predicted setpoint shift (design §17.1, capped samples at the operating point);
+  the 85–95% bar was never re-derived for §17's law, and it is reported, not
+  judged, until it is.
+- **H1's single trusted fall of 32%** (the first run, one seed) is traced in the
+  report, sample by sample.
+- **The no-limit case adds a share near the demand**, so that the stall straddles
+  `CPUPressureThreshold` and the block is tested on both sides of it.
+
+**From design §17.8, for the reviewer to confirm:** the cost-doubling and
+limit-halving counts gain `⌈W/Δt⌉ − 1` (the cap decided over `W`); the
+cost-doubling case's change-test mechanism is asserted within `ℓ + 2⌈W/Δt⌉`
+samples (the test over two windows); the band's lower edge after a cost
+increase is `min(θ⌊S*⌋, S*'·C_W/(C_W + N̄_W))`, with the floor reported; and "false
+restarts, 30s" is INVALID unless `S` reaches its plant's band first.
+
+**Three controllers.** The gate runs on the cost model, the level-PI baseline
+re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
+modelled on Temporal's tuner at its defaults (design §17.8, item 6). The
+baselines are judged on the numeric conditions without the cost model's
+mechanism assertions.
+
 **Both controllers.** The gate runs these conditions on the cost model and on
 the utilization-feedback baseline (PR 1's simulation, design §10), case by
 case, and reports the two side by side.
