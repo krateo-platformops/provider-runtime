@@ -239,6 +239,26 @@ func TestTracingModes(t *testing.T) {
 		}
 	})
 
+	t.Run("DeletePathWritesTheMarkerBeforeDelete", func(t *testing.T) {
+		w := initialized(newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA)))
+		w.Finalizers = []string{FinalizerName}
+		now := metav1.Now()
+		w.DeletionTimestamp = &now
+		s := newTraceServer(t, w)
+		tp, rec := tracer(t)
+		p := &widgetProvider{ops: s.ops, deleteErr: errors.New("boom")}
+		r := newTraceReconciler(s, p, WithTracerProvider(tp))
+		if _, err := r.Reconcile(context.Background(), reqFor("w")); err == nil {
+			t.Fatal("want the Delete error")
+		}
+		wantMode(t, lastRoot(t, rec), tracing.Parent, tpA)
+		if i, j := s.ops.index("patch"), s.ops.index("act-delete"); i < 0 || j < 0 || i > j {
+			t.Fatalf("ops = %v, want the marker patch before the Delete call", s.ops.list())
+		}
+		_, _ = r.Reconcile(context.Background(), reqFor("w"))
+		wantMode(t, lastRoot(t, rec), tracing.Link, tpA)
+	})
+
 	t.Run("InvalidTraceparentAndInvalidMarker", func(t *testing.T) {
 		s := newTraceServer(t,
 			initialized(newWidget("bad-tp", ann(meta.AnnotationKeyTraceparent, "garbage"))),
@@ -593,8 +613,8 @@ func TestTracingStatusMapping(t *testing.T) {
 			return s, &widgetProvider{ops: s.ops}, nil
 		},
 	}
-	if len(conflictCases) != len(tracing.Steps) {
-		t.Fatalf("conflict cases cover %d steps, tracing.Steps has %d", len(conflictCases), len(tracing.Steps))
+	if len(conflictCases) != len(tracing.Steps()) {
+		t.Fatalf("conflict cases cover %d steps, tracing.Steps has %d", len(conflictCases), len(tracing.Steps()))
 	}
 	for step, build := range conflictCases {
 		t.Run("Conflict/"+string(step), func(t *testing.T) {
@@ -759,6 +779,33 @@ func TestTracingMemoLifecycle(t *testing.T) {
 			t.Error("removing the finalizer kept the entry")
 		}
 	})
+	t.Run("NonOrphanFinalizerRemovalDropsTheEntry", func(t *testing.T) {
+		w := initialized(newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA)))
+		w.Finalizers = []string{FinalizerName}
+		s := newTraceServer(t, w)
+		tp, _ := tracer(t)
+		deleting := false
+		p := &widgetProvider{ops: s.ops, exists: func(*Widget) bool { return !deleting }}
+		r := newTraceReconciler(s, p, WithTracerProvider(tp))
+		mustReconcile(t, r, "w")
+		if r.traces.len() != 1 {
+			t.Fatal("no entry after a Parent pass")
+		}
+		// Deleted under the default (Delete) policy, with the external resource
+		// already gone: the pass skips Delete and removes the finalizer.
+		if err := s.raw.Delete(context.Background(), s.widget("w")); err != nil {
+			t.Fatal(err)
+		}
+		deleting = true
+		mustReconcile(t, r, "w")
+		if s.ops.count("act-delete") != 0 {
+			t.Fatalf("ops = %v, want no Delete for a resource that's gone", s.ops.list())
+		}
+		if r.traces.len() != 0 {
+			t.Error("removing the finalizer on the Delete path kept the entry")
+		}
+	})
+
 	t.Run("RecreatedObjectIsDecidedAfresh", func(t *testing.T) {
 		s := newTraceServer(t, initialized(newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA))))
 		tp, rec := tracer(t)
@@ -985,4 +1032,41 @@ func TestTracingConcurrency(t *testing.T) {
 
 func name(i int) string {
 	return "w" + string(rune('a'+i))
+}
+
+// A marker patch that returns NotFound counts as success: the object is gone,
+// so there is nothing to mark and nothing failed. The pass goes on, records no
+// trace.marker_failed, and the memo says marked.
+func TestTracingMarkerPatchNotFoundCountsAsSuccess(t *testing.T) {
+	s := newTraceServer(t, newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA)))
+	s.faults.patch = func(client.Object) error { return kerrors.NewNotFound(widgetGR, "w") }
+	tp, rec := tracer(t)
+	r := newTraceReconciler(s, &widgetProvider{ops: s.ops}, WithTracerProvider(tp))
+	mustReconcile(t, r, "w")
+	root := lastRoot(t, rec)
+	if _, failed := eventAttr(root, tracing.EventMarkerFailed, "exception.message"); failed {
+		t.Error("a NotFound marker patch was recorded as trace.marker_failed")
+	}
+	if st, ok := memoStateOf(r, "w"); !ok || st != memoMarked {
+		t.Errorf("memo = %v (%v), want marked", st, ok)
+	}
+	if s.ops.count("act-update") != 1 {
+		t.Errorf("ops = %v, want the pass to go on and act", s.ops.list())
+	}
+}
+
+// With tracing off, a pass's tracing work allocates nothing when the object has
+// no krateo.io/traceparent: beginTrace returns the shared offPass
+// (design-tracing §3.4).
+func TestTracingOffBeginTraceAllocatesNothing(t *testing.T) {
+	s := newTraceServer(t, newWidget("w", nil))
+	r := newTraceReconciler(s, &widgetProvider{ops: s.ops})
+	w := s.widget("w")
+	ctx := context.Background()
+	req := reqFor("w")
+	start := time.Now()
+	n := testing.AllocsPerRun(100, func() { _, _ = r.beginTrace(ctx, nil, req, w, true, start) })
+	if n != 0 {
+		t.Errorf("beginTrace with tracing off allocates %v times per pass, want 0", n)
+	}
 }

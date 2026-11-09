@@ -113,6 +113,10 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     propagator themselves.
   - **httpsignal sets `traceparent`** on outbound requests when tracing is
     on. With tracing off, it sends nothing.
+  - **"Reconciling" is logged after the Get.** The per-reconcile Logger is
+    bound once the root span starts, which needs the object, so the
+    "Reconciling" debug record now follows the Get. A pass whose object is
+    gone (NotFound) logs no "Reconciling" record.
   - **With tracing on, a concurrent write requeues before acting.** A write
     to the object between the pass's Get and the locked marker patch makes the
     update and delete paths requeue before they act, backing off from 1 s to

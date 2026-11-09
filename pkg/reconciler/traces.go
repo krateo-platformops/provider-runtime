@@ -95,6 +95,13 @@ type memoEntry struct {
 // marker, and failed entries while the object lives. NotFound, finalizer
 // removal, a UID change, and the annotation going away drop an entry. With
 // tracing off nothing is ever added.
+//
+// Turning tracing off while the process runs (tracing.SetTracerProvider(nil))
+// leaves the entries it holds in place: a pass with tracing off doesn't touch
+// the memo, so it costs nothing. They stay bounded by the live annotated
+// objects. They're dropped when such an object is deleted, and if tracing
+// comes back on, the next pass of each object reconciles its entry with what
+// the object shows.
 type traceMemo struct {
 	mu      sync.Mutex
 	entries map[types.NamespacedName]memoEntry
@@ -195,6 +202,28 @@ func (m *traceMemo) len() int {
 	defer m.mu.Unlock()
 	return len(m.entries)
 }
+
+// beginTrace decides the pass's mode and opens its root span. With tracing off
+// it returns offPass and allocates nothing, unless the object carries a
+// krateo.io/traceparent, which StartReconcile then carries for Inject
+// (docs/design-tracing.md §3.4). read is false when the Get failed: the span
+// then has no parent and no memo is consulted.
+func (r *Reconciler) beginTrace(ctx context.Context, tp trace.TracerProvider, req reconcile.Request, managed resource.Managed, read bool, started time.Time) (context.Context, *tracePass) {
+	var d tracing.Decision
+	if read {
+		d = r.traces.decide(tp, req.NamespacedName, managed, time.Now(), r.traceWindow)
+	}
+	spanCtx, span := tracing.StartReconcile(ctx, tp, tracing.Object{Kind: r.objectKind, Name: req.Name, Namespace: req.Namespace}, d, started)
+	if tp == nil {
+		return spanCtx, offPass
+	}
+	return spanCtx, &tracePass{tp: tp, span: span, d: d, key: req.NamespacedName, uid: managed.GetUID(), memo: &r.traces}
+}
+
+// offPass is every pass's tracing state with tracing off. Every method returns
+// before it writes anything when tp is nil, so one shared value serves every
+// pass, concurrently.
+var offPass = &tracePass{}
 
 // tracePass is one reconcile's tracing state. With tracing off tp is nil and
 // every method does nothing.

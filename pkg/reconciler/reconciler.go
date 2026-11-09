@@ -813,12 +813,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		return reconcile.Result{}, errors.Wrap(resource.IgnoreNotFound(err), errGetManaged)
 	}
 
-	var d tracing.Decision
-	if err == nil {
-		d = r.traces.decide(tp, req.NamespacedName, managed, time.Now(), r.traceWindow)
-	}
-	spanCtx, span := tracing.StartReconcile(ctx, tp, tracing.Object{Kind: r.objectKind, Name: req.Name, Namespace: req.Namespace}, d, started)
-	pass := &tracePass{tp: tp, span: span, d: d, key: req.NamespacedName, uid: managed.GetUID(), memo: &r.traces}
+	spanCtx, pass := r.beginTrace(ctx, tp, req, managed, err == nil, started)
 	panicked := true
 	defer func() { pass.end(err, panicked) }()
 
