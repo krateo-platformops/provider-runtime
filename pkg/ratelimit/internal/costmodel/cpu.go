@@ -68,6 +68,12 @@ type CPUResult struct {
 	Leff float64
 	// Stall is the sample's stall share, a percentage; -1 when absent.
 	Stall float64
+	// Threshold is the pressure threshold in force for this sample, a
+	// percentage: CPUPressureThreshold, or with no cpu.max while a limit is
+	// held, the one calibrated at the operating point (§5.2).
+	Threshold float64
+	// Calibrated reports that Threshold is the calibrated one.
+	Calibrated bool
 
 	// For metrics: U (cores), B̂ (cores), k̂ (cores per slot), ĉ (seconds),
 	// D̂ (seconds), the throughput (1/s) and the mean in flight.
@@ -98,15 +104,14 @@ type CPU struct {
 	preDt    []timed
 	phase    Phase
 	leff     float64
-	onU      float64 // §5.1 onset window's CPU and time
-	onDt     float64
 	uPre     float64 // U_pre saved at the onset
 	firstRel bool
-	clearS   float64 // §5.1 evidence window: stall and time
-	clearDt  float64
-	runU     float64 // a new pressured run while held
-	runDt    float64
+	on       window // §5.1: the onset window, while free
+	run      window // §5.1: a new run over the threshold, while held
 	runPre   float64
+	clear    window // §5.1: the evidence window
+	past     window // §5.2: the window that learned L_eff: the stall past the share
+	op       ratio  // §5.2: the stall share at the operating point, while held
 }
 
 // NewCPU returns the CPU path's state.
@@ -156,7 +161,7 @@ func (c *CPU) background() float64 {
 	return math.Max(mi, 0)
 }
 
-func (c *CPU) kind(s Sample, used, stall float64, capacity int) Kind {
+func (c *CPU) kind(s Sample, used, stall, thr float64, capacity int) Kind {
 	b := s.Books
 	if b.SlotSeconds == 0 && b.Completions == 0 {
 		return Idle
@@ -167,7 +172,7 @@ func (c *CPU) kind(s Sample, used, stall float64, capacity int) Kind {
 			return Capped
 		}
 	}
-	if s.Limit == 0 && c.phase == Held && stall > c.cfg.PressureThreshold {
+	if s.Limit == 0 && stall > thr {
 		return Pressured
 	}
 	if capacity > 0 && b.NMin > capacity {
@@ -199,7 +204,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if math.Abs(s.Limit-c.lastL) > 1e-9 {
 		res.LimitChanged = true
 		if s.Limit > 0 {
-			c.phase, c.leff = Free, 0
+			c.free()
 		}
 		// A new limit is a new plant: the CPU per slot-second depends on how
 		// much throttling the limit causes (§4.2), so the old estimate
@@ -214,13 +219,19 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	tau := c.tau()
 	alpha := 1 - math.Exp(-dt/tau)
 
-	// §5.1 runs before the sample is classified: a pressured sample is one
-	// that arrives while a learned limit is held.
+	// The threshold in force is taken before §5.1's states move: the sample
+	// that learns a limit is judged against the threshold that opened its
+	// window, and is the cut at onset.
+	thr := c.threshold(s)
+	res.Threshold, res.Calibrated = thr, s.Limit == 0 && c.phase == Held && c.separated()
+
+	// §5.1 runs before the sample is classified, so the sample that learns a
+	// limit is classified against it.
 	if s.Limit == 0 && s.StallPresent {
-		c.nodeLimit(s, used, stall, dt, tau, ceiling, &res)
+		c.nodeLimit(s, stall, thr, dt, tau, alpha, ceiling, &res)
 	}
 
-	kind := c.kind(s, used, stall, capacity)
+	kind := c.kind(s, used, stall, thr, capacity)
 	res.Kind = kind
 
 	c.idle = prune(c.idle, c.t-3*tau)
@@ -339,7 +350,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if !res.Trusted || (s.Limit == 0 && c.phase == Held) {
 		res.Paced = true
 	}
-	if stall > c.cfg.PressureThreshold || c.phase == Onset {
+	if stall > thr || c.phase == Onset {
 		res.Blocked = true
 	}
 	res.Slots = g
@@ -405,12 +416,38 @@ func (c *CPU) shareShift(b Interval, alpha float64) bool {
 	return shift
 }
 
+// window accumulates samples for §5.1's windows: the CPU obtained and the
+// stall share, both as ratios of sums.
+type window struct {
+	u, s, dt float64 // CPU-seconds, stall-seconds, seconds
+	n        int
+}
+
+func (w *window) add(usage, stall, dt float64) {
+	w.u += usage
+	w.s += stall / 100 * dt
+	w.dt += dt
+	w.n++
+}
+
+// cpu is the CPU obtained over the window, in cores.
+func (w *window) cpu() float64 { return w.u / w.dt }
+
+// stall is the window's stall share, a percentage; 0 when empty.
+func (w *window) stall() float64 {
+	if w.dt == 0 {
+		return 0
+	}
+	return 100 * w.s / w.dt
+}
+
 // nodeLimit runs §5.1's states with no cpu.max: free, onset (pressure for less
 // than τ, which only blocks rises), held (a limit learned from a window that
-// spans τ), re-learning and the stepwise release.
-func (c *CPU) nodeLimit(s Sample, used, stall, dt, tau float64, ceiling int, res *CPUResult) {
-	thr := c.cfg.PressureThreshold
-	rho := c.cfg.Target
+// spans τ), re-learning and the stepwise release; and §5.2's calibration of
+// the threshold at the operating point. thr is the threshold in force for
+// this sample.
+func (c *CPU) nodeLimit(s Sample, stall, thr, dt, tau, alpha float64, ceiling int, res *CPUResult) {
+	usage := s.Usage.Seconds()
 	over := stall > thr
 	// U_pre: the CPU obtained in clear samples over the last τ.
 	c.pre = prune(c.pre, c.t-tau)
@@ -427,7 +464,7 @@ func (c *CPU) nodeLimit(s Sample, used, stall, dt, tau float64, ceiling int, res
 		return u / d
 	}
 	if !over {
-		c.pre = append(c.pre, timed{c.t, s.Usage.Seconds()})
+		c.pre = append(c.pre, timed{c.t, usage})
 		c.preDt = append(c.preDt, timed{c.t, dt})
 	}
 
@@ -436,9 +473,10 @@ func (c *CPU) nodeLimit(s Sample, used, stall, dt, tau float64, ceiling int, res
 		if over {
 			c.phase = Onset
 			c.uPre = upre()
-			c.onU, c.onDt = s.Usage.Seconds(), dt
-			if c.onDt >= tau {
-				c.learn(c.onU/c.onDt, res)
+			c.on = window{}
+			c.on.add(usage, stall, dt)
+			if c.on.dt >= tau {
+				c.learn(c.on, res)
 			}
 		}
 	case Onset:
@@ -446,42 +484,99 @@ func (c *CPU) nodeLimit(s Sample, used, stall, dt, tau float64, ceiling int, res
 			c.phase = Free
 			return
 		}
-		c.onU += s.Usage.Seconds()
-		c.onDt += dt
-		if c.onDt >= tau {
-			c.learn(c.onU/c.onDt, res)
+		c.on.add(usage, stall, dt)
+		if c.on.dt >= tau {
+			c.learn(c.on, res)
 		}
 	case Held:
 		if over {
-			if c.runDt == 0 {
+			if c.run.n == 0 {
 				c.runPre = upre()
 			}
-			c.runU += s.Usage.Seconds()
-			c.runDt += dt
-			c.clearS, c.clearDt = 0, 0
-			if c.runDt >= tau {
+			c.run.add(usage, stall, dt)
+			c.clear = window{}
+			if c.run.dt >= tau {
 				c.uPre = c.runPre
-				c.learn(c.runU/c.runDt, res)
+				c.learn(c.run, res)
 			}
 			return
 		}
-		c.runU, c.runDt = 0, 0
-		c.clearS += stall / 100 * dt
-		c.clearDt += dt
-		if c.clearDt >= tau && 100*c.clearS/c.clearDt <= thr {
-			next := c.leff / rho
-			if c.firstRel {
-				next = math.Max(next, c.uPre)
-				c.firstRel = false
-			}
-			c.leff = next
-			c.clearS, c.clearDt = 0, 0
-			res.LimitChanged = true
-			if kh, ok := c.k.value(); ok && kh > 0 && (rho*c.leff-c.background())/kh >= float64(ceiling) {
-				c.phase, c.leff = Free, 0
-			}
+		c.run = window{}
+		// §5.2: a clear sample while held is the operating point; it re-learns
+		// the threshold over §3.5's window.
+		c.op.add(stall*dt, dt, alpha, false)
+		c.clear.add(usage, stall, dt)
+		if c.clear.dt >= tau && c.clear.stall() <= thr {
+			c.release(ceiling, res)
+			c.clear = window{}
 		}
 	}
+}
+
+// release raises the held limit after a clear window (§5.1): the first one
+// after a learn to max(L_eff/ρ, U_pre), each later one by 1/ρ, and the limit is
+// dropped when the law at it reaches the ceiling.
+func (c *CPU) release(ceiling int, res *CPUResult) {
+	rho := c.cfg.Target
+	next := c.leff / rho
+	if c.firstRel {
+		next = math.Max(next, c.uPre)
+		c.firstRel = false
+	}
+	c.leff = next
+	res.LimitChanged = true
+	if kh, ok := c.k.value(); ok && kh > 0 && (rho*c.leff-c.background())/kh >= float64(ceiling) {
+		c.free()
+	}
+}
+
+// learn holds the limit obtained over a window that spanned τ, keeps that
+// window's stall as the stall past the share, and restarts the operating
+// point's (§5.2).
+func (c *CPU) learn(w window, res *CPUResult) {
+	c.phase, c.leff = Held, w.cpu()
+	c.firstRel = true
+	c.past = w
+	c.clear, c.run = window{}, window{}
+	c.op.reset()
+	res.LimitChanged = true
+}
+
+// free drops the learned limit and the threshold's calibration.
+func (c *CPU) free() {
+	c.phase, c.leff = Free, 0
+	c.past, c.clear, c.run = window{}, window{}, window{}
+	c.op.reset()
+}
+
+// separated reports that the operating point's stall is measured (from the
+// third clear sample, as §3.5's standard errors) and is below the stall past
+// the share, so a threshold between them can be calibrated.
+func (c *CPU) separated() bool {
+	mo, ok := c.op.value()
+	return ok && c.op.n >= 3 && mo < c.past.stall()
+}
+
+// threshold is the pressure threshold in force (§5.2). With a cpu.max, or
+// with none and no limit held, it is CPUPressureThreshold. While a limit is
+// held it is calibrated between two stall shares, each a ratio of sums: at the
+// operating point, μo (the clear samples since the limit was learned, smoothed
+// over τ), and past the share, μp (the window that learned the limit). The
+// threshold is their midpoint, so a sample is read as whichever it is closer
+// to. Until the operating point is measured, or when it stalls as much as past
+// the share, it is μp: only a stall as high as past the share is pressure.
+// Never below the option.
+func (c *CPU) threshold(s Sample) float64 {
+	thr := c.cfg.PressureThreshold
+	if s.Limit != 0 || c.phase != Held {
+		return thr
+	}
+	mp := c.past.stall()
+	if !c.separated() {
+		return math.Max(thr, mp)
+	}
+	mo, _ := c.op.value()
+	return math.Max(thr, (mo+mp)/2)
 }
 
 // restartCost restarts the shared CPU estimates (not D̂_q, §3.4).
@@ -490,12 +585,4 @@ func (c *CPU) restartCost() {
 	c.c.reset()
 	c.d.reset()
 	c.since = 0
-}
-
-func (c *CPU) learn(leff float64, res *CPUResult) {
-	c.phase, c.leff = Held, leff
-	c.firstRel = true
-	c.clearS, c.clearDt = 0, 0
-	c.runU, c.runDt = 0, 0
-	res.LimitChanged = true
 }

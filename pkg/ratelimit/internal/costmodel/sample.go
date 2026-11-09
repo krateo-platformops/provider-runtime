@@ -64,8 +64,10 @@ const (
 	Idle
 	// Capped samples used the quota in every period: their CPU is censored.
 	Capped
-	// Pressured samples, with no cpu.max and a learned limit held, are
-	// censored at the CPU the node gave (design §5.1).
+	// Pressured samples, with no cpu.max and the stall over the threshold in
+	// force, are censored at the CPU the node gave (design §5.1), whether a
+	// limit is held or not: an onset window's samples measure the node, not
+	// the reconciles' cost. Simulation finding, PR 1 (§5.2).
 	Pressured
 	// Draining samples had more in flight than the capacity in force at every
 	// moment: a cut preempts nothing, so they measure the cut's excess, not

@@ -141,27 +141,27 @@ func cpuCfg() CPUConfig {
 
 func TestKinds(t *testing.T) {
 	c := NewCPU(cpuCfg())
-	if k := c.kind(sample(time.Second, 0.01, 0.25, 0, 0), 0.01, 0, 1); k != Idle {
+	if k := c.kind(sample(time.Second, 0.01, 0.25, 0, 0), 0.01, 0, 50, 1); k != Idle {
 		t.Errorf("nothing in flight: %v", k)
 	}
 	s := sample(time.Second, 0.25, 0.25, 5, 10)
 	s.Throttled = 10
-	if k := c.kind(s, 0.25, 0, 5); k != Capped {
+	if k := c.kind(s, 0.25, 0, 50, 5); k != Capped {
 		t.Errorf("every period throttled at the cap: %v", k)
 	}
 	// Throttled every period but usage beyond the slack below the cap: active.
 	s.Usage = time.Duration(0.2 * float64(time.Second))
-	if k := c.kind(s, 0.2, 0, 5); k != Active {
+	if k := c.kind(s, 0.2, 0, 50, 5); k != Active {
 		t.Errorf("throttled but 50 ms/s under the cap: %v", k)
 	}
 	// Usage within the slack (2 × 5ms in a 1s sample) of the cap: capped.
 	s.Usage = time.Duration(0.241 * float64(time.Second))
-	if k := c.kind(s, 0.241, 0, 5); k != Capped {
+	if k := c.kind(s, 0.241, 0, 50, 5); k != Capped {
 		t.Errorf("throttled and within the slack: %v", k)
 	}
 	d := sample(time.Second, 0.1, 0.25, 6, 5)
 	d.Books.NMin = 6
-	if k := c.kind(d, 0.1, 0, 4); k != Draining {
+	if k := c.kind(d, 0.1, 0, 50, 4); k != Draining {
 		t.Errorf("six in flight throughout with capacity 4: %v", k)
 	}
 }
@@ -203,5 +203,52 @@ func TestPressureHoldsAtOnsetValue(t *testing.T) {
 	r := m.Step(s, 16)
 	if r.Slots > 4 {
 		t.Errorf("pressure let the slots rise: %v", r.Slots)
+	}
+}
+
+// §5.2: with no cpu.max, the threshold while a limit is held is calibrated
+// between the stall at the operating point and the stall past the share.
+func TestThresholdCalibratedAtTheOperatingPoint(t *testing.T) {
+	cfg := cpuCfg()
+	cfg.PressureThreshold = 30
+	c := NewCPU(cfg)
+	stalled := func(used, stall float64) Sample {
+		s := sample(time.Second, used, 0, 5, 10)
+		s.Throttling = false
+		s.Stall = time.Duration(stall / 100 * float64(time.Second))
+		return s
+	}
+	for i := 0; i < 20; i++ {
+		c.Step(stalled(0.3, 10), 5, 5, 16)
+	}
+	// Past the share for τ: the limit is learned, and until the operating
+	// point is measured only a stall as high as that window's is pressure.
+	var r CPUResult
+	for i := 0; i < 10 && r.Phase != Held; i++ {
+		r = c.Step(stalled(0.4, 80), 5, 5, 16)
+	}
+	if r.Phase != Held || math.Abs(r.Leff-0.4) > 1e-9 {
+		t.Fatalf("no limit learned from a window spanning τ: %+v", r)
+	}
+	if r = c.Step(stalled(0.36, 20), 5, 5, 16); math.Abs(r.Threshold-80) > 1e-9 || r.Calibrated {
+		t.Errorf("before the operating point is measured: threshold %v, calibrated %v; want 80, false", r.Threshold, r.Calibrated)
+	}
+	for i := 0; i < 5; i++ {
+		r = c.Step(stalled(0.36, 20), 5, 5, 16)
+	}
+	if math.Abs(r.Threshold-50) > 1e-9 || !r.Calibrated {
+		t.Errorf("threshold %v, calibrated %v; want the midpoint of 20 and 80, 50", r.Threshold, r.Calibrated)
+	}
+	if r.Kind == Pressured {
+		t.Error("a sample at the operating point read as pressured")
+	}
+	if r = c.Step(stalled(0.4, 60), 5, 5, 16); r.Kind != Pressured || !r.Blocked {
+		t.Errorf("a stall nearer past the share: kind %v, blocked %v", r.Kind, r.Blocked)
+	}
+	// With a cpu.max the option is the threshold, calibrated or not.
+	s := stalled(0.2, 40)
+	s.Limit = 0.25
+	if r = c.Step(s, 5, 5, 16); r.Threshold != 30 || r.Calibrated {
+		t.Errorf("with a cpu.max: threshold %v, calibrated %v; want the option, 30", r.Threshold, r.Calibrated)
 	}
 }
