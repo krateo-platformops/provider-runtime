@@ -1032,6 +1032,16 @@ the model's value comes back up within the run the slots follow it back to
 leave them (§15, L3). Pressure never lowers the slots by itself, with a CPU
 limit or without one (§5.1).
 
+**Under a quota, only stall the quota doesn't explain blocks** (decided by the
+user, 2026-11-09; §17.9 item 8). With a `cpu.max`, a sample blocks increases only
+when its stall share is over `CPUPressureThreshold` and no period in it was
+throttled (`Δnr_throttled = 0`), the same criterion as §17.9 item 1. A sample over
+the threshold with a throttled period doesn't block: its stall is the quota's,
+counted by PSI's "some" as runnable time the quota throttled, and the law
+handles the cap. Stall the quota doesn't explain always blocks. Without a quota
+nothing changes: every sample over the threshold blocks (§5.1). The block's
+purpose is contention below the quota, which the law can't see.
+
 **Why the counter, not `avg10`.** `avg10` is an average with a time constant of
 about 10s, recomputed every 2s (the survey, from `kernel/sched/psi.c`; §14). That
 lag is half of what went wrong in §1. `total` differenced over the sample has
@@ -1839,6 +1849,11 @@ verbatim.
 | Medium | The confirmation run's rules | The plan's §4.5: the freezing commit, the seeds unused before it, every seed reported, a failure spends the seeds |
 | Additions | The allowance from above's start; `B̂` may fall; a `D̂` deferral blocks rises | The plan's §4.5; §17.9 items 6 and 7 |
 
+**Decided by the user, 2026-11-09, on §6's block.** Under a quota, increases are
+blocked only on samples over `CPUPressureThreshold` in which no period was
+throttled; stall the quota doesn't explain always blocks; without a quota
+nothing changes. §17.9 item 8; §6 amended.
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -2533,6 +2548,15 @@ and its two-in-a-row restart, with the sums fed by every qualifying life. The
 per-sample test is behind the 5–8 false restarts an hour at 0.47s, which it
 would otherwise have to justify. A pending D̂ deferral also blocks rises, as ĉ's
 does.
+
+**8. The block under a quota (§6), decided by the user.** Under a quota, block
+increases only on samples over CPUPressureThreshold in which no period was
+throttled (Δnr_throttled = 0), the same criterion as item 1. Stall the quota
+doesn't explain still always blocks. Without a quota nothing changes. The reason:
+the block's purpose is contention below the quota (§6), and the law handles the
+cap. A container at its own cap stalls from its own throttling (item 1), and
+blocking on that stall held rises the law computed from samples under the limit;
+§6 is amended accordingly.
 
 **What this revision doesn't change:** the law; `ĉ`'s window test; the cap over
 `W` (beyond item 3); the floor after a cost increase; the baselines.
