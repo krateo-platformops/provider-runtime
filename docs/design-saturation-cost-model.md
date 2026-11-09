@@ -1861,6 +1861,13 @@ written; the engine's throttle-counting bug confirmed and fixed in the simulatio
 | (C) | Cap-stretched lives in `D̂_q`: `D_mix` 0.879s against 0.47s in the mix shift | §17.10 (C): `D̂_q` excludes lives over per-sample tight samples, falling back to `D̂` |
 | Conditions | The counts, the long drain's derivation, the no-limit share, the false restarts at 0.47s | The plan's §4.5 |
 
+**The review of `caebca3`, 2026-11-09.** §17.10 (A)–(C) and the plan's §4.5
+conditions cleared as written. The contention case's six failures traced to a
+separate gap: a contention run ended by one sample under the threshold, a rewarm
+from contended lives, and an unblocked rise. §17.10 (D); the plan's §4.5 updates
+for contention, no limit and the long drain. With them nothing High or Medium
+remains.
+
 **Decided by the user, 2026-11-09, on §6's block.** Under a quota, increases are
 blocked only on samples over `CPUPressureThreshold` in which no period was
 throttled; stall the quota doesn't explain always blocks; without a quota
@@ -2600,6 +2607,20 @@ queue's `D̂_q` has no qualifying life within `τ`, `D_mix` uses `D̂` for it. I
 mix shift `D_mix` read 0.879s against 0.47s, from cap-stretched lives of the
 expensive queue; excluding them from `D̂_q` alone, and falling back to `D̂`, fixes
 that without starving the long drain, whose `D̂` keeps them (§17.9 item 1).
+
+**(D) A contention run, and what holds through it** (the review of `caebca3`, which
+traced the contention case's six failures: in seed 1 one dip sample with the
+stall at 44.6 ended the run, item 5 rewarmed `D̂` from purely contended lives,
+1.156s against 0.49s, and the next sample under the threshold was unblocked, so
+pacing took `S` from 4.80 to 9.80). A contention run (§17.9 items 1, 5 and 8)
+begins at a sample over CPUPressureThreshold in which no period was throttled
+(with no CPU limit: any sample over it). It ends only once the window W (§17.8
+item 1) has passed with no such sample. Throughout the run, including the
+samples inside it that are under the threshold:
+- rises are blocked (§6: held at min(S_onset, S_model));
+- the samples count for item 1's exclusion of D̂'s lives.
+Item 5's rewarm happens at the run's end, so D̂ restarts from lives that ran after
+a whole window without contention.
 
 **Reporting.** In self-throttled regimes (§17.9 item 1), the lives reported as
 "cap-stretched" (`StretchedLives`, §17.8 item 7(a)) are the plant's real

@@ -826,6 +826,30 @@ at `d4083a4`.** Each is labelled so; the conditions are the reviewer's.
 - **The long drain's count** is re-derived after design §17.10's (A)–(C),
   including the latency until post-change completions (about one lifetime at the
   cap, from the frozen curve) and the first window-capped sample's first term.
+
+**Updated at the review of `caebca3`, the reviewer's text verbatim:**
+
+- **Contention:** "rises are blocked in every sample of a contention run, design
+  §17.10 (D), and in no other; no fall is attributed to pressure; after the dip, S
+  is above S*(1 + 3r̄) in at most the frozen allowance n_above·(1 + ⌈D̂/Δt⌉)
+  samples."
+- **No limit:** "blocked in every sample over the threshold and in no other"
+  becomes "blocked in every sample of a run, a run ending once W has passed with
+  no sample over the threshold, and in no other".
+- **Long drain**, replacing `ℓ_min + 2k_θ − 1`: into the band within
+  ⌈(D'_cap + |W'|)/Δt⌉ + 1 samples of the change.
+  - D'_cap = N₀/X'_cap is the life at the cap: N₀ = ⌈S_pre⌉, and X'_cap is the
+    drain plant's throughput at the cap, frozen from its curve (about
+    0.25/3.0 ≈ 0.083/s).
+  - |W'| = ⌈D'_cap/Δt⌉ + 1 is the window while capped.
+  - With N₀ = 7 that is about 84 + 85 + 1 ≈ 170 samples: the new cost reaches c_W
+    only once W holds post-change completions.
+  - Until then, (A) allows no rise and the first term descends as c_W turns over.
+    During the transient the lower edge is design §17.8 item 4's floor, frozen
+    from the drain plant.
+  - Mechanisms asserted: no rise from the change to entry, per (A); at least one
+    capped sample at its first term with no completion of its own, per (B); the
+    source of D_mix reported (D̂_q, or the D̂ fallback of (C)).
 - **The no-limit case's third share** is derived and frozen with the plants: the
   share at which the engine's fixed-capacity stall at the demand crosses
   `CPUPressureThreshold`. It replaces the 1.2 cores picked from a report on seeds
