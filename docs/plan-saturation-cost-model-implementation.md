@@ -815,6 +815,24 @@ at `d4083a4`.** Each is labelled so; the conditions are the reviewer's.
   reviewer's caveat: the engine's reconciles, with their CPU first and their
   phases aligned at admission, are probably burstier at 100 ms than real ones.
 
+**Corrected after seeing results, by the reviewer, at the review of
+`0dfa94e`.** The conditions are the reviewer's; each is labelled so.
+
+- **Every frozen `n_iter` count gets one extra step**, `(1 + ⌈D̂/Δt⌉)` samples.
+- **Limit doubles:** within 10% of `S*'` in `1 + 2·(1 + ⌈D̂/Δt⌉) = 5` samples.
+- **Limit halves:** within `1 + (⌈D̂'/Δt⌉ + 1) = 3` samples after `i0`.
+- **Cost doubles** uses the measured `ℓ`, the first per-sample tight sample
+  after the change, plus `n_W − 1`.
+- **The long drain's count** is re-derived after design §17.10's (A)–(C),
+  including the latency until post-change completions (about one lifetime at the
+  cap, from the frozen curve) and the first window-capped sample's first term.
+- **The no-limit case's third share** is derived and frozen with the plants: the
+  share at which the engine's fixed-capacity stall at the demand crosses
+  `CPUPressureThreshold`. It replaces the 1.2 cores picked from a report on seeds
+  1–20.
+- **False restarts at 0.47s** are reported (2–9 an hour, from autocorrelated
+  window means): they cost holds, never rises.
+
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
 modelled on Temporal's tuner at its defaults (design §17.8, item 6): inside the

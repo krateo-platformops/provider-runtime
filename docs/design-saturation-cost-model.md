@@ -1849,6 +1849,18 @@ verbatim.
 | Medium | The confirmation run's rules | The plan's §4.5: the freezing commit, the seeds unused before it, every seed reported, a failure spends the seeds |
 | Additions | The allowance from above's start; `B̂` may fall; a `D̂` deferral blocks rises | The plan's §4.5; §17.9 items 6 and 7 |
 
+**The review of `0dfa94e`, 2026-11-09.** §17.9's items 1–8 implemented as
+written; the engine's throttle-counting bug confirmed and fixed in the simulation
+(`4fa8b49`); three window-consistency rules, §17.10.
+
+| Item | Finding | Answer |
+|---|---|---|
+| Engine | Node-share starvation under a quota counted as quota throttling, so §17.9 items 1 and 8 never fired in the contention dip | The simulation's fix and its test, `4fa8b49`; the contention case alone then passes 14 of 20 seeds, from 0 |
+| (A) | The sign guard read one sample's CPU while the cap is decided over `W`: rises in wait-heavy samples after capped ones (mix shift; the long drain) | §17.10 (A): the guard reads `U_W`; a window-capped sample never rises |
+| (B) | `D_mix` weighted by the sample's completions: no first term in samples without any, and none ever in the long drain | §17.10 (B): weighted by the completions over `W` |
+| (C) | Cap-stretched lives in `D̂_q`: `D_mix` 0.879s against 0.47s in the mix shift | §17.10 (C): `D̂_q` excludes lives over per-sample tight samples, falling back to `D̂` |
+| Conditions | The counts, the long drain's derivation, the no-limit share, the false restarts at 0.47s | The plan's §4.5 |
+
 **Decided by the user, 2026-11-09, on §6's block.** Under a quota, increases are
 blocked only on samples over `CPUPressureThreshold` in which no period was
 throttled; stall the quota doesn't explain always blocks; without a quota
@@ -2560,3 +2572,38 @@ blocking on that stall held rises the law computed from samples under the target
 
 **What this revision doesn't change:** the law; `ĉ`'s window test; the cap over
 `W` (beyond item 3); the floor after a cost increase; the baselines.
+
+### 17.10 Window consistency, after the review of `0dfa94e`
+
+**For review before any code.** The reviewer re-checked `0dfa94e`: §17.9's items
+1–8 are implemented as written. It confirmed the engine's throttle-counting bug
+(fixed in the simulation, `4fa8b49`), and traced the remaining failures to three
+places where the law reads a single sample while the cap is decided over the
+window `W`. The rules, in the reviewer's terms:
+
+**(A) The sign guard reads the window.** The law may raise the slots only when
+`U_W < ρL` and lower them only when `U_W > ρL`, with `U_W` the CPU over the window
+`W` (§17.8 item 1). A window-capped sample takes `min(prev, the capped rule)` and
+never rises. A single sample's CPU swings with the phase of the reconciles in it;
+read per sample, the guard let the law rise in a wait-heavy sample right after a
+capped one. That covers mix-shift seeds 2, 4 and 20, and the long drain's
+phase-driven re-raises.
+
+**(B) The capped rule's `D_mix` is weighted by the completions over `W`.** Not by
+the sample's own completions. The first term then applies in samples without
+completions, where until now only `θN̄` did; in the long drain it never applied,
+since `c_W` was 0.
+
+**(C) `D̂_q` excludes lives that overlapped a per-sample tight sample** (every
+period throttled, usage within the slack, §3.2's per-sample test), and when a
+queue's `D̂_q` has no qualifying life within `τ`, `D_mix` uses `D̂` for it. In the
+mix shift `D_mix` read 0.879s against 0.47s, from cap-stretched lives of the
+expensive queue; excluding them from `D̂_q` alone, and falling back to `D̂`, fixes
+that without starving the long drain, whose `D̂` keeps them (§17.9 item 1).
+
+**Reporting.** In self-throttled regimes (§17.9 item 1), the lives reported as
+"cap-stretched" (`StretchedLives`, §17.8 item 7(a)) are the plant's real
+durations (§3.4), not a bias; the reports say so.
+
+**What this doesn't change:** the law's form; the window tests (§17.8 item 2,
+§17.9 item 7); §17.9's items.
