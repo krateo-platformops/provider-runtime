@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-08T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # Usage
@@ -189,6 +189,33 @@ For Krateo, that's core-provider#310.
   (`NewSlogLogger`); use `logging.NewOTelHandler(level, w, serviceName)` as
   the binary's slog handler to get OTel-model JSON on stderr plus OTLP export
   once a LoggerProvider is installed.
+  - *Log-to-trace correlation* (unreleased, v1.13.0). Bind a Logger to a
+    context with `logging.WithContext(log, ctx)`, and every record it logs
+    carries that context to the slog handler. It works when the Logger is
+    slog-backed (`NewSlogLogger`), `ctx` holds a span, and the handler reads
+    it. `NewOTelJSONHandler` and `NewOTelHandler`'s JSON stream add `trace_id`
+    and `span_id`. `NewOTelHandler`'s otelslog bridge gives the context to
+    the LoggerProvider your main installs with `global.SetLoggerProvider`,
+    which sets the OTLP record's trace context. A logr-backed Logger can't
+    carry a context to its sink, so `WithContext` returns it unchanged.
+    `Reconcile` already binds its per-reconcile Logger to the `ctx` it is
+    given. Neither provider-runtime nor controller-runtime starts a span
+    there, so that `ctx` holds one only if you wrap the `Reconciler` in a
+    reconciler that starts it. Your `ExternalClient` methods get a `ctx`
+    (the reconcile's, with its timeout) but not that Logger, so bind your
+    own where you log:
+
+    ```go
+    func (e *external) Create(ctx context.Context, mg resource.Managed) error {
+        log := logging.WithContext(e.log, ctx)
+        // ... call the API with ctx, so its client spans are children ...
+        log.Info("created external resource", "externalName", meta.GetExternalName(mg))
+        return nil
+    }
+    ```
+
+    `WithContext` on a Logger that doesn't implement `logging.ContextLogger`
+    returns it unchanged, so this is safe with any Logger.
 - **Metrics** — `telemetry.Setup(ctx, log, telemetry.Config{Enabled: true})`
   returns `(*Metrics, shutdown, error)`; pass the metrics handle to
   `reconciler.WithMetrics` and `controller.Options.QueueWaitRecorder`.

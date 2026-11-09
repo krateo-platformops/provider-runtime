@@ -12,6 +12,31 @@ timestamp: 2026-11-09T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-09 — unreleased, v1.13.0: logs can correlate with traces
+- **Additive; nothing breaks.** `logging.ContextLogger` (`WithContext(ctx)
+  Logger`) is an optional interface, so a `Logger` written without it still
+  compiles. The helper `logging.WithContext(l, ctx)` binds `l` when it
+  implements it and returns `l` unchanged when it doesn't.
+- **Why:** `NewOTelJSONHandler` already stamped `trace_id` and `span_id` from
+  the record's context, but the `Logger` had no context to give it. The slog
+  Logger called slog without one, so every record carried
+  `context.Background()` and no controller could correlate a log with a trace.
+- **The slog Logger** passes the bound context with every record, and keeps
+  it through `WithName` and `WithValues`. The nop Logger stays a nop. **The
+  logr Logger can't carry a context**: logr's sink takes none, and its slog
+  adapter calls the handler with `context.Background()`. It comes back
+  unchanged.
+- **`Reconcile` binds its per-reconcile Logger** to the `ctx` it is given.
+  Neither provider-runtime nor controller-runtime starts a span there, so its
+  records correlate only when the provider wraps the reconciler in one that
+  does. Providers bind their own Logger in `ExternalClient` methods with
+  `logging.WithContext(log, ctx)`; the greeting example now does.
+- **Correction:** `NewOTelHandler`'s doc named a `SetupOTLPLogs` that never
+  existed. The binary's main installs the OTLP LoggerProvider, with
+  `global.SetLoggerProvider`.
+- **Ships first,** as its own minor release, before the credential-use and
+  cost-model work.
+
 ## 2026-11-09 — unreleased, decided, not built: size local capacity from what reconciles cost
 - **Design:** [design-saturation-cost-model](./design-saturation-cost-model.md),
   reviewed independently five times. The saturation input stops halving on a pressure
