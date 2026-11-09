@@ -83,6 +83,15 @@ func TestGateReport(t *testing.T) {
 		ctls = ctls[:1]
 	}
 	cases := gateCases()
+	if only := os.Getenv("SIM_GATE_CASE"); only != "" {
+		var keep []gateCase
+		for _, c := range cases {
+			if c.name == only {
+				keep = append(keep, c)
+			}
+		}
+		cases = keep
+	}
 	ss := seeds()
 	type job struct{ c, k, s int }
 	var jobs []job
