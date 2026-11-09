@@ -49,8 +49,14 @@ type CPUResult struct {
 	// because a sample of the last τ was window-capped (§17.9, item 4).
 	DDeferred, DPending, UnresHold bool
 	// ContentionEnd reports that a run of contention samples ended and
-	// rewarmed D̂ (§17.9, item 5).
-	ContentionEnd bool
+	// rewarmed D̂ (§17.9, item 5); InRun that the sample is in a contention
+	// run (§17.10 (D)).
+	ContentionEnd, InRun bool
+	// DMixFallback reports that D_mix used D̂ for a queue whose D̂_q had no
+	// qualifying life within τ (§17.10 (C)); UW is the CPU over the window,
+	// which the sign guard reads (§17.10 (A)).
+	DMixFallback bool
+	UW           float64
 	// WindowLen is the closed window's samples when WindowClosed is set.
 	WindowLen int
 	// WindowClosed reports that a c_W test window closed in this sample;
@@ -98,7 +104,8 @@ type histSample struct {
 	usage, dt          float64 // CPU-seconds and seconds
 	periods, throttled uint64
 	completions        int
-	longest            float64 // the longest lifetime among its completions, seconds
+	queues             map[string]int // completions per queue, for D_mix over W
+	longest            float64        // the longest lifetime among its completions, seconds
 }
 
 // winSample is a sample's part of a ĉ test window, kept to rebuild ĉ's sums
@@ -170,7 +177,9 @@ type CPU struct {
 	little   ratio // Little's fallback, ΣA/ΣC over uncapped samples
 	maxLife  float64
 	bad      []span // window-capped, pressured and change samples
-	tight    []span // samples whose every period was throttled
+	tight    []span // samples whose every period was throttled, not window-capped
+	tightAll []span // every per-sample tight sample (§17.10 (C))
+	dqLast   map[string]float64
 	hist     []histSample
 
 	// The published S's steps, for the rewarm (§17.8 item 3, §17.9 item 2).
@@ -184,7 +193,8 @@ type CPU struct {
 	// window-capped sample, a contention run in progress, B̂ held.
 	changeAfter time.Duration
 	lastCapT    float64
-	inCont      bool
+	runOn       bool          // a contention run (§17.10 (D))
+	lastContEnd time.Duration // the end of the run's last contention sample
 	bHat        float64
 	bHatOK      bool
 
@@ -203,7 +213,7 @@ type CPU struct {
 
 // NewCPU returns the CPU path's state.
 func NewCPU(cfg CPUConfig) *CPU {
-	return &CPU{cfg: cfg, dq: map[string]*ratio{}, shares: map[string]*ratio{}, sPrev: -1, sRefT: math.Inf(-1), lastCapT: math.Inf(-1)}
+	return &CPU{cfg: cfg, dq: map[string]*ratio{}, dqLast: map[string]float64{}, shares: map[string]*ratio{}, sPrev: -1, sRefT: math.Inf(-1), lastCapT: math.Inf(-1)}
 }
 
 // tau is the estimates' time constant: ten samples, and at least 60
@@ -388,7 +398,13 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		longest = math.Max(longest, l.Lifetime())
 		c.maxLife = math.Max(c.maxLife, l.Lifetime())
 	}
-	c.hist = append(c.hist, histSample{books.Start, books.End, s.Usage.Seconds(), dt, s.Periods, s.Throttled, books.Completions, longest})
+	perQueue := map[string]int{}
+	for q, qi := range books.Queues {
+		if qi.Completions > 0 {
+			perQueue[q] = qi.Completions
+		}
+	}
+	c.hist = append(c.hist, histSample{books.Start, books.End, s.Usage.Seconds(), dt, s.Periods, s.Throttled, books.Completions, perQueue, longest})
 	from := c.window(books, dt)
 	kind, nW := c.kind(s, from)
 	res.Kind, res.WindowSamples = kind, nW
@@ -401,18 +417,50 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		from--
 	}
 
-	// The samples a qualifying life may not overlap (§17.1, §17.8).
-	if kind == Capped || contention || res.ChangeSample {
+	// §17.10 (D): a contention run begins at a contention sample and ends
+	// only once the window W holds none; at its end D̂ is rewarmed (§17.9
+	// item 5).
+	switch {
+	case contention:
+		c.runOn, c.lastContEnd = true, books.End
+	case c.runOn && c.hist[from].from >= c.lastContEnd:
+		c.runOn = false
+		c.rewarmD(books.Start)
+		res.ContentionEnd, res.DRewarmed = true, true
+	}
+	inRun := c.runOn
+	res.InRun = inRun
+
+	// §17.10 (A): the CPU over the window, which the sign guard reads.
+	var uw, dw float64
+	for _, h := range c.hist[from:] {
+		uw += h.usage
+		dw += h.dt
+	}
+	uW := used
+	if dw > 0 {
+		uW = uw / dw
+	}
+	res.UW = uW
+
+	// The samples a qualifying life may not overlap (§17.1, §17.8, §17.10).
+	if kind == Capped || inRun || res.ChangeSample {
 		c.bad = append(c.bad, span{books.Start, books.End})
 	}
-	if tightSample(s, used) && kind != Capped {
-		c.tight = append(c.tight, span{books.Start, books.End})
+	if tightSample(s, used) {
+		c.tightAll = append(c.tightAll, span{books.Start, books.End})
+		if kind != Capped {
+			c.tight = append(c.tight, span{books.Start, books.End})
+		}
 	}
 	for len(c.bad) > 0 && c.bad[0].to < keepFrom {
 		c.bad = c.bad[1:]
 	}
 	for len(c.tight) > 0 && c.tight[0].to < keepFrom {
 		c.tight = c.tight[1:]
+	}
+	for len(c.tightAll) > 0 && c.tightAll[0].to < keepFrom {
+		c.tightAll = c.tightAll[1:]
 	}
 
 	c.idle = prune(c.idle, c.t-3*tau)
@@ -466,18 +514,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	c.sSteps.moved(prev, alpha)
 	c.sPrev = prev
 	c.sRecent = append(c.sRecent, timed{c.t, prev})
-	// §17.9 item 5: the end of a contention run rewarms D̂.
-	if contention {
-		c.inCont = true
-	} else if c.inCont {
-		c.inCont = false
-		c.rewarmD(books.Start)
-		res.ContentionEnd, res.DRewarmed = true, true
-	}
-
 	if kind == Idle {
 		res.Slots = prev
-		res.Blocked = contention
+		res.Blocked = inRun
 		c.report(&res)
 		return res
 	}
@@ -492,10 +531,13 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		if overlaps(c.bad, l) {
 			continue
 		}
-		q := perQ[l.Queue]
-		q[0] += l.Lifetime()
-		q[1]++
-		perQ[l.Queue] = q
+		// §17.10 (C): D̂_q also excludes lives over a per-sample tight sample.
+		if !overlaps(c.tightAll, l) {
+			q := perQ[l.Queue]
+			q[0] += l.Lifetime()
+			q[1]++
+			perQ[l.Queue] = q
+		}
 		if l.Granted >= c.dSince {
 			sum += l.Lifetime()
 			cnt++
@@ -518,6 +560,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			c.dq[q] = r
 		}
 		r.add(v[0], v[1], alpha, false)
+		c.dqLast[q] = c.t
 	}
 	// §17.8 item 5: Little's fallback takes every uncapped sample with work.
 	if kind != Capped && books.SlotSeconds > 0 {
@@ -584,7 +627,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if limit == 0 {
 		// §5.1: with no CPU limit, the CPU law doesn't run: S_cpu is the
 		// ceiling, reached through §7's pacing, and pressure only blocks.
-		res.Slots, res.Paced, res.Blocked = float64(ceiling), true, contention
+		res.Slots, res.Paced, res.Blocked = float64(ceiling), true, inRun
 		c.fill(&res, ch, cok, dv, dok)
 		return res
 	}
@@ -598,7 +641,8 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			g = math.Min(prev, (rho*limit-bg)*nbar/d)
 		}
 	case kind == Capped:
-		g = c.capped(s, books, from, limit, bg, nbar, &res)
+		// §17.10 (A): a window-capped sample never rises.
+		g = math.Min(prev, c.capped(from, limit, bg, nbar, tau, dv, dok, &res))
 	default:
 		switch {
 		case c.restartC:
@@ -624,11 +668,11 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			g = (rho*limit - bg) * dv / ch
 		}
 	}
-	// The sign guard (§4.2).
+	// The sign guard (§4.2), reading the window's CPU (§17.10 (A)).
 	switch {
-	case used < rho*limit && g < prev:
+	case uW < rho*limit && g < prev:
 		g, res.Guarded = prev, true
-	case used > rho*limit && g > prev:
+	case uW > rho*limit && g > prev:
 		g, res.Guarded = prev, true
 	}
 	// Neither a restart, a deferred sample, a pending ĉ test nor the change's
@@ -639,9 +683,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if !res.Trusted {
 		res.Paced = true
 	}
-	// §17.9 item 8: under a quota, only stall the quota doesn't explain
-	// blocks.
-	res.Blocked = contention
+	// §17.9 item 8 and §17.10 (D): every sample of a contention run blocks;
+	// under a quota, a run begins only at stall the quota doesn't explain.
+	res.Blocked = inRun
 	res.Slots = g
 	c.fill(&res, ch, cok, dv, dok)
 	return res
@@ -914,33 +958,49 @@ func (c *CPU) windowCost(from int, bg float64) (float64, bool) {
 }
 
 // capped is the law for a capped sample (design §4.2, §17.1):
-// min((ρL − B̂)·D_mix/c_W, θN̄), with D_mix only when every queue that ended a
-// reconcile has a D̂_q.
-func (c *CPU) capped(s Sample, b Interval, from int, limit, bg, nbar float64, res *CPUResult) float64 {
+// min((ρL − B̂)·D_mix/c_W, θN̄). D_mix is weighted by the completions over the
+// window W (§17.10 (B)); a queue whose D̂_q had no qualifying life within τ
+// uses the D̂ in force (§17.10 (C)); without either, only θN̄.
+func (c *CPU) capped(from int, limit, bg, nbar, tau, dv float64, dok bool, res *CPUResult) float64 {
 	rho := c.cfg.Target
 	theta := (rho*limit - bg) / (limit - bg)
 	g := theta * nbar
 	cw, ok := c.windowCost(from, bg)
-	if !ok || cw <= 0 || b.Completions == 0 {
+	if !ok || cw <= 0 {
 		return g
 	}
 	res.WindowCost = cw
-	var mix float64
-	for q, qi := range b.Queues {
-		if qi.Completions == 0 {
-			continue
+	per := map[string]int{}
+	total := 0
+	for _, h := range c.hist[from:] {
+		for q, n := range h.queues {
+			per[q] += n
+			total += n
 		}
-		r := c.dq[q]
-		if r == nil {
-			return g
-		}
-		dq, ok := r.value()
-		if !ok {
-			return g
-		}
-		mix += float64(qi.Completions) * dq
 	}
-	mix /= float64(b.Completions)
+	if total == 0 {
+		return g
+	}
+	var mix float64
+	for q, n := range per {
+		var d float64
+		r := c.dq[q]
+		v, vok := 0.0, false
+		if r != nil {
+			v, vok = r.value()
+		}
+		switch {
+		case vok && c.t-c.dqLast[q] < tau:
+			d = v
+		case dok:
+			d = dv
+			res.DMixFallback = true
+		default:
+			return g
+		}
+		mix += float64(n) * d
+	}
+	mix /= float64(total)
 	if first := (rho*limit - bg) * mix / cw; first < g {
 		res.FirstTerm = true
 		return first
