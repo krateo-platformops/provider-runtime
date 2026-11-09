@@ -52,10 +52,18 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     writer's annotations, set while `Create` ran.
   - **`telemetry.Setup` sets the global propagator** (W3C TraceContext and
     Baggage) on every call, tracing on or off. OTel's default is a no-op, so a
-    provider's own `otelhttp` starts honouring and forwarding W3C context.
-    core-provider already sets the same propagator itself.
+    provider's own `otelhttp` starts honouring and forwarding W3C context and
+    baggage. core-provider and oasgen-provider already set the same
+    propagator themselves.
   - **httpsignal sets `traceparent`** on outbound requests when tracing is
     on. With tracing off, it sends nothing.
+  - **With tracing on, a concurrent write requeues before acting.** A write
+    to the object between the pass's Get and the locked marker patch makes the
+    update and delete paths requeue before they act, backing off from 1 s to
+    60 s. Today the act runs, and the status Update fails instead. An object
+    written more often than one Connect and Observe can see its act slip until
+    the 10-minute window closes. That's bounded, and it's what the create path
+    already does with its create-pending Update.
 - **New dependency, when it is built:**
   `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` v1.45.0.
 

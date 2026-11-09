@@ -113,7 +113,7 @@ Where provider-runtime differs on purpose:
    child of the annotation's remote parent. That keeps the parent-or-link rule
    exact (§6.2) and the audit join's assumption true (§11.3).
 
-**Changes to code that exists today.** Besides the new code, three things
+**Changes to code that exists today.** Besides the new code, four things
 behave differently. Each goes in `docs/log.md` when it ships; the entry is
 already there, under this design.
 - **`RetryingCriticalAnnotationUpdater` writes only the runtime's own keys**
@@ -126,17 +126,53 @@ already there, under this design.
   - **After,** it carries only `krateo.io/external-name`, the
     `krateo.io/external-create-*` markers and `krateo.io/traceparent-continued`.
     A provider that sets another annotation in memory and relies on this write
-    to persist it would lose it. None of the consumers read for §11 does: git-,
-    incident- and alert-provider set no annotation on their managed resources,
-    and core-provider's annotation writes are its own (`getters.go:279-299`).
+    to persist it would lose it. **No consumer does.** I scanned every
+    non-archived go.mod in the org, root and nested, that requires
+    provider-runtime under either module path. All of them use the new path,
+    `github.com/krateo-platformops/provider-runtime`; none uses the old
+    `krateoplatformops` path. For each one, I checked whether it sets
+    annotations on a managed resource:
+
+    | Consumer (go.mod) | provider-runtime | Uses the reconciler | Annotations it writes |
+    |---|---|---|---|
+    | alert-provider | v1.13.0 | yes | none on its managed resources. `Alert.SetAnnotations` only keeps `krateo.io/paused` through an accessor (`apis/alert/v1alpha1/types.go:256-267`) |
+    | git-provider | v1.11.0 | yes | none |
+    | incident-provider | v1.8.2 | yes | none |
+    | access-review | v1.8.2 | yes | none |
+    | identity-lifecycle | v1.8.2 | yes | none |
+    | oasgen-provider (`go/oasgen-provider`) | v1.8.2 | yes | only on CRDs, Deployment pod templates and policies, never on its managed resource, and through its own writes (`internal/tools/crd/apply.go:228-230`, `deployment/deployment.go:32-34`, `policy/policy.go:244-245`) |
+    | core-provider (`go/core-provider`) | v1.7.2 | yes | only on compositions, through its own dynamic-client writes (`helpers/getters/getters.go:273-299,323-345`) |
+    | core-provider (`go/testprovider`) | v1.8.2 | yes | none |
+    | core-provider (`go/chart-inspector`) | v1.7.2 | no: `apis/common/v1` only | none |
+    | cmp-usage-collector | v1.7.0 | no: `pkg/logging` only | only on Secrets, through its own clientset writes (`internal/child/child.go:139-145`) |
+
+    The reviewer found the same for access-review and identity-lifecycle.
 - **`telemetry.Setup` sets the global propagator on every call** (§3.1).
   OTel's default global propagator is a no-op
   (`API/internal/global/propagator.go:29,55`). So a provider's own `otelhttp`
   starts extracting and injecting W3C context and baggage once it calls Setup,
-  tracing on or off. core-provider already sets the same propagator itself, so
-  it sees no change.
+  tracing on or off. core-provider and oasgen-provider already set the same
+  propagator themselves, tracing on or off (core-provider `tracing.go:32`,
+  oasgen-provider `go/oasgen-provider/internal/tools/telemetry/tracing.go:31`),
+  so they see no change. The re-review on #60 found the change has no
+  observable effect on today's consumers.
 - **httpsignal sets `traceparent` on outbound requests when tracing is on**
   (§6.6). With tracing off, it sends nothing.
+- **With tracing on, a concurrent write requeues before acting** (§6.2, "The
+  write, with an optimistic lock").
+  - **Today,** if another writer changes the object between the pass's Get and
+    its status Update, the pass still acts on the external system, and then
+    its status Update fails on the resourceVersion.
+  - **With tracing on,** a Parent pass on the update or delete path catches the
+    same write at the locked marker patch, and requeues **before** acting. It
+    backs off at 1 s, 2 s, 4 s and so on, up to 60 s
+    (`pkg/controller/options.go:159`).
+  - **For an object written more often than one Connect and Observe last,**
+    the act can slip until the window closes. Then rule 5's write, right after
+    the Get, has almost no gap to conflict in, and the act runs in a Link
+    pass. It's bounded by the window, and it matches the create path, which
+    already conflicts on the create-pending Update before `Create`
+    (`reconciler.go:1190-1194`).
 
 ## 3. The API
 
@@ -587,13 +623,21 @@ if the object has changed since.
   `managed` itself. `managed` holds what Observe computed in memory, and
   decoding the response into it would throw that away.
 - **What's copied back.** When the patch succeeds, the reconciler copies only
-  the new resourceVersion and the marker onto `managed`. The lock guarantees
-  the stored object is the one the pass read plus the marker, so `managed` with
-  the new version is still exactly that object plus the pass's own changes.
-  Later writes in the pass stay version-checked, including the status Update
-  after each acting call (`reconciler.go:1380`, `:1121`), and the provider's
-  own writes. A status Update with a stale version is refused
-  (`status_strategy.go:79-81`).
+  the new resourceVersion and the marker onto `managed`.
+  - **Why that's safe.** The lock guarantees that the stored object is the one
+    the pass read plus the marker. So `managed` with the new version is still
+    exactly that object, plus the pass's own changes.
+  - **The exception is a mutating admission webhook,** which can change other
+    fields of the object as it admits the patch. `managed` doesn't see those
+    changes. That's harmless: every later write in the pass goes through
+    admission again, so the webhook applies its change again.
+  - **Later writes stay version-checked,** including the status Update after
+    each acting call (`reconciler.go:1380`, `:1121`), and the provider's own
+    writes. The generic store refuses an update whose resourceVersion isn't
+    the stored one
+    (`apiserver@v0.37.2/pkg/registry/generic/registry/store.go:807-808`).
+    The status subresource goes through the same store, after copying in the
+    old object (`status_strategy.go:79-81`).
 - **Why the lock.** Without it, an unconditioned patch would succeed against
   whatever the object had become, and copying its version onto `managed`
   would switch optimistic concurrency off for the rest of the pass. Say
@@ -666,8 +710,10 @@ map keyed by `types.NamespacedName` and holding the object's UID:
   pass Link, so a cache that lags behind the write doesn't produce a second
   Parent pass.
 - **`failed`** after a write that failed with anything other than a conflict
-  (RBAC, a webhook). The pass records `trace.marker_failed` and logs once per
-  object, and later passes in this process link through `remembered`.
+  (RBAC, an admission webhook's Forbidden or Invalid). **The pass goes on:**
+  it records `trace.marker_failed`, logs once per object, and acts without
+  the marker. On the create path, it writes create-pending without the marker
+  and creates. Later passes in this process link through `remembered`.
   Without it, an object whose marker can never be written would parent every
   pass. After a restart, such an object parents again until its next acting
   pass or the end of the window.
@@ -1147,10 +1193,13 @@ on envtest, so the API server's own conflict handling is what's tested.
 19. **A marker conflict** (reviewer's 9): rules 3 and 5's `Now` write and the
     `BeforeFirstAction` write each conflict, each requeues before acting with
     step `marker`, and each leaves the entry `seen`.
-20. **A create-pending write rejected only because of the marker**
-    (reviewer's 10). The locked marker patch conflicts, so the pass requeues
-    before create-pending is written. No unresolved create handshake is left
-    behind, and the next pass creates.
+20. **Admission rejects the marker patch** (reviewer's 10, as re-reviewed).
+    - A validating webhook, or a fake client, refuses the marker patch with
+      Forbidden, and in a second case with Invalid.
+    - The pass records `trace.marker_failed`, and the entry becomes `failed`.
+    - create-pending is written without the marker, the create proceeds, and no
+      unresolved create handshake is left behind.
+    - The next pass links through `remembered`, and writes no marker.
 21. **The protocol check with tracing off** (reviewer's 11). With
     `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, Setup succeeds when only metrics are
     on, and fails when tracing is on.
@@ -1315,13 +1364,19 @@ alert-provider's `OTEL_TRACING_ENABLED` defaults to `OTEL_ENABLED`
 (`internal/tracing/tracing.go:63-67`). It keeps its own Setup, so it keeps that
 rule. `ConfigFromEnv`'s "unset means off" (D1) is for the providers that use it.
 
-### 11.4 core-provider (not in the brief, but affected)
+### 11.4 core-provider and oasgen-provider (not in the brief, but affected)
 
-core-provider already calls `telemetry.Setup` and has its own
-`SetupTracing`. To adopt, it sets `TracingEnabled` from its existing flag and
-deletes `coretelemetry.SetupTracing`. Otherwise two TracerProviders race for
-the global. Its `compositiondefinition.observe` span becomes a child of
-provider-runtime's `observe`.
+Both already call `telemetry.Setup`, and both have their own `SetupTracing`.
+To adopt, each sets `TracingEnabled` from its existing flag and deletes its own
+`SetupTracing`. Otherwise two TracerProviders race for the global.
+- **core-provider** (`go/core-provider`, provider-runtime v1.7.2) has
+  `coretelemetry.SetupTracing`. Its `compositiondefinition.observe` span becomes
+  a child of provider-runtime's `observe`.
+- **oasgen-provider** (`go/oasgen-provider`, provider-runtime v1.8.2) has its
+  own TracerProvider and propagator in
+  `internal/tools/telemetry/tracing.go:29-49` (the propagator at `:31`). Its
+  main calls `telemetry.Setup` (`main.go:130`) and then its own
+  `SetupTracing` (`main.go:148`), gated by `OTEL_TRACING_ENABLED` (`main.go:50`).
 
 ### 11.5 observability: one step for each provider that turns tracing on
 
@@ -1554,6 +1609,14 @@ Checked in source:
   - that `otlptracehttp` isn't in `go.mod`.
 - **What alert-provider does in Observe:** it starts its firings there
   (`alert.go:442-473`).
+- **The consumer scan for the critical-write change** (§2). Every non-archived
+  repo's root go.mod was read through the GitHub GraphQL API, and the nested
+  ones through each repo's tree: core-provider's four, oasgen-provider's two,
+  snowplow's, authn's and otel-collector's three. Each was matched against both
+  module paths, and each consumer's code was grepped for annotation writes.
+  Archived repos weren't scanned.
+- **oasgen-provider's tracing setup**, and that `apiserver`'s generic store
+  checks the resourceVersion (`store.go:807-808`).
 - **The consumers:** every consumer file cited in §11, observability's join,
   Service and tail-sampler files, and #58 as merged in v1.13.0.
 
