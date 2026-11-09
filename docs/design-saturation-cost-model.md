@@ -216,10 +216,15 @@ Each sample is one of five kinds, and only the kind it is updates anything:
   sample had more in flight than the capacity allows, as after a cut, which
   preempts nothing (§8). Its CPU and durations measure the cut's excess, not the
   cost at the new capacity: it feeds only `ĉ`, like a capped sample, and can't
-  raise the slots (amended after the first simulation run, §15).
+  raise the slots (amended after the first simulation run, §15). **Removed by
+  §17.4.**
 - **Active**: anything else.
 
 ### 3.3 CPU per reconcile, and the background
+
+**Amended by §17.1:** the law no longer uses `k̂`; it uses `ĉ`, fed by every
+sample with work, and a per-reconcile `D̂`. The background's estimate below is
+unchanged.
 
 Go can't attribute CPU to a goroutine, so the only measurement is the whole
 cgroup's CPU per sample. It includes the informers, watch decoding, the GC, the
@@ -281,6 +286,11 @@ Exported for people, not used by the law: the CPU per completion
 
 ### 3.4 Duration
 
+**Amended by §17.1, §17.2 and §17.5:** `D̂` is measured per reconcile, from grant
+and `Done` times, excluding completions whose lives overlapped a capped or
+pressured sample or a limit change; it restarts on a limit change and re-warms on
+a move of `N̄`.
+
 The in-gate wall time, grant to `Done`, is `D̂ = ΣA/ΣC` over the same window:
 the slot-seconds per completion. Little's law makes it the mean in-gate time of
 the reconciles that ended, up to the reconciles straddling the window's edges.
@@ -299,6 +309,10 @@ side where it is used: a longer `D̂_q` makes the capped term of §4.2 land high
 which is less undershoot, while the term `θN̄` still bounds it from above.
 
 ### 3.5 Smoothing, warm-up, change, and trust
+
+**Amended by §17:** the estimates are `ĉ` and `D̂` rather than `k̂` (§17.1); a
+limit change restarts `D̂` only (§17.2, replacing the first amendment's rule
+below); a move of `N̄` restarts `D̂`'s warm start (§17.5); trust is on `D̂/ĉ`.
 
 Each estimate is a ratio of two exponentially weighted sums (for example
 `k̂ = Σw(ΔU − B̂Δt) / Σw·A`), not an average of per-sample ratios, so a sample
@@ -524,6 +538,9 @@ CPU is a rate. The limit allows `ρL − B̂` cores to reconciles, so a throughp
 `S = X* × D`. The whole question is which `D`.
 
 ### 4.2 Which duration
+
+**Amended by §17.1:** the active law is `(ρL − B̂)·D̂/ĉ`, and the capped rule's
+`cᵢ` is `c_W`, the CPU per completion over samples spanning at least `D̂ + Δt`.
 
 Three candidates, checked against the measured curve:
 
@@ -977,6 +994,9 @@ logged by the harness (§10).
 
 ### 5.1 No CPU limit: a measured effective limit
 
+**Amended by §17.3:** while a limit is held, every window of `τ` either
+releases or re-learns, by its stall share against the threshold in force.
+
 Decided by the user, including the gradual release (§13 item 3; §15 M2, M2-a).
 With no quota, the container can use the whole node, and the limit that matters
 is what the node gives it when other pods want the same CPUs. That limit is never
@@ -1066,6 +1086,9 @@ the node gives; when it clears they return to the pre-onset level if that was
 higher, then rise by `1/ρ` per clear window.
 
 ### 5.2 No CPU limit: the threshold calibrated at the operating point
+
+**Amended by §17.6:** `μo` takes the held samples under `μp`, not those under the
+threshold in force.
 
 Decided by the user, 2026-11-09 (§13 item 10), after the first run of §10's
 simulation. Under node contention the container stalls even below its share:
@@ -1595,7 +1618,8 @@ Each new behaviour gets a revert check, as before.
   The active-sample law is a feedback law in form, `S' = (ρL − B̂) N̄/(U − B̂)`,
   but its gain is the measured inverse of the plant's, not a tuned constant,
   which is why it settles in about one step in the linear region and can't
-  cross the target (§4.3).
+  cross the target (§4.3). **Now measured rather than argued**: a PI baseline
+  runs through the same simulation and gate (§17.7).
 - **A latency gradient** (Netflix Gradient2, Envoy's adaptive concurrency, TCP
   Vegas). A reconcile's duration is mostly downstream wait, which moves for
   reasons the container's CPU doesn't cause; the per-key input already answers
@@ -1870,6 +1894,20 @@ not seen the results.
 | A queue going quiet was no change of mix | §3.5's share test ran only on the queues present in a sample, so a queue that stopped had no sample to fail the test, and the shared estimates kept describing the old mix | §3.5: every queue seen is tested in every sample with work, at share 0 when it had none. The mix-shift case |
 | No CPU limit: the operating point's stall at the threshold | Under node contention the container held at 90% of its share stalled about as much as the fixed threshold (about 50 per sample, against about 56 past the share), so half its samples read as pressure; and the onset window's contended samples fed `k̂` and `D̂`, which turned the cut at onset into a descent of 10% a sample | §5.2, decided by the user (§13 item 10): the threshold calibrated at the operating point, between its stall and the stall past the share, re-learned with each limit, never below the option. §3.2: a sample over the threshold with no `cpu.max` is pressured whether a limit is held or not, so the cut is computed from costs measured while the node had room. §10: the node case stays in the gate |
 
+**The statistical review of PR 1's gate, 2026-11-09.** Blind to the results for
+the conditions (the plan's §4.5), then with them for the design. Six findings,
+one critical; the user decided the design be amended before any code, and a
+utilization baseline added (§17).
+
+| Item | Finding | Answer |
+|---|---|---|
+| 1, Critical | A censoring limit cycle: a cohort's CPU phases fall in one capped, excluded sample, its waits in the next, active, with `k` about 4× low; `k̂` stays trusted and the slots cycle 1 ↔ 17 | §17.1: `ĉ` from every sample with work, `D̂` per reconcile, the capped rule's `c_W` over at least `D̂ + Δt`; why neither can be biased towards more slots under batch admission |
+| 2, High | The limit change's own sample read as active and seeded the restarted `k̂` at half | §17.2: that sample feeds only `ĉ`; a limit change restarts `D̂`, not `ĉ`; no rise in it, `θ'N̄` against the new limit when over target |
+| 3, High | No CPU limit: re-learning needs `τ` of consecutive pressured samples and never happens at the full share; the onset reference used three untrusted samples | §17.3: held, every window of `τ` releases or re-learns; the onset reference from the engine's fixed-capacity curve |
+| 4, Medium | The draining kind is exercised by none of the cases cited for it | §17.4: removed, with the argument and a long-drain case that shows the removal safe |
+| 5, Medium | The warm start's plain mean keeps the early high-`k` samples: about 11 samples from one slot, not 2 | §17.5: `D̂`'s warm start restarts at a move of `N̄`; `c` derived from the engine |
+| 6 | `μo`'s samples selected by the threshold they set; one node model only | §17.6: selected against `μp`; a second node model, used for no design choice |
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -1908,7 +1946,11 @@ go. "Scratch" means one of the never-committed simulations of §4.3, §4.4 and
 | §5.1, release: `U_pre` on the first clear window, then `×1/ρ` per window | A full release swinging the slots between 7 and 24; a passed dip held down | Scratch; second review, M2-a; the `×1/ρ` step decided (§13 item 3) |
 | §5.2, the threshold calibrated at the operating point, never below the option | The operating point's own stall read as pressure under node contention: rises blocked, cuts, a lower limit re-learned | The first simulation run; decided (§13 item 10) |
 | §3.2, onset samples pressured | A cut at onset spread over seven samples by contended costs | The first simulation run (§15) |
-| §3.2, the draining kind | The samples after a cut measuring the old capacity as the new | The first simulation run (§15) |
+| §17.1, `ĉ` from every sample with work and `D̂` per reconcile | A selection by phase biasing the law towards more slots: the 1 ↔ 17 cycle | The statistical review, finding 1 |
+| §17.1, `c_W` over at least `D̂ + Δt` in the capped rule | A cohort's capped sample sending the slots to the floor | The statistical review, finding 1 |
+| §17.2, the change's sample feeding only `ĉ` | A restarted estimate seeded from a sample that describes neither limit | The statistical review, finding 2 |
+| §17.3, every held window deciding | A held phase stuck at the share, never re-learning | The statistical review, finding 3 |
+| §17.5, `D̂` re-warmed at a move of `N̄` | An approach slowed by durations from a lower concurrency | The statistical review, finding 5 |
 | §3.5, no rise in a held-out sample or a restart's own sample | A stale estimate raising the slots into the change just seen | The first simulation run (§15) |
 | §3.5, a new `cpu.max` restarts the CPU estimates | The old limit's throttling carried into the new limit's law | The first simulation run (§15) |
 
@@ -1979,3 +2021,282 @@ shows a spread-only shift always moves the mean too in practice. The CPU side's
 `D_mix`, if no provider runs queues of very different durations on one
 Governor; the capped rule would then use a single `D̂`. Everything else answers
 a failure a review or a simulation showed.
+
+## 17. Amendment after the gate's statistical review, 2026-11-09
+
+**For review before any code.** The blind statistical review of PR 1 (§15) found
+six gaps in the CPU path, one of them critical. The user decided that the design
+be amended first, the amendment reviewed independently, and only then the code
+changed; and that a utilization-feedback controller be added to the same
+simulation as a baseline, so that the choice of controller is made on evidence
+(§17.7). This section is that amendment. Where it changes an earlier section,
+that section carries a pointer here; where they disagree, this section is right.
+
+### 17.1 Critical: no estimate selected by which phase of a reconcile fell in the sample
+
+**The finding.** After a jump in capacity, the reconciles admitted together run
+their CPU phases at the same time. The sample holding those phases is capped and
+excluded from `k̂` (§3.2); the next one, holding mostly their waits, is active,
+with a `k` about four times too low. `k̂` is fed only that low half, stays
+trusted, and the law cycles between 1 and 17 slots (the review: the mix-shift
+case, seed 19; the cost-doubling case, seed 15).
+
+**The cause.** `k̂` takes only active samples, and whether a sample is capped
+depends on which part of the reconciles in it fell inside it. When reconciles'
+CPU is concentrated in part of their lives and admissions are synchronized, the
+selection is correlated with the phase, and any estimate built from the selected
+samples is biased, here towards more slots. No smoothing removes a selection
+bias: it only averages the selected samples.
+
+**The amendment: estimate the two factors of the law, and select neither by its
+CPU.** The law is already `X* × D` (§4.1): `S = (ρL − B̂)·D̂/ĉ`. §3.4 noted that
+this equals `(ρL − B̂)/k̂` when both come from the same window; the amendment
+estimates them separately, each from data that no sample's CPU level selects.
+
+- **`ĉ`, the CPU per completion, from every sample with work**: idle samples
+  feed `B̂` only, as before, and every other sample, capped, pressured or active,
+  feeds `ĉ = Σw(ΔU − B̂Δt)/ΣwC`. A cap delays CPU; it doesn't remove it: the
+  quota throttles the cgroup's runnable work and lets it run in a later period,
+  so every reconcile's CPU appears in some sample whether the cap bound or not.
+  §3.5 already fed `ĉ` from capped samples for that reason. A sample with no
+  completion adds its CPU to the numerator and nothing to the denominator; the
+  change test skips it (it has no per-sample ratio).
+- **`D̂`, the in-gate duration, per reconcile**, from the grant and `Done` times
+  of each completion: the gated queue's `processing` map gains the pop's time as
+  its value (§3.6 already adds it, for the bandwidth `L`), so each completion
+  reports its own lifetime, whatever the sample boundaries. A completion is
+  excluded from `D̂` if its life overlapped a capped or pressured sample, or the
+  sample in which the limit changed (§17.2): its duration measures the cap.
+  `D̂_q` per queue is the same estimate per queue, and `D_mix` (§4.2) is built
+  from it as before.
+- **The law in an active sample** is `g = (ρL − B̂)·D̂/ĉ`. **In a capped sample**
+  it is `min((ρL − B̂)·D_mix/c_W, θN̄)`, where `c_W` replaces this sample's own
+  `cᵢ`: the CPU per completion over the most recent samples that span at least
+  `D̂ + Δt`, so that a cohort's CPU and its completions fall in the same window.
+  A single sample's `cᵢ` has the same phase problem: with the cohort's CPU in and
+  its completions not yet, it reads high and sends the slots to the floor, which
+  was the other half of the cycle.
+- **`k̂` is no longer estimated.** It is reported as `ĉ/D̂` for the metrics.
+
+**The fixed point is unchanged.** In a stationary plant at `S` slots, uncapped,
+`ĉ → (U − B)/X` and `D̂ → S/X` (Little's law over completions), so
+`g = (ρL − B̂)·S/(U − B)`, which is §4.3's `g(S)` with `B̂ = B`. §4.3's
+arguments are about `g` and hold as written; the smoothed form's induction
+(§4.3, "smoothing keeps both properties") is carried by `D̂`, which is
+non-decreasing in `S` (A1), and `ĉ`, which doesn't depend on `S` to first order
+(at the cap the CPU per completion was 5% under the value below it, §4.3, and
+that is a property of the work, not of the estimate).
+
+**Why the estimates can't be biased towards more slots under batch admission.**
+Take a cohort of `n` reconciles admitted at `t₀`, reconcile `j` with CPU `cⱼ`
+spent along its life in any profile (all of it first, all of it last, in
+bursts), and lifetime `Dⱼ`; any background `B`; any placement of sample
+boundaries; any of the samples capped.
+
+1. **`ĉ` over a window that contains the cohort's whole lives is exact**: its
+   numerator is the cohort's CPU, `Σcⱼ`, because no sample is excluded and the
+   cap only moves CPU between samples; its denominator is `n`. So
+   `ĉ = c̄`, whatever phase fell in whichever sample. That is the unbiasedness
+   the review asked for: the estimate doesn't depend on the phase.
+2. **While the cohort is in flight**, the smoothed numerator holds CPU that the
+   cohort's reconciles have spent and the denominator none of their
+   completions yet, so `ĉ ≥ c̄`, and the excess is that CPU over the weighted
+   completions, which falls to 0 as they complete, within `max Dⱼ`. A high `ĉ`
+   gives fewer slots. A smoothed window has no old edge to lose CPU at, since
+   the weights decay and every completion's CPU is in the sums, with one
+   exception: a restart of `ĉ` (§3.5) makes an edge, and the reconciles in flight
+   across it bring their completions without the CPU they spent before it. That
+   biases `ĉ` low, towards more slots, by at most that CPU over the completions
+   since the restart, and only until those reconciles have completed. It is
+   covered by the rules for restarts, not by this argument: a restart's own
+   sample can't raise the slots, and after it the estimate is untrusted and rises
+   are paced (§3.5, §7).
+3. **`D̂` is a mean of whole lifetimes**, each counted once at its completion, so
+   it doesn't depend on the sample boundaries at all. The exclusion of
+   completions whose lives overlapped a capped sample is length-biased: a longer
+   life is more likely to overlap one, so `D̂` is, in expectation, at or under the
+   mean lifetime of the reconciles that ran uncapped. A low `D̂` gives fewer
+   slots.
+
+So under batch admission, outside a restart, the law can err only towards fewer slots, and only
+until the cohort completes. A limit cycle like the one found needs an estimate
+biased towards more slots after the cohort's capped sample, and neither factor
+can be. What this does not prove: that the approach after such an undershoot is
+fast. That is §4.3's rise from below, now at the rate of §17.5.
+
+**The change test** (§3.5) runs on each sample's `cᵢ` (samples with completions)
+and on each completion's lifetime against `D̂`. A cohort's samples are outliers
+on opposite sides in turn (CPU without completions, then completions with little
+CPU), which hold out but don't restart: a restart needs two on the same side. A
+real cost change moves `cᵢ` the same way sample after sample.
+
+**Trust** (§3.5) is on the law's value: the relative standard error of
+`D̂/ĉ`, from the two estimates' errors, at most `(1 − ρ)/2`, with 60 completions
+since `ĉ`'s start.
+
+### 17.2 High: the change's own sample
+
+**The finding.** At a limit change, the sample ran partly at the new cap, but not
+every one of its periods was throttled, so it read as active and seeded the
+restarted `k̂` at about half the true value (the review: the limit-halving case,
+seed 8; the cost-doubling case, seed 2).
+
+**The amendment.** The sample in which `cpu.max` (or the learned limit) changed
+describes neither limit, and the sampler can't tell where in it the change fell.
+
+- **It feeds `ĉ`**, which doesn't depend on the limit (§17.1), **and nothing
+  else.** Completions whose lives overlapped it are excluded from `D̂`.
+- **A limit change restarts `D̂` and `D̂_q`, not `ĉ`.** The duration depends on
+  how much the limit throttles; the CPU per reconcile doesn't. This replaces the
+  first amendment's "a new `cpu.max` restarts `k̂`, `ĉ` and `D̂`" (§3.5).
+- **In that sample the slots can't rise.** They fall to `θ'N̄ᵢ`, with `θ'`
+  computed against the new limit, when the sample's CPU is over `ρ` of the new
+  limit: §4.2's bound, which needs no history. Otherwise they hold.
+- **Until `D̂` has a completion under the new limit**, the law holds, except that
+  a capped sample descends by `θN̄`. That takes one reconcile's duration and the
+  sample boundary, so a limit change now has the same latency as a cost change,
+  `ℓ = ⌈D̂/Δt⌉ + 1`, not 1. **This changes the count that §4.5 derives for a limit
+  change**, which the reviewer should re-derive.
+
+### 17.3 High: with no CPU limit, re-learning that never happens
+
+**The finding.** After the first release, the operating point is at the full
+share; the stall then sits around the calibrated threshold, 33–46% of samples
+over it, and re-learning never happens, because it needs `τ` of consecutive
+samples over the threshold. The onset step's reference was also wrong: it was
+computed from `k̂` with three untrusted samples.
+
+**The amendment: held, every window of `τ` decides.** While a limit is held, the
+samples are taken in consecutive evidence windows of `τ`, a new one starting
+after each decision. At the end of each, its stall share, a ratio of sums like
+§5.1's, is compared with the threshold in force:
+
+- **over: re-learn.** `L_eff` becomes the CPU the container obtained over the
+  window, and `μp` the window's stall share (§5.2); `U_pre` is the CPU of the
+  last clear window;
+- **at or under: release**, by §5.1's steps.
+
+So a held phase can't stay stuck between the two: every `τ` it either releases or
+re-learns. Free, the onset window is unchanged (samples over
+`CPUPressureThreshold`, consecutive, spanning `τ`), which keeps the blip's
+protection (§5.1). Per-sample, the threshold still blocks rises (§6) and makes a
+sample pressured (§3.2).
+
+**What it does at a steady share.** Held below the share, the window clears and
+the limit is released towards it; at the share, a window over the threshold
+re-learns at what the container obtained, the share, and the law goes to `ρ` of
+it. So the operating point moves in a band between `ρ` of the share and the
+share, one window at each end at the least, and about half the samples of the
+windows spent at the share are over the threshold. This is the band §5.1 already
+said the no-limit case has, now with a period instead of a stall; whether its
+share of samples over the threshold meets the node case's bar is for the gate.
+The alternative, holding at `ρ` of a learned share for good, never finds a share
+that grew, which §5.1's release exists to find.
+
+**The onset step's reference** is the engine's fixed-capacity target at
+`ρL_eff` (§10, and the plan's conditions), not a value computed from the model's
+own estimates.
+
+### 17.4 Medium: the draining kind, removed
+
+**The finding.** No case cited for the draining kind (§3.2, §15) exercises it.
+
+**The amendment: it is removed.** It existed because `k̂`, a CPU per slot-second,
+measured over a drain describes the capacity being left, not the one in force.
+With §17.1 neither factor is per slot-second: `ĉ` is per completion and doesn't
+depend on the capacity; `D̂` is per reconcile, and the reconciles that finish
+during a drain ran at the higher concurrency, so by A1 their durations are at or
+above the new capacity's. That biases `D̂` up, towards more slots, by at most the
+difference in duration between the two concurrencies, and only until they have
+completed. The sign guard (§4.2) keeps that from raising the slots while the
+sample's CPU is over target. **A case is added to show the removal is safe**:
+the 30s reconciles of the false-restart case with the CPU per reconcile doubled,
+so that a cut leaves the in-flight count above the capacity for up to 30
+seconds; it must stay within §4.5's band, and it reports the number of samples
+in which the in-flight count exceeded the capacity, so that the case is known to
+exercise a drain.
+
+### 17.5 Medium: a slow approach from the warm start
+
+**The finding.** The warm start's plain mean keeps the early samples taken at
+low concurrency, where `k` is high, so the approach from one slot takes about 11
+samples, not the 2 that §4.4's `c` assumed.
+
+**The amendment.** With §17.1 the dependence on concurrency is only in `D̂`: by
+A1 the early lifetimes, at low concurrency, are the shortest, and a plain mean
+that keeps them holds `D̂`, and the slots, low. So **`D̂`'s warm start restarts
+when `N̄` moves** by more than three standard deviations of its own
+sample-to-sample variation (the detector §3.5 already has, which until now only
+exempted the change test), **and takes only the reconciles admitted after the
+move**. `ĉ` is not restarted. After each rise, then, `D̂` is the duration at the
+new concurrency, and the law is `g(S)` evaluated at the current `S`, which
+converges at `g'(S*)` per step (§4.3). Until `D̂` has a completion after the
+move, the law holds; that adds one reconcile's duration per rise.
+
+The count `c` of the conditions is **derived from the engine** as well: the law
+iterated on the engine's fixed-capacity curve, with this warm start and the
+pacing, from one slot to within the band. The plan's conditions use that value.
+
+### 17.6 The calibrated threshold: the operating point's samples, and a second node model
+
+**The amendment.** `μo` (§5.2) takes the held samples whose stall share is under
+`μp`, not those under the threshold in force. The threshold depends on `μo`, so
+selecting `μo`'s samples by it feeds the truncation back into the estimate and
+lets it drift; `μp` is fixed for the life of a learned limit.
+
+**A second node model** joins the simulation (§10). Its stall is computed
+differently from the first's, so that the separation between the operating point
+and past the share differs and the stall past the share has a spread (`σp > 0`):
+the share of time any runnable thread of the container waits, with the other
+cgroups' demand varying from period to period. It is fixed before any run of the
+amended code, **and used for no design choice**: the node cases run on both
+models, and only the first was used to choose §5.2's rules.
+
+### 17.7 A utilization-feedback baseline, in the simulation only
+
+**Why.** §11 rejected utilization feedback because its gains must match the
+plant's gain, `dU/dS = c/D`, which varies by orders of magnitude between
+providers. That is an argument, not a measurement. The user asked that the two
+controllers run through the same gate, so the choice is made on evidence.
+
+**The baseline.** A PI controller on the measured CPU against the limit, in the
+form the survey describes for Temporal's resource-based slot supplier (two PID
+loops on cgroup v2, a CPU target of 0.9, memory 0.8 as a hard stop); it is
+written for this comparison, not copied from Temporal, whose code was not
+checked here.
+
+- **CPU:** the error `eᵢ = ρ − Uᵢ/L`, and the slots in velocity form,
+  `Sᵢ = clamp(Sᵢ₋₁ + K_p(eᵢ − eᵢ₋₁) + K_i·eᵢ·Δtᵢ, 1, ceiling)`. The velocity form
+  keeps no integrator, so the clamp is its anti-windup: at the floor or the
+  ceiling nothing accumulates.
+- **Memory** (when PR 2's memory simulation exists): the same against the Go
+  limit, `e = r_m − live/G`, with the hard stop at 0.8 of `G`; the slots are the
+  smaller of the two loops.
+- **No CPU limit:** `L` is the node's CPUs, the only limit a utilization
+  controller sees; the stall is not used.
+- **Whole slots** by the same error diffusion (§4.5), and the same floor and
+  ceiling.
+- **Gains** tuned once, on the measured workload's headline case only, by a grid
+  search for the fastest approach to §4.5's band without leaving it, then frozen
+  for every case, as the cost model's constants are. The cases with 30s
+  reconciles and with a doubled cost then test §11's argument directly.
+
+It consumes the same `Sample` as the cost model and lives in the simulation
+package; it is not wired into the Governor. The gate runs every CPU case on both
+and reports them side by side, with the same conditions.
+
+### 17.8 What changes elsewhere
+
+- §3.2: the draining kind is removed (§17.4). The change's sample is described in
+  §17.2.
+- §3.3–§3.5: `k̂` is replaced by `ĉ` over every sample with work and `D̂` per
+  reconcile (§17.1); the `N̄`-move detector restarts `D̂`'s warm start (§17.5);
+  a limit change restarts `D̂`, not `ĉ` (§17.2); trust is on `D̂/ĉ`.
+- §4.2: the active law is `(ρL − B̂)·D̂/ĉ`, the capped rule's `cᵢ` is `c_W`, and
+  the unresolvable rule applies when `ĉ` can't be told from 0 (`ĉ < 2·SE(ĉ)`).
+- §5.1: held, every window of `τ` decides (§17.3).
+- §5.2: `μo`'s samples are those under `μp` (§17.6).
+- §10: the long-drain case (§17.4), the second node model (§17.6), the
+  baseline (§17.7), and `S*` and `c` from the engine (the plan's §4.5).
+- §16: the draining kind leaves the budget; the per-reconcile `D̂`, `c_W`, the
+  windowed re-learning and the baseline join it.
