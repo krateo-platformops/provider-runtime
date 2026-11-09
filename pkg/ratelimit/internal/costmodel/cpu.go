@@ -357,7 +357,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		case heldOut:
 			stale = true
 		case restarted:
-			res.DRestarted = true
+			// A restart of D̂ holds the slots in its own sample, as ĉ's does
+			// (§3.5, §17.1).
+			res.DRestarted, res.Restarted = true, true
 		}
 		c.dHasLife = true
 	}
@@ -403,12 +405,15 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	}
 
 	limit := s.Limit
+	if limit == 0 {
+		// §5.1: with no CPU limit, the CPU law doesn't run: S_cpu is the
+		// ceiling, reached through §7's pacing, and pressure only blocks.
+		res.Slots, res.Paced, res.Blocked = float64(ceiling), true, over
+		c.fill(&res, ch, cok, dv, dok)
+		return res
+	}
 	g := prev
 	switch {
-	case limit == 0:
-		// §5.1: with no CPU limit, the CPU law doesn't run.
-		g = float64(ceiling)
-		res.Paced = true
 	case res.ChangeSample:
 		// §17.2 (L11): the sample's own N̄ scaled by what the new limit
 		// allows over what the sample used, its usage counted up to the new
@@ -432,13 +437,12 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			g = (rho*limit - bg) * dv / ch
 		}
 	}
-	if limit > 0 {
-		switch {
-		case used < rho*limit && g < prev:
-			g, res.Guarded = prev, true
-		case used > rho*limit && g > prev:
-			g, res.Guarded = prev, true
-		}
+	// The sign guard (§4.2).
+	switch {
+	case used < rho*limit && g < prev:
+		g, res.Guarded = prev, true
+	case used > rho*limit && g > prev:
+		g, res.Guarded = prev, true
 	}
 	// Neither a restart, a deferred sample nor the change's own sample can
 	// raise the slots (§3.5, §17.1, §17.2).
@@ -450,6 +454,12 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	}
 	res.Blocked = over
 	res.Slots = g
+	c.fill(&res, ch, cok, dv, dok)
+	return res
+}
+
+// fill reports the estimates for the metrics.
+func (c *CPU) fill(res *CPUResult, ch float64, cok bool, dv float64, dok bool) {
 	if cok {
 		res.PerCompletion = ch
 	}
@@ -459,8 +469,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			res.PerSlot = ch / dv
 		}
 	}
-	c.report(&res)
-	return res
+	c.report(res)
 }
 
 // report fills the result's throughput.
