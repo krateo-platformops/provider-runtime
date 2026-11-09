@@ -768,6 +768,40 @@ plan author's summary of the reviewer's reasons.
   frozen from the plant. **"False restarts, 30s"** is INVALID unless `S` reaches
   its plant's band first (design §17.8, item 1).
 
+**Corrected after seeing results, by the reviewer, at the review of the gate
+at `d4083a4`.** Each is labelled so; the conditions are the reviewer's.
+
+- **(a) Cost doubles, the change test's mechanism:** the deferral-then-restart
+  within `2⌈W_test/Δt⌉ + 1` samples, `W_test` the longer of the deferring and the
+  confirming windows, measured in the run (not `n_W` at the first window-capped
+  sample).
+- **(e) Contention below the quota:** the excursion after the dip is bounded from
+  the post-dip peak of `S`, not from `S` at the dip's end; or, with design §17.9
+  item 5's rewarm, only §4.3's convergence from above is allowed, with `n_iter`
+  from the frozen curve.
+- **§4.3's convergence from above, near the knee,** is an allowance frozen from
+  the plant's curve as `c` is: the noise-free law iterated from above the band
+  to its upper edge, `n_above·(1 + ⌈D̂/Δt⌉)` samples, computed per plant, frozen
+  and committed before any run.
+- **(i) The no-limit case:** its third share is moved closer to the demand, so
+  that the stall straddles 50.
+- **The baselines in the no-limit case** are reported, not judged: design §5.1
+  decides no CPU control without a limit, so the case's conditions describe the
+  cost model's decision, not a requirement on a different controller.
+
+**The gate's requirements from here** (the user's, through the coordinator):
+
+- **The cost model passes every case in all 20 seeds, with zero invalid seeds**
+  in the 30s cases. An invalid seed is not a pass.
+- **Then a confirmation run on fresh seeds 21–40.** The design and the conditions
+  have been tuned against seeds 1–20 three times; the confirmation checks that
+  mechanisms were fixed, not seeds. The seed list and the conditions are frozen
+  and committed before it runs, nobody looks at those seeds before then, and the
+  report names the freezing commit.
+- **The reservation gate's showing reflects Temporal's design as modelled.** The
+  reviewer's caveat: the engine's reconciles, with their CPU first and their
+  phases aligned at admission, are probably burstier at 100 ms than real ones.
+
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
 modelled on Temporal's tuner at its defaults (design §17.8, item 6): inside the
