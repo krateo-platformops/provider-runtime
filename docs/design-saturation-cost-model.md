@@ -276,8 +276,8 @@ Exported for people, not used by the law: the CPU per completion
 ### 3.4 Duration
 
 **Amended by §17.1, §17.2 and §17.4:** `D̂` is measured per reconcile, from grant
-and `Done` times, excluding completions whose lives overlapped a capped sample or
-a limit change, with Little's law over uncapped samples as a reported fallback;
+and `Done` times, excluding completions whose lives overlapped a capped sample, a
+sample with the stall over `CPUPressureThreshold`, or a limit change, with Little's law over uncapped samples as a reported fallback;
 it restarts on a limit change (`D̂_q` is kept) and re-warms on a move of `N̄`.
 
 The in-gate wall time, grant to `Done`, is `D̂ = ΣA/ΣC` over the same window:
@@ -533,7 +533,8 @@ CPU is a rate. The limit allows `ρL − B̂` cores to reconciles, so a throughp
 
 **Amended by §17.1:** the active law is `(ρL − B̂)·D̂/ĉ`, and the capped rule's
 `cᵢ` is `c_W`, the CPU per completion over samples spanning at least
-`max(A_W/C_W, a_oldest) + Δt`. **By §17.2:** the change's own sample uses
+max(the longest lifetime among the completions in the window, `a_oldest`) +
+`Δt`. **By §17.2:** the change's own sample uses
 `(ρL' − B̂)·N̄ᵢ/(min(Uᵢ, L') − B̂)`.
 
 Three candidates, checked against the measured curve:
@@ -1758,6 +1759,18 @@ before any code. The user decided its finding 4; this revision answers the rest.
 | 9, Medium | The baseline's fairness | §17.6: a filter on `U` in the grid; tuned on the headline case for speed with overshoot and variance penalties, gains committed before any other case runs; ×0.5 and ×2 reported; the H1 cases kept; no parity with Temporal claimed, and what was verified in its source stated |
 | 10, Low | The second node model is moot with the no-limit cases gone | Removed |
 
+**The re-review of the revision, `9b861b7`, 2026-11-09.** One High and two
+Medium, each with its correction text, applied verbatim; the reviewer judged
+that with them nothing High or Medium remains.
+
+| Item | Finding | Answer |
+|---|---|---|
+| High | The restart edge in `ĉ`: reconciles in flight across a restart bring completions without their earlier CPU, biasing `ĉ` low, towards more slots | §17.1: after a restart the denominator counts only completions of reconciles granted after it, so the edge biases `ĉ` high; the gate reports `ĉ`'s restarts not caused by a scenario change in the start, headline and mix cases |
+| Medium | `D̂` took lives that overlapped pressure | §17.1: a life overlapping a sample with the stall over `CPUPressureThreshold` is excluded too |
+| Medium | `c_W`'s window from the mean lifetime misses the longest | §17.1: max(the longest lifetime among the window's completions, `a_oldest`) + `Δt` |
+| Low | The fold-back's weight, the test's own statistics, the residual phase bias, the fallback's direction | §17.1: the warm-start weight `max(α, 1/n)` counted in `n`, with the test's mean and variance folded back; the residual bias up to `r̄` towards more slots, a third of the `3r̄` edge; Little's fallback reads low |
+| The plan's §4.5 | The counts, `c`, and the new cases' conditions | The plan's §4.5, the reviewer's text verbatim |
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -1792,7 +1805,7 @@ go. "Scratch" means one of the never-committed simulations of §4.3, §4.4 and
 | `ρ = 0.9` | Running at the limit, where duration and pressure climb | Decided (§13 item 2) |
 | Pressure from `total`, blocking rises at `min(S_onset, S_model)` | Climbing into contention the model doesn't see; a lagging sensor driving the slots | §1 (avg10's lag); first review, L3 |
 | §17.1, `ĉ` from every sample with work and `D̂` per reconcile | A selection by phase biasing the law towards more slots: the 1 ↔ 17 cycle | The statistical review, finding 1 |
-| §17.1, `c_W` over at least `max(A_W/C_W, a_oldest) + Δt` in the capped rule | A cohort's capped sample sending the slots to the floor | The statistical review, finding 1; its review, item 6 |
+| §17.1, `c_W` over at least max(the longest lifetime in the window, `a_oldest`) + `Δt` in the capped rule | A cohort's capped sample sending the slots to the floor | The statistical review, finding 1; its review, item 6 |
 | §17.1, the change test deferring, never dropping | Held-out CPU-heavy samples biasing `ĉ` low, and the cycle back | The review of `411b565`, item 1 |
 | §17.1, `τ_ĉ = max(τ, D̂/r̄)` | An exponential window's phase bias, about 25% for 30s CPU-first reconciles | The review of `411b565`, item 4 |
 | §17.1, Little's fallback for `D̂`, reported | No `D̂` at all through a long stretch at the cap | The review of `411b565`, item 5 |
@@ -1920,24 +1933,29 @@ them separately.
   `τ_ĉ = max(τ, D̂/r̄)`, with `r̄ = (1 − ρ)/2`: at least twenty lifetimes at
   `ρ = 0.9`, so that the weight across one lifetime varies by at most `r̄`, and the
   phase bias is within the trust bound. For the measured workload
-  (`D̂ ≈ 0.47s`) that is `τ` itself; for 30s reconciles, 600s.
+  (`D̂ ≈ 0.47s`) that is `τ` itself; for 30s reconciles, 600s. The residual phase
+  bias is up to `r̄` towards more slots, a third of the band's `3r̄` upper edge
+  (the plan's §4.5).
 - **`D̂`, the in-gate duration, per reconcile**, from the grant and `Done` times
   of each completion: the gated queue's `processing` map gains the pop's time as
   its value (§3.6 adds it, for the bandwidth `L`), so each completion reports its
   own lifetime, whatever the sample boundaries. A completion is excluded from
-  `D̂` if its life overlapped a capped sample: its duration measures the cap.
+  D̂ if its life overlapped a capped sample or a sample whose stall share was over
+  CPUPressureThreshold: either way its duration measures something other than the
+  work.
   `D̂_q` per queue is the same estimate per queue, and `D_mix` (§4.2) is built
   from it as before.
 - **When no life qualifies within one `τ`** (every reconcile overlapped a capped
   sample, as in a long stretch at the cap), `D̂` falls back to Little's law over
   the samples that didn't cap, `ΣA/ΣC` over them, and the fallback is reported
-  (a metric and a debug line), so that a run that leans on it is visible.
+  (a metric and a debug line), so that a run that leans on it is visible. It
+  reads low, towards fewer slots.
 - **The law in an active sample** is `g = (ρL − B̂)·D̂/ĉ`. **In a capped sample**
   it is `min((ρL − B̂)·D_mix/c_W, θN̄)`, where `c_W` replaces this sample's own
   `cᵢ`: the CPU per completion, `Σ(ΔU − B̂Δt)/ΣC`, over the most recent samples
-  that span at least `max(A_W/C_W, a_oldest) + Δt`, where `A_W/C_W` is the
-  window's own slot-seconds per completion and `a_oldest` the age of the oldest
-  reconcile in flight. A window that long holds the whole life of every
+  spanning at least max(the longest lifetime among the completions in the window,
+  a_oldest) + Δt, where `a_oldest` is the age of the oldest reconcile in flight.
+  A window that long holds the whole life of every
   reconcile that completed in it, and the oldest still running, so a cohort's
   CPU and its completions fall in the same window. A single sample's `cᵢ` has the
   phase problem: with the cohort's CPU in and its completions not yet, it reads
@@ -1982,14 +2000,15 @@ boundaries; any of the samples capped.
    completions, which falls to 0 as they complete, within `max Dⱼ`. A high `ĉ`
    gives fewer slots. With `τ_ĉ ≥ D̂/r̄` the weights across one life differ by at
    most `r̄`, so the exponential window's own phase bias is within the trust
-   bound. A smoothed window has no old edge to lose CPU at, with one exception:
-   a restart of `ĉ` (§3.5) makes an edge, and the reconciles in flight across it
-   bring their completions without the CPU they spent before it. That biases
-   `ĉ` low, towards more slots, by at most that CPU over the completions since
-   the restart, and only until those reconciles have completed. It is covered
-   by the rules for restarts, not by this argument: a restart's own sample can't
-   raise the slots, and after it the estimate is untrusted and rises are paced
-   (§3.5, §7).
+   bound, up to `r̄` towards more slots. A smoothed window has no old edge to
+   lose CPU at, except at a restart of `ĉ` (§3.5), which makes one. After a
+   restart of ĉ, its denominator counts only the completions of reconciles
+   granted after the restart, from the grant times §17.1 already records. The
+   CPU that the reconciles in flight across it spend afterwards stays in the
+   numerator. So until they have completed, ĉ is biased high, towards fewer
+   slots, and the restart edge can no longer raise the slots. The gate also
+   reports `ĉ`'s restarts that weren't caused by a scenario change, in the start,
+   headline and mix cases.
 3. **`D̂` is a mean of whole lifetimes**, each counted once at its completion, so
    it doesn't depend on the sample boundaries at all. The exclusion of
    completions whose lives overlapped a capped sample is length-biased: a longer
@@ -1997,10 +2016,11 @@ boundaries; any of the samples capped.
    mean lifetime of the reconciles that ran uncapped. A low `D̂` gives fewer
    slots. Little's fallback over uncapped samples, when it is used, has the
    phase problem the per-reconcile estimate removes, and that is why it is
-   reported.
+   reported; it reads low, towards fewer slots.
 
-So under batch admission, outside a restart and the fallback, the law can err
-only towards fewer slots, and only until the cohort completes. A limit cycle
+So under batch admission the law can err only towards fewer slots, beyond the
+exponential window's residual phase bias of up to `r̄`, and only until the cohort
+completes. A limit cycle
 like the one found needs an estimate biased towards more slots after the
 cohort's capped sample, and neither factor can be. What this does not prove:
 that the approach after such an undershoot is fast. That is §4.3's rise from
@@ -2016,7 +2036,9 @@ low, and the cycle returns. Amended:
   the next sample confirms a change (beyond 3σ on the same side), the estimate
   restarts from the two of them, both in the new sums. If it doesn't, the
   deferred terms are folded back into the sums with the weight they would have
-  had, `(1 − α)` times their own, and the next sample's terms added as usual.
+  had, the warm-start weight `max(α, 1/n)` counted in `n`, decayed once by the
+  next sample, and the test's own mean and variance are folded back with them;
+  the next sample's terms are then added as usual.
 - **Proof that nothing is lost.** Write `Sₖ` for the sums the estimate holds
   after sample `k`, and `Tₖ` for the sums with every sample since the last
   restart added on time. Without a deferral `Sₖ = Tₖ`. A deferral at `k` makes

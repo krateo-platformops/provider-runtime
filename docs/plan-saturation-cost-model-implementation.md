@@ -582,27 +582,57 @@ after results, for the real caps of the H1 cases.)
 a sum of mechanisms, and each case asserts that the mechanisms happened, not
 only that the count was met. A case that meets its count by another path fails.
 
-**The counts.**
+**The counts, for the design as amended by §17** (the reviewer's text,
+verbatim, from the re-review of design `9b861b7`).
 
-- **Cost doubles: within `ℓ + 2 + c` samples**, 6 with `ℓ = ⌈D̂/Δt⌉ + 1 = 2`
+- **`c`, frozen before any run:** on the case plant's fixed-capacity curve (each
+  whole capacity via `Config.Fixed`; `U(S)`, `D(S) = ΣA/ΣC`, interpolated),
+  iterate the noise-free law `S' = min(S + S·Δt/D(S), (ρL − B̂)·D(S)/c)`. The
+  count is `n_iter·(1 + ⌈D̂/Δt⌉)`, computed per plant, frozen and committed before
+  any run, and disclosed as a noise-free lower bound.
+- **Start from one slot:** within the band by `c₁ + 1`, where
+  `c₁ = n_iter(1 → θ⌊S*⌋)·(1 + ⌈D̂/Δt⌉)`, plus 1 for the crossing. That's 5 if
+  `n_iter = 2`; otherwise it follows the frozen `n_iter`.
+- **Cost doubles:** into the band within `ℓ + ⌈W_c/Δt⌉ = 4` (`ℓ = 2`,
+  `W_c ≈ 2s`). Entry is from above. Mechanisms asserted: a capped sample within
+  `ℓ`; a `ĉ` deferral, then a restart, with no rise in either; `D̂`'s warm-start
+  restart at the cut's `N̄` move. No `c` term. Derived from §17 alone (the
+  reviewer's note).
+- **Limit halves:** into the band within `ℓ + 1 = 2`.
+  `S₁ = (ρL' − B̂)N̄₁/(min(U₁, L') − B̂)`, then the first wholly-new-limit capped
+  sample's first term. Then a hold of up to `⌈D̂/Δt⌉ + 1`. No `c` term.
+- **Limit doubles:** within 10% of the new target in 3 samples if the frozen
+  `n_iter` is 1; otherwise `3 + (n_iter − 1)·(1 + ⌈D̂/Δt⌉)`.
+- **Long drain:** into the band within `ℓ_min + (2k_θ − 1)`, with
+  `k_θ = ⌈ln(N̄₀/(S*'(1 + 3r̄)))/ln(1/θ)⌉`. After entry, at most 5% outside. No
+  rise in any sample with `N⁻ > capacity`. Assert `D̂`'s warm-start restart at the
+  cut. Zero drained samples makes the case INVALID, not passed. Report the
+  Little's fallback uses and `ĉ`'s restarts.
+- **Rising cost (×(1 + 0.01·N̄)):** `S*` from this plant's own curve. Mean CPU
+  over the last 120s within 3 points of `ρL`. Into the band within `c₁ + 1`.
+  Attributed monotone, at most 5% outside. Report max `S` against the predicted
+  `0.01·(S* − 1)·S*`. `S` never exceeds `S*(1 + 3r̄)`. If it fails, the remedy is
+  a design change for the user, not a condition change.
+- **`ĉ`'s restarts** that weren't caused by a scenario change are reported in
+  the start, headline and mix cases (design §17.1).
+
+**Superseded counts, under the first design**, kept as history with their
+disclosure:
+
+- Cost doubles: within `ℓ + 2 + c` samples, 6 with `ℓ = ⌈D̂/Δt⌉ + 1 = 2`
   and `c = 2`. The permitted crossing falls inside `ℓ`: a mixed sample caps once
   about 7% of its CPU is at the new cost (`0.225·(1 + f) ≥ L − slack/Δt` gives
   `f ≥ 0.07`). The 2 is §3.5's change test, a held-out sample and then a
   restart. Mechanisms asserted: a capped sample within the first `ℓ`, then a
   held-out `k̂` sample, then a `k̂` restart.
-- **Limit halves, under the first design: within `ℓ + 1 + c` samples**, 4 with `ℓ = 1` and `c = 2`. `ℓ`
+- Limit halves: within `ℓ + 1 + c` samples, 4 with `ℓ = 1` and `c = 2`. `ℓ`
   is the change's own sample (a restart, which can't raise); the 1 is the first
   sample wholly at the new limit, which caps (a worst-case term, not a double
   count). There is no unresolvable-rule step: it has no path in the code (an
   active sample folds into `k̂` before the law reads it, and `2·SE` needs
   `n ≥ 3`). Mechanisms asserted: a restart in the change's sample, and a capped
   sample within `ℓ + 1`.
-- **Limit halves, with `D̂_q` kept across the change** (the reviewer's branch
-  "if `D̂_q` is kept", which the gate uses, the design having kept it, design
-  §17.2): **into the band within `ℓ + 1 = 2` samples, then the hold of up to
-  `⌈D̂/Δt⌉ + 1` samples, then `c`.** Mechanisms asserted: `S₁ ≤ θ'N̄₁` in the
-  change's sample, and a capped sample within `ℓ + 1` at its first term.
-- **Limit doubles keeps the original condition**, within 10% of the new target
+- Limit doubles keeps the original condition, within 10% of the new target
   in 3 samples: the reviewer withdrew its blind loosening of it.
 - §4.4's sums double-count the crossing (cost doubles) and add a step with no
   mechanism (limit halves).
@@ -610,14 +640,13 @@ only that the count was met. A case that meets its count by another path fails.
   seeds 2, 3 and 15 and the limit-halving case at seeds 8, 9 and 12, each from
   a missing mechanism or a late entry caused by the review's findings 1 and 2,
   not by the count.
-
-**Start from one slot: within the band by sample 5**, then the 5%-outside rule.
-That is `⌈ln S*/ln(1 + Δt/D̂)⌉ = 2`, plus 1 for a permitted capped crossing at
-`⌊S⌋ + 1`, plus `c = 2`. It doesn't wait for the review's finding 6,
-because entering the band only needs `S ≥ θ⌊S*⌋`. This
-replaces "20 samples", and it is in the reviewer's set, derived blind as 5.
-**Disclosure:** the band was entered by sample 3; 1 of 20 seeds left the band
-between samples 5 and 30, not investigated.
+- Start from one slot: within the band by sample 5, then the 5%-outside rule.
+  That is `⌈ln S*/ln(1 + Δt/D̂)⌉ = 2`, plus 1 for a permitted capped crossing at
+  `⌊S⌋ + 1`, plus `c = 2`. It doesn't wait for the review's finding 6,
+  because entering the band only needs `S ≥ θ⌊S*⌋`. This
+  replaces "20 samples", and it is in the reviewer's set, derived blind as 5.
+  **Disclosure:** the band was entered by sample 3; 1 of 20 seeds left the band
+  between samples 5 and 30, not investigated.
 
 **The mix shift, seen before: at most one crossing, and it must be downward**,
 from above `S*(1 + 3r̄)` to below `θ⌊S*⌋`, with `S*` the engine's
@@ -626,25 +655,34 @@ attributed monotone condition applies until the band. "Out of the cap within 6
 samples" is unchanged.
 
 **Removed with the learned limit** (design §5.1, §13 item 11: CPU saturation
-control requires a CPU limit): the dip, the blip, the node case and the node
-case's onset step, with their conditions above as the reviewer gave them. **In
-their place, no CPU limit, pressure only blocks:** on the node model with the
-container's share stepping from 400 to 800 and back to 400 ms/s, no sample's
-slots fall because of pressure; a rise is blocked in every sample over
-`CPUPressureThreshold` and in no other; and `S_cpu` is the ceiling throughout.
-(The blip's and the dip's removal is the plan author's reading of the decision,
-for the reviewer to confirm.)
+control requires a CPU limit): the node case and the node case's onset step,
+with their conditions as the reviewer gave them (this file at `4bc4481`). **The blip:** dropped
+(its property is the new case's invariant). **In their place, no CPU limit,
+pressure only blocks:** on the node model with the container's share stepping
+from 400 to 800 and back to 400 ms/s, no sample's slots fall because of
+pressure; a rise is blocked in every sample over `CPUPressureThreshold` and in
+no other; and `S_cpu` is the ceiling throughout.
 
-**Pending the reviewer's re-review of design §17**, not yet derived:
+**The dip: replaced with "Contention below the quota".** The measured workload
+at 250m on the node model, with the node giving 125 ms/s for 15s, then the full
+quota. During it, rises are blocked in every sample over `CPUPressureThreshold`
+and in no other, and no fall is attributed to pressure. After it, `S` is above
+`S*(1 + 3r̄)` in no sample with item 2's exclusion (design §17.1: lives that
+overlapped a sample over `CPUPressureThreshold` are excluded from `D̂`); without
+it, at most `1 + (⌈D̂/Δt⌉ + 1)` samples, with the excursion's size reported.
 
-- **`c`.** The counts above use `c = 2`, the reviewer's value under the first
-  design. Design §17.4 makes `c = n_iter·(1 + ⌈D̂/Δt⌉)`, computed on the engine's
-  fixed-capacity curve and frozen before any run; the counts would use it.
-- **The cases design §17 adds:** the long drain (design §17.3: within the band,
-  at most 5% outside; asserts that `N̄`'s move at the cut restarted `D̂`'s warm
-  start; reports the samples drained); the CPU per completion rising 1% per slot
-  (design §17.5: the measured workload's conditions); and the baseline's tuning
-  rule (design §17.6).
+**The baseline's tuning rule:**
+
+- a grid of `K_p` and `K_i` on a 13-point log grid over `[0.1, 100]` (`K_i` also
+  0), with `τ_U ∈ {0, 1, 2, 5, 10}s`, committed before any run;
+- tune on the headline case with seeds 101–120;
+- choose lexicographically: passes the headline's §4.5 conditions in all 20
+  tuning seeds (entry within 20 samples); then the smallest mean entry time;
+  then the smallest variance after entry. If none passes, choose by the smallest
+  fraction outside and report that;
+- commit the gains, then run every case at them and at ×0.5 and ×2;
+- judge it on the same numeric conditions, without the cost model's mechanism
+  assertions. Report side by side.
 
 **Unchanged:** the conditions §4.4 lists as unchanged, and the seeds: 20, all of
 which must pass.
