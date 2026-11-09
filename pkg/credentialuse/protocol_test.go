@@ -181,9 +181,21 @@ func TestAcquireSkipsInTheSteadyState(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.views = cacheOf{m: r.m}
+	// The informer delivers the version A1 wrote, after the pass's A2.
+	current := r.get(t, widgetKey("ns", "h"))
+	r.p.ver.holderEvent(current.UID, current, r.now)
 	r.tick(time.Millisecond)
 
-	// The pass whose A1 added the ref wrote; the next one skips: no call.
+	// The run's first delivery came after the first write, so the next pass
+	// writes once more (t_obs is the later of the delivery and A1's return,
+	// §6.3), and only the pass after it skips: no call.
+	r.srv.calls = nil
+	if _, err := r.p.acquire(context.Background(), current, refs); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"patch Secret/s"}; strings.Join(r.srv.calls, ",") != strings.Join(want, ",") {
+		t.Errorf("the pass after the delivery made %v, want %v", r.srv.calls, want)
+	}
 	r.srv.calls = nil
 	a, err := r.p.acquire(context.Background(), r.get(t, widgetKey("ns", "h")), refs)
 	if err != nil || len(a.Held) != 1 {
@@ -193,9 +205,31 @@ func TestAcquireSkipsInTheSteadyState(t *testing.T) {
 		t.Errorf("a steady-state pass made calls: %v", r.srv.calls)
 	}
 
-	// A deletion pass always writes (§5, §6.3).
+	// The same pass from a version the informer hasn't delivered writes
+	// (H1 of #59's review).
+	if _, err := r.m.Patch(widgetKey("ns", "h"), types.MergePatchType, []byte(`{"metadata":{"labels":{"x":"1"}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	r.srv.calls = nil
+	if _, err := r.p.acquire(context.Background(), r.get(t, widgetKey("ns", "h")), refs); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"patch Secret/s"}; strings.Join(r.srv.calls, ",") != strings.Join(want, ",") {
+		t.Errorf("a pass from an undelivered version made %v, want %v", r.srv.calls, want)
+	}
+
+	// A deletion pass always writes (§5, §6.3), even from a version the
+	// informer has delivered, in the same run, after this process's write:
+	// everything but the deletion would let it skip.
+	labeled := r.get(t, widgetKey("ns", "h"))
+	r.p.ver.holderEvent(labeled.UID, labeled, r.now)
 	must(r.m.Delete(widgetKey("ns", "h")))
 	deleting := r.get(t, widgetKey("ns", "h"))
+	r.p.ver.holderEvent(deleting.UID, deleting, r.now)
+	r.tick(time.Millisecond)
+	if cached, ok := r.views.Protected(SecretRef("ns", "s").ID()); !ok || !r.p.ver.canSkip(deleting.UID, deleting.ResourceVersion, SecretRef("ns", "s").ID(), cached.UID, "ns") {
+		t.Fatal("the deletion pass's version isn't otherwise skippable: the case below would test nothing")
+	}
 	before := r.get(t, secretKey("ns", "s")).Annotations[fNS]
 	r.srv.calls = nil
 	if _, err := r.p.acquire(context.Background(), deleting, refs); err != nil {
@@ -313,22 +347,39 @@ func TestAcquireOutcomes(t *testing.T) {
 			t.Errorf("record = %+v", rec)
 		}
 	})
-	t.Run("no refs: the record goes", func(t *testing.T) {
+	t.Run("no refs: the record goes, and observed with it", func(t *testing.T) {
 		r := newRig(t)
-		rec, _ := EncodeRecord([]ID{SecretRef("ns", "s").ID()})
-		must(r.m.Create(widgetKey("ns", "h"), metav1.ObjectMeta{Annotations: map[string]string{AnnotationRefs: rec}}))
+		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+		must(r.m.Create(widgetKey("ns", "h"), metav1.ObjectMeta{}))
+		p := SecretRef("ns", "s").ID()
+		// A1 adds the ref: observed gets A1's return.
+		if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), []Ref{SecretRef("ns", "s")}); err != nil {
+			t.Fatal(err)
+		}
+		uid := r.get(t, widgetKey("ns", "h")).UID
+		if _, ok := r.p.ver.observed[uid][p]; !ok {
+			t.Fatal("A1 that added the ref didn't set observed")
+		}
+		// A1 removes it: observed goes (§6.3).
 		if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), nil); err != nil {
 			t.Fatal(err)
 		}
 		if ReadRecord(r.get(t, widgetKey("ns", "h"))).Present {
 			t.Error("the record is still there")
 		}
+		if _, ok := r.p.ver.observed[uid][p]; ok {
+			t.Error("A1 that removed the ref left observed")
+		}
 	})
 	t.Run("forget", func(t *testing.T) {
 		r := newRig(t)
 		h := &metav1.ObjectMeta{UID: "h1", Annotations: map[string]string{AnnotationRefs: "[]", AnnotationUnheld: "[]", "keep": "x"}}
+		r.p.ver.announced("h1", []ID{SecretRef("ns", "s").ID()}, nil, r.now)
 		if !r.p.forget(h) || len(h.Annotations) != 1 || r.p.forget(h) {
 			t.Errorf("forget left %v", h.Annotations)
+		}
+		if _, ok := r.p.ver.observed["h1"]; ok {
+			t.Error("forget left observed")
 		}
 	})
 }

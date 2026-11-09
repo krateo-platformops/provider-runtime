@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/utils/clock"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
@@ -35,6 +38,12 @@ import (
 //
 // The bounds are a number of preemptions and of injected faults (see
 // apimodel). CREDENTIALUSE_MODEL_DEEP=1 raises them for a longer run.
+//
+// What the model doesn't cover, by construction (PR 3's and PR 7's stress
+// tests do): there is no enqueue model, so a batch runs when its actor is
+// chosen, not when an event would enqueue it, and neither #52-M1's lost
+// batches nor the index-prune race are reachable; releasers are never
+// faulted; and a batch holds one P, of one kind, in one namespace.
 
 const testGrace = 5 * time.Millisecond
 
@@ -46,22 +55,57 @@ type profile struct {
 	walk   int
 }
 
-// profiles are the searches every scenario runs.
+// A scenario's flags: what it needs searched, and what it must reach.
+type scenarioFlags int
+
+const (
+	// bothBounds: by default, also search every schedule with one
+	// preemption and one fault together (M2 of #59's review), for the
+	// scenarios with a second process.
+	bothBounds scenarioFlags = 1 << iota
+	// needsU5: some schedule of the exhaustive searches must release P over
+	// a live user after the grace (§5's last row). Without a preemption the
+	// deleter deletes the holder right after the Secret, inside the grace,
+	// so it is the preemption searches that reach it.
+	needsU5
+	// needsL6: some schedule of each exhaustive search must run a pass
+	// inside §6.5's L6 window.
+	needsL6
+	// needsH1: some schedule of the exhaustive searches must start a live
+	// pass in the state H1 of #59's review is about: the holder's record
+	// names P, so the pass's A1 won't add it; P has lost its finalizer; and
+	// the process's cache still shows P with it, under a written entry of
+	// its own. A skip there would report P held with no finalizer.
+	needsH1
+	// deepOnly: the scenario's exhaustive searches run only under
+	// CREDENTIALUSE_MODEL_DEEP or CREDENTIALUSE_MODEL_BOUNDS; by default and
+	// under the race detector it runs its random walks only. Its one-fault
+	// search alone is 2.6 million schedules, too many for CI until the
+	// scheduler reduces its state space.
+	deepOnly
+)
+
+// profiles are the searches a scenario runs.
 //
 //   - By default: every schedule with no preemption and one fault on the
-//     holder's calls, every schedule with one preemption and no fault, and
-//     400 random schedules with two preemptions and one fault. CI runs these
-//     in a step of their own, without the race detector.
+//     holders' calls, every schedule with one preemption and no fault, with
+//     bothBounds every schedule with one of each, and 400 random schedules
+//     with two preemptions and one fault. CI runs these in a step of their
+//     own, without the race detector.
 //   - Under the race detector, which slows each schedule several times and
 //     finds nothing in the model (one coroutine runs at a time), random walks
-//     only: 300 with one fault, 300 with two preemptions and one fault.
+//     only: 300 with one fault, 300 with two preemptions and one fault. A
+//     deepOnly scenario runs these walks by default too.
 //   - CREDENTIALUSE_MODEL_DEEP=1: every schedule with one preemption and one
 //     fault, and with two preemptions and none, and a long walk with three
 //     and two, with informers delivering one event per step.
 //   - CREDENTIALUSE_MODEL_BOUNDS=p,f,n[;p,f,n...]: exhaustive searches with
 //     those preemptions, faults and run caps, for measuring and for the
 //     revert check.
-func profiles(t *testing.T) []profile {
+//
+// The random walks' seed changes from run to run, and is logged;
+// CREDENTIALUSE_MODEL_SEED replays one.
+func profiles(t *testing.T, flags scenarioFlags) []profile {
 	if v := os.Getenv("CREDENTIALUSE_MODEL_BOUNDS"); v != "" {
 		var out []profile
 		for _, part := range strings.Split(v, ";") {
@@ -80,18 +124,30 @@ func profiles(t *testing.T) []profile {
 			{name: "random: 3 preemptions, 2 faults", bounds: apimodel.Bounds{Preemptions: 3, Faults: 2}, walk: 50_000},
 		}
 	}
-	if raceEnabled {
+	if raceEnabled || flags&deepOnly != 0 {
 		return []profile{
 			{name: "random: 1 fault", bounds: apimodel.Bounds{Faults: 1}, walk: 300},
 			{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1}, walk: 300},
 		}
 	}
-	return []profile{
+	out := []profile{
 		{name: "1 fault", bounds: apimodel.Bounds{Faults: 1, MaxRuns: 200_000}},
 		{name: "1 preemption", bounds: apimodel.Bounds{Preemptions: 1, MaxRuns: 200_000}},
-		{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1}, walk: 400},
 	}
+	if flags&bothBounds != 0 {
+		out = append(out, profile{name: "1 preemption, 1 fault", bounds: apimodel.Bounds{Preemptions: 1, Faults: 1, MaxRuns: 5_000_000}})
+	}
+	return append(out, profile{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1}, walk: 400})
 }
+
+var walkSeed = sync.OnceValue(func() int64 {
+	if v := os.Getenv("CREDENTIALUSE_MODEL_SEED"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return time.Now().UnixNano()
+})
 
 // world is one schedule's model, processes and record of what happened.
 type world struct {
@@ -106,11 +162,30 @@ type world struct {
 	errs      []error
 	// l6 counts passes inside §6.5's L6 window.
 	l6 int
+	// h1 counts live passes that start in needsH1's state.
+	h1 int
 	// onDone, if set, runs after the schedule, before the checks.
 	onDone func()
-	// livePasses counts each holder's live passes that ran, however they
-	// ended.
+	// livePasses counts each holder actor's live passes that ran, however
+	// they ended.
 	livePasses map[string]int
+	// batches counts each releaser's batches that ran, and batchesStarted
+	// those that began; started counts each holder actor's live passes that
+	// began.
+	batches, batchesStarted, started map[string]int
+	// holds[holder][P]: the earliest live pass that held P, in the current
+	// unbroken run of the holder's versions naming P.
+	holds map[string]map[ID]hold
+	// deletionPhase[actor]: the holder actor ran a pass on its deleting
+	// holder, or found it gone (M3 of #59's review).
+	deletionPhase map[string]bool
+	procs         map[**process]*apimodel.Proc
+}
+
+// hold is a live pass's hold of P: when, and the model's last event then.
+type hold struct {
+	at  time.Time
+	seq int
 }
 
 // connectRead is a holder's Connect reading P.
@@ -129,7 +204,8 @@ type timedDecision struct {
 }
 
 func newWorld(s *apimodel.Sched) *world {
-	w := &world{s: s, ns: "rlgov-probe", livePasses: map[string]int{}}
+	w := &world{s: s, ns: "rlgov-probe", livePasses: map[string]int{}, batches: map[string]int{}, batchesStarted: map[string]int{}, started: map[string]int{}, holds: map[string]map[ID]hold{},
+		deletionPhase: map[string]bool{}, procs: map[**process]*apimodel.Proc{}}
 	w.m = apimodel.New(s.Clock.Now)
 	w.p = SecretRef(w.ns, "probe-dummy-creds").ID()
 	return w
@@ -137,6 +213,35 @@ func newWorld(s *apimodel.Sched) *world {
 
 func (w *world) fail(format string, args ...any) {
 	w.errs = append(w.errs, fmt.Errorf(format, args...))
+}
+
+// proc is the scheduler's process for p: every actor of p crashes together,
+// and the crash replaces p with a fresh process, whose caches list the model
+// then (M3 of #59's review).
+func (w *world) proc(p **process) *apimodel.Proc {
+	if pr, ok := w.procs[p]; ok {
+		return pr
+	}
+	pr := w.s.Proc((*p).name, func(now time.Time) { *p = newProcess((*p).name, w.m, now) })
+	w.procs[p] = pr
+	return pr
+}
+
+// namedSince reports whether every version of holder since event seq has a
+// record naming id: the run of versions that held it hasn't broken, whoever
+// wrote them. It reads the model's event log, as instrumentation, outside
+// the schedule.
+func (w *world) namedSince(holder string, id ID, seq int) bool {
+	k := widgetKey(w.ns, holder)
+	for _, ev := range w.m.EventsAfter(seq) {
+		if ev.Key != k {
+			continue
+		}
+		if ev.Type == watch.Deleted || !ReadRecord(&ev.Obj).Names(id) {
+			return false
+		}
+	}
+	return true
 }
 
 // A process that only runs a releaser has no caches at all (releaser with
@@ -152,7 +257,7 @@ func (w *world) fail(format string, args ...any) {
 // The process may be replaced by a restart.
 func (w *world) informer(name string, p **process) {
 	oneByOne := os.Getenv("CREDENTIALUSE_MODEL_DEEP") != ""
-	w.s.Go(name, apimodel.Daemon, func(a *apimodel.Actor) {
+	w.s.GoIn(w.proc(p), name, apimodel.Daemon, func(a *apimodel.Actor) {
 		for {
 			a.Wait("watch", time.Time{}, func() bool { return (*p).cache.Pending() })
 			for (*p).cache.Pending() {
@@ -169,15 +274,18 @@ func (w *world) informer(name string, p **process) {
 
 // relister relists a process's caches once, at any point (§6.5 L2).
 func (w *world) relister(name string, p **process) {
-	w.s.Go(name, 0, func(a *apimodel.Actor) {
+	w.s.GoIn(w.proc(p), name, 0, func(a *apimodel.Actor) {
 		a.Wait("relist", time.Time{}, nil)
 		(*p).relist(a.Now())
 	})
 }
 
-// holderSpec is one holder's lifecycle.
+// holderSpec is one holder's lifecycle, as one process's runtime runs it.
 type holderSpec struct {
 	name string
+	// actor names the actor, when two processes run the same holder; it
+	// defaults to name.
+	actor string
 	// refs returns what RefsFunc names on each pass, numbered from 0, live
 	// passes first; nil means the Secret.
 	refs func(pass int) []Ref
@@ -190,27 +298,37 @@ type holderSpec struct {
 // holder runs one holder's passes in process p, as §7.2 says a runtime
 // does: Acquire, Connect (a read of each held ref), then BeforeEstablish and
 // the owner finalizer on a live pass, or Forget with the owner finalizer's
-// removal, in one write, on a deletion pass. A crash restarts the process.
+// removal, in one write, on a deletion pass. A crash of p loses the pass in
+// flight; the next pass runs in the restarted process.
 func (w *world) holder(spec holderSpec, p **process) {
-	w.s.Go(spec.name, apimodel.Faulty, func(a *apimodel.Actor) {
+	actor := spec.actor
+	if actor == "" {
+		actor = spec.name
+	}
+	if w.holds[spec.name] == nil {
+		w.holds[spec.name] = map[ID]hold{}
+	}
+	holds := w.holds[spec.name]
+	w.deletionPhase[actor] = false
+	w.s.GoIn(w.proc(p), actor, apimodel.Faulty, func(a *apimodel.Actor) {
 		ctx := context.Background()
-		heldAt := map[ID]time.Time{}
 		pass := 0
-		run := func(deletionPhase bool) (gone bool) {
-			if a.Crashed() {
-				*p = newProcess((*p).name, w.m, a.Now())
-				a.Restart()
-			}
+		run := func() (gone bool) {
+			a.Restart()
 			pr := newProtocol(modelServer{w.m, a}, cacheViews{p}, (*p).ver, (*p).seen, a.Clock(), testGrace)
 			srv := modelServer{w.m, a}
 			obj, err := srv.Get(ctx, widgetGK, w.ns, spec.name)
 			if Classify(err) == ClassNotFound {
+				w.deletionPhase[actor] = true // gone: nothing left to do
 				return true
 			}
 			if err != nil {
 				return false
 			}
 			deleting := obj.DeletionTimestamp != nil
+			if deleting {
+				w.deletionPhase[actor] = true
+			}
 			established := IsEstablished(obj, ownerFinalizers)
 			if deleting && !established {
 				return false // it goes once nothing holds it; nothing to do
@@ -220,25 +338,31 @@ func (w *world) holder(spec holderSpec, p **process) {
 				refs = spec.refs(pass)
 			}
 			pass++
+			if !deleting {
+				w.countH1(obj, refs, *p)
+			}
 			acq, err := pr.acquire(ctx, obj, refs)
 			if err != nil || acq.MustNotConnect {
 				return false
 			}
-			// heldAt is when a live pass held each ref, for as long as the
-			// holder's record has named it since: the protection lives in
-			// the record, so a pass that drops a ref from it forgets the hold,
-			// and one that keeps it (a Degraded pass, say) doesn't (§14's
-			// invariant).
-			rec := ReadRecord(obj)
-			for id := range heldAt {
-				if !rec.Names(id) {
-					delete(heldAt, id)
-				}
-			}
+			// A live pass holds each ref it reports held whose record names
+			// it now (§14's invariant: the protection lives in the record).
+			// The hold lasts while every later version of the holder, by any
+			// process, names the ref; namedSince checks that from the
+			// model's log, so neither a lost A1 nor another process's write
+			// can leave a stale hold (M1 of #59's review).
 			if !deleting {
-				for _, r := range acq.Held {
-					if _, ok := heldAt[r.ID()]; !ok {
-						heldAt[r.ID()] = a.Now()
+				seq := w.m.LastSeq()
+				if live, err := w.m.Get(widgetKey(w.ns, spec.name)); err == nil {
+					rec := ReadRecord(live)
+					for _, r := range acq.Held {
+						id := r.ID()
+						if h, ok := holds[id]; ok && w.namedSince(spec.name, id, h.seq) {
+							continue
+						}
+						if rec.Names(id) {
+							holds[id] = hold{at: a.Now(), seq: seq}
+						}
 					}
 				}
 			}
@@ -249,12 +373,12 @@ func (w *world) holder(spec holderSpec, p **process) {
 				if errors.Is(err, apimodel.ErrCrashed) {
 					return false
 				}
-				at, wasHeld := heldAt[r.ID()]
+				h, ok := holds[r.ID()]
 				w.reads = append(w.reads, connectRead{
 					holder:   spec.name,
 					at:       a.Now(),
 					notFound: Classify(err) == ClassNotFound,
-					held:     deleting && wasHeld && at.Before(obj.DeletionTimestamp.Time),
+					held:     deleting && ok && h.at.Before(obj.DeletionTimestamp.Time) && w.namedSince(spec.name, r.ID(), h.seq),
 				})
 			}
 			switch {
@@ -275,8 +399,9 @@ func (w *world) holder(spec holderSpec, p **process) {
 					a.Wait("await", time.Time{}, c)
 				}
 			}
-			gone := run(false)
-			w.livePasses[spec.name]++ // run, however it ended
+			w.started[actor]++
+			gone := run()
+			w.livePasses[actor]++ // run, however it ended
 			if gone {
 				return
 			}
@@ -286,7 +411,7 @@ func (w *world) holder(spec holderSpec, p **process) {
 			return err != nil || o.DeletionTimestamp != nil
 		})
 		for range spec.deletionPasses {
-			if run(true) {
+			if run() {
 				return
 			}
 		}
@@ -298,21 +423,20 @@ func (w *world) holder(spec holderSpec, p **process) {
 // after, the first batch waits until it holds, as a batch is enqueued by the
 // event it waits for.
 func (w *world) releaser(name string, p **process, n int, cacheless bool, after func() bool) {
-	w.s.Go(name, 0, func(a *apimodel.Actor) {
+	w.s.GoIn(w.proc(p), name, 0, func(a *apimodel.Actor) {
 		if after != nil {
 			a.Wait("await trigger", time.Time{}, after)
 		}
 		for range n {
-			if a.Crashed() {
-				*p = newProcess((*p).name, w.m, a.Now())
-				a.Restart()
-			}
+			a.Restart()
 			var v views = cacheViews{p}
 			if cacheless {
 				v = noViews{}
 			}
 			pr := newProtocol(modelServer{w.m, a}, v, (*p).ver, (*p).seen, a.Clock(), testGrace)
+			w.batchesStarted[name]++
 			res, err := pr.release(context.Background(), w.ns, []ID{w.p})
+			w.batches[name]++
 			at := a.Now()
 			for _, d := range res.Decisions {
 				for _, r := range res.Released {
@@ -362,12 +486,31 @@ func (w *world) deleter(name string, keys ...apimodel.Key) {
 	})
 }
 
+// countH1 counts a live pass that starts in needsH1's state, as
+// instrumentation, outside the schedule.
+func (w *world) countH1(obj metav1.Object, refs []Ref, p *process) {
+	f, _ := FinalizerName(widgetGK, w.ns)
+	rec := ReadRecord(obj)
+	for _, r := range refs {
+		k := keyOf(r.ID())
+		if !rec.Names(r.ID()) {
+			continue // this pass's A1 adds it, and never skips it
+		}
+		if live, err := w.m.Get(k); err == nil && hasFinalizer(live, f) {
+			continue
+		}
+		if cached, ok := p.cache.Get(k); ok && hasFinalizer(cached, f) && p.ver.hasWritten(cached.UID, w.ns) {
+			w.h1++
+		}
+	}
+}
+
 // checkHeld runs right after an Acquire, with no step in between: every ref
 // it reports held must carry the finalizer now. The one exception is §6.5's
-// L6 window, a recreate behind a cached UID: the pass skipped A2 on a written
-// entry for an incarnation that is gone, because the process hasn't been
-// delivered its deletion yet. That window must close on delivery, so outside
-// it a held ref without the finalizer is a violation.
+// L6 window, a recreate behind a cached UID: the pass skipped A2 on its
+// process's written entry for an incarnation that is gone, because the
+// process hasn't been delivered its deletion yet. That window must close on
+// delivery, so outside it a held ref without the finalizer is a violation.
 func (w *world) checkHeld(holder string, acq Acquired, p *process) {
 	f, _ := FinalizerName(widgetGK, w.ns)
 	for _, r := range acq.Held {
@@ -377,8 +520,7 @@ func (w *world) checkHeld(holder string, acq Acquired, p *process) {
 			continue
 		}
 		cached, ok := p.cache.Get(k)
-		inWindow := ok && (err != nil || cached.UID != live.UID)
-		if inWindow {
+		if ok && (err != nil || cached.UID != live.UID) && hasFinalizer(cached, f) && p.ver.hasWritten(cached.UID, w.ns) {
 			w.l6++
 			continue
 		}
@@ -412,6 +554,24 @@ func (w *world) check() error {
 		if !w.nsDeleted.IsZero() && !w.nsDeleted.After(allowed.NamespaceReadAt) && !allowed.NamespaceReadAt.IsZero() {
 			w.fail("SAFETY: a release read namespace %s as live at %s, after its deletion at %s",
 				w.ns, allowed.NamespaceReadAt.Format("05.000"), w.nsDeleted.Format("05.000"))
+		}
+	}
+	// A release over a live user after the grace: a namespace deletion
+	// that began before it returned must have begun at or after the
+	// grace's end (§6.4, M4 of #59's review). One that began inside the
+	// grace is the holders' to see.
+	for _, d := range w.released {
+		if !isU5(d.Input) || w.nsDeleted.IsZero() || w.nsDeleted.After(d.at) {
+			continue
+		}
+		if w.nsDeleted.Before(d.GraceEnd) {
+			w.fail("SAFETY: %s was released over a live user at %s, with its namespace deleted at %s, inside the grace that ended at %s",
+				d.P, d.at.Format("05.000"), w.nsDeleted.Format("05.000"), d.GraceEnd.Format("05.000"))
+		}
+	}
+	for actor, ran := range w.deletionPhase {
+		if !ran {
+			w.fail("DELETION PHASE: %s never ran a pass on its deleting holder", actor)
 		}
 	}
 	if err := w.converge(); err != nil {
@@ -454,12 +614,19 @@ func (c fixedClock) Since(t time.Time) time.Duration { return c.t.Sub(t) }
 
 func clockAt(t time.Time) clock.PassiveClock { return fixedClock{t} }
 
+// isU5 says whether a release was over a live user, after the grace: §5's
+// last row.
+func isU5(in ReleaseInput) bool {
+	return in.Deleting && !in.NamespaceDeleting && in.GraceOver && in.DeletingUsers == 0 && in.Users > 0
+}
+
 // explore runs scenario under every profile, and checks each run. A scenario
 // in which no schedule ever releases anything, or no deleting holder ever
-// reads, tests nothing: that is a failure too.
-func explore(t *testing.T, name string, scenario func(w *world)) {
+// reads, tests nothing: that is a failure too, and so, in an exhaustive
+// search, is missing a state flags say it must reach.
+func explore(t *testing.T, name string, flags scenarioFlags, scenario func(w *world)) {
 	t.Helper()
-	var releasing, deletingReads int
+	var releasing, deletingReads, u5, l6, h1 int
 	run := func(s *apimodel.Sched) error {
 		w := newWorld(s)
 		scenario(w)
@@ -472,6 +639,18 @@ func explore(t *testing.T, name string, scenario func(w *world)) {
 		if len(w.released) > 0 {
 			releasing++
 		}
+		for _, d := range w.released {
+			if isU5(d.Input) {
+				u5++
+				break
+			}
+		}
+		if w.l6 > 0 {
+			l6++
+		}
+		if w.h1 > 0 {
+			h1++
+		}
 		for _, r := range w.reads {
 			if r.held {
 				deletingReads++
@@ -480,19 +659,38 @@ func explore(t *testing.T, name string, scenario func(w *world)) {
 		}
 		return w.check()
 	}
-	for _, p := range profiles(t) {
-		releasing, deletingReads = 0, 0
+	exhaustive, u5Total, h1Total := 0, 0, 0
+	for _, p := range profiles(t, flags) {
+		releasing, deletingReads, u5, l6, h1 = 0, 0, 0, 0, 0
+		start := time.Now()
 		var res apimodel.Result
 		if p.walk > 0 {
-			res = apimodel.Walk(p.bounds, p.walk, 1, run)
+			seed := walkSeed()
+			t.Logf("%s, %s: seed %d (CREDENTIALUSE_MODEL_SEED=%d replays it)", name, p.name, seed, seed)
+			res = apimodel.Walk(p.bounds, p.walk, seed, run)
 		} else {
 			res = apimodel.Explore(p.bounds, run)
 		}
 		report(t, name+", "+p.name, res)
-		t.Logf("%s, %s: %d schedules released, %d had a deleting holder read what it held", name, p.name, releasing, deletingReads)
+		t.Logf("%s, %s: %s; %d schedules released, %d released over a live user (U5), %d reached L6, %d reached H1's state, %d had a deleting holder read what it held",
+			name, p.name, time.Since(start).Round(time.Millisecond), releasing, u5, l6, h1, deletingReads)
 		if releasing == 0 || deletingReads == 0 {
 			t.Errorf("%s, %s: vacuous: %d schedules released, %d had a deleting holder read what it held", name, p.name, releasing, deletingReads)
 		}
+		if p.walk == 0 {
+			exhaustive++
+			u5Total += u5
+			h1Total += h1
+		}
+		if p.walk == 0 && flags&needsL6 != 0 && l6 == 0 {
+			t.Errorf("%s, %s: vacuous: no schedule reached the L6 window", name, p.name)
+		}
+	}
+	if exhaustive > 0 && flags&needsH1 != 0 && h1Total == 0 {
+		t.Errorf("%s: vacuous: no exhaustively searched schedule started a live pass in H1's state", name)
+	}
+	if exhaustive > 0 && flags&needsU5 != 0 && u5Total == 0 {
+		t.Errorf("%s: vacuous: no exhaustively searched schedule released over a live user (U5)", name)
 	}
 }
 
@@ -519,8 +717,13 @@ func TestModelTeardown(t *testing.T) {
 		"interleaving B: Secret, namespace, holder":       {"secret", "ns", "holder"},
 		"interleaving A: Secret, holder (namespace live)": {"secret", "holder"},
 	} {
+		var flags scenarioFlags
+		if len(order) == 2 {
+			flags = needsU5 // the namespace stays live
+		}
 		t.Run(name, func(t *testing.T) {
-			explore(t, name, func(w *world) {
+			t.Parallel()
+			explore(t, name, flags, func(w *world) {
 				seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
 				pa := newProcess("A", w.m, w.s.Clock.Now())
 				w.informer("informerA", &pa)
@@ -548,7 +751,8 @@ func TestModelTeardown(t *testing.T) {
 // a lost response or a crash on any step (HIGH-1), and a restart that clears
 // the verified set.
 func TestModelAcquireAgainstRelease(t *testing.T) {
-	explore(t, "acquire against release", func(w *world) {
+	t.Parallel()
+	explore(t, "acquire against release", bothBounds, func(w *world) {
 		seed(w.m, w.ns, w.p.Name, nil, true) // held by a former holder, now gone
 		must(w.m.Create(widgetKey(w.ns, "h2"), metav1.ObjectMeta{}))
 		pa := newProcess("A", w.m, w.s.Clock.Now())
@@ -563,7 +767,8 @@ func TestModelAcquireAgainstRelease(t *testing.T) {
 // Two releasers in two processes are serialized by R3's tests (§6.5, §6.8),
 // while a holder of P is deleted.
 func TestModelTwoReleasers(t *testing.T) {
-	explore(t, "two releasers", func(w *world) {
+	t.Parallel()
+	explore(t, "two releasers", 0, func(w *world) {
 		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
 		pa := newProcess("A", w.m, w.s.Clock.Now())
 		pb := newProcess("B", w.m, w.s.Clock.Now())
@@ -580,27 +785,127 @@ func TestModelTwoReleasers(t *testing.T) {
 // write A2, even with a written entry from the earlier run, and even when
 // the informer never delivers the version in between. A relist of the
 // holder informer at any point (L2) must not let a pass skip on a stale
-// recordSince.
+// recordSince. With four live passes, a pass after the re-add runs no A1,
+// and must not skip on the first run (H1 of #59's review).
 func TestModelAwayAndBack(t *testing.T) {
-	explore(t, "away and back", func(w *world) {
+	for _, live := range []int{3, 4} {
+		t.Run(fmt.Sprintf("%d live passes", live), func(t *testing.T) {
+			t.Parallel()
+			explore(t, fmt.Sprintf("away and back, %d live passes", live), bothBounds|needsU5, func(w *world) {
+				seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+				pa := newProcess("A", w.m, w.s.Clock.Now())
+				pb := newProcess("B", w.m, w.s.Clock.Now())
+				w.informer("informerA", &pa)
+				if live == 3 {
+					w.relister("relistA", &pa)
+				}
+				secret := SecretRef(w.ns, w.p.Name)
+				w.holder(holderSpec{
+					name: "h1",
+					refs: func(pass int) []Ref {
+						if pass == 1 {
+							return nil // away
+						}
+						return []Ref{secret} // and back
+					},
+					livePasses: live, deletionPasses: 2,
+				}, &pa)
+				w.releaser("releaserB", &pb, 2, true, nil)
+				w.deleter("teardown", keyOf(w.p), widgetKey(w.ns, "h1"))
+			})
+		})
+	}
+}
+
+// Two processes run one holder (a leader handover, or two replicas without
+// leader election, §6.8), each with its own verified set: H1(b) of #59's
+// review. A holds the ref, and its informer runs. B takes the ref away; a
+// releaser releases P, which then has no user; B puts the ref back, with any
+// fault on its calls, and B's informer never delivers past its first list.
+// A's next pass must not skip on what its informer delivered of the first
+// run. Every exhaustive search must start a pass of A in that state
+// (needsH1); then the Secret and the holder are deleted.
+//
+// Its exhaustive searches run only in deep mode (deepOnly): with one fault
+// it has 2,625,480 schedules, all safe, 41,328 of them in H1's state; with
+// one preemption, and with one of each, it didn't finish within 3 and 6
+// million, with no failure. By default it runs random walks, which reach
+// H1's state rarely if at all (none in 6,000 here), so H1(b) is covered by
+// review_test.go's deterministic reproductions.
+//
+// The free-running form of this scenario (no waits, a second releaser) did
+// not finish one fault's search in an hour here, so four waits order its
+// phases. Each waits for a step to begin, not to end, so a preemption can
+// still put the steps on either side anywhere inside it. What they rule out:
+//
+//  1. B's away pass begins only once A's first live pass has begun. Ruled
+//     out: B's removal before A's first pass begins. A then reads
+//     a record without P, and its own A1 adds P back, a ref that never
+//     skips in that pass: the single-process away and back
+//     (TestModelAwayAndBack), with no cross-process observation for A to
+//     lean on.
+//  2. The releaser's batch begins only once B's away pass has ended. B's
+//     away pass makes one call, its A1, so what is ruled out is a batch
+//     whose R1 reads P before that A1 lands. Its R2 list comes after R1:
+//     before the A1 it sees B's record naming P and keeps P, which leaves no
+//     state H1 is about; after it, the batch releases from the same P that
+//     a later R1 would read, unless an A2 lands in between, which changes
+//     the epoch, fails R3, and sends the batch back to R1, the ordering the
+//     wait allows.
+//  3. B's re-add pass begins only once the releaser's batch has begun.
+//     Ruled out: B's re-add before the batch's R1. Its R2 then sees the
+//     record naming P and keeps P: no finalizer is removed, so no state H1
+//     is about. A re-add between R1 and R3 is in the search.
+//  4. A's second live pass begins only once B's re-add pass has begun.
+//     Ruled out: A's second pass beginning before B's re-add pass does. It
+//     then reads B's away version, which doesn't name P, so its A1 adds P,
+//     a ref that never skips; that is case 1 with the roles swapped.
+//
+// The teardown waits for both holders' live passes to end: deletion passes
+// never skip (§6.3), so this rules out no skip, and the deletions of a live
+// phase are the other scenarios'.
+func TestModelTwoProcessesAcquireOneHolder(t *testing.T) {
+	t.Parallel()
+	explore(t, "two processes acquire one holder", bothBounds|needsH1|deepOnly, func(w *world) {
 		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
 		pa := newProcess("A", w.m, w.s.Clock.Now())
 		pb := newProcess("B", w.m, w.s.Clock.Now())
+		pc := newProcess("C", w.m, w.s.Clock.Now())
 		w.informer("informerA", &pa)
-		w.relister("relistA", &pa)
 		secret := SecretRef(w.ns, w.p.Name)
+		w.holder(holderSpec{name: "h1", actor: "h1@A", livePasses: 2, deletionPasses: 2, before: func(n int) func() bool {
+			if n != 1 {
+				return nil
+			}
+			return func() bool { return w.started["h1@B"] >= 2 } // (4)
+		}}, &pa)
 		w.holder(holderSpec{
-			name: "h1",
+			name: "h1", actor: "h1@B",
 			refs: func(pass int) []Ref {
-				if pass == 1 {
+				if pass == 0 {
 					return nil // away
 				}
 				return []Ref{secret} // and back
 			},
-			livePasses: 3, deletionPasses: 3,
-		}, &pa)
-		w.releaser("releaserB", &pb, 2, true, nil)
-		w.deleter("teardown", keyOf(w.p), widgetKey(w.ns, "h1"))
+			livePasses: 2, deletionPasses: 2,
+			before: func(n int) func() bool {
+				switch n {
+				case 0:
+					return func() bool { return w.started["h1@A"] >= 1 } // (1)
+				case 1:
+					return func() bool { return w.batchesStarted["releaserC"] >= 1 } // (3)
+				}
+				return nil
+			},
+		}, &pb)
+		w.releaser("releaserC", &pc, 1, true, func() bool { return w.livePasses["h1@B"] >= 1 }) // (2)
+		w.s.Go("teardown", 0, func(a *apimodel.Actor) {
+			a.Wait("live passes done", time.Time{}, func() bool {
+				return w.livePasses["h1@A"] >= 2 && w.livePasses["h1@B"] >= 2
+			})
+			w.call(a, "delete secret", func() error { return w.m.Delete(keyOf(w.p)) })
+			w.call(a, "delete h1", func() error { return w.m.Delete(widgetKey(w.ns, "h1")) })
+		})
 	})
 }
 
@@ -609,7 +914,8 @@ func TestModelAwayAndBack(t *testing.T) {
 // two deletions relative to a release batch that runs after the Secret's
 // deletion.
 func TestModelDeletionsAroundTheGrace(t *testing.T) {
-	explore(t, "deletions around the grace", func(w *world) {
+	t.Parallel()
+	explore(t, "deletions around the grace", 0, func(w *world) {
 		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
 		pa := newProcess("A", w.m, w.s.Clock.Now())
 		w.informer("informerA", &pa)
@@ -636,8 +942,9 @@ func TestModelDeletionsAroundTheGrace(t *testing.T) {
 // which a pass can report a ref held that isn't, closed by the deletion's
 // delivery. checkHeld asserts both on every pass.
 func TestModelRecreateBehindACachedUID(t *testing.T) {
+	t.Parallel()
 	windows := 0
-	explore(t, "recreate behind a cached UID", func(w *world) {
+	explore(t, "recreate behind a cached UID", needsU5|needsL6, func(w *world) {
 		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
 		pa := newProcess("A", w.m, w.s.Clock.Now())
 		pb := newProcess("B", w.m, w.s.Clock.Now())

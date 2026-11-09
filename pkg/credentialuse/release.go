@@ -7,6 +7,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // maxReleaseRounds bounds how often one batch goes back to R1 after a
@@ -32,6 +33,8 @@ type ReleaseDecision struct {
 	// NamespaceReadAt is when R2's live GET of P's Namespace returned, if it
 	// made one.
 	NamespaceReadAt time.Time
+	// GraceEnd is when P's grace ran out, if P is being deleted.
+	GraceEnd time.Time
 }
 
 // ReleaseResult is what one batch did.
@@ -99,6 +102,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			switch Classify(err) {
 			case ClassNone:
 			case ClassNotFound:
+				p.seen.forget(uidOf(p.views, id))
 				continue // gone: nothing to release
 			default:
 				errs = append(errs, fmt.Errorf("credential-use: reading %s: %w", id, err))
@@ -110,6 +114,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				continue
 			}
 			if !hasFinalizer(m, f) {
+				p.seen.forget(m.UID)
 				continue // done
 			}
 			if m.Annotations[f] == "" {
@@ -137,7 +142,12 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		}
 
 		// R2. The last reads, after every R1: each deleting object's
-		// Namespace, then one consistent list of K in n.
+		// Namespace, then one consistent list of K in n. Whether the grace
+		// is over is measured before the first of them (M4 of #59's review):
+		// measured after, a namespace deletion that began inside the grace,
+		// after the Namespace GET, could be released over as if it began
+		// after the grace (§6.4).
+		now := p.clock.Now()
 		nsDeleting := map[string]bool{}
 		nsReadAt := map[string]time.Time{}
 		var decidable []r1Read
@@ -172,7 +182,6 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			errs = append(errs, fmt.Errorf("credential-use: listing %s in %s: %w", p.holder, n, err))
 			break
 		}
-		now := p.clock.Now()
 
 		// Decide, then R3.
 		var next []ID
@@ -192,7 +201,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				}
 			}
 			d := Decide(in)
-			res.Decisions = append(res.Decisions, ReleaseDecision{P: r.id, Input: in, Decision: d, NamespaceReadAt: nsReadAt[r.id.Namespace]})
+			res.Decisions = append(res.Decisions, ReleaseDecision{P: r.id, Input: in, Decision: d, NamespaceReadAt: nsReadAt[r.id.Namespace], GraceEnd: r.graceEnd})
 			switch d {
 			case Keep:
 				continue
@@ -208,7 +217,8 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			_, err = p.srv.Patch(ctx, r.id.GroupKind(), r.id.Namespace, r.id.Name, pt.Type, pt.Data)
 			switch ClassifyJSONPatch(err) {
 			case ClassNone:
-				p.ver.released(r.meta.UID)
+				p.ver.released(r.meta.UID, n)
+				p.seen.forget(r.meta.UID)
 				res.Released = append(res.Released, r.id)
 			case ClassStateChanged:
 				builtFrom[r.id] = r.meta.ResourceVersion
@@ -270,4 +280,13 @@ func (p *protocol) restoreEpoch(ctx context.Context, id ID, m *metav1.PartialObj
 		return fmt.Errorf("credential-use: restoring the epoch of %s: %w", id, err)
 	}
 	return nil
+}
+
+// uidOf returns the cached incarnation of id, if the views have it, for
+// pruning what this process remembers about an object that is gone.
+func uidOf(v views, id ID) types.UID {
+	if m, ok := v.Protected(id); ok {
+		return m.UID
+	}
+	return ""
 }

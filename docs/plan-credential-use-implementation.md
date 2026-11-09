@@ -208,8 +208,8 @@ escaping right, and is the marker removed only with K's last finalizer?
   R1, then one consistent paginated metadata list of K in N, with no
   selector), §5's decision, R3, a failed test going back to R1 (A3), and the
   `written` drop when R3 succeeds;
-- `verified.go`: the `written`, `recordSince` and `observed` maps, the skip
-  predicate, and the relist time (A20);
+- `verified.go`: the `written`, `delivered`, `recordSince` and `observed`
+  maps, the skip predicate, and the relist time (A20);
 - `handlers.go`: the holder and protected event logic as pure functions of
   (old, new, delivery time), so that PR 3's informers and the model call the
   same code;

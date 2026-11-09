@@ -25,8 +25,8 @@ FILES = ["acquire.go", "release.go", "verified.go"]
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
     # acquire.go: A1 and A2 (§6.2, §6.3, §8).
-    ("a deletion pass may skip A2", "acquire.go", [("\t\tif !deleting && !added[id] {\n", "\t\tif !added[id] {\n")]),
-    ("a ref this pass's A1 added may skip A2", "acquire.go", [("\t\tif !deleting && !added[id] {\n", "\t\tif !deleting {\n")]),
+    ("a deletion pass may skip A2", "acquire.go", [("\t\tif !deleting && !added[id] {\n", "\t\tif (deleting || !deleting) && !added[id] {\n")]),
+    ("a ref this pass's A1 added may skip A2", "acquire.go", [("\t\tif !deleting && !added[id] {\n", "\t\tif !deleting && (added[id] || !added[id]) {\n")]),
     ("A1 isn't guarded by the holder's resourceVersion", "acquire.go", [('\t\t"resourceVersion": obj.GetResourceVersion(),\n', "")]),
     ("A1 doesn't set observed for the refs it adds", "acquire.go", [("\tp.ver.announced(obj.GetUID(), addedList, removed, at)\n", "\tp.ver.announced(obj.GetUID(), nil, removed, at)\n")]),
     ("A1 doesn't drop observed for the refs it removes", "acquire.go", [("\tp.ver.announced(obj.GetUID(), addedList, removed, at)\n", "\tp.ver.announced(obj.GetUID(), addedList, nil, at)\n")]),
@@ -35,7 +35,7 @@ MUTANTS = [
     ("an A2 error is ignored", "acquire.go", [("\t\tdefault:\n\t\t\treturn fail(fmt.Errorf(\"credential-use: holding %s: %w\", id, err), class.String())\n", "\t\tdefault:\n\t\t\ta.Held = append(a.Held, r)\n")]),
     ("a ref in another namespace is held", "acquire.go", [("\t\tif r.Namespace != namespace {\n", "\t\tif false && r.Namespace != namespace {\n")]),
     ("A2 on a custom resource doesn't retry a conflict", "acquire.go", [("\tfor range maxGuardedAttempts {\n", "\tfor range 1 {\n")]),
-    ("written isn't recorded for a built-in kind", "acquire.go", [("\t\tp.ver.wrote(out.UID, namespace, issued)\n\t\treturn ClassNone, nil\n\t}\n\tvar last error", "\t\t_ = issued\n\t\treturn ClassNone, nil\n\t}\n\tvar last error")]),
+    ("written isn't recorded for a built-in kind", "acquire.go", [("\t\tp.ver.wrote(out.UID, namespace, issued)\n\t\treturn ClassNone, nil\n\t}\n\tvar last error", "\t\t_, _ = out, issued\n\t\treturn ClassNone, nil\n\t}\n\tvar last error")]),
     ("BeforeEstablish skips Missing refs", "acquire.go", [("\t\tif u.Reason != ReasonMissing {\n\t\t\tcontinue\n", "\t\tif true {\n\t\t\tcontinue\n")]),
     ("BeforeEstablish ignores a ref it can't hold", "acquire.go", [("\t\tif class, err := p.write(ctx, id, obj.GetNamespace()); class != ClassNone {\n", "\t\tif class, err := p.write(ctx, id, obj.GetNamespace()); false && class != ClassNone {\n")]),
     ("Forget doesn't clear observed", "acquire.go", [("\tp.ver.forgot(obj.GetUID())\n", "")]),
@@ -51,23 +51,34 @@ MUTANTS = [
     ("the grace ignores first sight", "release.go", [("GraceEnd(m.DeletionTimestamp.Time, p.seen.see(m.UID, now), p.grace)", "GraceEnd(m.DeletionTimestamp.Time, m.DeletionTimestamp.Time, p.grace)")]),
     ("§6.1's exclusion isn't applied", "release.go", [("\t\t\t\tif IsUser(&holders[i], r.id, p.ownerFinalizers) {\n", "\t\t\t\tif ReadRecord(&holders[i]).Names(r.id) {\n")]),
     ("deleting users aren't counted", "release.go", [("\t\t\t\tif IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {\n\t\t\t\t\tin.DeletingUsers++\n", "\t\t\t\tif false {\n\t\t\t\t\tin.DeletingUsers++\n")]),
-    ("written isn't dropped on a release", "release.go", [("\t\t\t\tp.ver.released(r.meta.UID)\n", "")]),
+    ("written isn't dropped on a release", "release.go", [("\t\t\t\tp.ver.released(r.meta.UID, n)\n", "")]),
+    ("first sight isn't pruned on a release", "release.go", [("\t\t\t\tp.seen.forget(r.meta.UID)\n", "")]),
     ("a state change isn't retried", "release.go", [("\t\t\t\tnext = append(next, r.id) // back to R1\n", "")]),
     ("a release rejected by an unchanged object is retried", "release.go", [("\t\t\tif rv, ok := builtFrom[id]; ok && rv == m.ResourceVersion {\n", "\t\t\tif rv, ok := builtFrom[id]; false && ok && rv == m.ResourceVersion {\n")]),
     ("a missing epoch isn't restored", "release.go", [("\t\t\t\tif err := p.restoreEpoch(ctx, id, m, n); err != nil {\n", "\t\t\t\tif err := error(nil); err != nil {\n")]),
-    ("R2 decides with the grace measured before the reads", "release.go", [("\t\tholders, err := p.srv.List(ctx, p.holder, n)\n\t\tif err != nil {\n\t\t\terrs = append(errs, fmt.Errorf(\"credential-use: listing %s in %s: %w\", p.holder, n, err))\n\t\t\tbreak\n\t\t}\n\t\tnow := p.clock.Now()\n",
-                                                                                 "\t\tnow := p.clock.Now().Add(p.grace)\n\t\tholders, err := p.srv.List(ctx, p.holder, n)\n\t\tif err != nil {\n\t\t\terrs = append(errs, fmt.Errorf(\"credential-use: listing %s in %s: %w\", p.holder, n, err))\n\t\t\tbreak\n\t\t}\n")]),
+    # M4 of #59's review: the clock is read before R2's first read. This
+    # mutant moves the reading after the list, where 04b389d had it.
+    ("R2 measures the grace after its reads", "release.go", [
+        ("\t\tnow := p.clock.Now()\n\t\tnsDeleting := map[string]bool{}\n", "\t\tnsDeleting := map[string]bool{}\n"),
+        ("\t\t\tbreak\n\t\t}\n\n\t\t// Decide, then R3.\n", "\t\t\tbreak\n\t\t}\n\t\tnow := p.clock.Now()\n\n\t\t// Decide, then R3.\n")]),
+    ("the grace runs out early", "release.go", [("\t\tnow := p.clock.Now()\n\t\tnsDeleting := map[string]bool{}\n", "\t\tnow := p.clock.Now().Add(p.grace)\n\t\tnsDeleting := map[string]bool{}\n")]),
 
     # verified.go: the skip and its handlers (§6.3, §6.5).
-    ("t_obs ignores recordSince", "verified.go", [("\tif hasR && (!hasO || r.After(t)) {\n", "\tif hasR && !hasO {\n")]),
-    ("t_obs ignores the last relist", "verified.go", [("\tif v.lastList.After(t) {\n", "\tif false {\n")]),
-    ("equal times skip", "verified.go", [("\treturn ok && obs.Before(issued)\n", "\treturn ok && !obs.After(issued)\n")]),
-    ("a skip needs no observation", "verified.go", [("\tobs, ok := v.tObs(h, p)\n\treturn ok && obs.Before(issued)\n", "\tobs, _ := v.tObs(h, p)\n\treturn obs.Before(issued)\n")]),
-    ("recordSince restarts on every event", "verified.go", [("\t\tif _, ok := v.recordSince[k]; !ok {\n\t\t\tv.recordSince[k] = at\n", "\t\tif true {\n\t\t\tv.recordSince[k] = at\n")]),
-    ("a version without P doesn't end the run", "verified.go", [("\t\tif k.holder == uid && !keep[k.ref] {\n\t\t\tdelete(v.recordSince, k)\n", "\t\tif false && k.holder == uid && !keep[k.ref] {\n\t\t\tdelete(v.recordSince, k)\n")]),
-    ("a recreate keeps written", "verified.go", [("\t\tif current == nil || current.GetUID() != k.uid {\n", "\t\tif current == nil {\n")]),
-    ("a lost finalizer keeps written", "verified.go", [("\t\tif err != nil || !hasFinalizer(current, f) {\n", "\t\tif err != nil {\n")]),
-    ("a release keeps written", "verified.go", [("\t\tif k.uid == pUID {\n\t\t\tdelete(v.written, k)\n", "\t\tif false && k.uid == pUID {\n\t\t\tdelete(v.written, k)\n")]),
+    ("a skip needs no delivered version (H1)", "verified.go", [("\tif v.delivered[h] != hRV {\n", "\tif false {\n")]),
+    ("a skip needs no version naming P", "verified.go", [("\tif !named {\n", "\tif false && !named {\n")]),
+    ("a write for another namespace counts", "verified.go", [("\tissued, ok := v.written[pUID][n]\n", "\tvar issued time.Time\n\tok := false\n\tfor _, t := range v.written[pUID] {\n\t\tissued, ok = t, true\n\t}\n")]),
+    ("t_obs ignores recordSince", "verified.go", [("\tobs := since\n", "\tvar obs time.Time\n\t_ = since\n")]),
+    ("t_obs ignores observed", "verified.go", [("\tif o, ok := v.observed[h][p]; ok && o.After(obs) {\n", "\tif o, ok := v.observed[h][p]; false && ok && o.After(obs) {\n")]),
+    ("t_obs ignores the last relist", "verified.go", [("\tif v.lastList.After(obs) {\n", "\tif false {\n")]),
+    ("equal times skip", "verified.go", [("\treturn obs.Before(issued)\n", "\treturn !obs.After(issued)\n")]),
+    ("recordSince restarts on every event", "verified.go", [("\t\tif _, ok := runs[p]; !ok {\n", "\t\tif true {\n")]),
+    ("a version without P doesn't end the run", "verified.go", [("\t\tif !names[p] {\n\t\t\tdelete(runs, p)\n", "\t\tif false && !names[p] {\n\t\t\tdelete(runs, p)\n")]),
+    ("a version that ends the run keeps observed (H1)", "verified.go", [("\t\t\tdelete(runs, p)\n\t\t\tdelete(v.observed[uid], p)\n", "\t\t\tdelete(runs, p)\n")]),
+    ("a holder's deletion keeps what was delivered", "verified.go", [("\t\tdelete(v.delivered, uid)\n\t\tdelete(v.recordSince, uid)\n\t\tdelete(v.observed, uid)\n", "")]),
+    ("a recreate keeps written", "verified.go", [("\tif current == nil || current.GetUID() != old.GetUID() {\n", "\tif current == nil {\n")]),
+    ("a lost finalizer keeps written", "verified.go", [("\t\tif err != nil || !hasFinalizer(current, f) {\n", "\t\tif err != nil || (f != f) {\n")]),
+    ("a release keeps written", "verified.go", [("\tdelete(v.written[pUID], n)\n", "")]),
+    ("a release drops every namespace's entry", "verified.go", [("\tdelete(v.written[pUID], n)\n\tif len(v.written[pUID]) == 0 {\n", "\tdelete(v.written[pUID], n)\n\tif true {\n")]),
 ]
 
 
@@ -77,17 +88,25 @@ MUTANTS = [
 EQUIVALENT = {}
 
 
-# The tests that exercise the protocol: its unit tests and the model's
-# schedules, searched exhaustively with one fault and with one preemption, as
-# CI's model step does (its random walk is left out, to keep runs
-# reproducible). The envtest premise tests pin the API facts and don't run
-# the protocol, so they are left out too.
-TESTS = "^(TestCanSkip|TestCanSkipAwayAndBack|TestProtectedEvent|TestAcquire.*|TestRelease.*|TestModel.*)$"
+# The tests that exercise the protocol: its unit tests first, and only if they
+# pass the model's schedules, searched exhaustively with one fault and with one
+# preemption, as CI's model step does (its random walk is left out, to keep
+# runs reproducible). -failfast ends a run at its first failure. The envtest
+# premise tests pin the API facts and don't run the protocol, so they are
+# left out. So is TestModelTwoProcessesAcquireOneHolder: its one-fault search
+# alone is 2.6 million schedules, about 45 minutes of CPU, per mutant.
+UNIT = "^(TestCanSkip.*|TestHolderEvent.*|TestProtectedEvent|TestSkip.*|TestAcquire.*|TestRelease.*)$"
+MODEL = "^TestModel(Teardown|AcquireAgainstRelease|TwoReleasers|AwayAndBack|DeletionsAroundTheGrace|RecreateBehindACachedUID|BoundsAreExhausted)$"
 
 
 def go_test():
     env = dict(os.environ, CI="1", CREDENTIALUSE_MODEL_BOUNDS="0,1,200000;1,0,200000")
-    return subprocess.run(["go", "test", "-count=1", "-timeout", "3000s", "-run", TESTS, *PKGS], cwd=ROOT, env=env, capture_output=True, text=True, timeout=3600)
+    for tests in (UNIT, MODEL):
+        r = subprocess.run(["go", "test", "-count=1", "-failfast", "-timeout", "3000s", "-run", tests, *PKGS],
+                           cwd=ROOT, env=env, capture_output=True, text=True, timeout=3600)
+        if r.returncode != 0:
+            return r
+    return r
 
 
 def digest():

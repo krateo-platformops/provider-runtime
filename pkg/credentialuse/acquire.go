@@ -94,6 +94,17 @@ type firstSight struct {
 
 func newFirstSight() *firstSight { return &firstSight{at: map[types.UID]time.Time{}} }
 
+// forget drops uid, once its object is released or gone, so that the map
+// holds only objects being deleted that this process still holds.
+func (f *firstSight) forget(uid types.UID) {
+	if uid == "" {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.at, uid)
+}
+
 // see returns when uid's deletion was first seen, recording now if never.
 func (f *firstSight) see(uid types.UID, now time.Time) time.Time {
 	f.mu.Lock()
@@ -162,11 +173,13 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		return fail(err, "Announce")
 	}
 
-	// A2. Write P, for each ref.
+	// A2. Write P, for each ref. A skip rests on the exact holder version this
+	// pass works from (§6.3; H1 of #59's review): after an A1, that is A1's
+	// response, which the informer may not have delivered yet.
 	for _, id := range want {
 		r := byID[id]
 		if !deleting && !added[id] {
-			if cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), id, cached.GetUID(), namespace) {
+			if cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {
 				a.Held = append(a.Held, r)
 				continue
 			}

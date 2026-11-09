@@ -36,8 +36,9 @@ const (
 	// FaultLost: the call runs, but its response is lost: it returns an
 	// error, as a timeout would.
 	FaultLost
-	// FaultCrash: the call doesn't run, and the actor's process dies. Every
-	// call returns ErrCrashed until the actor calls Restart.
+	// FaultCrash: the call doesn't run, and the actor's process dies, with
+	// every actor in it (see Proc). Each of them gets ErrCrashed from its
+	// calls until it calls Restart or Wait.
 	FaultCrash
 )
 
@@ -91,6 +92,19 @@ const (
 	Faulty
 )
 
+// A Proc is a process: actors that share its memory, so that a crash of any
+// of them is a crash of all. restart runs at the crash, before any actor
+// runs again, and replaces the process's memory with a fresh process's.
+type Proc struct {
+	Name    string
+	restart func(now time.Time)
+	actors  []*Actor
+	crashes int
+}
+
+// Crashes is how often the process has crashed in this schedule.
+func (p *Proc) Crashes() int { return p.crashes }
+
 // Sched runs one schedule.
 type Sched struct {
 	Clock  *Clock
@@ -112,6 +126,7 @@ type Sched struct {
 type Actor struct {
 	Name   string
 	s      *Sched
+	proc   *Proc
 	daemon bool
 	faulty bool
 
@@ -138,10 +153,24 @@ func newSched(b Bounds, prefix []int, rng *rand.Rand) *Sched {
 	}
 }
 
-// Go adds an actor. It starts parked: nothing of it runs until the scheduler
-// chooses it.
+// Proc adds a process. restart, if set, runs when it crashes.
+func (s *Sched) Proc(name string, restart func(now time.Time)) *Proc {
+	return &Proc{Name: name, restart: restart}
+}
+
+// Go adds an actor of its own process. It starts parked: nothing of it runs
+// until the scheduler chooses it.
 func (s *Sched) Go(name string, flags Flags, f func(a *Actor)) {
-	a := &Actor{Name: name, s: s, daemon: flags&Daemon != 0, faulty: flags&Faulty != 0, label: "start"}
+	s.GoIn(nil, name, flags, f)
+}
+
+// GoIn adds an actor to process p (nil: a process of its own, with nothing
+// to restart).
+func (s *Sched) GoIn(p *Proc, name string, flags Flags, f func(a *Actor)) {
+	a := &Actor{Name: name, s: s, proc: p, daemon: flags&Daemon != 0, faulty: flags&Faulty != 0, label: "start"}
+	if p != nil {
+		p.actors = append(p.actors, a)
+	}
 	a.next, a.stop = iter.Pull(func(yield func(struct{}) bool) {
 		defer func() {
 			if r := recover(); r != nil && r != errStopped { //nolint:errorlint // the sentinel itself
@@ -177,25 +206,51 @@ func (a *Actor) Call(label string, op func() error) error {
 		_ = op()
 		return ErrLost
 	case FaultCrash:
-		a.crashed = true
+		a.crash()
+		return ErrCrashed
+	}
+	if a.crashed {
+		// Another actor of the process crashed it while this call waited
+		// its turn: the call never runs.
 		return ErrCrashed
 	}
 	return op()
 }
 
-// Wait parks the actor until cond holds (nil: always) and the clock has
-// reached notBefore (zero: now). It is a yield point that can't fail.
-func (a *Actor) Wait(label string, notBefore time.Time, cond func() bool) {
-	if a.crashed {
+// crash kills the actor's process: every actor in it, whatever it is doing,
+// loses the work in flight, and the process restarts at once.
+func (a *Actor) crash() {
+	if a.proc == nil {
+		a.crashed = true
 		return
 	}
-	a.park(label, false, notBefore, cond)
+	a.proc.crashes++
+	for _, b := range a.proc.actors {
+		b.crashed = true
+	}
+	if a.proc.restart != nil {
+		a.proc.restart(a.s.Clock.Now())
+	}
 }
 
-// Crashed reports whether the actor's process has crashed.
+// Wait parks the actor until cond holds (nil: always) and the clock has
+// reached notBefore (zero: now). It is a yield point that can't fail. A
+// crash never skips it: an actor reaches a Wait with its work in flight
+// done, or lost to a crash, and the restarted process's actor waits for its
+// next event as the old one would have, so Wait clears the crash.
+func (a *Actor) Wait(label string, notBefore time.Time, cond func() bool) {
+	a.crashed = false
+	a.park(label, false, notBefore, cond)
+	a.crashed = false // a crash while it waited lost nothing in flight
+}
+
+// Crashed reports whether the actor's process has crashed since its last
+// Restart or Wait.
 func (a *Actor) Crashed() bool { return a.crashed }
 
-// Restart brings a crashed actor's process back: its calls run again.
+// Restart begins new work in the actor's process as it is now: its calls
+// run again. Actors call it at the start of each unit of work (a pass, a
+// batch), so that one lost to a crash doesn't fail the next.
 func (a *Actor) Restart() { a.crashed = false }
 
 // Now is the scheduler's clock.
@@ -303,7 +358,10 @@ func (s *Sched) choose(n int) int {
 		i = s.rng.Intn(n)
 	}
 	if i >= n {
-		i = n - 1
+		// A replay that offers fewer options than the run it replays: the
+		// scenario isn't deterministic, and the search would be wrong.
+		panic(fmt.Sprintf("apimodel: replayed choice %d of %d options at step %d: the scenario is not deterministic (trace %s)",
+			i, n, len(s.choices), s.Trace()))
 	}
 	s.choices = append(s.choices, i)
 	s.options = append(s.options, n)
