@@ -8,7 +8,8 @@
 //     threads' CPUs in slices; a CPU that can't get runtime is throttled until
 //     the next period (sched-bwc.rst);
 //   - GOMAXPROCS threads running the runnable goroutines, shared equally;
-//   - with no quota, a node that gives the container a share of its CPUs;
+//   - a node that gives the container a share of its CPUs, under a quota or
+//     with none;
 //   - PSI "some": per millisecond, the most any wanting thread waited;
 //   - a gate with the gated queue's semantics: a reconcile starts while in
 //     flight is under capacity, a cut preempts nothing, and freed slots go
@@ -34,8 +35,9 @@ const tick = time.Millisecond
 // aggregation of per-CPU stall into the cgroup's figure isn't modelled; one
 // factor fitted to those steady points stands for it. The measurements at
 // fewer slots changed capacity every few seconds, so avg10's lag mixes them,
-// and they aren't used. With no quota (§5.1's node share) the same factor is
-// an assumption: there is no measurement of that case.
+// and they aren't used. It enters no cut: it decides only which samples the
+// pressure block holds (design §10), and with a node share the same factor is
+// an assumption, as there is no measurement of that case.
 const DefaultPSIScale = 0.62
 
 // Class is one kind of reconcile: CPU, then an off-CPU wait.
@@ -65,9 +67,16 @@ type Config struct {
 	Period, Slice time.Duration
 	// LimitAt, when set, overrides Limit over time (a resize).
 	LimitAt func(t time.Duration) float64
-	// Share is the cores the node gives the container when it has no quota;
-	// nil means all of NodeCPUs.
+	// Share is the cores the node gives the container, under a quota or with
+	// none; nil means all of NodeCPUs.
 	Share func(t time.Duration) float64
+	// CostPerSlot, when positive, scales each reconcile's CPU by
+	// (1 + CostPerSlot·N), N the reconciles in flight when it starts (design
+	// §17.5).
+	CostPerSlot float64
+	// Controller, when set, builds the controller in place of the cost model
+	// (the utilization baseline, design §17.6).
+	Controller func() Controller
 	// Background is the cores the process's other goroutines want.
 	Background func(t time.Duration) float64
 	Ceiling    int
@@ -88,8 +97,14 @@ type Config struct {
 	Observe func(t time.Duration, s costmodel.Sample, r costmodel.Result)
 }
 
+// Controller turns samples into a capacity; costmodel.Model is one.
+type Controller interface {
+	Step(s costmodel.Sample, ceiling int) costmodel.Result
+}
+
 type recon struct {
 	queue    int
+	granted  time.Duration
 	cpuLeft  float64 // ms
 	waitLeft float64 // ms
 }
@@ -125,7 +140,10 @@ func Run(cfg Config) *Trace {
 	if cfg.PSIScale == 0 {
 		cfg.PSIScale = DefaultPSIScale
 	}
-	model := costmodel.NewModel(cfg.Model)
+	var model Controller = costmodel.NewModel(cfg.Model)
+	if cfg.Controller != nil {
+		model = cfg.Controller()
+	}
 	books := costmodel.NewBooks(0)
 	capacity := 1
 	if cfg.Fixed > 0 {
@@ -177,7 +195,11 @@ func Run(cfg Config) *Trace {
 					continue
 				}
 				c := q.Class(t)
-				inflight = append(inflight, &recon{queue: qi, cpuLeft: draw(c.CPU, c.Jitter), waitLeft: draw(c.Wait, c.Jitter)})
+				cpu := draw(c.CPU, c.Jitter)
+				if cfg.CostPerSlot > 0 {
+					cpu *= 1 + cfg.CostPerSlot*float64(len(inflight))
+				}
+				inflight = append(inflight, &recon{queue: qi, granted: t, cpuLeft: cpu, waitLeft: draw(c.Wait, c.Jitter)})
 				perQueue[qi]++
 				books.Grant(t, q.Name)
 				nextQueue = (qi + 1) % len(cfg.Queues)
@@ -234,14 +256,11 @@ func Run(cfg Config) *Trace {
 		var share float64
 		if w > 0 {
 			periodDemand = true
-			rate := 1.0
-			if L == 0 {
-				avail := float64(min(w, cfg.NodeCPUs))
-				if cfg.Share != nil {
-					avail = math.Min(avail, cfg.Share(t))
-				}
-				rate = avail / float64(w)
+			give := float64(min(w, cfg.NodeCPUs))
+			if cfg.Share != nil {
+				give = math.Min(give, cfg.Share(t))
 			}
+			rate := give / float64(w)
 			// What each wanting thread could run, from the quota's slices.
 			capacity := 0.0
 			for j := 0; j < w; j++ {
@@ -301,7 +320,7 @@ func Run(cfg Config) *Trace {
 				r.waitLeft--
 				if r.waitLeft <= 0 {
 					perQueue[r.queue]--
-					books.Release(t+tick, cfg.Queues[r.queue].Name, true)
+					books.Release(t+tick, cfg.Queues[r.queue].Name, true, r.granted)
 					changed = true
 					continue
 				}

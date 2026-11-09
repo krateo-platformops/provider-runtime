@@ -40,10 +40,10 @@ func TestBooksAccrueAndCarry(t *testing.T) {
 	b.Commit(0)
 	b.Grant(200*ms, "b")
 	b.Commit(200 * ms)
-	b.Release(600*ms, "a", true)
+	b.Release(600*ms, "a", true, 0)
 	b.Commit(600 * ms)
 	// A change after the read instant belongs to the next interval (L5).
-	b.Release(1100*ms, "b", true)
+	b.Release(1100*ms, "b", true, 200*ms)
 	b.Commit(1100 * ms)
 
 	iv := b.Close(time.Second)
@@ -70,7 +70,7 @@ func TestBooksZeroLengthDip(t *testing.T) {
 	b.Grant(0, "a")
 	b.Commit(0)
 	// A release re-granted in the same critical section isn't a dip (L6).
-	b.Release(500*ms, "a", true)
+	b.Release(500*ms, "a", true, 0)
 	b.Grant(500*ms, "a")
 	b.Commit(500 * ms)
 	iv := b.Close(time.Second)
@@ -83,7 +83,7 @@ func TestBooksHandBackIsNotACompletion(t *testing.T) {
 	b := NewBooks(0)
 	b.Grant(0, "a")
 	b.Commit(0)
-	b.Release(100*ms, "a", false)
+	b.Release(100*ms, "a", false, 0)
 	b.Commit(100 * ms)
 	if iv := b.Close(time.Second); iv.Completions != 0 {
 		t.Errorf("a handed-back grant counted as a completion")
@@ -100,19 +100,19 @@ func TestRatioWarmStartHoldOutAndRestart(t *testing.T) {
 	}
 	v, _ := r.value()
 	near(t, "mean", v, 1, 0.02)
-	// One outlier is held out and leaves the estimate.
+	// One outlier is deferred: the estimate doesn't move yet.
 	if r.add(5, 1, 0.1, true) != heldOut {
 		t.Fatal("an outlier was averaged in")
 	}
 	if v2, _ := r.value(); v2 != v {
-		t.Errorf("a held-out sample moved the estimate: %v to %v", v, v2)
+		t.Errorf("a deferred sample moved the estimate: %v to %v", v, v2)
 	}
-	// A second on the same side restarts from it.
+	// A second on the same side restarts from the two.
 	if r.add(5, 1, 0.1, true) != restarted {
 		t.Fatal("two outliers in a row didn't restart")
 	}
-	if v3, _ := r.value(); v3 != 5 || r.n != 1 {
-		t.Errorf("after the restart the estimate is %v with n %d, want 5 with 1", v3, r.n)
+	if v3, _ := r.value(); v3 != 5 || r.n != 2 {
+		t.Errorf("after the restart the estimate is %v with n %d, want 5 with 2", v3, r.n)
 	}
 	// Warm start: the first samples are a plain mean.
 	var w ratio
@@ -121,7 +121,7 @@ func TestRatioWarmStartHoldOutAndRestart(t *testing.T) {
 	if v, _ := w.value(); v != 2 {
 		t.Errorf("warm start: %v, want the plain mean 2", v)
 	}
-	if !math.IsInf(w.se(0.01), 1) {
+	if !math.IsInf(w.seRatio(), 1) {
 		t.Error("a standard error before the third sample")
 	}
 }
@@ -141,28 +141,23 @@ func cpuCfg() CPUConfig {
 
 func TestKinds(t *testing.T) {
 	c := NewCPU(cpuCfg())
-	if k := c.kind(sample(time.Second, 0.01, 0.25, 0, 0), 0.01, 0, 50, 1); k != Idle {
+	if k := c.kind(sample(time.Second, 0.01, 0.25, 0, 0), 0.01); k != Idle {
 		t.Errorf("nothing in flight: %v", k)
 	}
 	s := sample(time.Second, 0.25, 0.25, 5, 10)
 	s.Throttled = 10
-	if k := c.kind(s, 0.25, 0, 50, 5); k != Capped {
+	if k := c.kind(s, 0.25); k != Capped {
 		t.Errorf("every period throttled at the cap: %v", k)
 	}
 	// Throttled every period but usage beyond the slack below the cap: active.
 	s.Usage = time.Duration(0.2 * float64(time.Second))
-	if k := c.kind(s, 0.2, 0, 50, 5); k != Active {
+	if k := c.kind(s, 0.2); k != Active {
 		t.Errorf("throttled but 50 ms/s under the cap: %v", k)
 	}
 	// Usage within the slack (2 × 5ms in a 1s sample) of the cap: capped.
 	s.Usage = time.Duration(0.241 * float64(time.Second))
-	if k := c.kind(s, 0.241, 0, 50, 5); k != Capped {
+	if k := c.kind(s, 0.241); k != Capped {
 		t.Errorf("throttled and within the slack: %v", k)
-	}
-	d := sample(time.Second, 0.1, 0.25, 6, 5)
-	d.Books.NMin = 6
-	if k := c.kind(d, 0.1, 0, 50, 4); k != Draining {
-		t.Errorf("six in flight throughout with capacity 4: %v", k)
 	}
 }
 
@@ -206,49 +201,77 @@ func TestPressureHoldsAtOnsetValue(t *testing.T) {
 	}
 }
 
-// §5.2: with no cpu.max, the threshold while a limit is held is calibrated
-// between the stall at the operating point and the stall past the share.
-func TestThresholdCalibratedAtTheOperatingPoint(t *testing.T) {
-	cfg := cpuCfg()
-	cfg.PressureThreshold = 30
-	c := NewCPU(cfg)
-	stalled := func(used, stall float64) Sample {
-		s := sample(time.Second, used, 0, 5, 10)
-		s.Throttling = false
-		s.Stall = time.Duration(stall / 100 * float64(time.Second))
-		return s
+// §17.1: a deferred sample that the next doesn't confirm is folded back with
+// the weight it would have had, so the sums equal the sums with every sample.
+func TestDeferralLosesNothing(t *testing.T) {
+	var tested, plain ratio
+	xs := []float64{1, 1.01, 0.99, 1, 1.02, 0.98, 1, 1.01, 9, 1, 0.99, 1.01, 1}
+	for _, x := range xs {
+		tested.add(x, 1, 0.2, true)
+		plain.add(x, 1, 0.2, false)
 	}
-	for i := 0; i < 20; i++ {
-		c.Step(stalled(0.3, 10), 5, 5, 16)
+	tv, _ := tested.value()
+	pv, _ := plain.value()
+	near(t, "estimate with the deferral", tv, pv, 1e-12)
+	near(t, "the test's mean", tested.mu, plain.mu, 1e-12)
+	near(t, "the test's variance", tested.v, plain.v, 1e-12)
+	if tested.n != plain.n {
+		t.Errorf("n %d with the deferral, %d without", tested.n, plain.n)
 	}
-	// Past the share for τ: the limit is learned, and until the operating
-	// point is measured only a stall as high as that window's is pressure.
-	var r CPUResult
-	for i := 0; i < 10 && r.Phase != Held; i++ {
-		r = c.Step(stalled(0.4, 80), 5, 5, 16)
+}
+
+func TestBooksLivesAndOldest(t *testing.T) {
+	b := NewBooks(0)
+	b.Grant(0, "a")
+	b.Grant(100*ms, "a")
+	b.Commit(100 * ms)
+	b.Release(700*ms, "a", true, 0)
+	b.Commit(700 * ms)
+	iv := b.Close(time.Second)
+	if len(iv.Lives) != 1 || iv.Lives[0].Granted != 0 || iv.Lives[0].Ended != 700*ms {
+		t.Fatalf("lives %+v, want one from 0 to 0.7s", iv.Lives)
 	}
-	if r.Phase != Held || math.Abs(r.Leff-0.4) > 1e-9 {
-		t.Fatalf("no limit learned from a window spanning τ: %+v", r)
+	if iv.Oldest != 100*ms {
+		t.Errorf("oldest in flight granted at %v, want 0.1s", iv.Oldest)
 	}
-	if r = c.Step(stalled(0.36, 20), 5, 5, 16); math.Abs(r.Threshold-80) > 1e-9 || r.Calibrated {
-		t.Errorf("before the operating point is measured: threshold %v, calibrated %v; want 80, false", r.Threshold, r.Calibrated)
+	if iv.Start != 0 || iv.End != time.Second {
+		t.Errorf("interval %v–%v, want 0–1s", iv.Start, iv.End)
 	}
+}
+
+// §5.1: with no CPU limit, pressure only blocks; nothing cuts.
+func TestNoLimitOnlyBlocks(t *testing.T) {
+	m := NewModel(Config{CPU: cpuCfg()})
+	S := 1.0
+	for i := 0; i < 40; i++ {
+		s := sample(time.Second, 0.4, 0, S, int(4*S))
+		if i >= 20 {
+			s.Stall = 800 * ms
+		}
+		r := m.Step(s, 16)
+		if r.Slots < S-1e-9 {
+			t.Fatalf("sample %d: the slots fell from %v to %v with no limit", i, S, r.Slots)
+		}
+		if i >= 20 && r.Slots > S+1e-9 {
+			t.Fatalf("sample %d: a rise under pressure", i)
+		}
+		S = r.Slots
+	}
+	if S != 16 {
+		t.Errorf("slots %v before the pressure's hold, want the ceiling 16", S)
+	}
+}
+
+// §17.2 (L11): in the change's own sample the slots are its N̄ scaled by what
+// the new limit allows over what it used, and can't rise.
+func TestLimitChangeSample(t *testing.T) {
+	c := NewCPU(cpuCfg())
 	for i := 0; i < 5; i++ {
-		r = c.Step(stalled(0.36, 20), 5, 5, 16)
+		c.Step(sample(time.Second, 0.2, 0.25, 4, 40), 4, 4, 16)
 	}
-	if math.Abs(r.Threshold-50) > 1e-9 || !r.Calibrated {
-		t.Errorf("threshold %v, calibrated %v; want the midpoint of 20 and 80, 50", r.Threshold, r.Calibrated)
+	r := c.Step(sample(time.Second, 0.2, 0.125, 4, 40), 4, 4, 16)
+	if !r.ChangeSample {
+		t.Fatal("the change's sample not marked")
 	}
-	if r.Kind == Pressured {
-		t.Error("a sample at the operating point read as pressured")
-	}
-	if r = c.Step(stalled(0.4, 60), 5, 5, 16); r.Kind != Pressured || !r.Blocked {
-		t.Errorf("a stall nearer past the share: kind %v, blocked %v", r.Kind, r.Blocked)
-	}
-	// With a cpu.max the option is the threshold, calibrated or not.
-	s := stalled(0.2, 40)
-	s.Limit = 0.25
-	if r = c.Step(s, 5, 5, 16); r.Threshold != 30 || r.Calibrated {
-		t.Errorf("with a cpu.max: threshold %v, calibrated %v; want the option, 30", r.Threshold, r.Calibrated)
-	}
+	near(t, "S in the change's sample", r.Slots, 0.9*0.125*4/0.125, 1e-9)
 }

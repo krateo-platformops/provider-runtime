@@ -6,42 +6,50 @@ import "math"
 const changeSigma = 3.0
 
 // ratio is a ratio of two exponentially weighted sums with a warm start, the
-// 3σ hold-out and the two-in-a-row restart (design §3.5).
+// change test and the two-in-a-row restart (design §3.5, as amended by §17.1).
 //
-// Each sample's own ratio x = num/den is tracked too, as an exponentially
-// weighted mean and variance, for the change test and the standard error.
+// Each sample's own ratio x = num/den, when den > 0, is tracked too, as an
+// exponentially weighted mean and variance, for the change test. The test
+// never removes a sample from the sums: a sample beyond 3σ is deferred, and
+// folded back, with the weight it would have had, unless the next sample
+// confirms the change (§17.1).
 type ratio struct {
-	// n counts the samples averaged in since the last start or restart.
+	// n counts the samples folded in since the last start or restart.
 	n        int
 	num, den float64
-	// mu and v are the weighted mean and variance of the per-sample ratios.
+	// qnn, qnd and qdd are Σw²num², Σw²num·den and Σw²den², for the ratio
+	// estimator's standard error.
+	qnn, qnd, qdd float64
+	// xn counts the samples with a per-sample ratio; mu and v are those
+	// ratios' weighted mean and variance.
+	xn    int
 	mu, v float64
-	// run counts consecutive outliers on one side, signed.
-	run int
+	// pend is a deferred sample, side the sign of its deviation.
+	pend *deferred
+}
+
+type deferred struct {
+	num, den, alpha float64
+	side            float64
 }
 
 // value reports the estimate, and false before any sample.
 func (r *ratio) value() (float64, bool) {
-	if r.n == 0 || r.den == 0 {
+	if r.n == 0 || r.den <= 0 {
 		return 0, false
 	}
 	return r.num / r.den, true
 }
 
-// effective is the number of samples the estimate effectively averages.
-func effective(n int, alpha float64) float64 {
-	if alpha <= 0 {
-		return float64(n)
-	}
-	return math.Min(float64(n), (2-alpha)/alpha)
-}
-
-// se is the standard error of the estimate, +Inf before the third sample.
-func (r *ratio) se(alpha float64) float64 {
-	if r.n < 3 {
+// seRatio is the ratio estimator's standard error (§17.1):
+// √(Σw²(numᵢ − r̂·denᵢ)²)/Σw·denᵢ, +Inf before the third sample.
+func (r *ratio) seRatio() float64 {
+	v, ok := r.value()
+	if !ok || r.n < 3 {
 		return math.Inf(1)
 	}
-	return math.Sqrt(math.Max(r.v, 0) / effective(r.n, alpha))
+	q := r.qnn - 2*v*r.qnd + v*v*r.qdd
+	return math.Sqrt(math.Max(q, 0)) / r.den
 }
 
 func (r *ratio) reset() { *r = ratio{} }
@@ -51,49 +59,71 @@ type outcome int
 
 const (
 	averaged outcome = iota
+	// heldOut: the sample is deferred; it may not raise the slots.
 	heldOut
+	// restarted: the estimate restarted from the deferred sample and this one.
 	restarted
 )
 
-// add folds one sample in with weight alpha. With test set, a sample more than
-// three standard deviations from the mean is held out, and the second such in
-// a row on the same side restarts the estimate from that sample. den must be
-// positive.
-func (r *ratio) add(num, den, alpha float64, test bool) outcome {
-	x := num / den
-	out := averaged
-	if test && r.n >= 3 {
-		sd := math.Sqrt(math.Max(r.v, 0))
-		// A floor only against division by zero, not a tuning.
-		sd = math.Max(sd, 1e-9*math.Max(math.Abs(r.mu), 1))
-		dev := (x - r.mu) / sd
-		switch {
-		case math.Abs(dev) <= changeSigma:
-			r.run = 0
-		case sign(dev) == sign(float64(r.run)) && r.run != 0:
-			r.run += int(sign(dev))
-		default:
-			r.run = int(sign(dev))
-		}
-		if abs(r.run) >= 2 {
-			r.reset()
-			out = restarted
-		} else if r.run != 0 {
-			return heldOut
-		}
-	}
+// fold adds one sample with the warm-start weight max(alpha, 1/n), and updates
+// the test's statistics with it.
+func (r *ratio) fold(num, den, alpha float64) {
 	r.n++
-	al := math.Max(alpha, 1/float64(r.n))
-	r.num = (1-al)*r.num + al*num
-	r.den = (1-al)*r.den + al*den
-	if r.n == 1 {
-		r.mu, r.v = x, 0
-	} else {
-		d := x - r.mu
-		r.mu += al * d
-		r.v = (1 - al) * (r.v + al*d*d)
+	a := math.Max(alpha, 1/float64(r.n))
+	r.num = (1-a)*r.num + a*num
+	r.den = (1-a)*r.den + a*den
+	b, a2 := (1-a)*(1-a), a*a
+	r.qnn = b*r.qnn + a2*num*num
+	r.qnd = b*r.qnd + a2*num*den
+	r.qdd = b*r.qdd + a2*den*den
+	if den <= 0 {
+		return
 	}
-	return out
+	x := num / den
+	r.xn++
+	if r.xn == 1 {
+		r.mu, r.v = x, 0
+		return
+	}
+	d := x - r.mu
+	r.mu += a * d
+	r.v = (1 - a) * (r.v + a*d*d)
+}
+
+// deviation is a sample's distance from the mean in standard deviations, and
+// whether the test can be run on it.
+func (r *ratio) deviation(num, den float64) (float64, bool) {
+	if den <= 0 || r.xn < 3 {
+		return 0, false
+	}
+	sd := math.Sqrt(math.Max(r.v, 0))
+	// A floor only against division by zero, not a tuning.
+	sd = math.Max(sd, 1e-9*math.Max(math.Abs(r.mu), 1))
+	return (num/den - r.mu) / sd, true
+}
+
+// add folds one sample in with weight alpha. With test set, a sample more than
+// three standard deviations from the mean is deferred; if the next one is
+// beyond three on the same side the estimate restarts from the two, and
+// otherwise the deferred one is folded back first. den may be 0: such a sample
+// adds to the numerator and isn't tested.
+func (r *ratio) add(num, den, alpha float64, test bool) outcome {
+	if p := r.pend; p != nil {
+		r.pend = nil
+		if dev, ok := r.deviation(num, den); test && ok && math.Abs(dev) > changeSigma && sign(dev) == p.side {
+			r.reset()
+			r.fold(p.num, p.den, p.alpha)
+			r.fold(num, den, alpha)
+			return restarted
+		}
+		r.fold(p.num, p.den, p.alpha)
+	}
+	if dev, ok := r.deviation(num, den); test && ok && math.Abs(dev) > changeSigma {
+		r.pend = &deferred{num: num, den: den, alpha: alpha, side: sign(dev)}
+		return heldOut
+	}
+	r.fold(num, den, alpha)
+	return averaged
 }
 
 func sign(x float64) float64 {
@@ -104,13 +134,6 @@ func sign(x float64) float64 {
 		return -1
 	}
 	return 0
-}
-
-func abs(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
 
 // spread tracks the exponentially weighted variance of a series' steps, for

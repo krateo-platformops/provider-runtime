@@ -16,9 +16,11 @@ import "time"
 type Books struct {
 	// start is the instant the open interval began.
 	start time.Duration
-	// inFlight and perQueue are the counts at start.
+	// inFlight and perQueue are the counts at start, and grants the grant
+	// instants of the reconciles in flight then.
 	inFlight int
 	perQueue map[string]int
+	grants   map[time.Duration]int
 	// pending are the changes since start, in order.
 	pending []change
 }
@@ -28,13 +30,15 @@ type change struct {
 	queue     string
 	delta     int
 	completed bool
+	// granted is a release's grant instant.
+	granted time.Duration
 	// commit marks the end of a critical section.
 	commit bool
 }
 
 // NewBooks opens the first interval at start.
 func NewBooks(start time.Duration) *Books {
-	return &Books{start: start, perQueue: map[string]int{}}
+	return &Books{start: start, perQueue: map[string]int{}, grants: map[time.Duration]int{}}
 }
 
 // Grant records a slot granted to queue at.
@@ -42,10 +46,11 @@ func (b *Books) Grant(at time.Duration, queue string) {
 	b.pending = append(b.pending, change{at: at, queue: queue, delta: +1})
 }
 
-// Release records a slot given back by queue at. completed is false for a
-// grant handed back unused, which is not a completion.
-func (b *Books) Release(at time.Duration, queue string, completed bool) {
-	b.pending = append(b.pending, change{at: at, queue: queue, delta: -1, completed: completed})
+// Release records a slot given back by queue at, granted at granted (the pop's
+// time the gated queue's processing map holds). completed is false for a grant
+// handed back unused, which is not a completion.
+func (b *Books) Release(at time.Duration, queue string, completed bool, granted time.Duration) {
+	b.pending = append(b.pending, change{at: at, queue: queue, delta: -1, completed: completed, granted: granted})
 }
 
 // Commit ends a critical section at at.
@@ -65,7 +70,7 @@ func (b *Books) InFlight() int {
 // Close ends the open interval at at and returns it. Changes recorded after at
 // stay pending, so they count in the next interval.
 func (b *Books) Close(at time.Duration) Interval {
-	iv := Interval{Queues: map[string]QueueInterval{}, NMin: -1, NMax: -1}
+	iv := Interval{Start: b.start, End: at, Queues: map[string]QueueInterval{}, NMin: -1, NMax: -1}
 	cur := b.start
 	n := b.inFlight
 	// A count enters N± only if it lasted some time: the states between the
@@ -104,14 +109,28 @@ func (b *Books) Close(at time.Duration) Interval {
 		}
 		n += c.delta
 		b.perQueue[c.queue] += c.delta
+		if c.delta > 0 {
+			b.grants[c.at]++
+		} else {
+			if b.grants[c.granted]--; b.grants[c.granted] <= 0 {
+				delete(b.grants, c.granted)
+			}
+		}
 		if c.delta < 0 && c.completed {
 			iv.Completions++
 			qi := iv.Queues[c.queue]
 			qi.Completions++
 			iv.Queues[c.queue] = qi
+			iv.Lives = append(iv.Lives, Life{Queue: c.queue, Granted: c.granted, Ended: c.at})
 		}
 	}
 	accrue(at)
+	iv.Oldest = -1
+	for g := range b.grants {
+		if iv.Oldest < 0 || g < iv.Oldest {
+			iv.Oldest = g
+		}
+	}
 	if iv.NMin < 0 {
 		// An interval of no length: the count at its instant.
 		iv.NMin, iv.NMax = n, n

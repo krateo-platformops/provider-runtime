@@ -37,6 +37,8 @@ type Sample struct {
 
 // Interval is the slot accounting closed at one sample (design §3.2).
 type Interval struct {
+	// Start and End are the interval's instants on the books' clock.
+	Start, End time.Duration
 	// SlotSeconds is ∫N dt over the interval.
 	SlotSeconds float64
 	// Completions counts reconciles that ended (Done), not handed-back grants.
@@ -46,7 +48,22 @@ type Interval struct {
 	// NMin and NMax are the fewest and most in flight during the interval,
 	// taken after each critical section's dispatch.
 	NMin, NMax int
+	// Lives are the completions' grant and Done instants, in order (design
+	// §17.1: the gated queue's processing map holds the pop's time).
+	Lives []Life
+	// Oldest is the grant instant of the oldest reconcile in flight at End,
+	// or -1 when none is.
+	Oldest time.Duration
 }
+
+// Life is one completed reconcile's time in the gate.
+type Life struct {
+	Queue          string
+	Granted, Ended time.Duration
+}
+
+// Lifetime is the life's length in seconds.
+func (l Life) Lifetime() float64 { return (l.Ended - l.Granted).Seconds() }
 
 // QueueInterval is one queue's part of an Interval.
 type QueueInterval struct {
@@ -54,7 +71,8 @@ type QueueInterval struct {
 	Completions int
 }
 
-// Kind is what a sample measures (design §3.2).
+// Kind is what a sample measures (design §3.2, as amended by §5.1 and §17.3:
+// the pressured and draining kinds are removed).
 type Kind int
 
 const (
@@ -64,15 +82,6 @@ const (
 	Idle
 	// Capped samples used the quota in every period: their CPU is censored.
 	Capped
-	// Pressured samples, with no cpu.max and the stall over the threshold in
-	// force, are censored at the CPU the node gave (design §5.1), whether a
-	// limit is held or not: an onset window's samples measure the node, not
-	// the reconciles' cost. Simulation finding, PR 1 (§5.2).
-	Pressured
-	// Draining samples had more in flight than the capacity in force at every
-	// moment: a cut preempts nothing, so they measure the cut's excess, not
-	// the cost at the new capacity. Simulation finding, PR 1.
-	Draining
 )
 
 func (k Kind) String() string {
@@ -81,10 +90,6 @@ func (k Kind) String() string {
 		return "idle"
 	case Capped:
 		return "capped"
-	case Pressured:
-		return "pressured"
-	case Draining:
-		return "draining"
 	default:
 		return "active"
 	}
