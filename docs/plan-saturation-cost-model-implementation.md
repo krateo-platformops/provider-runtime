@@ -440,6 +440,10 @@ gate.
 
 ### 4.4 Conditions revised after the first simulation run
 
+**Superseded by §4.5, and kept as history.** The statistical review found that
+this section's upper band edge had no derivation and would have let two real
+overshoots pass; the user replaced these conditions with the reviewer's.
+
 **These conditions were revised after seeing results.** The first run of PR 1's
 gate failed several of the conditions above. Reading the failures, the user
 judged that some of this plan's readings of §10 ask for more than the design
@@ -525,6 +529,73 @@ band's derivation in item 3 is right, including its regime boundary; whether the
 counts in the step cases are each a guarantee of the design, or one of them
 double-counts; and whether 5% outside the band is the right reading of two
 standard errors for a sequence whose errors are correlated by the smoothing.
+
+### 4.5 Conditions derived blind by the statistical reviewer
+
+**These are the gate's conditions.** They replace §4.4's. The statistical
+reviewer derived them from the design and from §4.4's derivations without seeing
+any result, and the user adopted them on 2026-11-09. They are recorded here as
+the reviewer derived them; this plan's author has not changed them. Where a
+condition below was not part of the reviewer's set, it says so.
+
+**The target, `S*`, from the engine's fixed-capacity curve.** Not a reference
+run's settled `S`, which carries the controller under test. The engine runs the
+workload at each whole capacity with no model (`Config.Fixed`), and `S*` is the
+point where the measured `U` crosses `ρL`, interpolated between the two whole
+capacities on either side. The reviewer's values: 4.73 on the measured workload,
+2.83 with the CPU per reconcile doubled, 2.81 with the limit halved, 8.72 with
+the limit doubled. The gate computes them from the engine for each seed and
+reports them beside these values.
+
+**The band, asymmetric.** With `r̄ = (1 − ρ)/2`, the trust bound of §3.5:
+
+- **Lower edge `θ⌊S*⌋`.** A capped sample at the operating point is the
+  actuator's quantum meeting the limit; under a backlog its `N̄ ≥ ⌊S*⌋`, so its
+  `θN̄` term lands at `θ⌊S*⌋` or above (§4.4, item 3, tightened from
+  `θ(S* − 1)` to the whole number).
+- **Upper edge `S*(1 + 3r̄)`.** Above the target there is no permitted crossing
+  (§4.3: a capped sample crosses only towards less CPU), so the only excursion
+  above is the estimate's noise, bounded at three standard errors at the trust
+  bound. §4.4's symmetric band had no derivation for its upper edge.
+
+**Outside the band: at most 5% of samples, at `z = 3`.** After the band is first
+reached, `S` is outside it in at most 5% of the samples, with the edges at three
+standard errors as above.
+
+**Monotone, attributed.** Before the band is first reached, every fall of `S` is
+attributed: either it is in a capped sample (the crossing §4.3 permits), or it
+is in an active sample whose CPU was over `ρL` by at most `3r̄` relative while
+the estimate was trusted (noise in the estimate, falling on the correct side of
+the target). A fall that is neither fails.
+
+**Each step case asserts the mechanism it counts on.** The count of samples is
+a sum of mechanisms (§4.4: latency, the permitted crossing, the change test, the
+convergence), and each case asserts that the mechanisms happened, not only that
+the count was met. For a cost doubling: a held-out sample of `k̂`, then a
+restart; a capped sample before the crossing. For a limit change: a restart in
+the change's sample. A case that meets its count by another path fails.
+
+**The counts, as derived, without a draining term:** cost doubles within
+`ℓ + 1 + 2 + c` samples; limit halves within `ℓ + 1 + 1 + c`; with `ℓ` and `c`
+as §4.4 defines them. **Limit doubles keeps the original condition**, within
+10% of the new target in 3 samples: the reviewer withdrew its blind loosening
+of it.
+
+**Carried from §4.4, not in the reviewer's set,** with §4.5's band and target in
+place of §4.4's: start from one slot (within the band in 20 samples); the mix
+shift's single crossing (a passage across the band); the dip's recovery
+(`1 + ⌈τ/Δt⌉ + R + 1` samples); the node case's stall over the threshold in
+force. The node case's onset step is referred to the engine's fixed-capacity
+`S*` at `ρL_eff` rather than to the law's value from `k̂`, which at that point had
+three untrusted samples (the review's finding, design §15); this is the plan
+author's reading, for the reviewer to confirm.
+
+**Unchanged:** the conditions §4.4 lists as unchanged, and the seeds: 20, all of
+which must pass.
+
+**Both controllers.** The gate runs these conditions on the cost model and on
+the utilization-feedback baseline (PR 1's simulation, design §10), case by
+case, and reports the two side by side.
 
 ## 5. The complexity budget, decided from the simulation
 
