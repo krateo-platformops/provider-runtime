@@ -12,7 +12,8 @@ timestamp: 2026-11-09T00:00:00Z
 **Status:** design, for review. Nothing is built. It builds on
 [#58](https://github.com/krateo-platformops/provider-runtime/pull/58)
 (`logging.ContextLogger`, `logging.WithContext`), which is open at `cda449d`
-and has to merge first. §13 lists the questions only the user can decide.
+and has to merge first. The user decided its five open questions on
+2026-11-09, and §13 records the decisions.
 
 **The goal** (the user's decision). Every provider built on provider-runtime
 (git-provider, incident-provider, alert-provider and the others) gets
@@ -167,8 +168,11 @@ func ConfigFromEnv() (Config, error)
   standard `OTEL_*` variables the SDK reads and the protocol check above.
   Reading `OTEL_TRACING_ENABLED` inside Setup was rejected: core-provider reads
   it already and runs its own pipeline, so bumping provider-runtime would
-  silently give it two TracerProviders (§12). What `OTEL_TRACING_ENABLED`
-  defaults to when unset is open question Q1.
+  silently give it two TracerProviders (§12).
+- **Unset means off.** `ConfigFromEnv` reads `OTEL_TRACING_ENABLED` on its
+  own, and an unset variable means off, whatever `OTEL_ENABLED` says. That's
+  the rule core-provider and the composition-dynamic-controller follow
+  (decision D1, §13). `OTEL_ENABLED` gates metrics only.
 
 ### 3.2 `pkg/tracing`: the API-only half
 
@@ -189,8 +193,8 @@ const ScopeName = "github.com/krateo-platformops/provider-runtime"
 func SetTracerProvider(tp trace.TracerProvider)
 func TracerProvider() trace.TracerProvider // nil when off
 
-// Decide applies §6.2's rule to an object's annotations and generation. It is pure.
-func Decide(annotations map[string]string, generation int64) Decision
+// Decide applies §6.2's rule to an object's annotations. It is pure.
+func Decide(annotations map[string]string) Decision
 
 type Mode int // NoParent, Parent, Link
 type Decision struct {
@@ -207,7 +211,6 @@ func StartReconcile(ctx context.Context, tp trace.TracerProvider, obj Object, st
 type Object struct {
 	Kind, Name, Namespace string
 	Annotations           map[string]string
-	Generation            int64
 }
 
 // Inject and InjectAnnotations write ctx's trace context onto an object another
@@ -258,7 +261,7 @@ the first case (§10).
 
 controller-runtime starts no span (§1), so `Reconciler.Reconcile` starts it.
 The span needs the object: §6.2 decides between parent and link from the
-object's annotations and generation. So it starts after the Get, but its start
+object's annotations. So it starts after the Get, but its start
 time is the top of `Reconcile`, so it still covers the Get:
 
 ```go
@@ -439,30 +442,38 @@ An invalid value counts as absent.
 object it reconciles:
 
 ```
-krateo.io/traceparent-continued: <traceparent>@<generation>
+krateo.io/traceparent-continued: <traceparent>
 ```
 
-Here `<traceparent>` is the canonical form of the span context that was
-continued: `00-<32 hex>-<16 hex>-<2 hex>`, as `TraceContext.Inject` writes it,
-in lower case (`trace_context.go:39-64`). `<generation>` is the object's
-`metadata.generation` in decimal. A value that doesn't parse counts as absent.
+The value is the canonical form of the span context that was continued:
+`00-<32 hex>-<16 hex>-<2 hex>`, as `TraceContext.Inject` writes it, in lower
+case (`trace_context.go:39-64`). A value that doesn't parse counts as absent.
 
-**The rule.** `Decide(annotations, generation)` sets R to the annotation's
-remote span context (§6.1) and M to the parsed marker:
+**The rule.** `Decide(annotations)` sets R to the annotation's remote span
+context (§6.1) and M to the parsed marker:
 
 1. R isn't valid: **NoParent.** The root is a new root with no link
    (`trace.WithNewRoot()`). No marker.
-2. R is valid, and M is absent, or M's trace ID or span ID differs from R's,
-   or M's generation differs from `generation`: **Parent.** The root's parent is
-   R (`trace.ContextWithRemoteSpanContext`), and `Marker` is
-   `canonical(R)@generation`.
+2. R is valid, and M is absent, or M's trace ID or span ID differs from R's:
+   **Parent.** The root's parent is R (`trace.ContextWithRemoteSpanContext`),
+   and `Marker` is `canonical(R)`.
 3. Otherwise: **Link.** The root is a new root (`trace.WithNewRoot()`) with
    one link, `trace.Link{SpanContext: R}`. No marker.
 
-Only the trace ID and span ID count as a new value. A change to the flags or to
-`tracestate` alone isn't a new causal event. That this is "the reconcile that
-first sees a new traceparent value, or a generation change", the plan agreed
-with marketing, is open question Q3.
+Only a new traceparent value makes a Parent pass (decision D3, §13). Only the
+trace ID and span ID count as new: a change to the flags or to `tracestate`
+alone isn't a new causal event. A generation change with the same value is a
+Link pass. That covers a spec edit by a writer that doesn't restamp the
+annotation, and the deletion (§6.2, "Deletion").
+
+**The generation isn't needed, and it isn't in the marker.** The plan agreed
+with marketing first made a generation change a Parent pass too, and only
+that needed the generation recorded. Nothing else does:
+- Retries are bounded by when the marker is written, before the external
+  calls (below).
+- A restart reads the marker from the object.
+- A writer that is in the trace restamps the annotation, and its new value
+  makes the Parent pass.
 
 **The write.** In Parent mode with tracing on, the reconciler writes the
 marker right after the span starts. That's before the pause and orphan
@@ -498,14 +509,15 @@ would have. Nothing else on the object can stand in for it:
 - The alternatives that need no write are rejected in §12.
 
 **Deletion.** Setting `deletionTimestamp` bumps the generation
-(`apiserver@v0.37.2/pkg/registry/rest/delete.go:166-172`). So under the agreed
-rule, the deletion pass of an object that carries a traceparent is a Parent
-pass. Patching an annotation on an object being deleted is allowed. If the
+(`apiserver@v0.37.2/pkg/registry/rest/delete.go:166-172`), but the deleter
+doesn't restamp the annotation. A `helm uninstall` can't. So the deletion pass
+is a Link pass, linked to the last stamper's trace, and not attributed to it.
+In Parent mode, a marker patch on an object being deleted is allowed. If the
 object is gone, the patch returns NotFound, which counts as success.
 
 ### 6.3 What the marker costs
 
-- **Writes.** One metadata patch per new (traceparent, generation) pair, only
+- **Writes.** One metadata patch per new traceparent value, only
   on objects that carry `krateo.io/traceparent`, and only with tracing on. The
   composition-dynamic-controller stamps a child only when its release really
   changes: the per-reconcile traceparent is stripped before the release digest
@@ -519,7 +531,8 @@ object is gone, the patch returns NotFound, which counts as success.
 - **The platform's "nothing stamped" rule.** The audit join was built so that
   nothing is stamped on the user's object (observability's
   `ops/audit-reconcile-join/README.md`, first paragraph). This marker is such a
-  stamp, triggered by an edge, so whether it's acceptable is open question Q2.
+  stamp, triggered by an edge. The user accepted it (decision D2, §13): it's
+  the only option that survives restarts.
 
 ### 6.4 With tracing off
 
@@ -688,7 +701,8 @@ The root's status follows how the pass ended:
   and it was put under the tail sampler's 5% rule for that (observability's
   `charts/otel-collector-tailsampling/values.yaml`, the
   `outside-sampled-services` comment). A provider not listed in that rule is kept
-  at 100% (open question Q4).
+  at 100%. So each provider that turns tracing on is added to the list
+  (decision D4, §11.5). There's still no sampler in code (§8).
 - **Off** costs what §3.4 says.
 
 ## 10. Tests
@@ -711,7 +725,8 @@ globals.
    - Link: run the same object again with the patched marker. The pass is a new
      root with one link to R, and makes no patch.
    - New value: a new span ID gives Parent again.
-   - Generation: bump the generation with the same traceparent (as agreed, Q3).
+   - Generation only: bump the generation with the same traceparent. That's
+     Link, with no patch (D3). A deletion with the same traceparent is also Link.
    - An invalid traceparent, and an invalid marker.
    - Flags or `tracestate` changed alone: Link.
    - An in-process parent span in the incoming context is not the root's
@@ -780,6 +795,8 @@ What each consumer sets. The changes belong to each consumer's own session.
   - `SERVICE_VERSION`
   - `DEPLOYMENT_NAME: {{ include "git-provider.fullname" . }}`
   - `OTEL_ENABLED`, only if it also wants metrics.
+- **Before `OTEL_TRACING_ENABLED=true`:** observability lists its `service.name`
+  in the tail sampler (§11.5).
 - **RBAC.** It already has `patch` on its kinds
   (`templates/clusterrole.yaml:13-23`), which the marker needs.
 - **Outbound.** Propagation comes with the bump, through httpsignal (§6.6).
@@ -835,8 +852,8 @@ provider-runtime now makes. All in one PR, with the bump:
    match.
 
 alert-provider's `OTEL_TRACING_ENABLED` defaults to `OTEL_ENABLED`
-(`internal/tracing/tracing.go:63-67`). Since it keeps its own Setup, it keeps
-that rule, whatever Q1 decides for `ConfigFromEnv`.
+(`internal/tracing/tracing.go:63-67`). It keeps its own Setup, so it keeps that
+rule. `ConfigFromEnv`'s "unset means off" (D1) is for the providers that use it.
 
 ### 11.4 core-provider (not in the brief, but affected)
 
@@ -845,6 +862,25 @@ core-provider already calls `telemetry.Setup` and has its own
 deletes `coretelemetry.SetupTracing`. Otherwise two TracerProviders race for
 the global. Its `compositiondefinition.observe` span becomes a child of
 provider-runtime's `observe`.
+
+### 11.5 observability: one step for each provider that turns tracing on
+
+When a provider's chart turns tracing on, observability adds that provider's
+`service.name` (its `OTEL_SERVICE_NAME`) to the
+`outside-sampled-services` condition of the tail sampler, in
+`charts/otel-collector-tailsampling/values.yaml` (decision D4).
+- **Effect.** The routine loop then falls to the `sample-5pct` rule. The
+  `error-status` rule still keeps every failed reconcile, and a Parent pass
+  inside a kept trace stays whole with it.
+- **No sampler in code.** Providers set no sampler in code, and their charts
+  keep `OTEL_TRACES_SAMPLER=parentbased_always_on` (§8). Without this step,
+  every trace from a provider not on the list is kept at 100% (§9).
+- **Order.** The step lands before, or with, the chart change that sets
+  `OTEL_TRACING_ENABLED=true`.
+
+For the audit join (decision D5), observability maps each provider's API group
+to its Deployment name to join provider objects. `<resource>-<version>-controller`
+names only composition controllers (§13, D5).
 
 ## 12. Alternatives rejected
 
@@ -886,87 +922,65 @@ provider-runtime's `observe`.
   reason. They would break "exactly three", so they're events.
 - **A sync exporter.** It blocks reconciles on the collector.
 
-## 13. Open questions for the user
+## 13. Decided by the user, 2026-11-09
 
-Every premise below was checked in source. Where a premise is a cluster
-fact, it's marked.
+The questions this design left open, and what was decided. Every premise was
+checked in source, except where it's marked as a cluster fact.
 
-**Q1. What `OTEL_TRACING_ENABLED` means when it's unset (`ConfigFromEnv`).**
-The two conventions in use disagree. core-provider and the
-composition-dynamic-controller read it on its own, defaulting to false
-(core-provider `main.go:69-70`, CDC `main.go:155-156`). alert-provider defaults
-it to `OTEL_ENABLED` (`internal/tracing/tracing.go:63-67`), and says that's the
-contract snowplow and access-review follow. Both charts set both variables
-explicitly (core-provider `templates/configmap.yaml:11-12`, alert-provider
-`templates/deployment.yaml:227-230`), so only an unset variable is in
-question.
-- (a) On its own, default false. That matches the other Krateo runtime. A
-  provider that turns on `OTEL_ENABLED` for metrics doesn't also start a span
-  stream, and §9 shows what that stream costs.
-- (b) Default to `OTEL_ENABLED`, matching snowplow, access-review and
-  alert-provider.
-- **Recommendation: (a).**
+**D1. `OTEL_TRACING_ENABLED` unset means off, on its own.** This was option (a).
+`ConfigFromEnv` reads it on its own, defaulting to false, and `OTEL_ENABLED`
+gates only metrics (§3.1). That's what core-provider and the
+composition-dynamic-controller do (core-provider `main.go:69-70`, CDC
+`main.go:155-156`). alert-provider defaults it to `OTEL_ENABLED`
+(`internal/tracing/tracing.go:63-67`), and says snowplow and access-review do
+the same. It keeps that rule in its own Setup (§11.3). Turning on metrics never
+starts a span stream.
 
-**Q2. Is the `krateo.io/traceparent-continued` marker acceptable?** It's
-needed for first-sight detection that survives restarts (§6.2). It costs a
-metadata patch and one extra reconcile per upstream edge, only on annotated
-objects and only with tracing on (§6.3). It's also the kind of stamp on a
-user's object that observability built the audit join to avoid.
-- (a) Accept the marker.
-- (b) In-memory memo only: no writes, but the first sight after a restart or a
-  failover is linked, not parented.
-- (c) Parent every pass, as UR does: unbounded traces.
-- **Recommendation: (a).** Only (a) meets "without state that breaks across
-  restarts".
+**D2. The marker annotation is accepted.** This was option (a), and it's the
+only option that survives restarts (§6.2). Its cost is one metadata patch, plus
+one extra reconcile, per new traceparent value, only on annotated objects and
+only with tracing on (§6.3). Rejected:
+- (b) An in-memory memo, which loses the first sight after a restart or a
+  failover.
+- (c) Parenting every pass, as UR does, which grows traces without bound.
 
-**Q3. Does a generation change with an unchanged traceparent mean Parent?**
-Under the rule as agreed, a spec edit by a writer that doesn't restamp the
-annotation parents that pass onto the last stamper's trace. The portal doesn't
-stamp: the audit join is out of band because "nothing is stamped on the user's
-object" (observability's README). A remediation applied through
-incident-provider's apply Pod doesn't either: the Pod runs a script with a
-kubeconfig (`apply.go:384-395`), and nothing in incident-provider's code
-injects a traceparent. Deletion also bumps the generation (§6.2).
-So every generation-only edge comes from a writer that wasn't in the trace, and
-it gets attributed to one that was. It's bounded, at one pass per edit, but
-it's wrong. A writer that is in the trace restamps, and the new-value rule
-already catches that.
-- (a) Keep the agreed rule.
-- (b) Parent only on a new traceparent value. A generation change with the same
-  value links.
-- **Recommendation: (b).** But it changes what was agreed with marketing, so
-  it's yours to decide.
+**D3. Parent only on a new traceparent value.** This was option (b). A
+generation change with the same value is a Link pass, and so is a deletion
+(§6.2). That changes the plan first agreed with marketing, which counted a
+generation change too. The reasons:
+- A generation-only change comes from a writer that doesn't restamp. The
+  portal doesn't stamp: the audit join is out of band because "nothing is
+  stamped on the user's object" (observability's README). Nothing in
+  incident-provider's code injects a traceparent either: its apply Pod runs a
+  script with a kubeconfig (`apply.go:384-395`).
+- So parenting such a change would pin it to the last stamper's trace.
+- A writer that is in the trace restamps, and its new value is caught.
 
-**Q4. Sampling for providers that turn tracing on.** observability's tail
-sampler keeps every trace from a service not listed in
-`outside-sampled-services` (the `values.yaml` cited in §9). So every provider
-that enables tracing is kept at 100%. At the rate in §9, 200 objects on a
-3-minute poll is about 300K spans a day, as much as alert-provider's loop that
-had to be listed. That's arithmetic: the object counts on krateo-057 weren't
-checked, since I don't touch clusters.
-- (a) Each provider's `service.name` is added to that list when its chart turns
-  tracing on (an observability change), so the routine loop gets 5% and errors
-  are kept by the error rule.
-- (b) Head sampling in the provider's chart (`parentbased_traceidratio`).
-  That loses whole Link-mode traces at random, errors included.
-- (c) Turn tracing on only when investigating.
-- **Recommendation: (a).**
+So the marker is the traceparent alone, with no generation (§6.2).
 
-**Q5. The audit join for provider objects.** The join builds
-`<resource>-<version>-controller` and compares it with `k8s.deployment.name`
-(`query.sql:8-9`). That's core-provider's naming for composition controllers.
-A provider runs one Deployment for several Kinds: git-provider's ClusterRole
-covers `repoes` and `localresources` (`clusterrole.yaml:13-23`). So with
-exactly three attributes, the join can't name a provider object's group. The
-audit record has no Kind, and the README says guessing a Kind from a plural is
-wrong on real data.
-- (a) Ship with exactly three. observability joins provider objects through a
-  per-provider map from group to Deployment.
-- (b) Extend the contract with `k8s.object.group` in both runtimes together.
-  That's a cross-repo change.
-- **Recommendation: (a) now, and (b) as a coordinated contract change.** With
-  the Kind alone, two providers that each have a Kind of the same name
-  look the same.
+**D4. Each provider's `service.name` goes on the tail sampler's
+sampled-services list when it turns tracing on.** This was option (a). It's a
+step for observability, in §11.5. There's no sampler in code (§8). At §9's
+rate, 200 objects on a 3-minute poll make about 300K spans a day. That's
+arithmetic: the object counts on krateo-057 weren't checked. Rejected:
+- (b) Head sampling, which loses whole Link-mode traces at random, errors
+  included.
+- (c) Turning tracing on only while investigating.
+
+**D5. Exactly three attributes now; `k8s.object.group` follows in both
+runtimes together.**
+- **The problem.** The audit join builds `<resource>-<version>-controller` and
+  compares it with `k8s.deployment.name` (`query.sql:8-9`). That's
+  core-provider's naming for composition controllers. A provider runs one
+  Deployment for several Kinds: git-provider's ClusterRole covers `repoes` and
+  `localresources` (`clusterrole.yaml:13-23`). And the audit record has no Kind.
+- **For now,** observability maps each provider's API group to its Deployment
+  name (§11.5).
+- **The follow-up.** Adding `k8s.object.group` to the `reconcile` span is a
+  coordinated contract change, made in unstructured-runtime and
+  provider-runtime together, with observability's join. It's recorded here and
+  not designed here. With the Kind alone, two providers that each have a Kind
+  of the same name look the same. Each runtime's own session makes its change.
 
 ## 14. Checked, and not
 
