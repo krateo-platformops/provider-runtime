@@ -1,0 +1,28 @@
+CPU threshold block, re-run, started 2026-11-08T18:01:12Z
+image: new3 6d76a36bcff5e2e0d45d56fecf96f023e7094c63 sha256:ceb79357975eed7fc20b4eec005a83d546e8910d953642fd54a1e150492de58d local tarball images/measure-new3.tar, not pushed
+memory input: off in every arm
+workload changed from the first block: that block couldn't separate the arms by construction. Its calls were CPU-bound with no time off the CPU (about 0.72s of CPU each, no wait), so one call in flight kept 250m saturated and no threshold could lower the pressure. This workload was decided before any run of this block, from the first block's logs and a model, not after seeing results. The two blocks' figures don't compare with each other.
+workload: cpu mode, 250m limit, 512Mi, 64 Greetings, 16 workers, poll 1s, 360s per run. Each Observe spends 20ms of CPU measured on its own thread (LOAD_CPU_MS=20, burn.go), then waits 400ms (LOAD_HOLD_MS=400). The controller's own work adds a few ms per reconcile; the STAT lines report both.
+expected for off, from the model in remeasure-plan.txt, written before the calibration: about 25ms of CPU a reconcile against 250ms a second, so at most about 10 reconciles a second, against the 37 that 16 workers would run unthrottled: about 12 of the 16 runnable at any moment, the quota spent in every period, pressure (cpu.pressure some avg10) about 75 to 85, as the first block's off arm read 79 to 81 with its workers always runnable. The calibration below measured lower pressure, about 60.
+expected for 50: four calls in flight use about the quota (4 x 25ms per 425ms), so local should settle between about 2 and 5, cutting when a fifth call saturates and recovering one step per 30s.
+
+calibration, one uncounted 120s off run on new3 before this block (results/c2cal-off-2.log; c2cal-off-1 is a failed setup, the new cluster then had no Greeting CRD), figures from 40s on: CPU 250ms/s, throttled 2.0s per second; pressure some avg10 mean 59.6 (57.3 to 61.2); 20.1ms of CPU per call; 11.4 Observes a second, about 22ms of CPU per Observe with the controller's own work; each call's CPU stretched to a median 525ms of wall time; calls in flight median 11 (mean 11.4, 8 to 15, 12 or more in 41 of 83 seconds); no restarts, no failed probes. Checked against the approved validity rules: CPU met, pressure met, burn met, calls in flight NOT met (11 against 12).
+why the in-flight check was mis-specified: it counts calls inside Observe (its CPU and its 400ms wait), not reconciles. The 16 workers also spend throttled time outside Observe, in the reconciler's Get and status update, so the counter reads about 11 while all 16 workers are busy. The threshold of 12 came from a model that didn't separate the two. Saturation is shown by what the check stood for: CPU at the limit, throttled, and pressure over 50.
+correction, decided by the coordinator before run 1: the per-run validity check for off reads CPU at least 225ms/s and pressure over 50; calls in flight are reported as a diagnostic only. The workload is unchanged.
+expected for 75, stated before run 1: off's pressure reads about 60, under 75, so the 75 arm will likely not engage. It reads "did not engage" unless it does. The arms and the workload are not changed for that: it is a finding about this workload, as core-provider's sweep found.
+arms: off (SATURATION unset), 75 (SATURATION=true SAT_CPU=75), 50 (SATURATION=true SAT_CPU=50); 5 runs each
+order: rotating. Round 1 off,75,50; round 2 75,50,off; round 3 50,off,75; round 4 off,75,50; round 5 75,50,off.
+
+liveness probe: httpGet /healthz, no initial delay, periodSeconds 10, timeoutSeconds 1, failureThreshold 3, about 30s to a kill
+source of the probe: incident-provider, helm/incident-provider/templates/deployment.yaml:68: httpGet /healthz with no period, timeout or failure set, so Kubernetes' defaults apply. Read from its default branch by the coordinator.
+health server: controller-runtime's HealthProbeBindAddress with AddHealthzCheck and healthz.Ping, as incident-provider's main.go does.
+scope of the result: a controller with this probe. It does not carry to consumers with none, such as git-provider.
+
+validity, checked per run and reported, never used to drop a run: the median burn_cpu_ms/call is 20.0 to 20.5; in the off arm, CPU is at least 225ms/s (90% of the limit) and pressure is over 50. Calls in flight are a diagnostic only (see the correction above). If the off arm doesn't saturate, the block shows nothing about the threshold, and that is the result.
+
+what counts, decided before run 1:
+benefit: the off arm gets liveness kills, and 50 removes or clearly cuts them, by cause. Clearly: off has 3 or more liveness kills across its 5 runs, and 50 has at most half as many. If the off arm has no liveness kills, the result is "no benefit shown here". The workload and the probe are not tuned to produce kills.
+cost: Observes per second, median of 5 runs, against off; and failed probes that did not kill, per arm.
+also reported: whether 75 engaged at all, as cuts, local below 16 and calls in flight. With the local gate in the queue (provider-runtime#40) a gated arm defers nothing for local capacity, so deferrals no longer show it.
+
+driver power: Now drawing from 'AC Power'

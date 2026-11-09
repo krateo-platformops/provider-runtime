@@ -1,0 +1,50 @@
+setup: Greeting CRD established on gke_integration-test-431120_us-central1-a_rlgov-measure
+2026-11-08T18:01:15Z cpu2-start gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-off-1
+done c2-off-1: # restarts=0 # lastTerminated=
+2026-11-08T18:09:07Z after-c2-off-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-75-1
+done c2-75-1: # restarts=0 # lastTerminated=
+2026-11-08T18:16:38Z after-c2-75-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-50-1
+done c2-50-1: # restarts=0 # lastTerminated=
+2026-11-08T18:24:10Z after-c2-50-1 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-75-2
+done c2-75-2: # restarts=0 # lastTerminated=
+2026-11-08T18:31:41Z after-c2-75-2 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-50-2
+done c2-50-2: # restarts=0 # lastTerminated=
+2026-11-08T18:39:14Z after-c2-50-2 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-off-2
+done c2-off-2: # restarts=0 # lastTerminated=
+2026-11-08T18:46:28Z after-c2-off-2 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-50-3
+done c2-50-3: # restarts=0 # lastTerminated=
+2026-11-08T18:53:35Z after-c2-50-3 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-off-3
+done c2-off-3: # restarts=0 # lastTerminated=
+2026-11-08T19:01:13Z after-c2-off-3 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-75-3
+done c2-75-3: # restarts=0 # lastTerminated=
+2026-11-08T19:09:06Z after-c2-75-3 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-off-4
+done c2-off-4: # restarts=0 # lastTerminated=
+2026-11-08T19:17:10Z after-c2-off-4 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-75-4
+done c2-75-4: # restarts=0 # lastTerminated=
+2026-11-08T19:25:17Z after-c2-75-4 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-50-4
+done c2-50-4: # restarts=0 # lastTerminated=
+2026-11-08T19:33:24Z after-c2-50-4 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-75-5
+done c2-75-5: # restarts=0 # lastTerminated=
+2026-11-08T19:41:24Z after-c2-75-5 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-50-5
+done c2-50-5: # restarts=0 # lastTerminated=
+2026-11-08T19:49:26Z after-c2-50-5 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned c2-off-5
+done c2-off-5: # restarts=0 # lastTerminated=
+2026-11-08T19:57:01Z after-c2-off-5 gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+2026-11-08T19:57:02Z cpu2-end gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+BLOCK-DONE
+cpu block exit 0

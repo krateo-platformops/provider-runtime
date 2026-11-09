@@ -1,0 +1,13 @@
+# run=ovh2-new-3 mode=overhead image=new3 cpu=1 mem=128Mi env=SAT_PERIOD_MS=1000 PHASE_S=60 EXPERIMENTAL_MEMORY=true seconds=135 started=2026-11-08T18:53:59 ended=2026-11-08T18:56:33
+# rollout=ok
+# probe=
+# driver_load_end=18:56  up 2 days, 11:41, 21 users, load averages: 70,29 58,96 40,45
+LOG node kernel="Linux version 6.12.94+ (builder@2f29dc84e049) (Chromium OS 17.0_pre498229-r33 clang version 17.0.0 (/mnt/host/source/src/third_party/llvm-project 14f0776550b5a49e1c42f49a00213f7f3fa047bf), LLD 17.0.0) #1 SMP Fri Aug 21 07:56:42 UTC 2026" cgroup_v2=true cpu_pressure_file=true memory_pressure_file=true memory_max=134217728 cpu_max="100000 100000"
+LOG Go memory limit set from memory.max [bytes 107374182 memoryMax 134217728 ratio 0.8]
+LOG Saturation sampler started [cgroup /sys/fs/cgroup samplePeriod 1s]
+LOG Saturation input disabled; the other inputs still apply [input memory_working_set reason the Go memory headroom replaces it while a Go memory limit is set cgroup /sys/fs/cgroup]
+OVERHEAD period=1s phase=1m0s idle_cpu=681µs sampling_cpu=34.288ms net_cpu_per_s=560us net_per_sample=560us share_of_one_core=0.0560% inputs=[{cpu_pressure true 0} {memory_working_set false 0} {go_memory_headroom true 93.57576665869269}]
+# restarts=0
+# lastTerminated=
+# terminations:
+# events:

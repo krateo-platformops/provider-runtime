@@ -1,0 +1,2 @@
+# run=x1-ws80-2 mode=ramp image=new env=SATURATION=true EXPERIMENTAL_MEMORY=true seconds=240 started=2026-11-06T12:26:47
+# DISCARDED the driver host slept: the Mac first slept at 12:05:55 local, and this run was started by a dark wake at 12:26:43 with no network. No data. prun.sh looped on "namespaces x1-ws80-2 not found" until it was killed at 15:02 local. Rerun as x2-ws80-1.
