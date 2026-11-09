@@ -12,9 +12,9 @@ timestamp: 2026-11-09T00:00:00Z
 **Status:** design, for review. Nothing is built. It builds on
 [#58](https://github.com/krateo-platformops/provider-runtime/pull/58)
 (`logging.ContextLogger`, `logging.WithContext`). That's merged, and it
-shipped in v1.13.0 (`3ab2917`). The user decided its six open questions on
-2026-11-09, and §13 records them (D1 to D6). The sixth came from the review on
-#60.
+shipped in v1.13.0 (`3ab2917`). The user decided its open questions on
+2026-11-09, and §13 records the decisions (D1 to D7). D6 came from the review
+on #60, and D7, the OTLP endpoint, from core-provider's review of it.
 
 **The goal** (the user's decision). Every provider built on provider-runtime
 (git-provider, incident-provider, alert-provider and the others) gets
@@ -1021,24 +1021,45 @@ The root's status follows how the pass ended:
   alert-provider sets `OTEL_TRACES_SAMPLER=parentbased_always_on` explicitly
   (`helm/alert-provider/values.yaml:65-67`). Provider charts should set it
   explicitly too, so the value is visible.
-- **The endpoint:**
-  `http://otel-collector-daemonset-local.krateo-system.svc:4318`.
-  - **Verified on krateo-057 by observability** (its review on #60). The
-    release is `otel-collector-daemonset`, and the Service is a ClusterIP
-    with `internalTrafficPolicy: Local` and 4 of 4 node endpoints: installer
-    checked the EndpointSlice. The 70 composition controllers export there.
-    The template is observability's
-    `charts/otel-collector-daemonset/templates/service-local.yaml`
-    (`<release>-local`).
-  - **Each provider chart sets it explicitly,** and doesn't inherit a
-    fallback. core-provider's chart value `otel.endpoint` defaults to `""`,
-    and its configmap then falls back to the headless
-    `otel-collector-daemonset-opentelemetry-collector` Service
-    (`helm/core-provider/templates/configmap.yaml:13`), which isn't node-local
-    (`service-local.yaml` explains why). installer sets the `-local` URL
-    explicitly on 057 for that reason (observability's review).
-  - alert-provider uses `http://$(HOST_IP):4318`
-    (`templates/deployment.yaml:227-232`), which is also node-local.
+- **The endpoint: `http://$(HOST_IP):4318` by default** (decision D7, §13).
+  `HOST_IP` comes from the downward API (`fieldRef: status.hostIP`,
+  `k8s.io/api@v0.37.2/core/v1/types.go:2671-2672`), in the provider
+  Deployment's `env`. That's the same standard as core-provider's cdc, which
+  the user also decided, and what alert-provider already uses
+  (`templates/deployment.yaml:225-232`).
+  - **It reaches the node's agent on every daemonset version in use.** The
+    daemonset exposes hostPort 4318: it's on by default in the upstream
+    opentelemetry-collector chart 0.170.0 (`values.yaml:425-430`, which I
+    read; `_config.tpl:481-482`, per observability's check). observability's
+    wrapper uses that chart version (`charts/otel-collector-daemonset/Chart.yaml:132-134`)
+    and doesn't override the ports. observability checked from chart source
+    that this holds for the versions live today, 0.1.19 and 0.1.23.
+  - **The Service needs no name.** The default needs no Service name, so it
+    doesn't depend on the collector's release name.
+  - **An explicit `otel.endpoint` wins.** The chart renders the default only
+    when its explicit `otel.endpoint` value is empty, so a `-local` URL, or any
+    other, can still be set.
+
+  **Why `-local` is only an override.**
+  - **It isn't on every cluster.** The node-local Service
+    `<release>-local.<namespace>.svc:4318` exists only from
+    otel-collector-daemonset 0.1.21 (observability `e9fe3ea`, #123: version
+    0.1.21 in its `Chart.yaml`, against 0.1.20 in the commit before it).
+    observability reports demo runs 0.1.19, which I can't check.
+  - **Its name depends on the release.** It derives from the collector's Helm
+    release name (`templates/service-local.yaml`).
+  - **It's for senders that can't use the downward API,** such as the
+    composition-dynamic-controller. The cdc reads its endpoint from a
+    ConfigMap through `envFrom`, which can't carry a `fieldRef`. That's why
+    observability added the Service at all (`service-local.yaml`, its header
+    comment). A provider Deployment can use `env`.
+  - **On krateo-057,** observability verified the `-local` Service, release
+    `otel-collector-daemonset` with 4 of 4 node endpoints, in its review on
+    #60. installer sets it explicitly there for the composition controllers.
+    core-provider's chart falls back to the headless
+    `otel-collector-daemonset-opentelemetry-collector` Service when
+    `otel.endpoint` is empty (`helm/core-provider/templates/configmap.yaml:13`),
+    and that Service isn't node-local.
 
 ## 9. Cardinality and cost
 
@@ -1242,13 +1263,36 @@ What each consumer sets. The changes belong to each consumer's own session.
   to correlate it switches to `logging.NewSlogLogger` over `logging.NewOTelHandler`.
 - **Chart ConfigMap:**
   - `OTEL_TRACING_ENABLED`
-  - `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector-daemonset-local.krateo-system.svc:4318`, set explicitly (§8)
+  - `OTEL_EXPORTER_OTLP_ENDPOINT`, only when the chart's explicit
+    `otel.endpoint` is set. Otherwise the Deployment's `env` renders the
+    default (below).
   - `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
   - `OTEL_TRACES_SAMPLER=parentbased_always_on`
   - `OTEL_SERVICE_NAME=git-provider`, set explicitly (§11.5)
   - `SERVICE_VERSION`
   - `DEPLOYMENT_NAME: {{ include "git-provider.fullname" . }}`
   - `OTEL_ENABLED`, only if it also wants metrics.
+- **The endpoint, in the Deployment's `env`** (D7, §8). git-provider loads
+  its ConfigMap with `envFrom` (`templates/deployment.yaml:35-37`). `env` wins
+  over `envFrom` for the same key (`k8s.io/api@v0.37.2/core/v1/types.go:3176-3180`),
+  so the default is rendered only when `otel.endpoint` is empty. That keeps an
+  explicit value in the ConfigMap from being silently overridden:
+
+  ```yaml
+  env:
+    {{- if and .Values.otel.tracing (not .Values.otel.endpoint) }}
+    # HOST_IP first: Kubernetes expands $(HOST_IP) only from a variable declared before it.
+    - name: HOST_IP
+      valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: "http://$(HOST_IP):4318"
+    {{- end }}
+  ```
+- **Egress.** If the chart adds an egress NetworkPolicy, the policy must
+  allow node IPs on TCP 4318, and the CNI must support `hostPort`. GKE does.
+  git-provider's chart ships no NetworkPolicy today: its templates are
+  `clusterrole`, `clusterrolebinding`, `configmap`, `deployment`, `hpa` and
+  `serviceaccount`.
 - **Before `OTEL_TRACING_ENABLED=true`:** observability lists its `service.name`
   in the tail sampler (§11.5).
 - **Expect a burst when it turns on** (§6.3). For every git-provider object
@@ -1263,7 +1307,14 @@ What each consumer sets. The changes belong to each consumer's own session.
 
 - **Bump** from v1.8.2. That's several minors: the governor, the gated queue
   and the Ready contract came in between (`docs/log.md`).
-- **Main and chart** as git-provider, with `OTEL_SERVICE_NAME=incident-provider` (§11.5). Its Logger is already slog over
+- **Main and chart** as git-provider, with `OTEL_SERVICE_NAME=incident-provider`
+  (§11.5). That includes the `HOST_IP` endpoint in the Deployment's `env`,
+  the `otel.endpoint` override rule and the egress caveat.
+  - **Its one NetworkPolicy** (`templates/checks.yaml`, from line 90) selects
+    only the check Pods, `app.kubernetes.io/component: incident-check`. So the
+    controller's egress to 4318 isn't restricted today.
+  - **If a policy ever selects the controller,** it must allow node IPs on
+    4318. Its Logger is already slog over
   `NewOTelJSONHandler` (`main.go:63-64`), so logs correlate since v1.13.0 (#58).
 - **Inject** nothing. It writes Pods and ConfigMaps
   (`internal/controllers/incident/incident.go:360-368`, `apply.go:384-395`),
@@ -1364,6 +1415,11 @@ provider-runtime now makes. All in one PR, with the bump:
    reconcile-side spans (`alert.reconcile` and the `alert.*` actions) move to
    provider-runtime's names.
 
+**Its endpoint already matches D7.** Its chart sets `HOST_IP` from
+`status.hostIP` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://$(HOST_IP):4318`
+(`templates/deployment.yaml:225-232`). Adopting adds only the `otel.endpoint`
+override, rendering the default when it's empty, and the egress caveat in §11.1.
+
 alert-provider's `OTEL_TRACING_ENABLED` defaults to `OTEL_ENABLED`
 (`internal/tracing/tracing.go:63-67`). It keeps its own Setup, so it keeps that
 rule. `ConfigFromEnv`'s "unset means off" (D1) is for the providers that use it.
@@ -1373,9 +1429,21 @@ rule. `ConfigFromEnv`'s "unset means off" (D1) is for the providers that use it.
 Both already call `telemetry.Setup`, and both have their own `SetupTracing`.
 To adopt, each sets `TracingEnabled` from its existing flag and deletes its own
 `SetupTracing`. Otherwise two TracerProviders race for the global.
-- **core-provider** (`go/core-provider`, provider-runtime v1.7.2) has
-  `coretelemetry.SetupTracing`. Its `compositiondefinition.observe` span becomes
-  a child of provider-runtime's `observe`.
+- **core-provider** (`go/core-provider`, provider-runtime v1.7.2). Its
+  `compositiondefinition.observe` span (`compositiondefinitions.go:817`) comes
+  from `coretelemetry.Tracer()`, which is `otel.Tracer(tracerName)` on the
+  global provider (`internal/tools/telemetry/tracing.go:54`). Since
+  `telemetry.Setup` sets that global (§3.1), the span keeps working, and it
+  becomes a child of provider-runtime's `observe`. Adoption is two steps
+  (core-provider's review on #60):
+  1. Set `TracingEnabled` from its existing `--otel-tracing-enabled` flag
+     (`main.go:70`).
+  2. Delete `coretelemetry.SetupTracing` and its call and shutdown hook in main
+     (`main.go:177-186`).
+
+  core-provider applies the HOST_IP endpoint (D7) to its own Deployment and to
+  the cdc. That's the user's decision for the cdc, and it's core-provider's
+  change to make.
 - **oasgen-provider** (`go/oasgen-provider`, provider-runtime v1.8.2) has its
   own TracerProvider and propagator in
   `internal/tools/telemetry/tracing.go:29-49` (the propagator at `:31`). Its
@@ -1585,6 +1653,27 @@ Incident's remediation joins the RCA's trace.
   - (c) Accepting a link. The remediation's own root is kept only 5% of the
     time when healthy (D4), so it would usually not be stored.
 
+**D7. The OTLP endpoint is `http://$(HOST_IP):4318` by default.** Decided by
+the user, the same standard as core-provider's cdc.
+- **How it's set.** `HOST_IP` comes from the downward API
+  (`fieldRef: status.hostIP`), in the provider Deployment's `env`. It's
+  rendered only when the chart's explicit `otel.endpoint` is empty; an explicit
+  value, such as the `-local` URL, wins.
+- **Why it works everywhere.** The daemonset exposes hostPort 4318 in every
+  version in use (§8). It needs no Service name.
+- **The caveat.** An egress NetworkPolicy must allow node IPs on 4318, and the
+  CNI must support `hostPort` (§11.1).
+- **Rejected:**
+  - (b) The `-local` Service as the default. It exists only from
+    otel-collector-daemonset 0.1.21 (demo runs 0.1.19, as observability
+    reports), and its name depends on the release. It stays as an override for
+    senders that can't use the downward API, such as the cdc's ConfigMap
+    `envFrom`.
+  - (c) No default, with every chart setting the endpoint itself. A chart
+    that forgot it would export to the SDK's default `localhost:4318`, which
+    is wrong in a pod. That's otlptracehttp's default when no endpoint is set
+    (`HTTP/internal/otlpconfig/options.go:84`).
+
 ## 14. Checked, and not
 
 Checked in source:
@@ -1632,9 +1721,12 @@ Not checked:
 
 - **What krateo-057 runs**, checked by me: the env values, the object counts,
   and which endpoint each Deployment uses. I don't touch clusters. The brief
-  reports the env convention as verified on 057. observability verified §8's
-  endpoint, the release name `otel-collector-daemonset` and the -local
-  Service's 4 of 4 node endpoints on 057, in its review on #60. alert-provider's
+  reports the env convention as verified on 057. observability verified, in
+  its reviews on #60: the `-local` Service on 057 (release
+  `otel-collector-daemonset`, 4 of 4 node endpoints); hostPort 4318 on 0.1.19
+  and 0.1.23, from chart source; and that demo runs 0.1.19. I read the
+  upstream `values.yaml:425-430` and observability's `e9fe3ea` myself. I didn't
+  read `_config.tpl:481-482`. alert-provider's
   `incident.*` name test in 0.2.67 is as observability reports it; I didn't
   read that test.
 - **Whether every provider's predicates let annotation-only updates through**
