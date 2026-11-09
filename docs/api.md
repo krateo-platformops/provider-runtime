@@ -86,7 +86,7 @@ The API-only half of reconcile tracing ([design-tracing](./design-tracing.md)): 
 - `Inject(ctx, obj)` / `InjectAnnotations(ctx, annotations)` — write `krateo.io/traceparent`, and `krateo.io/tracestate` or its removal, onto an object another Krateo controller reconciles. They overwrite, and they never write the marker. The rules for callers are in the package documentation and in [usage](./usage.md).
 - `InjectHeader(ctx, h)` / `HasActiveSpan(ctx)` — the HTTP side: the active span only, never overwriting, never baggage.
 - `RecordError(span, err)`, `Truncate(s)` — the exception event and Error status, with the text cut to `MaxErrorText` (4 KiB).
-- Names: `EventRateLimitDeferred`, `EventReconcilePaused`, `EventConflict`, `EventMarkerFailed`; the `Attr…` keys; `Step` with `StepConnect`, `StepObserve`, `StepHandshake`, `StepFinalizer`, `StepCreatePending`, `StepCreate`, `StepLateInit`, `StepMarker`, listed in `Steps`.
+- Names: `EventRateLimitDeferred`, `EventReconcilePaused`, `EventConflict`, `EventMarkerFailed`; the `Attr…` keys; `Step` with `StepConnect`, `StepObserve`, `StepHandshake`, `StepFinalizer`, `StepCreatePending`, `StepCreate`, `StepLateInit`, `StepMarker`, listed by `Steps()`.
 - `pkg/meta` gains `AnnotationKeyTraceparent` and `AnnotationKeyTracestate`, the same keys as unstructured-runtime's.
 
 The reconciler's wiring (the root span, the children, the marker) lands in a following change.
@@ -122,7 +122,7 @@ A record correlates with a trace when three things hold: the Logger is slog-back
 `Config`, `Metrics`, `Setup(ctx, log, cfg) (*Metrics, shutdown func(context.Context) error, error)`. All recording methods are nil-safe on a nil `*Metrics`.
 
 Unreleased: tracing. `Config` gains `TracingEnabled`, `ServiceVersion` and `DeploymentName`, and `ConfigFromEnv() (Config, error)` reads `OTEL_ENABLED`, `OTEL_TRACING_ENABLED`, `OTEL_EXPORT_INTERVAL`, `DEPLOYMENT_NAME` and `SERVICE_VERSION` (the `Env…` constants).
-- **With `TracingEnabled`,** `Setup` builds an `otlptracehttp` exporter from the standard `OTEL_*` environment, with a batcher, and sets the TracerProvider as the OTel global and as `tracing.SetTracerProvider`. With tracing on, `OTEL_EXPORTER_OTLP_PROTOCOL` and `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` must be unset or `http/protobuf`.
+- **With `TracingEnabled`,** `Setup` builds an `otlptracehttp` exporter from the standard `OTEL_*` environment, with a batcher, and sets the TracerProvider as the OTel global and as `tracing.SetTracerProvider`. With tracing on, the traces protocol must be unset or `http/protobuf`: `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` when it's set, otherwise `OTEL_EXPORTER_OTLP_PROTOCOL` (OTel's precedence).
 - **On every call,** `Setup` sets the global propagator to W3C TraceContext and Baggage.
 - **Shared resource.** Metrics and traces share one resource: `service.name`, `service.version`, `k8s.deployment.name` and `service.instance.id`, with the environment winning for each.
 - **Shutdown** stops the TracerProvider, which flushes, and then the MeterProvider. Instruments (meter `github.com/krateo-platformops/provider-runtime`):

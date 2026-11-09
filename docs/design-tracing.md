@@ -232,9 +232,10 @@ func ConfigFromEnv() (Config, error)
     even when Setup is never called.
 - **Protocol, checked only with tracing on.** OTLP/HTTP only. `otlptracehttp`
   ignores `OTEL_EXPORTER_OTLP_PROTOCOL`: there is no reference to it in
-  `HTTP/`. So when `TracingEnabled` is true, Setup returns an error if
-  `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` or `OTEL_EXPORTER_OTLP_PROTOCOL` is set
-  to anything other than `http/protobuf`. Without that check, protobuf would go
+  `HTTP/`. So when `TracingEnabled` is true, Setup returns an error if the
+  traces protocol is set to anything other than `http/protobuf`. It follows
+  OTel's precedence: `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` when it is set,
+  otherwise `OTEL_EXPORTER_OTLP_PROTOCOL` (corrected in implementation review). Without that check, protobuf would go
   to a gRPC port with nothing said. With tracing off there's no trace exporter
   to misconfigure, so a metrics-only provider with a gRPC protocol variable set
   for another tool doesn't start failing.

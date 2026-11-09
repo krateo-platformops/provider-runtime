@@ -124,8 +124,9 @@ func envBool(key string) (bool, error) {
 //     batcher, and installs the TracerProvider as the OTel global and as
 //     tracing.SetTracerProvider. It passes no sampler and no span limits, so
 //     the SDK's OTEL_TRACES_SAMPLER and OTEL_SPAN_* handling apply.
-//   - With tracing on, OTEL_EXPORTER_OTLP_TRACES_PROTOCOL and
-//     OTEL_EXPORTER_OTLP_PROTOCOL must be unset or http/protobuf.
+//   - With tracing on, the traces protocol must be http/protobuf, following
+//     OTel's precedence: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL when it is set,
+//     otherwise OTEL_EXPORTER_OTLP_PROTOCOL; unset is fine.
 //   - Metrics and traces share one resource.
 //
 // The returned function shuts down the TracerProvider, which flushes its
@@ -209,14 +210,22 @@ func setupMetrics(ctx context.Context, res *resource.Resource, interval time.Dur
 	return metrics, provider, nil
 }
 
-// checkProtocol refuses an OTLP protocol other than http/protobuf: the trace
+// checkProtocol refuses a traces protocol other than http/protobuf: the trace
 // exporter speaks only OTLP/HTTP, and it ignores these variables, so without
-// this check protobuf would go to a gRPC port with nothing said.
+// this check protobuf would go to a gRPC port with nothing said. It follows
+// OTel's precedence: the signal-specific OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+// decides when it is set, and OTEL_EXPORTER_OTLP_PROTOCOL only otherwise, so a
+// general grpc meant for another signal doesn't refuse traces set to
+// http/protobuf.
 func checkProtocol() error {
-	for _, key := range []string{envTracesProtocol, envProtocol} {
-		if v := os.Getenv(key); v != "" && v != httpProtobuf {
-			return fmt.Errorf("%s=%q: provider-runtime exports traces over OTLP/HTTP only; set it to %s or unset it", key, v, httpProtobuf)
-		}
+	key := envTracesProtocol
+	v := os.Getenv(key)
+	if v == "" {
+		key = envProtocol
+		v = os.Getenv(key)
+	}
+	if v != "" && v != httpProtobuf {
+		return fmt.Errorf("%s=%q: provider-runtime exports traces over OTLP/HTTP only; set it to %s or unset it", key, v, httpProtobuf)
 	}
 	return nil
 }

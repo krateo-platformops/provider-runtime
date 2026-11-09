@@ -52,5 +52,7 @@ const (
 	StepMarker        Step = "marker"
 )
 
-// Steps lists every Step, in the order above.
-var Steps = []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker}
+// Steps returns every Step, in the order above, as a new slice each call.
+func Steps() []Step {
+	return []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker}
+}

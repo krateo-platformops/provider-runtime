@@ -14,6 +14,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/krateo-platformops/provider-runtime/pkg/tracing"
@@ -281,20 +284,118 @@ func TestSetupShutdownFlushesSpans(t *testing.T) {
 	}
 }
 
-// Metrics and traces share one resource: Setup builds it once.
+// Metrics and traces share one resource. The test reads what Setup gives
+// each provider from what its exporter sends: an httptest server stands in for
+// the OTLP/HTTP collector and decodes both requests, and both carry the same
+// resource with every key from Config.
 func TestSetupSharesTheResource(t *testing.T) {
 	clearOTelEnv(t)
-	cfg := Config{ServiceName: "git-provider", ServiceVersion: "1.2.3", DeploymentName: "git-provider"}
-	a, err := newResource(context.Background(), cfg)
+	resetGlobals(t)
+
+	var mu sync.Mutex
+	got := map[string]map[string]string{} // path -> resource attributes
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		attrs := map[string]string{}
+		switch r.URL.Path {
+		case "/v1/traces":
+			req := &coltracepb.ExportTraceServiceRequest{}
+			if err := proto.Unmarshal(body, req); err != nil {
+				t.Errorf("decode traces: %v", err)
+			}
+			for _, rs := range req.GetResourceSpans() {
+				for _, kv := range rs.GetResource().GetAttributes() {
+					attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
+				}
+			}
+		case "/v1/metrics":
+			req := &colmetricspb.ExportMetricsServiceRequest{}
+			if err := proto.Unmarshal(body, req); err != nil {
+				t.Errorf("decode metrics: %v", err)
+			}
+			for _, rm := range req.GetResourceMetrics() {
+				for _, kv := range rm.GetResource().GetAttributes() {
+					attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
+				}
+			}
+		}
+		mu.Lock()
+		if len(attrs) > 0 {
+			got[r.URL.Path] = attrs
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+
+	metrics, shutdown, err := Setup(context.Background(), nil, Config{
+		Enabled: true, TracingEnabled: true,
+		ServiceName: "shared", ServiceVersion: "1.2.3", DeploymentName: "shared-deploy",
+	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Setup: %v", err)
 	}
-	b, err := newResource(context.Background(), cfg)
-	if err != nil {
-		t.Fatal(err)
+	metrics.IncStartupSuccess(context.Background())
+	_, span := tracing.TracerProvider().Tracer(tracing.ScopeName).Start(context.Background(), "reconcile")
+	span.End()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		t.Fatalf("shutdown: %v", err)
 	}
-	if !a.Equal(b) {
-		t.Errorf("two resources from the same Config differ:\n%v\n%v", a, b)
+
+	mu.Lock()
+	defer mu.Unlock()
+	traces, metricsRes := got["/v1/traces"], got["/v1/metrics"]
+	if traces == nil || metricsRes == nil {
+		t.Fatalf("exported resources: traces %v, metrics %v; want both", traces, metricsRes)
+	}
+	for k, want := range map[string]string{
+		"service.name":        "shared",
+		"service.version":     "1.2.3",
+		"k8s.deployment.name": "shared-deploy",
+		"service.instance.id": "shared-deploy",
+	} {
+		if traces[k] != want || metricsRes[k] != want {
+			t.Errorf("%s: traces %q, metrics %q; want %q on both", k, traces[k], metricsRes[k], want)
+		}
+	}
+	if len(traces) != len(metricsRes) {
+		t.Errorf("the two resources differ:\ntraces  %v\nmetrics %v", traces, metricsRes)
+	}
+}
+
+// The protocol check follows OTel's precedence: the traces variable decides
+// when it is set, and the general one only otherwise.
+func TestSetupProtocolPrecedence(t *testing.T) {
+	cases := map[string]struct {
+		traces, general string
+		ok              bool
+	}{
+		"TracesHTTPOverridesGeneralGRPC": {traces: "http/protobuf", general: "grpc", ok: true},
+		"TracesGRPCFailsWhateverGeneral": {traces: "grpc", general: "http/protobuf", ok: false},
+		"GeneralGRPCAloneFails":          {general: "grpc", ok: false},
+		"GeneralHTTPAloneIsFine":         {general: "http/protobuf", ok: true},
+		"NeitherIsFine":                  {ok: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			clearOTelEnv(t)
+			resetGlobals(t)
+			t.Setenv(envTracesProtocol, tc.traces)
+			t.Setenv(envProtocol, tc.general)
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+			_, shutdown, err := Setup(context.Background(), nil, Config{TracingEnabled: true})
+			if (err == nil) != tc.ok {
+				t.Fatalf("Setup error = %v, want ok=%v", err, tc.ok)
+			}
+			if shutdown != nil {
+				sctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = shutdown(sctx)
+			}
+		})
 	}
 }
 
