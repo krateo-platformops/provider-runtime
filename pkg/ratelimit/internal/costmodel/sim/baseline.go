@@ -93,10 +93,12 @@ func (b *baseline) Step(s costmodel.Sample, ceiling int) costmodel.Result {
 	b.carry = S + b.carry - whole
 	b.capacity = min(max(int(whole), 1), ceiling)
 	b.prev = S
+	// CPU.Used is the filtered Ū the controller acts on, by which the gate
+	// attributes its falls (plan §4.5).
 	law := S
 	if s.Limit == 0 {
 		law = float64(ceiling)
 	}
 	return costmodel.Result{Capacity: b.capacity, Slots: S, Carry: b.carry, Held: held,
-		CPU: costmodel.CPUResult{Slots: law, Used: used, Stall: stall, Blocked: over, InFlight: s.Books.SlotSeconds / dt}}
+		CPU: costmodel.CPUResult{Slots: law, Used: b.u, Stall: stall, Blocked: over, InFlight: s.Books.SlotSeconds / dt}}
 }

@@ -47,9 +47,10 @@ func (m *Model) Step(s Sample, ceiling int) Result {
 	r := m.cpu.Step(s, m.prev, m.capacity, ceiling)
 	S := r.Slots
 	// §7: untrusted rises, and rises towards the ceiling when the CPU isn't
-	// binding, are one slot per reconcile that ended in the sample.
+	// binding, are one slot per reconcile that ended in the sample and that
+	// ĉ's denominator counts (§17.8, item 5).
 	if r.Paced && S > m.prev {
-		S = math.Min(S, m.prev+float64(s.Books.Completions))
+		S = math.Min(S, m.prev+float64(r.PaceCompletions))
 	}
 	// §6: through a run of samples over the threshold, the slots are held at
 	// min(S_onset, S_model).

@@ -77,6 +77,9 @@ type Config struct {
 	// Controller, when set, builds the controller in place of the cost model
 	// (the utilization baseline, design §17.6).
 	Controller func() Controller
+	// Reserve, when set, runs the reservation-gating baseline inside the
+	// engine in place of any controller (design §17.8, item 6).
+	Reserve *Reservation
 	// Background is the cores the process's other goroutines want.
 	Background func(t time.Duration) float64
 	Ceiling    int
@@ -149,6 +152,12 @@ func Run(cfg Config) *Trace {
 	if cfg.Fixed > 0 {
 		capacity = cfg.Fixed
 	}
+	var rs *reserver
+	if cfg.Reserve != nil {
+		rs = &reserver{cfg: *cfg.Reserve, lastDecision: -1, lastRead: -1, lastIssue: -1}
+		capacity = 0
+	}
+	var others float64 // ms of CPU the node's other cgroups used
 	tr := &Trace{}
 
 	var (
@@ -231,6 +240,15 @@ func Run(cfg Config) *Trace {
 				local[j] = 0
 			}
 		}
+		if rs != nil {
+			waiting := false
+			for _, q := range cfg.Queues {
+				waiting = waiting || q.Active(t)
+			}
+			if waiting && rs.decide(t, capacity, cfg.Ceiling, L, float64(cfg.NodeCPUs), usage, others) {
+				capacity++
+			}
+		}
 		if admit(t) {
 			books.Commit(t)
 		}
@@ -302,6 +320,12 @@ func Run(cfg Config) *Trace {
 		}
 		usage += ran
 		stall += cfg.PSIScale * math.Max(0, worst)
+		// The node's other cgroups, saturated: they use whatever the container
+		// doesn't, up to N − share (design §17.8, item 6).
+		if cfg.Share != nil {
+			n := float64(cfg.NodeCPUs)
+			others += math.Max(0, math.Min(n-cfg.Share(t), n-ran))
+		}
 		if share > 0 {
 			for _, r := range inflight {
 				if r.cpuLeft > 1e-9 {
@@ -322,6 +346,9 @@ func Run(cfg Config) *Trace {
 					perQueue[r.queue]--
 					books.Release(t+tick, cfg.Queues[r.queue].Name, true, r.granted)
 					changed = true
+					if rs != nil {
+						capacity-- // the permit is released
+					}
 					continue
 				}
 			}
@@ -359,9 +386,17 @@ func Run(cfg Config) *Trace {
 				last.at, last.usage, last.stall = end, usage, stall
 				last.nrPeriods, last.nrThrottle = nrPeriods, nrThr
 				var res costmodel.Result
-				if cfg.Fixed > 0 {
+				switch {
+				case rs != nil:
+					res = costmodel.Result{Capacity: capacity, Slots: float64(capacity),
+						CPU: costmodel.CPUResult{Slots: float64(capacity), Used: rs.reading * math.Max(L, 0), Stall: 100 * s.Stall.Seconds() / s.Dt.Seconds(),
+							InFlight: s.Books.SlotSeconds / s.Dt.Seconds()}}
+					if L == 0 {
+						res.CPU.Used = rs.reading * float64(cfg.NodeCPUs)
+					}
+				case cfg.Fixed > 0:
 					res = costmodel.Result{Capacity: cfg.Fixed, Slots: float64(cfg.Fixed)}
-				} else {
+				default:
 					res = model.Step(s, cfg.Ceiling)
 					capacity = res.Capacity
 				}
@@ -402,4 +437,87 @@ func waterFill(demand []float64, capacity float64) float64 {
 		left -= d
 	}
 	return sorted[len(sorted)-1]
+}
+
+// Reservation is the reservation-gating baseline, modelled on Temporal's
+// resource-based tuner as read in its source (design §17.8, item 6), with no
+// claim of parity: one reservation loop, deciding no sooner than Ramp after
+// its last issue and every Retry while refused, a PID on the CPU error
+// updated at each decision, and a CPU reading refreshed no more often than
+// Refresh.
+type Reservation struct {
+	Kp, Ki, Kd        float64
+	Target, Threshold float64
+	MinSlots          int
+	Ramp, Retry       time.Duration
+	Refresh           time.Duration
+}
+
+// TemporalReservation is Temporal's activity defaults (internal/resource_tuner.go
+// at 705a0db: lines 21, 148–154, 289–302; contrib/sysinfo/sysinfo.go at 3f64d34,
+// line 78).
+func TemporalReservation() Reservation {
+	return Reservation{Kp: 5, Ki: 0, Kd: 1, Target: 0.9, Threshold: 0.05, MinSlots: 1,
+		Ramp: 50 * time.Millisecond, Retry: 10 * time.Millisecond, Refresh: 100 * time.Millisecond}
+}
+
+type reserver struct {
+	cfg                     Reservation
+	next                    time.Duration
+	lastDecision, lastIssue time.Duration
+	lastRead                time.Duration
+	readUsage, readOthers   float64
+	reading                 float64 // the CPU as a fraction of the limit, or of the node
+	prevE, integral         float64
+}
+
+// decide runs the reservation loop at t and reports an issue.
+func (r *reserver) decide(t time.Duration, issued, ceiling int, limit, nodeCPUs, usage, others float64) bool {
+	if t < r.next {
+		return false
+	}
+	if issued < r.cfg.MinSlots {
+		// ReserveSlot issues below the minimum without consulting the PID or
+		// recording the issue for the ramp throttle (resource_tuner.go, lines
+		// 190–192).
+		r.next = t + tick
+		return true
+	}
+	if issued >= ceiling {
+		r.next = t + r.cfg.Retry
+		return false
+	}
+	// The CPU reading, refreshed lazily at a decision (sysinfo.go, lines 77–86).
+	if r.lastRead < 0 || t-r.lastRead >= r.cfg.Refresh {
+		if r.lastRead >= 0 {
+			ms := float64(t-r.lastRead) / float64(tick)
+			cg := 0.0
+			if limit > 0 {
+				cg = (usage - r.readUsage) / (ms * limit)
+			}
+			if cg != 0 {
+				r.reading = cg
+			} else {
+				r.reading = (usage - r.readUsage + others - r.readOthers) / (ms * nodeCPUs)
+			}
+		}
+		r.lastRead, r.readUsage, r.readOthers = t, usage, others
+	}
+	dt := t.Seconds()
+	if r.lastDecision >= 0 {
+		dt = (t - r.lastDecision).Seconds()
+	}
+	if dt <= 0 {
+		dt = 0.001
+	}
+	e := r.cfg.Target - r.reading
+	r.integral += e * dt
+	out := r.cfg.Kp*e + r.cfg.Ki*r.integral + r.cfg.Kd*(e-r.prevE)/dt
+	r.prevE, r.lastDecision = e, t
+	if out > r.cfg.Threshold {
+		r.lastIssue, r.next = t, t+r.cfg.Ramp+tick
+		return true
+	}
+	r.next = t + r.cfg.Retry
+	return false
 }

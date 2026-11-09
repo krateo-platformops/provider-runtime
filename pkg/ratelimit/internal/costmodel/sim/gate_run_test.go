@@ -70,14 +70,18 @@ func parallel(n int, f func(i int)) {
 	wg.Wait()
 }
 
-// TestGateReport runs every case on both controllers (the baseline at its
-// committed gains and at ×0.5 and ×2) and prints the side-by-side table, when
-// SIM_GATE is set. It fails nothing: it reports.
+// TestGateReport runs every case on the three controllers (the level PI at its
+// committed gains and at ×0.5 and ×2, and the reservation gate at Temporal's
+// defaults) and prints the side-by-side table, when SIM_GATE is set; with
+// SIM_GATE=cost, the cost model alone. It fails nothing: it reports.
 func TestGateReport(t *testing.T) {
 	if os.Getenv("SIM_GATE") == "" {
 		t.Skip("set SIM_GATE")
 	}
-	ctls := []controller{ctlCost, ctlBaseline(1), ctlBaseline(0.5), ctlBaseline(2)}
+	ctls := []controller{ctlCost, ctlBaseline(1), ctlBaseline(0.5), ctlBaseline(2), ctlReserve}
+	if os.Getenv("SIM_GATE") == "cost" {
+		ctls = ctls[:1]
+	}
 	cases := gateCases()
 	ss := seeds()
 	type job struct{ c, k, s int }
@@ -256,16 +260,19 @@ func TestTuneBaseline(t *testing.T) {
 }
 
 // tuningGrid is the plan's §4.5 grid, committed before any run: K_p and K_i on
-// a 13-point log grid over [0.1, 100] (K_i also 0), τ_U ∈ {0, 1, 2, 5, 10}s.
+// a 13-point log grid over [0.1, 100] (K_i also 0), τ_U ∈ {0, 1, 2, 5, 10}s;
+// and, after the first tuning chose K_p at the grid's edge, K_p ∈
+// {0, 0.01, 0.03} added (design §17.8, item 6).
 func tuningGrid() []Baseline {
 	var logs []float64
 	for i := 0; i < 13; i++ {
 		logs = append(logs, 0.1*math.Pow(1000, float64(i)/12))
 	}
 	kis := append([]float64{0}, logs...)
+	kps := append([]float64{0, 0.01, 0.03}, logs...)
 	var g []Baseline
 	for _, tu := range []float64{0, 1, 2, 5, 10} {
-		for _, kp := range logs {
+		for _, kp := range kps {
 			for _, ki := range kis {
 				g = append(g, Baseline{Kp: kp, Ki: ki, TauU: tu, Target: rho, PressureThreshold: 50})
 			}

@@ -25,22 +25,39 @@ type CPUResult struct {
 	// Slots is S_cpu after the sign guard, before pacing and the combination.
 	Slots float64
 	Kind  Kind
-	// Paced reports that rises are limited to one slot per completion (§7).
-	Paced bool
+	// Paced reports that rises are limited to one slot per completion (§7);
+	// PaceCompletions is the completions the pacing counts, those ĉ's
+	// denominator counts (§17.8, item 5).
+	Paced           bool
+	PaceCompletions int
 	// Blocked reports that pressure blocks rises this sample (§6).
 	Blocked bool
 	// Trusted is §3.5's trust, on D̂/ĉ (§17.1).
 	Trusted bool
-	// Restarted reports that ĉ or the shared estimates restarted, which
+	// Restarted reports that ĉ, D̂ or the shared estimates restarted, which
 	// resets the carry and holds the slots in this sample.
 	Restarted bool
-	// CRestarted and CDeferred report ĉ's change test: a restart, or a
-	// sample deferred (§17.1). DRestarted reports D̂'s.
-	CRestarted, CDeferred, DRestarted bool
-	// DRewarmed reports that a move of N̄ restarted D̂'s warm start (§17.4);
-	// DHold that the active law held for want of a D̂ since; DFallback that D̂
-	// is Little's law over uncapped samples (§17.1).
+	// CRestarted and CDeferred report ĉ's change test over windows: a
+	// restart, or a window deferred (§17.8, item 2). CPending reports that no
+	// rise is allowed while the test is pending. DRestarted reports D̂'s.
+	CRestarted, CDeferred, CPending, DRestarted bool
+	// CHold reports that the active law held after a ĉ restart with no
+	// completion its denominator counts yet (§17.8, item 5).
+	CHold bool
+	// WindowClosed reports that a c_W test window closed in this sample;
+	// SigmaW is the window test's standard deviation of c_W (seconds).
+	WindowClosed bool
+	SigmaW       float64
+	// WindowSamples is n_W, the samples in this sample's window W.
+	WindowSamples int
+	// DRewarmed reports that a move of the published S restarted D̂'s warm
+	// start (§17.8, item 3); DHold that the active law held for want of a D̂
+	// since; DFallback that D̂ is Little's law over uncapped samples (§17.1).
 	DRewarmed, DHold, DFallback bool
+	// StretchedLives counts the lives taken into D̂ that overlapped a sample
+	// whose every period was throttled though its window didn't cap (§17.8,
+	// item 7(a)).
+	StretchedLives int
 	// LimitChanged reports a new cpu.max; ChangeSample that this sample is
 	// the change's own (§17.2).
 	LimitChanged, ChangeSample bool
@@ -66,12 +83,39 @@ type timed struct {
 
 type span struct{ from, to time.Duration }
 
-// costSample is one sample's terms for c_W (§17.1).
-type costSample struct {
-	from, to    time.Duration
-	cpu         float64 // CPU-seconds less the background
-	completions int
-	longest     float64 // the longest lifetime among its completions, seconds
+// histSample is one sample's terms for the window W (§17.1, §17.8).
+type histSample struct {
+	from, to           time.Duration
+	usage, dt          float64 // CPU-seconds and seconds
+	periods, throttled uint64
+	completions        int
+	longest            float64 // the longest lifetime among its completions, seconds
+}
+
+// winSample is a sample's part of a ĉ test window, kept to rebuild ĉ's sums
+// from the restart's edge.
+type winSample struct {
+	num, alpha float64
+	grants     []time.Duration
+	completion int
+	hasLives   bool
+}
+
+// costWindow is a ĉ test window in progress or closed (§17.8, item 2).
+type costWindow struct {
+	from    time.Duration
+	cpu     float64
+	comp    int
+	longest float64
+	samples []winSample
+	side    float64
+}
+
+func (w *costWindow) value() (float64, bool) {
+	if w.comp == 0 {
+		return 0, false
+	}
+	return w.cpu / float64(w.comp), true
 }
 
 // CPU is the CPU path's state (design §3.3–§3.5, §4.2, §17). The sampler
@@ -82,18 +126,17 @@ type CPU struct {
 	t     float64 // seconds since the first sample
 	lastL float64 // the last sample's cpu.max, cores
 
-	// ĉ: CPU per completion over every sample with work (§17.1).
-	c      ratio
-	cStart time.Duration // completions count from reconciles granted since
-	since  int           // completions since ĉ's start
-	prevC  struct {
-		ok           bool
-		num, alpha   float64
-		from         time.Duration
-		grants       []time.Duration
-		completions  int
-		hadLivesInfo bool
-	}
+	// ĉ: CPU per completion over every sample with work (§17.1), tested over
+	// consecutive windows (§17.8, item 2).
+	c        ratio
+	cStart   time.Duration // completions count from reconciles granted since
+	since    int           // completions since ĉ's start
+	win      costWindow    // the window in progress
+	pend     *costWindow   // a deferred window
+	wn       int           // windows folded into the test's statistics
+	wmu, wv  float64
+	restartC bool // ĉ restarted and no counted completion since
+
 	// D̂: per-reconcile lifetimes (§17.1), its warm start since dSince.
 	d        ratio
 	dSince   time.Duration
@@ -102,11 +145,16 @@ type CPU struct {
 	dq       map[string]*ratio
 	little   ratio // Little's fallback, ΣA/ΣC over uncapped samples
 	maxLife  float64
-	bad      []span // samples a qualifying life may not overlap
-	hist     []costSample
+	bad      []span // window-capped, pressured and change samples
+	tight    []span // samples whose every period was throttled
+	hist     []histSample
+
+	// The published S's steps, for the rewarm (§17.8, item 3).
+	sPrev   float64
+	sSteps  spread
+	sRecent []timed
 
 	shares  map[string]*ratio
-	nbar    spread
 	tput    float64 // smoothed completions per second, for τ
 	tputN   int
 	idle    []timed // idle samples' CPU rates
@@ -115,7 +163,7 @@ type CPU struct {
 
 // NewCPU returns the CPU path's state.
 func NewCPU(cfg CPUConfig) *CPU {
-	return &CPU{cfg: cfg, dq: map[string]*ratio{}, shares: map[string]*ratio{}}
+	return &CPU{cfg: cfg, dq: map[string]*ratio{}, shares: map[string]*ratio{}, sPrev: -1}
 }
 
 // tau is the estimates' time constant: ten samples, and at least 60
@@ -160,18 +208,62 @@ func (c *CPU) background() float64 {
 	return math.Max(mi, 0)
 }
 
-func (c *CPU) kind(s Sample, used float64) Kind {
-	b := s.Books
-	if b.SlotSeconds == 0 && b.Completions == 0 {
-		return Idle
+// window returns the index in hist where the current sample's window W
+// starts: the most recent samples spanning at least max(the longest lifetime
+// among their completions, a_oldest) + Δt (§17.1).
+func (c *CPU) window(b Interval, dt float64) int {
+	aOldest := 0.0
+	if b.Oldest >= 0 {
+		aOldest = (b.End - b.Oldest).Seconds()
 	}
-	if s.Limit > 0 && s.Throttling && s.Periods >= 1 && s.Throttled >= s.Periods {
-		slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
-		if used*s.Dt.Seconds() >= s.Limit*s.Dt.Seconds()-slack {
-			return Capped
+	longest := 0.0
+	i := len(c.hist) - 1
+	for ; i > 0; i-- {
+		h := c.hist[i]
+		longest = math.Max(longest, h.longest)
+		if (b.End - h.from).Seconds() >= math.Max(longest, aOldest)+dt {
+			break
 		}
 	}
-	return Active
+	return max(i, 0)
+}
+
+// kind classifies the sample (§3.2, as amended by §17.8, item 1): capped
+// when its window W, judged against the current limit, used the quota less
+// one slice of slack per sample and throttled every period but one boundary
+// period per sample.
+func (c *CPU) kind(s Sample, from int) (Kind, int) {
+	b := s.Books
+	if b.SlotSeconds == 0 && b.Completions == 0 {
+		return Idle, 0
+	}
+	n := len(c.hist) - from
+	if s.Limit <= 0 || !s.Throttling {
+		return Active, n
+	}
+	var u, d float64
+	var per, thr uint64
+	for _, h := range c.hist[from:] {
+		u += h.usage
+		d += h.dt
+		per += h.periods
+		thr += h.throttled
+	}
+	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
+	if per >= 1 && u >= s.Limit*d-slack*float64(n) && thr+uint64(n) >= per {
+		return Capped, n
+	}
+	return Active, n
+}
+
+// tightSample reports §3.2's per-sample test: every period throttled, usage
+// within the slack.
+func tightSample(s Sample, used float64) bool {
+	if s.Limit <= 0 || !s.Throttling || s.Periods < 1 || s.Throttled < s.Periods {
+		return false
+	}
+	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
+	return used*s.Dt.Seconds() >= s.Limit*s.Dt.Seconds()-slack
 }
 
 // costCompletions counts the completions ĉ's denominator takes: those of
@@ -190,8 +282,8 @@ func costCompletions(b Interval, from time.Duration) int {
 	return n
 }
 
-func (c *CPU) overlapsBad(l Life) bool {
-	for _, b := range c.bad {
+func overlaps(spans []span, l Life) bool {
+	for _, b := range spans {
 		if l.Granted < b.to && l.Ended > b.from {
 			return true
 		}
@@ -218,6 +310,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	}
 	res.Used, res.InFlight, res.Stall = used, nbar, stall
 	rho := c.cfg.Target
+	rbar := (1 - rho) / 2
 	books := s.Books
 
 	// §17.2: a limit change keeps ĉ and D̂_q, restarts D̂, and its own sample
@@ -233,17 +326,36 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 
 	tau := c.tau()
 	alpha := 1 - math.Exp(-dt/tau)
-	kind := c.kind(s, used)
-	res.Kind = kind
 	over := stall > c.cfg.PressureThreshold
 
-	// The samples a qualifying life may not overlap (§17.1).
+	// The window W and the sample's kind (§17.8, item 1).
+	longest := 0.0
+	for _, l := range books.Lives {
+		longest = math.Max(longest, l.Lifetime())
+		c.maxLife = math.Max(c.maxLife, l.Lifetime())
+	}
+	c.hist = append(c.hist, histSample{books.Start, books.End, s.Usage.Seconds(), dt, s.Periods, s.Throttled, books.Completions, longest})
+	from := c.window(books, dt)
+	kind, nW := c.kind(s, from)
+	res.Kind, res.WindowSamples = kind, nW
+	keepFrom := books.End - time.Duration((2*c.maxLife+3*tau+2*dt)*float64(time.Second))
+	for len(c.hist) > 1 && c.hist[0].to < keepFrom && from > 0 {
+		c.hist = c.hist[1:]
+		from--
+	}
+
+	// The samples a qualifying life may not overlap (§17.1, §17.8).
 	if kind == Capped || over || res.ChangeSample {
 		c.bad = append(c.bad, span{books.Start, books.End})
 	}
-	keep := books.End - time.Duration((2*c.maxLife+3*tau)*float64(time.Second))
-	for len(c.bad) > 0 && c.bad[0].to < keep {
+	if tightSample(s, used) && kind != Capped {
+		c.tight = append(c.tight, span{books.Start, books.End})
+	}
+	for len(c.bad) > 0 && c.bad[0].to < keepFrom {
 		c.bad = c.bad[1:]
+	}
+	for len(c.tight) > 0 && c.tight[0].to < keepFrom {
+		c.tight = c.tight[1:]
 	}
 
 	c.idle = prune(c.idle, c.t-3*tau)
@@ -262,6 +374,20 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		al := math.Max(alpha, 1/float64(c.tputN))
 		c.tput = (1-al)*c.tput + al*x
 	}
+
+	// §17.8 item 3: a move of the published S of at least max(3σ of its
+	// steps, 1 slot) restarts D̂'s warm start, which takes only the reconciles
+	// admitted since the move.
+	if c.sPrev >= 0 && c.sSteps.n >= 3 {
+		if d := prev - c.sPrev; math.Abs(d) > math.Max(changeSigma*math.Sqrt(c.sSteps.v), 1) {
+			c.rewarmD(books.Start)
+			res.DRewarmed = true
+		}
+	}
+	c.sSteps.moved(prev, alpha)
+	c.sPrev = prev
+	c.sRecent = append(prune(c.sRecent, c.t-tau), timed{c.t, prev})
+
 	if kind == Idle {
 		res.Slots = prev
 		res.Blocked = over
@@ -269,78 +395,14 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		return res
 	}
 
-	// §17.4: a move of N̄ restarts D̂'s warm start, which takes only the
-	// reconciles admitted after it.
-	if c.nbar.moved(nbar, alpha) {
-		c.rewarmD(books.End)
-		res.DRewarmed = true
-	}
-
-	// ĉ, from every sample with work, with τ_ĉ = max(τ, D̂/r̄) (§17.1).
-	stale := false
-	cpuNum := s.Usage.Seconds() - bg*dt
-	rbar := (1 - rho) / 2
-	tauC := tau
-	if dh, ok := c.d.value(); ok {
-		tauC = math.Max(tau, dh/rbar)
-	}
-	alphaC := 1 - math.Exp(-dt/tauC)
-	den := costCompletions(books, c.cStart)
-	switch c.c.add(cpuNum, float64(den), alphaC, true) {
-	case heldOut:
-		res.CDeferred, stale = true, true
-		c.since += den
-	case restarted:
-		// The restart's edge is the deferred sample's start: the denominator
-		// counts only completions of reconciles granted since (§17.1).
-		res.CRestarted, res.Restarted = true, true
-		c.cStart = c.prevC.from
-		c.c.reset()
-		pd := 0
-		for _, g := range c.prevC.grants {
-			if g >= c.cStart {
-				pd++
-			}
-		}
-		if !c.prevC.hadLivesInfo {
-			pd = c.prevC.completions
-		}
-		c.c.fold(c.prevC.num, float64(pd), c.prevC.alpha)
-		den = costCompletions(books, c.cStart)
-		c.c.fold(cpuNum, float64(den), alphaC)
-		c.since = pd + den
-	default:
-		c.since += den
-	}
-	c.prevC.ok, c.prevC.num, c.prevC.alpha, c.prevC.from = true, cpuNum, alphaC, books.Start
-	c.prevC.grants = c.prevC.grants[:0]
-	for _, l := range books.Lives {
-		c.prevC.grants = append(c.prevC.grants, l.Granted)
-	}
-	c.prevC.completions, c.prevC.hadLivesInfo = books.Completions, books.Lives != nil
-
-	// c_W's sample terms (§17.1).
-	longest := 0.0
-	for _, l := range books.Lives {
-		longest = math.Max(longest, l.Lifetime())
-		c.maxLife = math.Max(c.maxLife, l.Lifetime())
-	}
-	c.hist = append(c.hist, costSample{books.Start, books.End, cpuNum, books.Completions, longest})
-	aOldest := 0.0
-	if books.Oldest >= 0 {
-		aOldest = (books.End - books.Oldest).Seconds()
-	}
-	for len(c.hist) > 1 && (books.End-c.hist[1].from).Seconds() >= math.Max(c.maxLife, aOldest)+2*dt {
-		c.hist = c.hist[1:]
-	}
-
 	// D̂ and D̂_q, from the lives that overlapped no capped, pressured or
 	// change sample; D̂'s since its warm start (§17.1, §17.4).
+	stale := false
 	var sum float64
 	var cnt int
 	perQ := map[string][2]float64{}
 	for _, l := range books.Lives {
-		if c.overlapsBad(l) {
+		if overlaps(c.bad, l) {
 			continue
 		}
 		q := perQ[l.Queue]
@@ -350,6 +412,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		if l.Granted >= c.dSince {
 			sum += l.Lifetime()
 			cnt++
+			if overlaps(c.tight, l) {
+				res.StretchedLives++
+			}
 		}
 	}
 	if cnt > 0 {
@@ -371,29 +436,55 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		}
 		r.add(v[0], v[1], alpha, false)
 	}
-	if kind != Capped && books.SlotSeconds > 0 && books.Completions > 0 {
+	// §17.8 item 5: Little's fallback takes every uncapped sample with work.
+	if kind != Capped && books.SlotSeconds > 0 {
 		c.little.add(books.SlotSeconds, float64(books.Completions), alpha, false)
+	}
+
+	// The D̂ in force: the per-reconcile estimate, else Little's fallback
+	// after τ without a qualifying life, used only at a settled S or under a
+	// pressure hold (§17.8, item 7(b)).
+	var dv float64
+	dok := false
+	switch {
+	case c.dHasLife:
+		dv, dok = c.d.value()
+	case c.t-c.dSinceT >= tau && (c.settled() || over):
+		if v, ok := c.little.value(); ok {
+			dv, dok, res.DFallback = v, true, true
+		}
+	}
+
+	// ĉ, from every sample with work, with τ_ĉ = max(τ, D̂/r̄) from the D̂ in
+	// force (§17.1, §17.8 item 5).
+	tauC := tau
+	if dok {
+		tauC = math.Max(tau, dv/rbar)
+	}
+	alphaC := 1 - math.Exp(-dt/tauC)
+	cpuNum := s.Usage.Seconds() - bg*dt
+	den := costCompletions(books, c.cStart)
+	c.c.add(cpuNum, float64(den), alphaC, false)
+	c.since += den
+	if den > 0 {
+		c.restartC = false
+	}
+	res.PaceCompletions = den
+	c.windowTest(books, cpuNum, den, alphaC, dt, tauC, &res)
+	if res.CRestarted {
+		res.Restarted = true
 	}
 
 	if books.SlotSeconds > 0 && c.shareShift(books, alpha) {
 		c.c.reset()
 		c.cStart, c.since = books.End, 0
+		c.win, c.pend, c.wn = costWindow{from: books.End}, nil, 0
 		c.rewarmD(books.End)
 		res.Restarted = true
 	}
 
 	ch, cok := c.c.value()
 	seC := c.c.seRatio()
-	var dv float64
-	dok := false
-	switch {
-	case c.dHasLife:
-		dv, dok = c.d.value()
-	case c.t-c.dSinceT >= tau:
-		if v, ok := c.little.value(); ok {
-			dv, dok, res.DFallback = v, true, true
-		}
-	}
 	res.SECost = seC
 	if cok && dok && ch > 0 && dv > 0 {
 		seD := c.d.seRatio()
@@ -422,7 +513,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			g = math.Min(prev, (rho*limit-bg)*nbar/d)
 		}
 	case kind == Capped:
-		g = c.capped(s, books, limit, bg, nbar, dt, &res)
+		g = c.capped(s, books, from, limit, bg, nbar, &res)
 	default:
 		switch {
 		case !cok || ch <= 0 || (c.c.n >= 3 && ch < 2*seC):
@@ -431,6 +522,10 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 				g = float64(ceiling)
 				res.Paced = true
 			}
+		case c.restartC:
+			// §17.8 item 5: after a ĉ restart, with CPU but no completion its
+			// denominator counts, the active law holds.
+			res.CHold = true
 		case !dok:
 			res.DHold = true
 		default:
@@ -444,9 +539,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	case used > rho*limit && g > prev:
 		g, res.Guarded = prev, true
 	}
-	// Neither a restart, a deferred sample nor the change's own sample can
-	// raise the slots (§3.5, §17.1, §17.2).
-	if (res.Restarted || stale || res.ChangeSample) && g > prev {
+	// Neither a restart, a deferred sample, a pending ĉ test nor the change's
+	// own sample can raise the slots (§3.5, §17.1, §17.2, §17.8 item 2).
+	if (res.Restarted || stale || res.CPending || res.ChangeSample) && g > prev {
 		g = prev
 	}
 	if !res.Trusted {
@@ -456,6 +551,148 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	res.Slots = g
 	c.fill(&res, ch, cok, dv, dok)
 	return res
+}
+
+// settled reports that the published S hasn't moved by a slot or more over
+// the last τ (§17.8, item 7(b)).
+func (c *CPU) settled() bool {
+	if len(c.sRecent) == 0 {
+		return true
+	}
+	lo, hi := c.sRecent[0].v, c.sRecent[0].v
+	for _, x := range c.sRecent {
+		lo, hi = math.Min(lo, x.v), math.Max(hi, x.v)
+	}
+	return hi-lo < 1
+}
+
+// windowTest runs ĉ's change test over consecutive, non-overlapping c_W
+// windows (§17.8, item 2). The sums are fed every sample regardless; the test
+// decides restarts and when no sample may raise the slots.
+func (c *CPU) windowTest(b Interval, num float64, den int, alpha, dt, tauC float64, res *CPUResult) {
+	ws := winSample{num: num, alpha: alpha, completion: b.Completions, hasLives: b.Lives != nil}
+	longest := 0.0
+	for _, l := range b.Lives {
+		ws.grants = append(ws.grants, l.Granted)
+		longest = math.Max(longest, l.Lifetime())
+	}
+	if len(c.win.samples) == 0 {
+		c.win.from = b.Start
+	}
+	c.win.samples = append(c.win.samples, ws)
+	c.win.cpu += num
+	c.win.comp += den
+	c.win.longest = math.Max(c.win.longest, longest)
+	sd := math.Sqrt(math.Max(c.wv, 0))
+	sd = math.Max(sd, 1e-9*math.Max(math.Abs(c.wmu), 1e-9))
+	res.SigmaW = sd
+	dev := func(x float64) float64 { return (x - c.wmu) / sd }
+
+	aOldest := 0.0
+	if b.Oldest >= 0 {
+		aOldest = (b.End - b.Oldest).Seconds()
+	}
+	closed := (b.End - c.win.from).Seconds() >= math.Max(c.win.longest, aOldest)+dt
+	if !closed {
+		// A window in progress already beyond 3σ, on either side, is pending.
+		if x, ok := c.win.value(); ok && c.wn >= 3 && math.Abs(dev(x)) > changeSigma {
+			res.CPending = true
+		}
+		if c.pend != nil {
+			res.CPending = true
+		}
+		return
+	}
+	res.WindowClosed = true
+	w := c.win
+	c.win = costWindow{from: b.End}
+	x, ok := w.value()
+	if !ok {
+		if c.pend != nil {
+			res.CPending = true
+		}
+		return
+	}
+	aw := 1 - math.Exp(-(b.End-w.from).Seconds()/tauC)
+	fold := func(v float64) {
+		c.wn++
+		a := math.Max(aw, 1/float64(c.wn))
+		if c.wn == 1 {
+			c.wmu, c.wv = v, 0
+			return
+		}
+		d := v - c.wmu
+		c.wmu += a * d
+		c.wv = (1 - a) * (c.wv + a*d*d)
+	}
+	if c.wn < 3 {
+		if p := c.pend; p != nil {
+			c.pend = nil
+			if pv, ok := p.value(); ok {
+				fold(pv)
+			}
+		}
+		fold(x)
+		return
+	}
+	z := dev(x)
+	if p := c.pend; p != nil {
+		c.pend = nil
+		if math.Abs(z) > changeSigma && sign(z) == p.side {
+			c.restartFrom(p, &w)
+			res.CRestarted = true
+			return
+		}
+		if pv, ok := p.value(); ok {
+			fold(pv)
+		}
+		z = dev(x)
+	}
+	if math.Abs(z) > changeSigma {
+		w.side = sign(z)
+		c.pend = &w
+		res.CDeferred, res.CPending = true, true
+		return
+	}
+	fold(x)
+}
+
+// restartFrom restarts ĉ from the deferred window p and the window w, with the
+// edge at p's start: the denominator counts only completions of reconciles
+// granted since (§17.1).
+func (c *CPU) restartFrom(p, w *costWindow) {
+	c.cStart = p.from
+	c.c.reset()
+	c.since = 0
+	c.wn, c.wmu, c.wv = 0, 0, 0
+	for _, win := range []*costWindow{p, w} {
+		for _, ws := range win.samples {
+			d := ws.completion
+			if ws.hasLives {
+				d = 0
+				for _, g := range ws.grants {
+					if g >= c.cStart {
+						d++
+					}
+				}
+			}
+			c.c.fold(ws.num, float64(d), ws.alpha)
+			c.since += d
+		}
+	}
+	c.restartC = c.since == 0
+	for _, win := range []*costWindow{p, w} {
+		if v, ok := win.value(); ok {
+			c.wn++
+			if c.wn == 1 {
+				c.wmu = v
+			} else {
+				d := v - c.wmu
+				c.wmu += d / 2
+				c.wv = (c.wv + d*d/2) / 2
+			}
+		}
+	}
 }
 
 // fill reports the estimates for the metrics.
@@ -484,25 +721,13 @@ func (c *CPU) rewarmD(at time.Duration) {
 	c.dSince, c.dSinceT, c.dHasLife = at, c.t, false
 }
 
-// windowCost is c_W: the CPU per completion over the most recent samples
-// spanning at least max(the longest lifetime among the window's completions,
-// a_oldest) + Δt (§17.1).
-func (c *CPU) windowCost(b Interval, dt float64) (float64, bool) {
-	aOldest := 0.0
-	if b.Oldest >= 0 {
-		aOldest = (b.End - b.Oldest).Seconds()
-	}
+// windowCost is c_W: the CPU per completion over the window W (§17.1).
+func (c *CPU) windowCost(from int, bg float64) (float64, bool) {
 	var cpu float64
 	var comp int
-	longest := 0.0
-	for i := len(c.hist) - 1; i >= 0; i-- {
-		h := c.hist[i]
-		cpu += h.cpu
+	for _, h := range c.hist[from:] {
+		cpu += h.usage - bg*h.dt
 		comp += h.completions
-		longest = math.Max(longest, h.longest)
-		if (b.End - h.from).Seconds() >= math.Max(longest, aOldest)+dt {
-			break
-		}
 	}
 	if comp == 0 {
 		return 0, false
@@ -513,11 +738,11 @@ func (c *CPU) windowCost(b Interval, dt float64) (float64, bool) {
 // capped is the law for a capped sample (design §4.2, §17.1):
 // min((ρL − B̂)·D_mix/c_W, θN̄), with D_mix only when every queue that ended a
 // reconcile has a D̂_q.
-func (c *CPU) capped(s Sample, b Interval, limit, bg, nbar, dt float64, res *CPUResult) float64 {
+func (c *CPU) capped(s Sample, b Interval, from int, limit, bg, nbar float64, res *CPUResult) float64 {
 	rho := c.cfg.Target
 	theta := (rho*limit - bg) / (limit - bg)
 	g := theta * nbar
-	cw, ok := c.windowCost(b, dt)
+	cw, ok := c.windowCost(from, bg)
 	if !ok || cw <= 0 || b.Completions == 0 {
 		return g
 	}

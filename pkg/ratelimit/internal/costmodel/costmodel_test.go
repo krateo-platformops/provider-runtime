@@ -140,24 +140,39 @@ func cpuCfg() CPUConfig {
 }
 
 func TestKinds(t *testing.T) {
-	c := NewCPU(cpuCfg())
-	if k := c.kind(sample(time.Second, 0.01, 0.25, 0, 0), 0.01); k != Idle {
+	kindOf := func(s Sample) Kind {
+		c := NewCPU(cpuCfg())
+		return c.Step(s, 5, 5, 16).Kind
+	}
+	if k := kindOf(sample(time.Second, 0.01, 0.25, 0, 0)); k != Idle {
 		t.Errorf("nothing in flight: %v", k)
 	}
 	s := sample(time.Second, 0.25, 0.25, 5, 10)
 	s.Throttled = 10
-	if k := c.kind(s, 0.25); k != Capped {
+	if k := kindOf(s); k != Capped {
 		t.Errorf("every period throttled at the cap: %v", k)
 	}
 	// Throttled every period but usage beyond the slack below the cap: active.
 	s.Usage = time.Duration(0.2 * float64(time.Second))
-	if k := c.kind(s, 0.2); k != Active {
+	if k := kindOf(s); k != Active {
 		t.Errorf("throttled but 50 ms/s under the cap: %v", k)
 	}
 	// Usage within the slack (2 × 5ms in a 1s sample) of the cap: capped.
 	s.Usage = time.Duration(0.241 * float64(time.Second))
-	if k := c.kind(s, 0.241); k != Capped {
+	if k := kindOf(s); k != Capped {
 		t.Errorf("throttled and within the slack: %v", k)
+	}
+	// §17.8 item 1: at the cap's usage but with most periods unthrottled, as
+	// one thread's burst at one slot: not capped. One boundary period per
+	// sample is allowed.
+	s.Usage = time.Duration(0.25 * float64(time.Second))
+	s.Throttled = 2
+	if k := kindOf(s); k != Active {
+		t.Errorf("two of ten periods throttled: %v", k)
+	}
+	s.Throttled = 9
+	if k := kindOf(s); k != Capped {
+		t.Errorf("nine of ten periods throttled, one boundary period: %v", k)
 	}
 }
 

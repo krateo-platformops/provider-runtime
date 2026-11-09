@@ -3,6 +3,7 @@ package sim
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel"
@@ -18,24 +19,32 @@ const (
 	rbar = (1 - rho) / 2
 )
 
-// controller is what runs a case: the cost model, or the baseline at a
-// multiple of its committed gains.
+// controller is what runs a case: the cost model, the level PI at a multiple
+// of its committed gains, or the reservation-gating baseline at Temporal's
+// defaults.
 type controller struct {
-	name string
-	cost bool
-	gain float64
+	name    string
+	cost    bool
+	reserve bool
+	gain    float64
 }
 
 var (
-	ctlCost = controller{name: "cost model", cost: true}
+	ctlCost    = controller{name: "cost model", cost: true}
+	ctlReserve = controller{name: "reservation gate", reserve: true}
 )
 
 func ctlBaseline(gain float64) controller {
-	return controller{name: fmt.Sprintf("baseline ×%g", gain), gain: gain}
+	return controller{name: fmt.Sprintf("level PI ×%g", gain), gain: gain}
 }
 
 func (c controller) apply(cfg *Config) {
 	if c.cost {
+		return
+	}
+	if c.reserve {
+		r := TemporalReservation()
+		cfg.Reserve = &r
 		return
 	}
 	g := baselineGains
@@ -66,14 +75,62 @@ func (g *gctx) n() int          { return len(g.tr.Results) }
 // limit is the sample's cpu.max in cores.
 func (g *gctx) limit(i int) float64 { return g.tr.Samples[i].Limit }
 
-// capped applies §3.2's capped test to the sample, for either controller.
+// window is the first sample of sample i's window W: the most recent samples
+// spanning at least max(the longest lifetime among their completions,
+// a_oldest) + Δt (design §17.1, §17.8 item 1).
+func (g *gctx) window(i int) int {
+	b := g.tr.Samples[i].Books
+	aOldest := 0.0
+	if b.Oldest >= 0 {
+		aOldest = (b.End - b.Oldest).Seconds()
+	}
+	dt := g.tr.Samples[i].Dt.Seconds()
+	longest := 0.0
+	j := i
+	for ; j > 0; j-- {
+		for _, l := range g.tr.Samples[j].Books.Lives {
+			longest = math.Max(longest, l.Lifetime())
+		}
+		if (b.End - g.tr.Samples[j].Books.Start).Seconds() >= math.Max(longest, aOldest)+dt {
+			break
+		}
+	}
+	return j
+}
+
+// nW is n_W, the samples in sample i's window.
+func (g *gctx) nW(i int) int { return i - g.window(i) + 1 }
+
+// capped applies design §17.8 item 1's test, over the sample's window and
+// against the current limit, for any controller.
 func (g *gctx) capped(i int) bool {
 	s := g.tr.Samples[i]
-	if s.Limit <= 0 || !s.Throttling || s.Periods < 1 || s.Throttled < s.Periods {
+	if s.Limit <= 0 || !s.Throttling {
 		return false
 	}
+	j := g.window(i)
+	var u, d float64
+	var per, thr uint64
+	for k := j; k <= i; k++ {
+		x := g.tr.Samples[k]
+		u += x.Usage.Seconds()
+		d += x.Dt.Seconds()
+		per += x.Periods
+		thr += x.Throttled
+	}
+	n := i - j + 1
 	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
-	return s.Usage.Seconds() >= s.Limit*s.Dt.Seconds()-slack
+	return per >= 1 && u >= s.Limit*d-slack*float64(n) && thr+uint64(n) >= per
+}
+
+// firstCapped is the first window-capped sample at or after from, or -1.
+func (g *gctx) firstCapped(from int) int {
+	for i := from; i < g.n(); i++ {
+		if g.capped(i) {
+			return i
+		}
+	}
+	return -1
 }
 
 func (g *gctx) stall(i int) float64 {
@@ -104,7 +161,10 @@ func (g *gctx) entry(b band, from int) int {
 // outside checks §4.5's rule after entry: at most 5% of samples outside the
 // band. For the cost model, untrusted samples are judged with their own
 // relative standard error when it exists, and excluded and counted before.
-func (g *gctx) outside(b band, from, to int) {
+func (g *gctx) outside(b band, from, to int) { g.outsideLo(b, from, to, nil) }
+
+// outsideLo is outside with a lower edge that may vary by sample.
+func (g *gctx) outsideLo(b band, from, to int, lo func(i int) float64) {
 	if from < 0 {
 		return
 	}
@@ -122,7 +182,11 @@ func (g *gctx) outside(b band, from, to int) {
 			}
 		}
 		n++
-		if S := g.S(i); S < b.lo-1e-9 || S > hi+1e-9 {
+		l := b.lo
+		if lo != nil {
+			l = lo(i)
+		}
+		if S := g.S(i); S < l-1e-9 || S > hi+1e-9 {
 			out++
 		}
 	}
@@ -147,7 +211,12 @@ func (g *gctx) monotone(from, to int) {
 		if g.capped(i) {
 			continue
 		}
+		// The baselines' falls are attributed by the CPU they act on: the
+		// level PI's filtered Ū, the reservation gate's reading (plan §4.5).
 		u := g.tr.Used(i)
+		if !g.cost {
+			u = g.tr.Results[i].CPU.Used
+		}
 		L := g.limit(i)
 		if L > 0 && u > rho*L {
 			trusted := g.cost && g.tr.Results[i].CPU.Trusted
@@ -159,9 +228,21 @@ func (g *gctx) monotone(from, to int) {
 				continue
 			}
 			g.fail("a trusted fall at %v larger than 3r̄: %.2f to %.2f", g.tr.At[i], prev, S)
+			g.trace(i)
 			continue
 		}
 		g.fail("an unattributed fall at %v: %.2f to %.2f (U %.3f, not capped)", g.tr.At[i], prev, S, u)
+	}
+}
+
+// trace reports the samples around i, for a fall the plan asks to trace.
+func (g *gctx) trace(i int) {
+	for j := max(i-4, 1); j <= i+2 && j < g.n(); j++ {
+		r := g.tr.Results[j]
+		c := r.CPU
+		g.report("trace %v: S %.2f, U %.3f, kind %v, ĉ %.4f, D̂ %.3f, c_W %.4f, N̄ %.2f, C %d, trusted %v, deferred %v, pending %v, restarted %v, rewarmed %v, guarded %v",
+			g.tr.At[j], r.Slots, g.tr.Used(j), c.Kind, c.PerCompletion, c.Duration, c.WindowCost, c.InFlight,
+			g.tr.Samples[j].Books.Completions, c.Trusted, c.CDeferred, c.CPending, c.CRestarted, c.DRewarmed, c.Guarded)
 	}
 }
 
@@ -267,7 +348,7 @@ func heavyClass() Class {
 
 const (
 	stepAt  = 90 * time.Second
-	drainAt = 3600 * time.Second
+	drainAt = 6000 * time.Second
 )
 
 func gateCases() []gateCase {
@@ -285,10 +366,12 @@ func gateCases() []gateCase {
 			g.monotone(0, g.entry(bandOf(base.sStar), 0))
 		}},
 		{name: "start from one slot", cfg: measured, check: func(g *gctx) {
+			// Plan §4.5, corrected (a): the entry allows c₁ + 1 + ⌈D̂/Δt⌉.
 			b := bandOf(base.sStar)
+			by := c1(base) + 1 + ceilSec(base.dStar)
 			e := g.entry(b, 0)
-			if e < 0 || e+1 > c1(base)+1 {
-				g.fail("into the band [%.2f, %.2f] at sample %d, want by %d: %v", b.lo, b.hi, e+1, c1(base)+1, g.slotsFrom(0, 12))
+			if e < 0 || e+1 > by {
+				g.fail("into the band [%.2f, %.2f] at sample %d, want by %d: %v", b.lo, b.hi, e+1, by, g.slotsFrom(0, 12))
 			}
 			g.outside(b, e, g.n())
 			countRestarts(g, 0)
@@ -299,57 +382,111 @@ func gateCases() []gateCase {
 			c.Queues[0].Class = classAfter(stepAt, baseClass, heavyClass())
 			return c
 		}, check: func(g *gctx) {
+			// Plan §4.5, the counts under design §17.8.
 			p := frozenPlants["cost46"]
 			b := bandOf(p.sStar)
 			i0 := index(g.tr, stepAt)
-			const ell, wc = 2, 2
-			e := g.entry(b, i0)
-			if e < 0 || e > i0+ell+wc {
-				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", b.lo, b.hi, e-i0, ell+wc, g.slotsFrom(i0, 10))
+			const ell = 2
+			fc := g.firstCapped(i0)
+			nw := 1
+			if fc >= 0 {
+				nw = g.nW(fc)
+			}
+			g.report("n_W %d at the first window-capped sample (+%d)", nw, fc-i0)
+			// The floor after a cost increase (design §17.8 item 4), frozen from
+			// the plant, until the window after ĉ's restart has closed.
+			floor := floorAfterCostIncrease()
+			until := i0 + 2*nw + 1
+			if g.cost {
+				until = -1
+				for i := i0; i < g.n(); i++ {
+					if g.tr.Results[i].CPU.CRestarted {
+						for j := i + 1; j < g.n(); j++ {
+							if g.tr.Results[j].CPU.WindowClosed {
+								until = j
+								break
+							}
+						}
+						break
+					}
+				}
+				if until < 0 {
+					until = g.n()
+				}
+			}
+			lo := func(i int) float64 {
+				if i <= until {
+					return math.Min(b.lo, floor)
+				}
+				return b.lo
+			}
+			g.report("the floor %.2f until +%d, then θ⌊S*'⌋ = %.2f", floor, until-i0, b.lo)
+			within := ell + 2*nw - 1
+			e := -1
+			for i := i0; i < g.n(); i++ {
+				if S := g.S(i); S >= lo(i)-1e-9 && S <= b.hi+1e-9 {
+					e = i
+					break
+				}
+			}
+			if e < 0 || e > i0+within {
+				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", lo(i0), b.hi, e-i0, within, g.slotsFrom(i0, 10))
 			}
 			for i := i0; e >= 0 && i < e; i++ {
-				if g.S(i) < b.lo {
+				if g.S(i) < lo(i) {
 					g.fail("entered from below at +%d, not from above", i-i0)
 					break
 				}
 			}
 			if g.cost {
-				capped := false
-				for i := i0; i <= i0+ell && i < g.n(); i++ {
-					capped = capped || g.capped(i)
+				if fc < 0 || fc > i0+ell+nw-1 {
+					g.fail("no window-capped sample within ℓ + n_W − 1 = %d of the change", ell+nw-1)
 				}
-				if !capped {
-					g.fail("no capped sample within ℓ = %d of the change", ell)
+				// The change test's mechanism applies to a change of at least
+				// 3σ_W; it has 2⌈W/Δt⌉ + 1 samples, and 3⌈W/Δt⌉ + 1 for a
+				// change near 3σ_W (the plan author's reading: 3σ_W ≤ Δc < 4σ_W).
+				pre := g.tr.Results[i0-1].CPU
+				z := 0.0
+				if pre.SigmaW > 0 {
+					z = pre.PerCompletion / pre.SigmaW
+				}
+				g.report("σ_W %.5f before the change; the change Δc/σ_W ≈ %.1f", pre.SigmaW, z)
+				horizon := 2*nw + 1
+				if z < 4 {
+					horizon = 3*nw + 1
 				}
 				def, rst := -1, -1
-				for i := i0; i < g.n() && i <= i0+20; i++ {
+				for i := i0; i < g.n() && i <= i0+horizon; i++ {
 					c := g.tr.Results[i].CPU
 					if c.CDeferred && def < 0 {
 						def = i
 					}
-					if c.CRestarted && def >= 0 && i == def+1 {
+					if c.CRestarted && def >= 0 {
 						rst = i
 						break
 					}
 				}
-				if def < 0 || rst < 0 {
-					g.fail("no ĉ deferral followed by a restart after the change")
-				} else {
-					for _, i := range []int{def, rst} {
-						if g.S(i) > g.S(i-1)+1e-9 {
-							g.fail("a rise in the ĉ deferral or restart at +%d", i-i0)
-						}
+				switch {
+				case z < 3:
+					g.report("a change under 3σ_W: the change test's mechanism isn't required")
+				case def < 0 || rst < 0:
+					g.fail("no ĉ deferral followed by a restart within %d of the change", horizon)
+				}
+				for i := i0; i < g.n() && i <= i0+horizon+nw; i++ {
+					c := g.tr.Results[i].CPU
+					if (c.CPending || c.CDeferred || c.CRestarted) && g.S(i) > g.S(i-1)+1e-9 {
+						g.fail("a rise at +%d while ĉ's test was pending", i-i0)
 					}
 				}
 				rw := false
-				for i := i0; i < g.n() && i <= i0+10; i++ {
+				for i := i0; i < g.n() && i <= i0+within+1; i++ {
 					rw = rw || g.tr.Results[i].CPU.DRewarmed
 				}
 				if !rw {
-					g.fail("no D̂ warm-start restart at the cut's N̄ move")
+					g.fail("no D̂ warm-start restart at the cut")
 				}
 			}
-			g.outside(b, e, g.n())
+			g.outsideLo(b, e, g.n(), lo)
 		}},
 		{name: "limit halves", cfg: func(seed uint64) Config {
 			c := measured(seed)
@@ -366,25 +503,39 @@ func gateCases() []gateCase {
 					break
 				}
 			}
+			// Plan §4.5: within 1 after i0, W judged against the current limit.
 			const ell = 1
 			e := g.entry(b, i0)
-			if e < 0 || e > i0+ell+1 {
-				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", b.lo, b.hi, e-i0, ell+1, g.slotsFrom(i0, 10))
+			if e < 0 || e > i0+1 {
+				g.fail("into the band [%.2f, %.2f] at +%d samples, want within 1 after the change's sample: %v", b.lo, b.hi, e-i0, g.slotsFrom(i0, 10))
 			}
 			if g.cost {
 				r := g.tr.Results[i0]
 				if !r.CPU.ChangeSample {
 					g.fail("the change's sample not treated as such")
 				}
-				if r.Slots > rho*r.CPU.InFlight+1e-9 {
-					g.fail("S₁ %.2f above θ'N̄₁ = %.2f", r.Slots, rho*r.CPU.InFlight)
+				// Corrected (c): S₁ = min(S₀, L11) when U₁ > ρL', else S₀.
+				s0 := g.S(i0 - 1)
+				L := g.limit(i0)
+				want := s0
+				if u := g.tr.Used(i0); u > rho*L {
+					if d := math.Min(u, L) - r.CPU.Background; d > 0 {
+						want = math.Min(s0, (rho*L-r.CPU.Background)*r.CPU.InFlight/d)
+					}
 				}
-				first := false
+				if math.Abs(r.Slots-want) > 1e-6 {
+					g.fail("S₁ %.3f, want %.3f", r.Slots, want)
+				}
+				// Corrected (b): a capped sample at its first term, or an active
+				// sample at the law with D̂ restarted, within ℓ + 1.
+				ok := false
 				for i := i0 + 1; i <= i0+ell+1 && i < g.n(); i++ {
-					first = first || (g.tr.Results[i].CPU.Kind == costmodel.Capped && g.tr.Results[i].CPU.FirstTerm)
+					c := g.tr.Results[i].CPU
+					ok = ok || (c.Kind == costmodel.Capped && c.FirstTerm) ||
+						(c.Kind == costmodel.Active && !c.DHold && !c.CHold && !c.Unresolvable && c.Duration > 0)
 				}
-				if !first {
-					g.fail("no capped sample at its first term within ℓ + 1")
+				if !ok {
+					g.fail("neither a capped sample at its first term nor an active one at the law within ℓ + 1")
 				}
 				holds := 0
 				for i := i0; i < g.n() && i <= i0+30; i++ {
@@ -523,10 +674,11 @@ func gateCases() []gateCase {
 		}, check: func(g *gctx) {
 			i0 := index(g.tr, 15*time.Second)
 			g.monotone(i0, g.entry(bandOf(base.sStar), i0))
+			// Plan §4.5: the 85–95% bar was never re-derived for §17's law, so
+			// the mean CPU is reported against the predicted setpoint shift (a
+			// few percent towards less CPU, design §17.1), not judged.
 			u := meanCPU(g.tr, 75*time.Second, g.cfg.Duration) / g.cfg.Limit
-			if u < 0.85 || u > 0.95 {
-				g.fail("mean CPU %.1f%%, want 85–95%%", 100*u)
-			}
+			g.report("mean CPU %.1f%% of the limit (target 90%%, shifted down by at most a few points)", 100*u)
 		}},
 		{name: "false restarts, 0.47s", cfg: func(seed uint64) Config {
 			c := measured(seed)
@@ -538,7 +690,17 @@ func gateCases() []gateCase {
 			c.Duration = time.Hour
 			c.Queues[0].Class = fixedClass(drainBase)
 			return c
-		}, check: falseRestarts},
+		}, check: func(g *gctx) {
+			// Design §17.8 item 1: INVALID unless S reaches its plant's band
+			// before the restarts are counted.
+			e := g.entry(bandOf(frozenPlants["drain0"].sStar), 0)
+			if e < 0 {
+				g.v.invalid = "S never reached the 30s plant's band"
+				return
+			}
+			g.report("into the 30s plant's band at %v", g.tr.At[e])
+			falseRestartsFrom(g, e)
+		}},
 		{name: "mix shift seen", cfg: func(seed uint64) Config { c, _ := mixShift(seed, true); return c }, check: func(g *gctx) {
 			_, shift := mixShift(0, true)
 			b := bandOf(base.sStar)
@@ -554,8 +716,14 @@ func gateCases() []gateCase {
 					break
 				}
 			}
-			if capped > 0 && (out < 0 || out-i0 > 6) {
-				g.fail("not out of the cap within 6 samples of the shift: %v", g.slotsFrom(i0, 12))
+			// Corrected (f): min(⌈ln(32/S*)/ln(1/θ)⌉, ⌈W/Δt⌉ + 1) + (n_W − 1).
+			nw := 1
+			if fc := g.firstCapped(i0); fc >= 0 {
+				nw = g.nW(fc)
+			}
+			lim := int(math.Min(math.Ceil(math.Log(32/base.sStar)/math.Log(1/rho)), float64(nw+1))) + nw - 1
+			if capped > 0 && (out < 0 || out-i0 > lim) {
+				g.fail("not out of the cap within %d samples of the shift: %v", lim, g.slotsFrom(i0, 12))
 			}
 			// At most one crossing, downward across the whole band.
 			side := 0
@@ -604,11 +772,16 @@ func gateCases() []gateCase {
 			}
 		}},
 		{name: "no limit, pressure only blocks", cfg: func(seed uint64) Config {
+			// Plan §4.5: a share near the demand (about 1.6 cores at the
+			// ceiling), so that the stall straddles the threshold.
 			return Config{
-				Seed: seed, Duration: 900 * time.Second, Procs: 4, NodeCPUs: 4, Ceiling: 32,
+				Seed: seed, Duration: 1200 * time.Second, Procs: 4, NodeCPUs: 4, Ceiling: 32,
 				Share: func(t time.Duration) float64 {
-					if t >= 300*time.Second && t < 600*time.Second {
+					switch {
+					case t >= 300*time.Second && t < 600*time.Second:
 						return 0.8
+					case t >= 900*time.Second && t < 1200*time.Second:
+						return 1.6
 					}
 					return 0.4
 				},
@@ -616,7 +789,7 @@ func gateCases() []gateCase {
 				Model:  defaultModel(),
 			}
 		}, check: func(g *gctx) {
-			over := 0
+			over, near, nearOver := 0, 0, 0
 			for i := 1; i < g.n(); i++ {
 				r := g.tr.Results[i]
 				if g.S(i) < g.S(i-1)-1e-9 {
@@ -624,6 +797,12 @@ func gateCases() []gateCase {
 					return
 				}
 				o := g.stall(i) > 50
+				if g.tr.At[i] >= 900*time.Second {
+					near++
+					if o {
+						nearOver++
+					}
+				}
 				if o {
 					over++
 					if g.S(i) > g.S(i-1)+1e-9 {
@@ -635,12 +814,12 @@ func gateCases() []gateCase {
 					g.fail("blocked %v at %v with the stall at %.1f", r.CPU.Blocked, g.tr.At[i], g.stall(i))
 					return
 				}
-				if r.CPU.Slots != float64(g.cfg.Ceiling) {
+				if g.cost && r.CPU.Slots != float64(g.cfg.Ceiling) {
 					g.fail("S_cpu %.2f at %v, want the ceiling", r.CPU.Slots, g.tr.At[i])
 					return
 				}
 			}
-			g.report("samples over the threshold: %d", over)
+			g.report("samples over the threshold: %d; at the share near demand, %d of %d", over, nearOver, near)
 		}},
 		{name: "contention below the quota", cfg: func(seed uint64) Config {
 			c := measured(seed)
@@ -652,29 +831,34 @@ func gateCases() []gateCase {
 			}
 			return c
 		}, check: func(g *gctx) {
+			// Corrected (e): during the dip, no rise in a sample over the
+			// threshold; after it, S above S*(1 + 3r̄) in at most
+			// 2k_θ − 1 + (n_W − 1) samples, k_θ from the slots at the dip's end.
 			b := bandOf(base.sStar)
 			from, to := index(g.tr, 60*time.Second), index(g.tr, 75*time.Second)
-			onset := -1.0
-			for i := from; i < to+1 && i < g.n(); i++ {
+			var stalls []float64
+			for i := from; i < to && i < g.n(); i++ {
 				r := g.tr.Results[i]
-				o := g.stall(i) > 50
+				st := g.stall(i)
+				stalls = append(stalls, st)
+				o := st > 50
 				if r.CPU.Blocked != o {
-					g.fail("blocked %v at %v with the stall at %.1f", r.CPU.Blocked, g.tr.At[i], g.stall(i))
+					g.fail("blocked %v at %v with the stall at %.1f", r.CPU.Blocked, g.tr.At[i], st)
 				}
-				if !o {
-					onset = -1
-					continue
-				}
-				if onset < 0 {
-					onset = g.S(i - 1)
-				}
-				if g.S(i) > onset+1e-9 {
-					g.fail("a rise past the onset value at %v under pressure", g.tr.At[i])
-				}
-				if g.S(i) < g.S(i-1)-1e-9 && r.CPU.Slots > g.S(i)+1e-9 {
-					g.fail("a fall at %v not computed by the controller", g.tr.At[i])
+				if o && g.S(i) > g.S(i-1)+1e-9 {
+					g.fail("a rise at %v with the stall over the threshold", g.tr.At[i])
 				}
 			}
+			sort.Float64s(stalls)
+			if len(stalls) > 0 {
+				g.report("the dip's stall: min %.1f, median %.1f, max %.1f, over 50 in %d of %d", stalls[0], stalls[len(stalls)/2], stalls[len(stalls)-1], countOver(stalls, 50), len(stalls))
+			}
+			sEnd := g.S(to - 1)
+			kth := 0
+			if sEnd > b.hi {
+				kth = int(math.Ceil(math.Log(sEnd/b.hi) / math.Log(1/rho)))
+			}
+			allow := max(2*kth-1, 0) + g.nW(to) - 1
 			above, worst := 0, 0.0
 			for i := to; i < g.n(); i++ {
 				if g.S(i) > b.hi+1e-9 {
@@ -682,29 +866,38 @@ func gateCases() []gateCase {
 					worst = math.Max(worst, g.S(i)-b.hi)
 				}
 			}
-			allow := 0
-			if !g.cost {
-				allow = 1 + ceilSec(base.dStar) + 1
-			}
 			if above > allow {
-				g.fail("above S*(1 + 3r̄) = %.2f in %d samples after it, want at most %d", b.hi, above, allow)
+				g.fail("above S*(1 + 3r̄) = %.2f in %d samples after the dip, want at most %d (k_θ %d from S %.2f)", b.hi, above, allow, kth, sEnd)
 			}
 			if above > 0 {
 				g.report("the excursion above the band: %d samples, at most %.2f slots over", above, worst)
 			}
 		}},
 		{name: "long drain", cfg: func(seed uint64) Config {
-			// The change comes after the 30s plant's own approach from one slot,
-			// c₁ + 1 samples (2,977 on the frozen curve), has had time to end.
 			c := measured(seed)
 			c.Duration = drainAt + 1200*time.Second
 			c.Queues[0].Class = classAfter(drainAt, drainBase, drainHeavy())
 			return c
 		}, check: func(g *gctx) {
-			p := frozenPlants["drain"]
+			p, p0 := frozenPlants["drain"], frozenPlants["drain0"]
 			b := bandOf(p.sStar)
 			i0 := index(g.tr, drainAt)
-			g.report("before the change: S %.2f against the 30s plant's S* %.2f", g.S(i0-1), frozenPlants["drain0"].sStar)
+			// The precondition: at steady state before the change, at least
+			// τ_ĉ plus 60 completions after entering the 30s plant's band.
+			e0 := g.entry(bandOf(p0.sStar), 0)
+			if e0 < 0 || e0 >= i0 {
+				g.v.invalid = fmt.Sprintf("never in the 30s plant's band before the change (S %.2f)", g.S(i0-1))
+				return
+			}
+			tauC := math.Max(10, p0.dStar/rbar)
+			comp := 0
+			for i := e0; i < i0; i++ {
+				comp += g.tr.Samples[i].Books.Completions
+			}
+			if (g.tr.At[i0]-g.tr.At[e0]).Seconds() < tauC || comp < 60 {
+				g.v.invalid = fmt.Sprintf("not at steady state before the change: %v and %d completions since entry, want τ_ĉ %.0fs and 60", g.tr.At[i0]-g.tr.At[e0], comp, tauC)
+				return
+			}
 			n0 := 0.0
 			k := 0
 			for i := index(g.tr, drainAt-60*time.Second); i < i0; i++ {
@@ -712,9 +905,20 @@ func gateCases() []gateCase {
 				k++
 			}
 			n0 /= float64(k)
+			if n0 <= p.sStar*(1+3*rbar) {
+				g.v.invalid = fmt.Sprintf("N̄₀ %.2f not above S*'(1 + 3r̄) = %.2f: no descent to count", n0, p.sStar*(1+3*rbar))
+				return
+			}
 			kth := int(math.Ceil(math.Log(n0/(p.sStar*(1+3*rbar))) / math.Log(1/rho)))
-			const ellMin = 1
-			within := ellMin + 2*max(kth, 0) - 1
+			// ℓ_min, measured: the samples from the change to the first
+			// window-capped sample after it.
+			fc := g.firstCapped(i0)
+			if fc < 0 {
+				g.fail("no window-capped sample after the change: ℓ_min unmeasurable")
+				return
+			}
+			ellMin := fc - i0
+			within := ellMin + 2*kth - 1
 			drained := 0
 			for i := i0; i < g.n(); i++ {
 				if g.tr.Samples[i].Books.NMin > g.tr.Capacity[i-1] {
@@ -727,17 +931,17 @@ func gateCases() []gateCase {
 			if drained == 0 {
 				g.v.invalid = "no drained sample: the case didn't exercise a drain"
 			}
-			g.report("drained samples: %d; N̄₀ %.2f, k_θ %d", drained, n0, kth)
+			g.report("drained samples: %d; N̄₀ %.2f, k_θ %d, ℓ_min %d, n_W %d", drained, n0, kth, ellMin, g.nW(fc))
 			e := g.entry(b, i0)
 			if e < 0 || e > i0+within {
 				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", b.lo, b.hi, e-i0, within, g.slotsFrom(i0, 12))
 			}
 			g.outside(b, e, g.n())
 			if g.cost {
-				rw, fb, cr := false, 0, 0
+				rw, fb, cr, st := false, 0, 0, 0
 				for i := i0; i < g.n(); i++ {
 					c := g.tr.Results[i].CPU
-					if i <= i0+60 {
+					if i <= e+1 {
 						rw = rw || c.DRewarmed
 					}
 					if c.DFallback {
@@ -746,11 +950,12 @@ func gateCases() []gateCase {
 					if c.CRestarted {
 						cr++
 					}
+					st += c.StretchedLives
 				}
 				if !rw {
 					g.fail("no D̂ warm-start restart at the cut")
 				}
-				g.report("Little's fallback used in %d samples; ĉ restarts %d", fb, cr)
+				g.report("Little's fallback used in %d samples; ĉ restarts %d; cap-stretched lives in D̂ %d", fb, cr, st)
 			}
 		}},
 		{name: "rising cost", cfg: func(seed uint64) Config {
@@ -764,31 +969,59 @@ func gateCases() []gateCase {
 			if math.Abs(u-rho) > 0.03 {
 				g.fail("mean CPU over the last 120s %.1f%%, want within 3 points of 90%%", 100*u)
 			}
+			// Corrected (a): entry by c₁ + 1 + ⌈D̂/Δt⌉.
+			by := c1(p) + 1 + ceilSec(p.dStar)
 			e := g.entry(b, 0)
-			if e < 0 || e+1 > c1(p)+1 {
-				g.fail("into the band [%.2f, %.2f] at sample %d, want by %d", b.lo, b.hi, e+1, c1(p)+1)
+			if e < 0 || e+1 > by {
+				g.fail("into the band [%.2f, %.2f] at sample %d, want by %d", b.lo, b.hi, e+1, by)
 			}
 			g.monotone(0, e)
 			g.outside(b, e, g.n())
-			top := 0.0
+			// Corrected (d): untrusted samples judged at 3·max(own SE, r̄),
+			// excluded and counted without one.
+			top, excluded := 0.0, 0
 			for i := range g.tr.Results {
+				hi := b.hi
+				if g.cost {
+					c := g.tr.Results[i].CPU
+					if !c.Trusted {
+						if c.RelSE <= 0 || math.IsInf(c.RelSE, 0) || math.IsNaN(c.RelSE) {
+							excluded++
+							continue
+						}
+						hi = p.sStar * (1 + 3*math.Max(c.RelSE, rbar))
+					}
+				}
 				top = math.Max(top, g.S(i))
+				if g.S(i) > hi+1e-9 {
+					g.fail("S %.2f at %v above %.2f", g.S(i), g.tr.At[i], hi)
+					break
+				}
 			}
-			if top > b.hi+1e-9 {
-				g.fail("S reached %.2f, above S*(1 + 3r̄) = %.2f", top, b.hi)
-			}
-			g.report("max S %.2f against S* %.2f (predicted excess 0.01·(S* − 1)·S* = %.2f)", top, p.sStar, 0.01*(p.sStar-1)*p.sStar)
+			g.report("max S %.2f against S* %.2f (predicted excess 0.01·(S* − 1)·S* = %.2f); %d samples without a standard error excluded", top, p.sStar, 0.01*(p.sStar-1)*p.sStar, excluded)
 		}},
 	}
 }
 
-func falseRestarts(g *gctx) {
+func countOver(xs []float64, v float64) int {
+	n := 0
+	for _, x := range xs {
+		if x > v {
+			n++
+		}
+	}
+	return n
+}
+
+func falseRestarts(g *gctx) { falseRestartsFrom(g, 120) }
+
+func falseRestartsFrom(g *gctx, from int) {
 	if !g.cost {
 		return
 	}
 	n := 0
 	for i, r := range g.tr.Results {
-		if i < 120 || (!r.CPU.CRestarted && !r.CPU.DRestarted) {
+		if i < from || (!r.CPU.CRestarted && !r.CPU.DRestarted) {
 			continue
 		}
 		n++

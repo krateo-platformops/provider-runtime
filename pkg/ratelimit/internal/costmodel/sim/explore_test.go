@@ -8,7 +8,7 @@ import (
 )
 
 // TestExplore prints a gate case's trajectory when SIM_EXPLORE names it, with
-// SIM_CONTROLLER optionally "baseline". A development aid, skipped otherwise.
+// SIM_CONTROLLER optionally "baseline" or "reserve". A development aid, skipped otherwise.
 func TestExplore(t *testing.T) {
 	name := os.Getenv("SIM_EXPLORE")
 	if name == "" {
@@ -25,8 +25,11 @@ func TestExplore(t *testing.T) {
 		t.Fatalf("no case %q", name)
 	}
 	cfg := gc.cfg(1)
-	if os.Getenv("SIM_CONTROLLER") == "baseline" {
+	switch os.Getenv("SIM_CONTROLLER") {
+	case "baseline":
 		ctlBaseline(1).apply(&cfg)
+	case "reserve":
+		ctlReserve.apply(&cfg)
 	}
 	tr := Run(cfg)
 	var b strings.Builder

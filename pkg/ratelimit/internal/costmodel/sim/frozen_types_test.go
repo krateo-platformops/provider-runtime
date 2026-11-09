@@ -1,9 +1,28 @@
 package sim
 
+import "math"
+
 // frozen is one case plant's values from its fixed-capacity curve (plan
 // §4.5): S*, the duration at S*, and n_iter from one slot (nStart) and from
 // the case's starting point (nFrom).
 type frozen struct {
 	sStar, dStar  float64
 	nStart, nFrom int
+}
+
+// frozenXCap is the plant's throughput at the cap, X at the curve's largest
+// capacity, from the same TestFreeze run as frozenPlants (seed 9001: the
+// cost46 plant's n=16 row, X = 5.438/s).
+var frozenXCap = map[string]float64{"cost46": 5.438}
+
+// floorAfterCostIncrease is design §17.8 item 4's lower edge after the cost
+// doubles, frozen from the plants: S*'·(D_mix/D*')·C_W/(C_W + N₀), with
+// N₀ = ⌈S_pre⌉, C_W = X'_cap·|W| and D_mix the base plant's D (item 7(c)).
+// |W| is taken as ⌈D*'/Δt⌉ + 1 seconds, the mean lifetime plus a sample: the
+// plan author's reading of "from the frozen curve".
+func floorAfterCostIncrease() float64 {
+	p, b := frozenPlants["cost46"], frozenPlants["base"]
+	n0 := math.Ceil(b.sStar)
+	cw := frozenXCap["cost46"] * float64(ceilSec(p.dStar)+1)
+	return p.sStar * (b.dStar / p.dStar) * cw / (cw + n0)
 }
