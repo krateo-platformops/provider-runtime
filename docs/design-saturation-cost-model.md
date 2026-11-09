@@ -2555,7 +2555,7 @@ throttled (Δnr_throttled = 0), the same criterion as item 1. Stall the quota
 doesn't explain still always blocks. Without a quota nothing changes. The reason:
 the block's purpose is contention below the quota (§6), and the law handles the
 cap. A container at its own cap stalls from its own throttling (item 1), and
-blocking on that stall held rises the law computed from samples under the limit;
+blocking on that stall held rises the law computed from samples under the target;
 §6 is amended accordingly.
 
 **What this revision doesn't change:** the law; `ĉ`'s window test; the cap over

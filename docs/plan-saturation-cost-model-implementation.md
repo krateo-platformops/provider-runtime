@@ -665,8 +665,9 @@ no other; and `S_cpu` is the ceiling throughout.
 
 **The dip: replaced with "Contention below the quota".** The measured workload
 at 250m on the node model, with the node giving 125 ms/s for 15s, then the full
-quota. During it, rises are blocked in every sample over `CPUPressureThreshold`
-and in no other, and no fall is attributed to pressure. After it, `S` is above
+quota. During it, rises are blocked in every sample over CPUPressureThreshold in
+which no period was throttled, and in no other (design §17.9 item 8), and no
+fall is attributed to pressure. After it, `S` is above
 `S*(1 + 3r̄)` in no sample with item 2's exclusion (design §17.1: lives that
 overlapped a sample over `CPUPressureThreshold` are excluded from `D̂`); without
 it, at most `1 + (⌈D̂/Δt⌉ + 1)` samples, with the excursion's size reported.
