@@ -9,7 +9,7 @@ timestamp: 2026-11-08T00:00:00Z
 
 # Size local capacity from what reconciles cost
 
-**Status:** design, revised after its second independent review (§15), for
+**Status:** design, revised after its third independent review (§15), for
 re-review. Nothing is built. The open questions were decided by the user on
 2026-11-08 (§13). It replaces the
 mechanical step of §7 of [design-rate-limit-governor](./design-rate-limit-governor.md)
@@ -348,38 +348,71 @@ end of a GC, so that is when memory is observed:
   would pair exactly, but `runtime.AddCleanup` runs its function "some time
   after" the object is unreachable, possibly "arbitrarily far into the future",
   `GOROOT/src/runtime/mcleanup.go`, so it can't.)
-- **The regression.** Across observations, `live = U₀ + m·N + ε`: `U₀` the
-  informer caches and runtime state, `m` the mean live memory per reconcile in
-  flight, weighted by the time each holds a slot, and `ε` the spread from which
-  reconciles happen to be in flight. It is fitted by least squares:
+- **The regression.** Across observations,
+  `live = U₀ + m·N + β·t + ε`: `U₀` the informer caches and runtime state at the
+  present, `m` the mean live memory per reconcile in flight, weighted by the time
+  each holds a slot, `β` a drift of the caches in time (`t` in minutes before
+  now), and `ε` the spread from which reconciles happen to be in flight. The
+  time term is there because the in-flight count also moves with time, during
+  the warm-up above all, and caches that shrink or grow meanwhile would otherwise
+  be read as a cost per slot (§15, third review, M2: a cache shrinking during the
+  ramp read as 3.5 MB per slot against a true 7). It is fitted by weighted least
+  squares:
   - **Regressor:** the midpoint of `[N⁻, N⁺]`, with an error of variance
     `(N⁺ − N⁻)²/12`. An error in the regressor biases a plain slope towards
-    zero, the unsafe side, so the slope is corrected for it, the
-    errors-in-variables method of moments: `m_fit = cov(N, live) / (var(N) − σ̄ᵤ²)`,
-    with `σ̄ᵤ²` the weighted mean of those error variances.
-  - **Window and weighting:** each observation weighted by `exp(−age/τ_m)`,
-    `τ_m = 10 min`, and otherwise equally. The caches and the mix change over
-    minutes, not seconds, and a long window keeps the warm-up's few-slot
-    observations, which give the fit its spread (below). A shift in the queues'
-    shares (§3.5) restarts the fit, since `m` is a property of the mix.
+    zero, the unsafe side, so the moments are corrected for it, the
+    errors-in-variables method of moments: `σ̄ᵤ²`, the weighted mean of those
+    error variances, is taken off the variance of `N` before solving.
+  - **Weights: recency, and a variance that grows with `N`** (§15, third review,
+    L2). Each in-flight reconcile adds its own independent part to the spread,
+    so `Var(ε | N) = s₀ + s₁·N`. Each observation is weighted by
+    `exp(−age/τ_m) / (s₀ + s₁·N)`, with `τ_m = 10 min`; `s₀` and `s₁` are fitted to
+    the squared residuals by the same weighted regression, in three passes
+    (iteratively reweighted least squares), with `s₀` at least the measurement's
+    own noise. Unweighted, the band is too wide at a few slots and too narrow at
+    a full set, which is where the slots operate.
   - **Confidence level:** one-sided 97.5%, `z = 1.96` (a Student-t quantile with
     the effective degrees of freedom when they are under 30). From the fit:
     `m̂ = m_fit + z·SE(m_fit)`, the upper bound of the slope; `Û₀ = U₀_fit −
-    z·SE(U₀_fit)`, the lower bound of the intercept; `σ̂`, the residual standard
-    deviation; and the upper prediction bound of `live` at `N`,
-    `L̂⁺(N) = U₀_fit + m_fit·N + z·√(σ̂² + Var(U₀_fit + m_fit·N))`, which covers a
-    new observation at `N` with probability 97.5% when the model holds.
-  - **Identified** when the effective number of observations is at least 10, the
-    corrected spread `var(N) − σ̄ᵤ²` is at least one slot squared, and the slope
-    is positive with relative standard error at most 0.25. The warm-up gives the
-    spread: it starts at one slot (§7), so the first observations have one or
-    two in flight and later ones a full set. A full set alone doesn't: with 11
-    or 12 in flight and nothing lower, the scratch fit is never identified. With
-    a relative standard error of 0.25, `m̂` falls below `m/2` only if the fit is
-    more than four standard errors low, probability under `3×10⁻⁵`.
-- **Before the fit is identified**, and whenever it isn't, the memory input runs
-  a fallback (§4.4) on the first draft's baseline: `Û₀,idle`, the lowest `live` at
-  an observation with nothing in flight at any moment, 0 until there is one.
+    z·SE(U₀_fit)`, the lower bound of the intercept at the present; and the upper
+    prediction bound of `live` at `N`,
+    `L̂⁺(N) = U₀_fit + m_fit·N + z·√(s₀ + s₁·N + Var(U₀_fit + m_fit·N))`, which
+    covers a new observation at `N` with probability 97.5% when the model holds.
+    The time term enters only through `U₀_fit`, the intercept now: no trend is
+    extrapolated forward.
+  - **Identified** when all of these hold: the effective number of observations
+    is at least 10; **the spread of `N` that time doesn't explain**, the weighted
+    variance of the residual of `N` regressed on `t`, less `σ̄ᵤ²`, is at least one
+    slot squared, which is the collinearity test (an `N` that only rises with
+    time can't separate a cost per slot from a drift); and the slope is positive
+    with relative standard error at most 0.25. With that standard error, `m̂`
+    falls below `m/2` only if the fit is more than four standard errors low,
+    probability under `3×10⁻⁵`. The warm-up's ramp alone doesn't identify, since
+    it rises with time; what does is `N`'s movement around its trend: in-flight
+    counts that vary from sample to sample, the capacity's alternation by error
+    diffusion (§4.5), and the fallback's moves down as well as up. In the
+    scratch runs of the reviewer's mix the fit was identified in 82–99% of the
+    GCs of an hour.
+- **The fit's lifecycle** (§15, third review, M1). At each observation the
+  current window's fit is used if it is identified. If it isn't, the last
+  identified fit is kept, predicting at the time it was fitted, as long as the
+  new observations stay inside its band. They leave it, and the fit is
+  restarted, on either of two tests on the standardized residuals
+  `(live − U₀_fit − m_fit·N)/√(s₀ + s₁·N)` of the fit in use:
+  - two in a row beyond 3 on the same side, §3.5's rule, for a jump;
+  - the mean of each disjoint block of 30 beyond `3/√30`, for a sustained shift
+    too small to show in one observation. A mix that got lighter moved the
+    residuals by about 1.8 standard deviations, inside the single-observation
+    band, and only this test saw it.
+
+  A restart drops the window's observations, since they describe the workload
+  before the change, and records its direction: up (heavier than the fit) or
+  down (lighter). A shift in the queues' shares (§3.5) restarts it too, with no
+  direction. Under the model, a false restart from the block test has
+  probability 0.27% per block, about once every three hours at one GC a second;
+  the scratch hour-long runs had 0 to 2.
+- **With no usable fit**, before the first identification and after a restart
+  until the next one, the memory input runs the fallback of §4.4.
 
 **Why a regression, not an allocation bound** (§15, H1-new). The revision before
 this one capped `m̂` by the heap allocated per completed reconcile, `Δallocs/C`,
@@ -389,14 +422,14 @@ reviewer's case, like oasgen's mix: 150 fast Observes a second (50ms, 200 KB) an
 2 creates a second (2s, 20 MB), about 11 in flight. Per completion that is
 0.46 MB, per reconcile in flight 7.1 MB, so the cap admitted about 300 slots,
 the ceiling in practice, and an OOMKill. The regression measures `m` itself: in
-2,000 scratch trials of that mix with the warm-up's spread, its upper bound
+2,000 scratch trials of that mix with the warm-up's spread (the second review's fit, before the time term), its upper bound
 covered `m` in 99.8%, with a median of 9.3 MB, 31% above it.
 
 **Why not the first draft's idle baseline alone.** Without a fully idle
 observation it is 0, and `(live − 0)/N⁻` carries the informer caches into every
 reconcile's cost: 13 slots fit in the review's case (140 MB of caches, a 166 MB
 budget, 2 MB each), and that estimator was at 5.6 after 20 GCs (§15, H2). The
-fallback of §4.4 therefore uses it only to size decreases, never to size rises.
+fallback of §4.4 doesn't use it: its moves are sized by no estimate of `m`.
 
 ## 4. The formula
 
@@ -604,9 +637,10 @@ leaves the GC room between the live heap and the limit. With no Go limit but a
 `live × (1 + GOGC/100)`, so `H = ((1 − r) M − nonheap)/(1 + GOGC/100)`. This
 replaces the working-set ratios.
 
-**The law, once the fit is identified** (§3.6). At each observation:
+**The law, with a usable fit** (§3.6: the current one, or the last one kept).
+At each observation:
 
-`S_mem = min( N_pred , N_room )`
+`S_mem = min( N_pred , N_room , S_prev + (H − live)/g⁺ )`
 
 - `N_pred`, the largest `N` up to the ceiling with `L̂⁺(N) ≤ H`: the most
   reconciles whose live heap, predicted with its spread and the fit's own
@@ -615,42 +649,56 @@ replaces the working-set ratios.
   more as the room this GC showed holds, at the upper bound of the cost. It
   binds when this observation's `live` is above what the fit predicts: a burst
   of heavy reconciles, or caches that grew faster than the window follows.
+- **The data cap on every rise** (§15, third review, M2): a rise of `Δ` slots is
+  allowed only when `H − live ≥ Δ·g⁺`, where `g⁺` is the largest increase in
+  live per added slot measured over the window `τ_m`: over consecutive
+  observations `j − 1, j` in which the count certainly rose (`N⁻ⱼ − N⁺ⱼ₋₁ ≥ 1`),
+  `(liveⱼ − liveⱼ₋₁)/(N⁻ⱼ − N⁺ⱼ₋₁)`. Dividing by the rise that certainly happened
+  makes each term an upper bound for its pair. Until one such pair has been
+  measured, a rise is one slot. The cap needs no model: it says the room left
+  must hold every added slot at the worst per-slot cost seen. It stops a fit
+  that is wrong in a way its band can't yet see from moving the slots in one
+  GC; the reviewer's case went from 5 to 29 slots in one GC, with live at about
+  233 MB, past `G`. It also bounds the cost of a single large hold that has been
+  seen once (L1 below).
 
 `N_pred` is what the decided estimator gives (§13 item 9): the fit's slope and
 intercept, with their uncertainty and the residual spread. The reviewer's mix
 showed why the spread has to be in it. Its live heap varies by about 40 MB from
 one GC to the next, depending on how many 20 MB creates happen to be in flight,
 so a law aimed at the *mean* live heap, `(H − U₀)/m`, put it over the budget in
-130 of 300 GCs. With `N_pred` the same scratch run held 7 to 17 slots, and live
-was over `H` in 9 to 21 of 300 GCs, 3–7%, and over the Go limit `G` in at most
-1 of 300, across three seeds. `Û₀`, the lower bound of the intercept, doesn't
-set slots: a lower baseline would mean more room, so it is the unsafe side. It is
-exported as the caches' size and used where a lower bound is the safe one.
+130 of 300 GCs. `Û₀`, the lower bound of the intercept, doesn't set slots: a
+lower baseline would mean more room, so it is the unsafe side. It is exported as
+the caches' size.
 
-**The fallback, before identification and whenever the fit isn't identified.**
+**The fallback, with no usable fit.**
 
-- **Rises:** one slot per observation whose `live` is under `H`, and never more
-  than §7's warm-up pacing. A rise is sized by no estimate, so the caches can't
-  stall it, and each one is measured by the next GC before the next rise.
+- **Rises:** one slot per observation, and only when the room covers that slot
+  and the live heap's own spread: `H − live ≥ g⁺ + z·s_live`, where `s_live` is
+  the spread of `live` from one GC to the next, the root mean square of the
+  differences over the last 60 observations divided by `√2`. Without the spread
+  term the fallback rises until `live` reaches `H` and then sits on it, over the
+  budget about half the time for a mix whose live heap varies (§15, third
+  review, M1); in the scratch hour-long run it reached 251 MB against a 256 MB
+  limit. Never more than §7's warm-up pacing.
+- **Never above the last identified `N_pred`** (M1), unless the last restart was
+  downward: the observations showed the workload lighter than that fit, which
+  is evidence the old bound is too low. After an upward restart or a queue-share
+  restart the old `N_pred` stays a ceiling, and the fallback can only fall below
+  it. Without the exception a lighter mix deadlocks: the slots stay at the old
+  bound, the count stops moving, and no new fit is ever identified.
 - **Decreases:** when `live` is over `H`, one slot per observation, and no grants
-  while it stays over (the GC limiter's rule below applies as well). The
-  estimate that would size a larger cut, `(live − Û₀,idle)/N⁻`, carries the
-  caches when there was no idle observation, which makes it too large and so the
-  cut too small; one slot per GC is the pace the data supports.
-- **What it risks:** between two GCs, one reconcile more than the last GC
-  measured, so `live` can pass `H` by up to one reconcile's live memory. That is
-  what `r` covers when a reconcile keeps less than `r·G`, 31 MB at 256Mi; §10's
-  heterogeneous case has 20 MB creates.
-- **It ends itself.** The rises spread the in-flight count from one slot up,
-  which is what identifies the fit. In the scratch runs it was identified at the
-  10th GC with 2 MB reconciles and the 14th to 20th with the reviewer's mix.
+  while it stays over (the GC limiter's rule below applies as well).
+- **What it risks:** between two GCs, the next reconcile admitted. With `g⁺`
+  measured, the room covers it at the worst cost seen.
 - **It is one of the design's fixed steps.** One slot per GC is a fixed step,
-  paced by measurements, not by a timer, and it applies only while the
-  estimator has nothing better to go on.
+  paced by measurements, not by a timer, and it applies only while the estimator
+  has nothing better to go on (§7).
 
-**Convergence, with the confidence bound.** Take `live = U₀ + mN + ε`, the
-model of §3.6, with `ε` independent of `N` and the mix of reconciles in flight
-the same at every `N` (assumption A4).
+**Convergence, with the confidence bound.** Take the model of §3.6,
+`live = U₀ + mN + βt + ε`, with `ε` independent of `N`, its variance
+`s₀ + s₁N`, and the mix of reconciles in flight the same at every `N`
+(assumption A4).
 
 - **What is proved is a probability, not a construction.** At any one
   observation, `m̂ ≥ m` with probability at least 97.5% and `L̂⁺(N)` covers the
@@ -660,13 +708,14 @@ the same at every `N` (assumption A4).
 - **When the bound holds** (`m̂ ≥ m`), the map `S' = N⁻ + (H − U₀ − mN)/m̂` rises
   for `N < N*` and stays at or below `N* = (H − U₀)/m`, with slope `1 − m/m̂` in
   `[0, 1)`: monotone, from below. `N_pred ≤ N*` too, up to the 2.5% tail of
-  `ε`. So `S_mem` approaches its target from below and doesn't pass it.
+  `ε`. So `S_mem` approaches its target from below and doesn't pass it. The data
+  cap only slows a rise; it never raises.
 - **When it fails**, `m̂ = (1 − δ)m` for some `δ > 0`, and the step overshoots the
-  remaining room by `δ/(1 − δ)` of it. Identification requires a relative
-  standard error of at most 0.25, so `δ > 1/2`, where the map would stop
-  converging, needs the fit four standard errors low, probability under
-  `3×10⁻⁵`. A smaller `δ` overshoots part of the room left, and the next GC's
-  `N_room` takes it back.
+  remaining room by `δ/(1 − δ)` of it, no further than the data cap allows.
+  Identification requires a relative standard error of at most 0.25, so
+  `δ > 1/2`, where the map would stop converging, needs the fit four standard
+  errors low, probability under `3×10⁻⁵`. A kept fit that has gone wrong shows
+  in its residuals, and the band tests restart it.
 - **Above the target**, after a burst of heavy reconciles or caches that grew,
   `H − live < 0`, `N_room < N⁻`, and there are no grants until enough reconciles
   end. Down to the floor if the caches alone exceed the budget: there is no
@@ -680,17 +729,33 @@ counting admissions as if they had happened before the GC. Unlike the CPU law,
 nothing here depends on duration, and between two GCs `S_mem` doesn't change, so
 new admissions are paced by the GCs that measure them.
 
+**The worst case** (§15, third review, L1). No rule can bound a reconcile it has
+never seen. A single reconcile whose live memory exceeds
+`memory.max − nonheap − H`, admitted while `live` is near `H`, takes the
+container past `memory.max` and is OOMKilled; at 256Mi, with `H ≈ 166 MiB` and
+about 8 MiB of non-heap memory, that is a hold over about 82 MiB. Even alone, at
+the floor of one slot, a hold over `memory.max − nonheap − U₀` is OOMKilled. If
+the container survives the first one, `g⁺` includes it, and every later rise
+must leave room for it, for as long as it stays in the window.
+
 **The review's cases** (scratch, one GC per step, a backlog from the start and
-no idle observation, ceiling 64, the fallback until the fit is identified):
+no idle observation, ceiling 64, the full rules of this section and §3.6). These
+runs re-measure the second review's figures under the third review's rules;
+those were 3–7% over `H` with an unweighted fit and no data cap.
 
-| Caches `U₀` | Budget `H` | Per reconcile | Target | Identified at | Result |
-|---|---|---|---|---|---|
-| 140 MB | 166 MB | 2 MB, sd 1 MB | 13 | GC 10 | 90% of the target by GC 21, then 11 or 12; live over `H` by the noise only |
-| 300 MB | 600 MB | 2 MB | 150, ceiling 64 | GC 10 | the ceiling at GC 10 |
-| 500 MB | 690 MB | 2 MB | 95, ceiling 64 | GC 10 | the ceiling at GC 10 |
-| 30 MB | 166 MB | the reviewer's mix, `m` 7.1 MB | 19.2 by the mean | GC 14–20 | 7–17 slots; live over `H` in 3–7% of GCs, over `G` in at most 1 of 300 |
+| Case | Result |
+|---|---|
+| Caches 140 MB, budget 166 MB, 2 MB per reconcile (target 13) | settles at 11, never over `H` |
+| Caches 300 or 500 MB, budgets 600 or 690 MB, 2 MB (targets past the ceiling) | the ceiling at GC 57, never over `H` |
+| The reviewer's mix, 4,000 GCs (over an hour), 3 seeds | 5–11 slots; live over `H` in 0.5–2.6% of GCs, over `G` in 0–2 of 4,000, at most 212 MB; the fit identified in 82–99% of GCs; 0–2 restarts |
+| The same mix, caches shrinking from 100 to 30 MB during the ramp | the largest rise in one GC, 1 slot; over `G` in 1 of 600 GCs |
+| The same mix lightening (creates' share from 35% to 10% over 10 minutes) | one downward restart; slots from 8 to 29.5; over `G` in 4 of 3,000 GCs, at most 236 MB |
 
-The first revision's figures with `â` (§15, H2) are withdrawn with `â`.
+The scratch model redraws which reconciles are in flight at every GC, so its
+live heap varies more from one GC to the next than a real one, where a 2s create
+spans two GCs. That inflates `s_live` and `g⁺`, and so makes these results
+conservative in throughput. §10's Go simulation models each reconcile's
+lifetime.
 
 **When the GC CPU limiter has engaged** since the last sample
 (`/gc/limiter/last-enabled:gc-cycle` changed), the GC is already losing; the room
@@ -956,9 +1021,13 @@ Everything else:
   allow. That is the price of not admitting work before any of it has been
   measured.
 - **Memory increases** are bounded by what the fit predicts and the room the
-  last GC showed, and don't move between GCs (§4.4). Before the fit is
-  identified they come only from the fallback, one slot per GC under `H`, and
-  never faster than the warm-up pacing above: never a jump to the ceiling.
+  last GC showed, and don't move between GCs (§4.4). Every one of them, with a
+  fit or without, is also capped by the data: `Δ` slots only when the room
+  holds `Δ` times the largest per-slot increase measured. With no usable fit
+  they come only from the fallback, one slot per GC when the room covers it and
+  the live heap's spread, never above the last identified bound unless the
+  workload measured lighter, and never faster than the warm-up pacing above:
+  never a jump to the ceiling.
 - **Capped and pressured samples** never raise (§4.2, §5.1), and **pressure**
   blocks rises (§6).
 
@@ -1068,7 +1137,10 @@ whole number) and the input gauges, with `memory_working_set` gone and
 | `…local.queue.slot_share{controller}` | fraction | each queue's smoothed share of the slot-time, `A_q/A` |
 | `…local.estimate.restarts{estimate, cause}` | count | restarts by estimate (`k`, `c`, `d`, `m`) and cause (`cost`, `mix`) |
 | `…local.memory.budget`, `…memory.live`, `…memory.baseline`, `…memory.per_reconcile`, `…memory.spread` | bytes | `H`, `live`, `Û₀` (lower bound), `m̂` (upper bound), `σ̂` |
-| `…local.memory.identified` | 0/1 | the regression identified (§3.6); 0 means the fallback runs |
+| `…local.memory.identified` | 0/1 | the current window's fit identified (§3.6) |
+| `…local.memory.fit_kept` | 0/1 | the last identified fit in use, the current one not identified |
+| `…local.memory.max_increment` | bytes | `g⁺`, the largest increase in live per added slot over the window |
+| `…local.memory.fit_restarts{direction}` | count | restarts of the fit: `up`, `down` (band tests), `mix` (queue shares) |
 
 and a counter `…local.pressure_blocked`, samples in which pressure held a rise.
 `Snapshot` gains the same values. They are provider-runtime's own; core-provider's
@@ -1101,14 +1173,21 @@ stepwise release (§5.1); error diffusion averaging to the real value within
 new Go limit, a clamp, a change of binding input, a restart) followed by `⌊S⌋`;
 a pressure-held sample keeping the carry. Memory with a fake runtime-metrics
 reader (#48's `goMemory` seam): observation only when the GC count rises, `N⁻`
-and `N⁺` recorded with it; the regression against a reference least-squares fit,
-its errors-in-variables correction, its exponential weights, its 97.5% bounds
-and prediction bound; each identification condition failing on its own (too few
-observations, too little spread, a non-positive slope, a relative standard error
-over 0.25), and a full set of slots alone never identifying; the fallback's rise
-of one slot per observation under `H`, its decrease of one per observation over
-it, never past the warm-up pacing, and its hand-over to the fit; a restart of the
-fit on a queue-share shift; `S_mem = min(N_pred, N_room)` with each term binding;
+and `N⁺` recorded with it; the regression on `N` and time against a reference
+weighted least-squares fit, its errors-in-variables correction, its weights
+(recency and the fitted `s₀ + s₁N`), its 97.5% bounds and prediction bound, and
+no trend extrapolated forward; each identification condition failing on its own
+(too few observations, a spread of `N` that time explains, a non-positive slope,
+a relative standard error over 0.25), a ramp that only rises with time never
+identifying, and a full set of slots alone never identifying; the kept fit
+predicting at its own time, and each restart (two beyond 3σ up, two down, a block
+mean beyond `3/√30` either way, a queue-share shift) dropping the window and
+recording its direction; the current fit preferred to the kept one; `g⁺` only
+from pairs whose count certainly rose, and its window; the data cap binding on
+an identified rise and on a fallback rise; the fallback's rise needing
+`g⁺ + z·s_live` of room, its bound at the last `N_pred` and the exception after a
+downward restart, its decrease of one per observation over `H`, never past the
+warm-up pacing; `S_mem = min(N_pred, N_room, data cap)` with each term binding;
 the limiter alarm, `GOGC` without a Go limit, `GOGC=off`; a second Governor's
 `Start` leaving the Go memory limit alone and warning (L7).
 
@@ -1127,9 +1206,12 @@ over `H`. And the review's cases, each with its pass condition:
 | H1: 500m, 3ms of CPU per 0.8s reconcile, `B` 15 ms/s, idle samples with bursts to 60 ms/s | the slots reach the ceiling within 10 samples and never return to the floor |
 | H1: the same, `B` noisy (sd 10 ms/s) against 3.75 ms/s per slot, 10 minutes | never below the ceiling after warm-up |
 | H1: the measured workload with `B` 20 ms/s and idle bursts above `U(1)` | monotone from one slot to the target, mean CPU 85–95% |
-| H2: a backlog from the start, no idle observation, caches of 100, 300 and 500 MB against budgets that fit them, 2 MB kept and 4 or 50 MB allocated per reconcile | the fit identified within 20 GCs; `live` over `H` by no more than one reconcile's memory; 90% of `min(N_pred, ceiling)` within 30 GCs |
-| H1-new: heterogeneous durations, the reviewer's mix: 150 fast Observes a second (50ms, 200 KB) and 2 creates a second (2s, 20 MB), against 256Mi with a Go limit | no OOMKill; `live` over `G` in at most 1% of GCs; over `H` in at most 10%; the fit identified within 30 GCs; the slots never above the mean target `(H − U₀)/m` |
-| H1-new: the same mix with no warm-up spread (started at a full set of slots by a fake) | never identified; the fallback rules throughout; no OOMKill |
+| H2: a backlog from the start, no idle observation, caches of 100, 300 and 500 MB against budgets that fit them, 2 MB kept per reconcile | the fit identified within 120 GCs; `live` never over `H` by more than one reconcile's memory; 90% of `min(N_pred, ceiling)` within 120 GCs |
+| H1-new: heterogeneous durations, the reviewer's mix: 150 fast Observes a second (50ms, 200 KB) and 2 creates a second (2s, 20 MB), against 256Mi with a Go limit | no OOMKill; `live` over `G` in at most 1% of GCs; over `H` in at most 10%; the slots never above the mean target `(H − U₀)/m` |
+| Third review, M1: the same mix for more than an hour (4,000 GCs at least), each reconcile's lifetime modelled | `live` over `G` in at most 0.1% of GCs, over `H` in at most 5%; no OOMKill; the fit used (current or kept) in at least 95% of GCs after the first identification; no fallback rise above the last identified `N_pred` without a downward restart |
+| Third review, M2: caches shrinking from 100 to 30 MB during the ramp | no rise in one GC larger than `(H − live)/g⁺`; never over `G`; no identification while `N` and `t` are collinear (the time-unexplained spread under one slot squared) |
+| Third review, M2: a within-queue mix that lightens (creates' share 35% to 10% over 10 minutes) | a downward restart; the slots rise past the old `N_pred` under the data cap; never over `G` |
+| H1-new: the same mix with no spread at all (a fake holding the count fixed) | never identified; the fallback rules throughout; no OOMKill |
 | M1: a cheap queue (1ms of CPU, 2s each) at the ceiling, then an expensive one (23ms, 0.43s) taking the backlog | with the expensive queue seen uncapped before: the capped descent geometric at the rate §4.2 derives, `θ·D_mix/Dᵢ` per sample, out of the cap within 6 samples (the reviewer's example: 32 → 14.7 → 6.9 → 3.45, 5 samples at the cap, against about 30 at `θ`); at most one crossing of the target, then a monotone rise to it; never seen: a descent of at least `θ` per sample, and no rise while capped |
 | M2: no `cpu.max`, a node model with CFS shares among other cgroups, the container's share stepping from 400 to 800 and back to 400 ms/s | at onset, one step to within 10% of the law's value at `ρL_eff`; stall over the threshold in at most 10% of samples at a steady share; a doubled share found within 10 windows |
 | M2-a: a node that gives 4 cores, with a 1s blip to 0.5 core, and separately a 15s dip to 0.5 core | the blip learns no limit and blocks rises for its sample only; the dip learns one after `τ`, and once it ends the CPU is back to 90% of the pre-onset level within one clear window (scratch: 2 samples after the dip) |
@@ -1356,7 +1438,21 @@ confirmed item 3's gradual release then.
    the budget in 130 of 300 GCs on the reviewer's own mix; and the fallback's
    rises are one slot per GC under the budget, sized by no estimate, because the
    idle-only baseline the decision names stalls at one slot when there is no
-   idle observation, which was H2.
+   idle observation, which was H2. **After the third review**, decided by the
+   coordinator (§15): the fit also has a time term, with identification refused
+   when the in-flight count moves only with time; the last identified fit is kept
+   while observations stay in its band, re-fitted when they leave it or the
+   queue shares shift; the fallback never rises above the last identified bound;
+   and every memory rise is capped by the largest per-slot increase measured.
+   Three points of this revision's, all data-based, for the coordinator to
+   confirm: the current window's fit is used whenever it is identified, and the
+   last one kept only while it isn't, because a fit frozen as soon as it was
+   identified kept an unlucky early fit for an hour and put live over `G` in 27
+   GCs; a sustained-shift test on the mean of blocks of residuals, because a
+   lighter mix stayed inside the single-observation band; and an exception to
+   the fallback's bound after a downward restart, plus a spread margin on its
+   rises, because without them a lighter mix deadlocked at the old bound and the
+   fallback sat on `H`.
 
 ## 14. Checked, and not
 
@@ -1435,3 +1531,15 @@ taken on them:
 | L1 | The rate of `D_mix`'s descent at the cap | §4.2: the first term is `θ·N̄·D_mix/D`, geometric at about `θ·D_mix/D` per sample after a mix shift; the reviewer's example, 5 samples at the cap against about 30 at `θ`; §10's mix-shift case checks it |
 | L3 | The unresolvable rule's wording | §4.2: `k̂ ≤ 0` or `k̂ < 2·SE` |
 | L4 | `D̂_q` is not uncontended | §3.4 and §4.2: it is from active samples, at least the uncontended duration, which errs on the safe side |
+
+**Third independent review, of `d14ee27`, 2026-11-09.** Nothing High. Two Medium
+and three Low, all on the memory fit's lifecycle. The coordinator asked for
+data-based fixes only, and no new fixed steps; none is added.
+
+| Item | Finding | Answer |
+|---|---|---|
+| M1, Medium | Identification lapses at steady state: the warm-up's spread decays within about 17 minutes, and the fallback's one slot per GC then seeks the mean, over `H` about half the time | §3.6: the last identified fit is kept while observations stay in its band, predicting at the time it was fitted; it restarts when they leave the band (two beyond 3σ on one side, or a block mean of 30 beyond `3/√30`) or the queue shares shift, and a restart drops the old observations. The current window's fit is used whenever it is identified (§13 item 9). §4.4: the fallback never rises above the last identified `N_pred`, except after a downward restart, and its rises need room for the worst per-slot increase plus the live heap's measured spread. §10: a heterogeneous run of more than an hour. Scratch, 4,000 GCs, 3 seeds: over `H` in 0.5–2.6%, over `G` in 0–2 GCs |
+| M2, Medium | The spread is confounded with time, and an identified fit jumps in one GC: a cache shrinking during the ramp read as 3.5 MB per slot against 7, and the slots went 5 → 29 with live about 233 MB, past `G` | §3.6: `live` regressed on `N` and time, identification refused when the spread of `N` that time doesn't explain is under one slot squared. §4.4: every rise capped by the data, `Δ` slots only when `H − live ≥ Δ·g⁺`, `g⁺` the largest increase in live per added slot measured where the count certainly rose; no doubling rule. §10: the cache-shrink and lightening-mix cases. Scratch: the largest one-GC rise in the shrink case was 1 slot |
+| L1 | A large single hold | §4.4: covered by the data cap once seen; the worst case stated, a hold over `memory.max − nonheap − H` (about 82 MiB at 256Mi) admitted near `H`, or over `memory.max − nonheap − U₀` even alone, is an OOMKill that no rule can prevent the first time |
+| L2 | Weight the regression with a variance that grows with `N`, and re-check the over-`H` figure | §3.6: weights `exp(−age/τ_m)/(s₀ + s₁N)`, the variance model fitted to the squared residuals by iteratively reweighted least squares; the prediction bound uses it. §4.4: re-measured under all the third review's rules, 0.5–2.6% over `H` in hour-long runs, against the previous 3–7% |
+| L3 | §10's H2 row still named allocation | §10: the row rewritten; allocation enters no rule now |
