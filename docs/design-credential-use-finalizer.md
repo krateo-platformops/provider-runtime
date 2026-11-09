@@ -471,11 +471,10 @@ revision 16). The format is identical in `k8s.io/apiserver` v0.31.0, v0.33.0,
 v0.35.0, v0.36.5 and v0.37.2, read from the module cache
 (`pkg/endpoints/handlers/responsewriters/errors.go`, `forbiddenMessage`); in
 v0.31.0 `Forbidden` builds the message inline, with the same `: <reason>`
-suffix. CI pins the exact text on envtest 1.37.0, and the same test runs on
-1.34, 1.35 and 1.36 locally. Neither provider-runtime nor installer states
-the oldest Kubernetes version Krateo supports (installer's chart has no
-`kubeVersion` constraint), so that is open for the user (§18). Once it is
-named, the envtest pins the text on it too.
+suffix. **Krateo's minimum Kubernetes is 1.36** (the user's decision,
+§18). CI pins the exact text on envtest 1.37.0 and on 1.36.2, the latest
+1.36 patch, in `.github/workflows/run-tests.yaml`, and the same test also
+passes locally on 1.34 and 1.35.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an
@@ -3805,7 +3804,7 @@ amendment keeps the merged design's safety proofs. Its findings:
 | M2 The consent-read `RetryAfter` had no backoff: exponential per (holder, ref), from 1s doubling to the poll interval, reset on success; an overload test | §11.3, §8 step 5, §14 |
 | L1 An R3 422 against an unchanged resourceVersion is an error with an event and a metric, not contention; each retry rebuilds the patch, which tests every value it removes | §6.2, §12, §14 |
 | L2 A1 copies the whole returned `ObjectMeta`, and re-reads the object before the next write when the generation or labels changed | §6.2 A1 |
-| L3 Class (e) is counted; the RBAC message format is the same from apiserver v0.31.0 to v0.37.2; the oldest supported Kubernetes version is open | §6.2, §12, §18 |
+| L3 Class (e) is counted; the RBAC message format is the same from apiserver v0.31.0 to v0.37.2; Krateo's minimum Kubernetes is 1.36 (the user's decision), and CI pins the message on 1.36.2 and 1.37.0 | §6.2, §12, §18 |
 | L4 Guarded CRD writes are bounded to 5 attempts, and a starved count write is logged and counted | §7.3, §12 |
 
 ## 18. Open questions for the user
@@ -3814,9 +3813,10 @@ amendment keeps the merged design's safety proofs. Its findings:
 §5.2), NQ3 (the builder line, §7.5) and NQ4 (provider-runtime#46). In
 revision 16, IP1 to IP5 (§17).
 
-**Open:** the oldest Kubernetes version Krateo supports. Neither
-provider-runtime nor installer states one. The RBAC message's format is the
-same from Kubernetes 1.31 to 1.37 (§6.2), and once a minimum is named, the
-envtest that pins the message runs on it too.
+**Decided after the review of revision 16:** Krateo's minimum Kubernetes
+is **1.36**. CI runs the premise envtests, the exact RBAC message among
+them, on 1.36.2 and 1.37.0 (§6.2).
+
+Nothing is open.
 
 Nothing is open. No question needs the user.

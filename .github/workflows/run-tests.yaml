@@ -30,6 +30,16 @@ jobs:
           echo "KUBEBUILDER_ASSETS=$assets" >> "$GITHUB_ENV"
       - name: Run coverage
         run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+      # pkg/credentialuse's premise tests pin the API facts the credential-use
+      # protocol rests on, the authorizer's exact RBAC message among them
+      # (docs/design-credential-use-finalizer.md §6.2). The run above has them
+      # on 1.37.0; this runs them again on Krateo's minimum Kubernetes, 1.36
+      # (the user's decision, design §18), at its latest patch.
+      - name: Premise tests on the minimum Kubernetes (1.36)
+        run: |
+          assets="$("$(go env GOPATH)/bin/setup-envtest" use -p path 1.36.2)"
+          test -n "$assets"
+          KUBEBUILDER_ASSETS="$assets" go test -race -count=1 -run '^TestPremise' ./pkg/credentialuse/
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:

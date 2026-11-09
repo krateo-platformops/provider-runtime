@@ -165,8 +165,9 @@ patches, R3's patch), §10.1 (labels).
     and no `metadata.finalizers` cause;
   - (d) an A2 by an impersonated ServiceAccount without `patch`: 403, with
     the authorizer's exact message pinned, for a namespaced and a
-    cluster-scoped object. CI runs it on 1.37.0, and it is run locally on
-    1.34, 1.35 and 1.36 (L3 of #52's review);
+    cluster-scoped object. CI runs every premise test on 1.37.0 and on
+    1.36.2, since Krateo's minimum Kubernetes is 1.36 (the user's decision);
+    they also pass locally on 1.34 and 1.35 (L3 of #52's review);
   - (e) NamespaceLifecycle's 403 on a create in a terminating namespace;
   - the classifier gives each real error its class, and Deleting comes only
     from (a), never from a 403;
@@ -1067,7 +1068,7 @@ it in the docs.
 | V9 | json-patch v4's `test` with `null` passes on a missing key only when the parent exists | `gopkg.in/evanphx/json-patch.v4@v4.13.0/patch.go:677-693` | A4: not relied on |
 | V10 | `GetConfig` disables client-side rate limiting when QPS is 0 | `controller-runtime@v0.25.2/pkg/client/config/config.go:101-104` | §6.6's backfill figures stand |
 | V11 | kube-controller-manager's clients are `NewClient("root-ca-cert-publisher")` and `NewClient("service-account-controller")` | `kubernetes@v1.36.2/cmd/kube-controller-manager/app/certificates.go:269`, `core.go:618` | §10.6.1's identities stand; PR 8 impersonates them |
-| V12 | The authorizer's message format is the same in `k8s.io/apiserver` v0.31.0, v0.33.0, v0.35.0, v0.36.5 and v0.37.2 | `pkg/endpoints/handlers/responsewriters/errors.go`, `forbiddenMessage`, in each version in the module cache | class (d)'s pattern holds from Kubernetes 1.31 to 1.37. The oldest version Krateo supports isn't stated anywhere found (installer's chart has no `kubeVersion`), so it is open for the user |
+| V12 | The authorizer's message format is the same in `k8s.io/apiserver` v0.31.0, v0.33.0, v0.35.0, v0.36.5 and v0.37.2 | `pkg/endpoints/handlers/responsewriters/errors.go`, `forbiddenMessage`, in each version in the module cache | class (d)'s pattern holds from Kubernetes 1.31 to 1.37. Krateo's minimum is 1.36 (the user's decision), and CI pins the message on 1.36.2 and 1.37.0 |
 
 ### To verify, in the PR that needs them
 
