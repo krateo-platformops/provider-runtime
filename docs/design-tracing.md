@@ -127,11 +127,15 @@ already there, under this design.
     `krateo.io/external-create-*` markers and `krateo.io/traceparent-continued`.
     A provider that sets another annotation in memory and relies on this write
     to persist it would lose it. **No consumer does.** I scanned every
-    non-archived go.mod in the org, root and nested, that requires
+    non-archived go.mod in krateo-platformops, root and nested, that requires
     provider-runtime under either module path. All of them use the new path,
     `github.com/krateo-platformops/provider-runtime`; none uses the old
-    `krateoplatformops` path. For each one, I checked whether it sets
-    annotations on a managed resource:
+    `krateoplatformops` path. The repos still on the old path,
+    `github.com/krateoplatformops/...`, live in the old `krateoplatformops`
+    org. Its `provider-runtime` stops at v1.2.1, still under the old module
+    path, so they can't take this change without rewriting the module path. For each consumer in
+    krateo-platformops, I checked whether it sets annotations on a managed
+    resource:
 
     | Consumer (go.mod) | provider-runtime | Uses the reconciler | Annotations it writes |
     |---|---|---|---|
@@ -1610,11 +1614,15 @@ Checked in source:
 - **What alert-provider does in Observe:** it starts its firings there
   (`alert.go:442-473`).
 - **The consumer scan for the critical-write change** (§2). Every non-archived
-  repo's root go.mod was read through the GitHub GraphQL API, and the nested
-  ones through each repo's tree: core-provider's four, oasgen-provider's two,
-  snowplow's, authn's and otel-collector's three. Each was matched against both
-  module paths, and each consumer's code was grepped for annotation writes.
-  Archived repos weren't scanned.
+  go.mod in krateo-platformops was read: the root ones through the GitHub
+  GraphQL API, and the nested ones through each repo's tree. That's
+  core-provider's four, oasgen-provider's two, snowplow's, authn's and
+  otel-collector's three. Each was matched against both module paths, and each
+  consumer's code was grepped for annotation writes. Archived repos weren't
+  scanned. The old `krateoplatformops` org wasn't scanned either. Its repos are
+  on `github.com/krateoplatformops/...`, and its `provider-runtime` is still on
+  that path at v1.2.1 (its `go.mod` and tags, read through the API). So they
+  can't take the change without rewriting the module path.
 - **oasgen-provider's tracing setup**, and that `apiserver`'s generic store
   checks the resourceVersion (`store.go:807-808`).
 - **The consumers:** every consumer file cited in §11, observability's join,
