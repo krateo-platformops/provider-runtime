@@ -362,7 +362,9 @@ func Explore(b Bounds, scenario func(s *Sched) error) Result {
 // Walk runs scenario on n random schedules within b, seeded with seed.
 func Walk(b Bounds, n int, seed int64, scenario func(s *Sched) error) Result {
 	var res Result
-	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // reproducible schedules, not security
+	// A seeded generator, so that a failing schedule replays: crypto/rand
+	// can't be seeded, and nothing here is security.
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // #nosec G404 -- reproducible schedules, not security
 	for range n {
 		s := newSched(b, nil, rng)
 		if err := scenario(s); err != nil {
