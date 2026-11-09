@@ -1,0 +1,300 @@
+TestGateReport (SIM_GATE=1) at 3a1ef49: the plan's §4.5 conditions on the cost model and on
+the utilization baseline at its committed gains (2a23517) and at ×0.5 and ×2. Seeds 1–20.
+Per cell: seeds passing; below, failure kinds counted across seeds, and seeds 1–3's reports.
+
+20 seeds; 1m3s
+
+| Case | cost model | baseline ×1 | baseline ×0.5 | baseline ×2 |
+|---|---|---|---|---|
+| headline | 20/20 | 20/20 | 20/20 | 20/20 |
+| start from one slot | 17/20 | 20/20 | 0/20 | 10/20 |
+| cost doubles | 6/20 | 0/20 | 0/20 | 0/20 |
+| limit halves | 12/20 | 9/20 | 3/20 | 0/20 |
+| limit doubles | 20/20 | 0/20 | 0/20 | 20/20 |
+| wait doubles | 20/20 | 20/20 | 20/20 | 20/20 |
+| usage noise | 19/20 | 12/20 | 20/20 | 0/20 |
+| H1 biased background | 20/20 | 20/20 | 20/20 | 20/20 |
+| H1 noisy background | 20/20 | 20/20 | 20/20 | 20/20 |
+| H1 bursts above one slot | 16/20 | 19/20 | 18/20 | 19/20 |
+| false restarts, 0.47s | 20/20 | 20/20 | 20/20 | 20/20 |
+| false restarts, 30s | 20/20 | 20/20 | 20/20 | 20/20 |
+| mix shift seen | 19/20 | 0/20 | 0/20 | 0/20 |
+| mix shift never seen | 20/20 | 0/20 | 0/20 | 0/20 |
+| no limit, pressure only blocks | 20/20 | 20/20 | 20/20 | 20/20 |
+| contention below the quota | 11/20 | 0/20 | 0/20 | 0/20 |
+| long drain | 0/20 (19 invalid) | 0/20 | 0/20 | 0/20 |
+| rising cost | 13/20 | 18/20 | 0/20 | 0/20 |
+
+H1 bursts above one slot — baseline ×0.5:
+  6× an unattributed fall at …
+  seed 1: an untrusted fall at 1m19.001s: 6.88 to 6.80 with U over ρL
+  seed 1: an untrusted fall at 1m24.001s: 6.45 to 6.37 with U over ρL
+  seed 1: an untrusted fall at 1m29s: 6.02 to 5.96 with U over ρL
+  seed 1: an untrusted fall at 1m30.001s: 5.96 to 5.88 with U over ρL
+  seed 1: an untrusted fall at 1m33.001s: 5.71 to 5.64 with U over ρL
+  seed 1: an untrusted fall at 1m34.001s: 5.64 to 5.59 with U over ρL
+  seed 1: an untrusted fall at 1m35.001s: 5.59 to 5.56 with U over ρL
+  seed 3: an untrusted fall at 26.001s: 9.34 to 9.25 with U over ρL
+  seed 3: an untrusted fall at 59.001s: 6.43 to 6.35 with U over ρL
+  seed 3: an untrusted fall at 1m7s: 5.73 to 5.68 with U over ρL
+  seed 3: an untrusted fall at 1m8.001s: 5.68 to 5.63 with U over ρL
+  seed 3: an untrusted fall at 1m10.001s: 5.56 to 5.51 with U over ρL
+
+H1 bursts above one slot — baseline ×1:
+  1× an unattributed fall at …
+  seed 3: an untrusted fall at 1m18.001s: 5.61 to 5.50 with U over ρL
+
+H1 bursts above one slot — baseline ×2:
+  1× an unattributed fall at …
+
+H1 bursts above one slot — cost model:
+  1× a trusted fall at …
+  3× mean CPU …
+  seed 1: an untrusted fall at 24.001s: 3.36 to 3.35 with U over ρL
+  seed 2: an untrusted fall at 21.001s: 2.99 to 2.97 with U over ρL
+  seed 2: an untrusted fall at 22.001s: 2.97 to 2.91 with U over ρL
+  seed 2: an untrusted fall at 25.001s: 2.96 to 2.89 with U over ρL
+  seed 3: an untrusted fall at 19.001s: 3.24 to 2.93 with U over ρL
+  seed 3: an untrusted fall at 20.001s: 2.93 to 2.82 with U over ρL
+
+contention below the quota — baseline ×0.5:
+  20× above S*( …
+  289× a rise past the onset value at …
+  seed 1: the excursion above the band: 66 samples, at most 4.63 slots over
+  seed 2: the excursion above the band: 61 samples, at most 4.77 slots over
+  seed 3: the excursion above the band: 66 samples, at most 4.59 slots over
+
+contention below the quota — baseline ×1:
+  20× above S*( …
+  298× a rise past the onset value at …
+  seed 1: the excursion above the band: 65 samples, at most 9.71 slots over
+  seed 2: the excursion above the band: 64 samples, at most 9.70 slots over
+  seed 3: the excursion above the band: 65 samples, at most 9.57 slots over
+
+contention below the quota — baseline ×2:
+  20× above S*( …
+  298× a rise past the onset value at …
+  seed 1: the excursion above the band: 36 samples, at most 10.58 slots over
+  seed 2: the excursion above the band: 36 samples, at most 10.58 slots over
+  seed 3: the excursion above the band: 39 samples, at most 10.58 slots over
+
+contention below the quota — cost model:
+  9× above S*( …
+  seed 1: the excursion above the band: 6 samples, at most 4.06 slots over
+  seed 2: the excursion above the band: 4 samples, at most 2.30 slots over
+
+cost doubles — baseline ×0.5:
+  20× into the band [ …
+  4× outside the band [ …
+
+cost doubles — baseline ×1:
+  16× outside the band [ …
+  20× into the band [ …
+
+cost doubles — baseline ×2:
+  20× into the band [ …
+  20× outside the band [ …
+
+cost doubles — cost model:
+  12× no D̂ warm-start restart at the cut's N̄ move
+  1× outside the band [ …
+  2× entered from below at + …
+  2× no capped sample within ℓ = …
+  2× no ĉ deferral followed by a restart after the change
+  4× into the band [ …
+  seed 1: 2 untrusted samples without a standard error excluded from the band rule
+  seed 2: 4 untrusted samples without a standard error excluded from the band rule
+  seed 3: 3 untrusted samples without a standard error excluded from the band rule
+
+false restarts, 0.47s — cost model:
+  seed 1: restarts after warm-up: 2 in an hour
+  seed 2: restarts after warm-up: 4 in an hour
+  seed 3: restarts after warm-up: 9 in an hour
+
+false restarts, 30s — cost model:
+  seed 1: restarts after warm-up: 0 in an hour
+  seed 2: restarts after warm-up: 0 in an hour
+  seed 3: restarts after warm-up: 0 in an hour
+
+limit doubles — baseline ×0.5:
+  20× not within …
+
+limit doubles — baseline ×1:
+  20× not within …
+
+limit doubles — cost model:
+  seed 1: 5 untrusted samples without a standard error excluded from the band rule
+  seed 2: 5 untrusted samples without a standard error excluded from the band rule
+  seed 3: 4 untrusted samples without a standard error excluded from the band rule
+
+limit halves — baseline ×0.5:
+  17× into the band [ …
+  2× outside the band [ …
+
+limit halves — baseline ×1:
+  10× outside the band [ …
+  2× into the band [ …
+
+limit halves — baseline ×2:
+  13× into the band [ …
+  20× outside the band [ …
+
+limit halves — cost model:
+  1× into the band [ …
+  2× S₁ …
+  6× no capped sample at its first term within ℓ + …
+  seed 1: 4 untrusted samples without a standard error excluded from the band rule
+  seed 2: 5 untrusted samples without a standard error excluded from the band rule
+  seed 3: 2 untrusted samples without a standard error excluded from the band rule
+
+long drain — baseline ×0.5:
+  1862× a rise at …
+  19× into the band [ …
+  20× outside the band [ …
+  seed 1: before the change: S 7.21 against the 30s plant's S* 6.95
+  seed 1: drained samples: 814; N̄₀ 8.02, k_θ 6
+  seed 2: before the change: S 6.98 against the 30s plant's S* 6.95
+  seed 2: drained samples: 789; N̄₀ 7.21, k_θ 5
+  seed 3: before the change: S 6.52 against the 30s plant's S* 6.95
+  seed 3: drained samples: 815; N̄₀ 7.45, k_θ 5
+
+long drain — baseline ×1:
+  1770× a rise at …
+  20× outside the band [ …
+  8× into the band [ …
+  seed 1: before the change: S 5.25 against the 30s plant's S* 6.95
+  seed 1: drained samples: 947; N̄₀ 6.97, k_θ 5
+  seed 2: before the change: S 5.05 against the 30s plant's S* 6.95
+  seed 2: drained samples: 941; N̄₀ 8.06, k_θ 6
+  seed 3: before the change: S 7.48 against the 30s plant's S* 6.95
+  seed 3: drained samples: 948; N̄₀ 7.41, k_θ 5
+
+long drain — baseline ×2:
+  1233× a rise at …
+  20× outside the band [ …
+  7× into the band [ …
+  seed 1: before the change: S 6.92 against the 30s plant's S* 6.95
+  seed 1: drained samples: 1060; N̄₀ 7.31, k_θ 5
+  seed 2: before the change: S 9.47 against the 30s plant's S* 6.95
+  seed 2: drained samples: 1047; N̄₀ 7.85, k_θ 6
+  seed 3: before the change: S 4.58 against the 30s plant's S* 6.95
+  seed 3: drained samples: 1059; N̄₀ 7.46, k_θ 5
+
+long drain — cost model:
+  19× INVALID: no drained sample: the case didn't exercise a drain
+  20× into the band [ …
+  20× no D̂ warm-start restart at the cut
+  seed 1: before the change: S 1.00 against the 30s plant's S* 6.95
+  seed 1: drained samples: 0; N̄₀ 1.00, k_θ -14
+  seed 1: Little's fallback used in 1201 samples; ĉ restarts 0
+  seed 2: before the change: S 1.00 against the 30s plant's S* 6.95
+  seed 2: drained samples: 0; N̄₀ 1.00, k_θ -14
+  seed 2: Little's fallback used in 1201 samples; ĉ restarts 0
+  seed 3: before the change: S 1.00 against the 30s plant's S* 6.95
+  seed 3: drained samples: 0; N̄₀ 1.00, k_θ -14
+  seed 3: Little's fallback used in 1201 samples; ĉ restarts 0
+
+mix shift never seen — baseline ×0.5:
+  2363× capped at …
+
+mix shift never seen — baseline ×1:
+  2361× capped at …
+
+mix shift never seen — baseline ×2:
+  1516× capped at …
+
+mix shift seen — baseline ×0.5:
+  20× not out of the cap within …
+
+mix shift seen — baseline ×1:
+  20× not out of the cap within …
+  seed 2: an untrusted fall at 3m54.001s: 12.65 to 12.50 with U over ρL
+  seed 2: an untrusted fall at 3m59.001s: 11.82 to 11.65 with U over ρL
+
+mix shift seen — baseline ×2:
+  20× not out of the cap within …
+  7× an unattributed fall at …
+  seed 1: an untrusted fall at 3m16.001s: 6.78 to 6.44 with U over ρL
+  seed 1: an untrusted fall at 3m18.001s: 6.08 to 5.87 with U over ρL
+  seed 2: an untrusted fall at 3m14.001s: 7.56 to 7.32 with U over ρL
+  seed 2: an untrusted fall at 3m17.001s: 6.73 to 6.53 with U over ρL
+  seed 3: an untrusted fall at 3m8.001s: 9.63 to 9.29 with U over ρL
+  seed 3: an untrusted fall at 3m18.001s: 6.26 to 6.01 with U over ρL
+  seed 3: an untrusted fall at 3m19s: 6.01 to 5.83 with U over ρL
+  seed 3: an untrusted fall at 3m20.001s: 5.83 to 5.58 with U over ρL
+  seed 3: an untrusted fall at 3m24.001s: 5.53 to 5.33 with U over ρL
+
+mix shift seen — cost model:
+  1× not out of the cap within …
+  seed 1: ĉ restarts not caused by a scenario change: 2
+  seed 2: ĉ restarts not caused by a scenario change: 0
+  seed 3: ĉ restarts not caused by a scenario change: 0
+
+no limit, pressure only blocks — baseline ×0.5:
+  seed 1: samples over the threshold: 599
+  seed 2: samples over the threshold: 599
+  seed 3: samples over the threshold: 599
+
+no limit, pressure only blocks — baseline ×1:
+  seed 1: samples over the threshold: 599
+  seed 2: samples over the threshold: 599
+  seed 3: samples over the threshold: 599
+
+no limit, pressure only blocks — baseline ×2:
+  seed 1: samples over the threshold: 599
+  seed 2: samples over the threshold: 599
+  seed 3: samples over the threshold: 599
+
+no limit, pressure only blocks — cost model:
+  seed 1: samples over the threshold: 597
+  seed 2: samples over the threshold: 597
+  seed 3: samples over the threshold: 597
+
+rising cost — baseline ×0.5:
+  20× into the band [ …
+  seed 1: max S 4.91 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 2: max S 4.89 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 3: max S 5.02 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+
+rising cost — baseline ×1:
+  1× outside the band [ …
+  2× S reached …
+  seed 1: max S 5.09 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 2: max S 5.25 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 3: max S 5.17 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+
+rising cost — baseline ×2:
+  20× S reached …
+  7× outside the band [ …
+  seed 1: max S 5.88 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 2: max S 5.84 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 3: max S 5.99 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+
+rising cost — cost model:
+  3× S reached …
+  6× into the band [ …
+  seed 1: max S 4.86 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 2: max S 4.86 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+  seed 3: 1 untrusted samples without a standard error excluded from the band rule
+  seed 3: max S 5.65 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17)
+
+start from one slot — baseline ×0.5:
+  20× into the band [ …
+
+start from one slot — baseline ×2:
+  10× outside the band [ …
+
+start from one slot — cost model:
+  3× into the band [ …
+  seed 1: ĉ restarts not caused by a scenario change: 0
+  seed 2: ĉ restarts not caused by a scenario change: 0
+  seed 3: ĉ restarts not caused by a scenario change: 0
+
+usage noise — baseline ×1:
+  8× slots' standard deviation …
+
+usage noise — baseline ×2:
+  20× slots' standard deviation …
+
+usage noise — cost model:
+  1× slots' standard deviation …
