@@ -135,6 +135,28 @@ func iterateDown(pts []curvePoint, limit, sStar, hi float64) int {
 	return -1
 }
 
+// noLimitShare finds the share at which the no-limit case's fixed-capacity
+// stall at the demand crosses 50: the node model with no quota, the ceiling's
+// 32 slots held fixed, the share swept in steps of 0.05 core.
+func noLimitShare(t *testing.T) float64 {
+	stallAt := func(share float64) float64 {
+		cfg := Config{Seed: 9001, Duration: 180 * time.Second, Procs: 4, NodeCPUs: 4, Ceiling: 32, Fixed: 32,
+			Share:  func(time.Duration) float64 { return share },
+			Queues: []Queue{{Name: "q", Class: fixedClass(baseClass), Active: always}}}
+		return 100 * summarize(Run(cfg), 60*time.Second).stall
+	}
+	prevS, prevV := 0.2, stallAt(0.2)
+	for sh := 0.25; sh <= 4.0+1e-9; sh += 0.05 {
+		v := stallAt(sh)
+		t.Logf("no-limit share %.2f: stall %.1f", sh, v)
+		if prevV > 50 && v <= 50 {
+			return prevS + (prevV-50)/(prevV-v)*(sh-prevS)
+		}
+		prevS, prevV = sh, v
+	}
+	return math.NaN()
+}
+
 // TestFreeze prints frozen_test.go's constants when SIM_FREEZE is set.
 func TestFreeze(t *testing.T) {
 	if os.Getenv("SIM_FREEZE") == "" {
@@ -145,8 +167,10 @@ func TestFreeze(t *testing.T) {
 	b.WriteString("// frozenPlants are each case plant's S*, D(S*) and n_iter from its fixed-\n// capacity curve (plan §4.5). nStart counts from one slot to θ⌊S*⌋; nFrom\n// from the base plant's S* into this plant's band; nAbove from\n// X*·D(⌈S*(1 + 3r̄)⌉) down to S*(1 + 3r̄).\nvar frozenPlants = map[string]frozen{\n")
 	limits := map[string]float64{"limit125": 0.125, "limit500": 0.5}
 	var baseS float64
+	xcaps := map[string]float64{}
 	for _, p := range plants() {
 		pts := measureCurve(p)
+		xcaps[p.name] = pts[len(pts)-1].x
 		L := 0.25
 		if v, ok := limits[p.name]; ok {
 			L = v
@@ -169,6 +193,13 @@ func TestFreeze(t *testing.T) {
 			t.Logf("%s n=%2.0f U=%.4f X=%.3f D=%.4f", p.name, q.n, q.u, q.x, q.d)
 		}
 	}
-	b.WriteString("}\n")
+	b.WriteString("}\n\n")
+	b.WriteString("// frozenXCap is each plant's throughput at the cap: X at its curve's largest\n// capacity (plan §4.5, design §17.8 item 4).\nvar frozenXCap = map[string]float64{\n")
+	for _, p := range plants() {
+		fmt.Fprintf(&b, "\t%q: %.4f,\n", p.name, xcaps[p.name])
+	}
+	b.WriteString("}\n\n")
+	share := noLimitShare(t)
+	fmt.Fprintf(&b, "// frozenNoLimitShare is the share at which the engine's fixed-capacity stall\n// at the demand (the ceiling, 32) crosses CPUPressureThreshold (plan §4.5).\nconst frozenNoLimitShare = %.4f\n", share)
 	t.Log("\n" + b.String())
 }

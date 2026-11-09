@@ -75,6 +75,16 @@ func (g *gctx) n() int          { return len(g.tr.Results) }
 // limit is the sample's cpu.max in cores.
 func (g *gctx) limit(i int) float64 { return g.tr.Samples[i].Limit }
 
+// tightPerSample is §3.2's per-sample test: every period throttled, usage
+// within the slack.
+func tightPerSample(s costmodel.Sample) bool {
+	if s.Limit <= 0 || !s.Throttling || s.Periods < 1 || s.Throttled < s.Periods {
+		return false
+	}
+	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
+	return s.Usage.Seconds() >= s.Limit*s.Dt.Seconds()-slack
+}
+
 // window is the first sample of sample i's window W: the most recent samples
 // spanning at least max(the longest lifetime among their completions,
 // a_oldest) + Δt (design §17.1, §17.8 item 1).
@@ -121,6 +131,28 @@ func (g *gctx) capped(i int) bool {
 	n := i - j + 1
 	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
 	return per >= 1 && u >= s.Limit*d-slack*float64(n) && thr+uint64(n) >= per
+}
+
+// inRuns marks each sample in a contention run (design §17.10 (D)): a run
+// begins at a sample over the threshold in which no period was throttled (with
+// no limit, any sample over it) and ends once the sample's window W holds no
+// such sample.
+func (g *gctx) inRuns() []bool {
+	runs := make([]bool, g.n())
+	on := false
+	var last time.Duration
+	for i := 0; i < g.n(); i++ {
+		s := g.tr.Samples[i]
+		cont := g.stall(i) > 50 && (s.Limit == 0 || s.Throttled == 0)
+		switch {
+		case cont:
+			on, last = true, s.Books.End
+		case on && g.tr.Samples[g.window(i)].Books.Start >= last:
+			on = false
+		}
+		runs[i] = on
+	}
+	return runs
 }
 
 // firstCapped is the first window-capped sample at or after from, or -1.
@@ -290,7 +322,9 @@ func meanCPU(tr *Trace, from, to time.Duration) float64 {
 func ceilSec(d float64) int { return int(math.Ceil(d - 1e-9)) }
 
 // c1 is §4.5's count from one slot to θ⌊S*⌋ on a frozen plant.
-func c1(p frozen) int { return p.nStart * (1 + ceilSec(p.dStar)) }
+// It carries one extra step, (1 + ⌈D̂/Δt⌉) samples (plan §4.5, the review of
+// 0dfa94e).
+func c1(p frozen) int { return (p.nStart + 1) * (1 + ceilSec(p.dStar)) }
 
 func classAfter(at time.Duration, before, after Class) func(time.Duration) Class {
 	return func(t time.Duration) Class {
@@ -386,7 +420,16 @@ func gateCases() []gateCase {
 			p := frozenPlants["cost46"]
 			b := bandOf(p.sStar)
 			i0 := index(g.tr, stepAt)
-			const ell = 2
+			// Plan §4.5: the measured ℓ, the first per-sample tight sample
+			// after the change.
+			ell := 2
+			for i := i0; i < g.n() && i <= i0+30; i++ {
+				if tightPerSample(g.tr.Samples[i]) {
+					ell = i - i0
+					break
+				}
+			}
+			g.report("ℓ %d (the first per-sample tight sample after the change)", ell)
 			fc := g.firstCapped(i0)
 			nw := 1
 			if fc >= 0 {
@@ -517,8 +560,10 @@ func gateCases() []gateCase {
 			// Plan §4.5: within 1 after i0, W judged against the current limit.
 			const ell = 1
 			e := g.entry(b, i0)
-			if e < 0 || e > i0+1 {
-				g.fail("into the band [%.2f, %.2f] at +%d samples, want within 1 after the change's sample: %v", b.lo, b.hi, e-i0, g.slotsFrom(i0, 10))
+			// Plan §4.5 (the review of 0dfa94e): within 1 + (⌈D̂'/Δt⌉ + 1) after i0.
+			within := 1 + ceilSec(p.dStar) + 1
+			if e < 0 || e > i0+within {
+				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d after the change's sample: %v", b.lo, b.hi, e-i0, within, g.slotsFrom(i0, 10))
 			}
 			if g.cost {
 				r := g.tr.Results[i0]
@@ -569,10 +614,8 @@ func gateCases() []gateCase {
 			p := frozenPlants["limit500"]
 			b := bandOf(p.sStar)
 			i0 := index(g.tr, stepAt)
-			within := 3
-			if p.nFrom != 1 {
-				within = 3 + (p.nFrom-1)*(1+ceilSec(p.dStar))
-			}
+			// Plan §4.5 (the review of 0dfa94e): 1 + 2·(1 + ⌈D̂/Δt⌉).
+			within := 1 + 2*(1+ceilSec(p.dStar))
 			ok := -1
 			for i := i0; i < g.n() && i <= i0+within; i++ {
 				if math.Abs(g.S(i)-p.sStar)/p.sStar <= 0.10 {
@@ -783,11 +826,9 @@ func gateCases() []gateCase {
 			}
 		}},
 		{name: "no limit, pressure only blocks", cfg: func(seed uint64) Config {
-			// Plan §4.5 (i): a share near the demand, so that the stall
-			// straddles the threshold. At 1.6 cores the stall was over 50 in 1
-			// of 301 samples (seeds 1–3 at 31b9509), at 0.8 in nearly all; 1.2
-			// is between them, chosen from that report: a test-configuration
-			// parameter, not a condition.
+			// Plan §4.5: the third share is frozen with the plants, where the
+			// engine's fixed-capacity stall at the demand crosses the threshold
+			// (frozenNoLimitShare), replacing 1.2 picked from a report.
 			return Config{
 				Seed: seed, Duration: 1200 * time.Second, Procs: 4, NodeCPUs: 4, Ceiling: 32,
 				Share: func(t time.Duration) float64 {
@@ -795,7 +836,7 @@ func gateCases() []gateCase {
 					case t >= 300*time.Second && t < 600*time.Second:
 						return 0.8
 					case t >= 900*time.Second && t < 1200*time.Second:
-						return 1.2
+						return frozenNoLimitShare
 					}
 					return 0.4
 				},
@@ -813,7 +854,11 @@ func gateCases() []gateCase {
 					g.v.fails = nil
 				}()
 			}
+			// Plan §4.5: blocked in every sample of a run, a run ending once W
+			// has passed with no sample over the threshold, and in no other.
+			runs := g.inRuns()
 			over, near, nearOver := 0, 0, 0
+			onset := -1.0
 			for i := 1; i < g.n(); i++ {
 				r := g.tr.Results[i]
 				if g.S(i) < g.S(i-1)-1e-9 {
@@ -829,13 +874,20 @@ func gateCases() []gateCase {
 				}
 				if o {
 					over++
-					if g.S(i) > g.S(i-1)+1e-9 {
-						g.fail("a rise at %v with the stall over the threshold", g.tr.At[i])
+				}
+				if runs[i] {
+					if onset < 0 {
+						onset = g.S(i - 1)
+					}
+					if g.S(i) > onset+1e-9 {
+						g.fail("a rise at %v in a contention run", g.tr.At[i])
 						return
 					}
+				} else {
+					onset = -1
 				}
-				if r.CPU.Blocked != o {
-					g.fail("blocked %v at %v with the stall at %.1f", r.CPU.Blocked, g.tr.At[i], g.stall(i))
+				if r.CPU.Blocked != runs[i] {
+					g.fail("blocked %v at %v, in a run %v", r.CPU.Blocked, g.tr.At[i], runs[i])
 					return
 				}
 				if g.cost && r.CPU.Slots != float64(g.cfg.Ceiling) {
@@ -843,7 +895,7 @@ func gateCases() []gateCase {
 					return
 				}
 			}
-			g.report("samples over the threshold: %d; at the share near demand, %d of %d", over, nearOver, near)
+			g.report("samples over the threshold: %d; at the share near demand (%.2f cores), %d of %d", over, frozenNoLimitShare, nearOver, near)
 		}},
 		{name: "contention below the quota", cfg: func(seed uint64) Config {
 			c := measured(seed)
@@ -858,21 +910,34 @@ func gateCases() []gateCase {
 			// Corrected (e): during the dip, no rise in a sample over the
 			// threshold; after it, S above S*(1 + 3r̄) in at most
 			// 2k_θ − 1 + (n_W − 1) samples, k_θ from the slots at the dip's end.
+			// Plan §4.5 (the review of caebca3): rises blocked in every sample of
+			// a contention run, design §17.10 (D), and in no other; no fall
+			// attributed to pressure.
 			b := bandOf(base.sStar)
 			from, to := index(g.tr, 60*time.Second), index(g.tr, 75*time.Second)
+			runs := g.inRuns()
 			var stalls []float64
-			for i := from; i < to && i < g.n(); i++ {
+			onset := -1.0
+			for i := 1; i < g.n(); i++ {
 				r := g.tr.Results[i]
-				st := g.stall(i)
-				stalls = append(stalls, st)
-				// Plan §4.5, design §17.9 item 8: blocked in every sample over
-				// the threshold with no throttled period, and in no other.
-				o := st > 50 && g.tr.Samples[i].Throttled == 0
-				if g.cost && r.CPU.Blocked != o {
-					g.fail("blocked %v at %v with the stall at %.1f and %d throttled periods", r.CPU.Blocked, g.tr.At[i], st, g.tr.Samples[i].Throttled)
+				if i >= from && i < to {
+					stalls = append(stalls, g.stall(i))
 				}
-				if o && g.S(i) > g.S(i-1)+1e-9 {
-					g.fail("a rise at %v with the stall over the threshold and no throttled period", g.tr.At[i])
+				if g.cost && r.CPU.Blocked != runs[i] {
+					g.fail("blocked %v at %v, in a run %v (stall %.1f, %d throttled periods)", r.CPU.Blocked, g.tr.At[i], runs[i], g.stall(i), g.tr.Samples[i].Throttled)
+				}
+				if !runs[i] {
+					onset = -1
+					continue
+				}
+				if onset < 0 {
+					onset = g.S(i - 1)
+				}
+				if g.S(i) > onset+1e-9 {
+					g.fail("a rise at %v in a contention run", g.tr.At[i])
+				}
+				if g.S(i) < g.S(i-1)-1e-9 && r.CPU.Slots > g.S(i)+1e-9 {
+					g.fail("a fall at %v not computed by the controller", g.tr.At[i])
 				}
 			}
 			sort.Float64s(stalls)
@@ -882,8 +947,8 @@ func gateCases() []gateCase {
 			// Corrected (e): with design §17.9 item 5's rewarm, only §4.3's
 			// convergence from above, the frozen allowance n_above·(1 + ⌈D̂/Δt⌉).
 			sEnd := g.S(to - 1)
-			kth := base.nAbove
-			allow := base.nAbove * (1 + ceilSec(base.dStar))
+			kth := base.nAbove + 1 // with the extra step (the review of 0dfa94e)
+			allow := kth * (1 + ceilSec(base.dStar))
 			above, worst := 0, 0.0
 			for i := to; i < g.n(); i++ {
 				if g.S(i) > b.hi+1e-9 {
@@ -923,27 +988,17 @@ func gateCases() []gateCase {
 				g.v.invalid = fmt.Sprintf("not at steady state before the change: %v and %d completions since entry, want τ_ĉ %.0fs and 60", g.tr.At[i0]-g.tr.At[e0], comp, tauC)
 				return
 			}
-			n0 := 0.0
-			k := 0
-			for i := index(g.tr, drainAt-60*time.Second); i < i0; i++ {
-				n0 += g.tr.Results[i].CPU.InFlight
-				k++
+			// Plan §4.5 (the review of caebca3): into the band within
+			// ⌈(D'_cap + |W'|)/Δt⌉ + 1 samples of the change, frozen from the
+			// drain plant, with the floor as the lower edge in the transient.
+			within := drainCount()
+			floor := floorAfterDrainChange()
+			lo := func(i int) float64 {
+				if i <= i0+within {
+					return math.Min(b.lo, floor)
+				}
+				return b.lo
 			}
-			n0 /= float64(k)
-			if n0 <= p.sStar*(1+3*rbar) {
-				g.v.invalid = fmt.Sprintf("N̄₀ %.2f not above S*'(1 + 3r̄) = %.2f: no descent to count", n0, p.sStar*(1+3*rbar))
-				return
-			}
-			kth := int(math.Ceil(math.Log(n0/(p.sStar*(1+3*rbar))) / math.Log(1/rho)))
-			// ℓ_min, measured: the samples from the change to the first
-			// window-capped sample after it.
-			fc := g.firstCapped(i0)
-			if fc < 0 {
-				g.fail("no window-capped sample after the change: ℓ_min unmeasurable")
-				return
-			}
-			ellMin := fc - i0
-			within := ellMin + 2*kth - 1
 			drained := 0
 			for i := i0; i < g.n(); i++ {
 				if g.tr.Samples[i].Books.NMin > g.tr.Capacity[i-1] {
@@ -956,31 +1011,50 @@ func gateCases() []gateCase {
 			if drained == 0 {
 				g.v.invalid = "no drained sample: the case didn't exercise a drain"
 			}
-			g.report("drained samples: %d; N̄₀ %.2f, k_θ %d, ℓ_min %d, n_W %d", drained, n0, kth, ellMin, g.nW(fc))
-			e := g.entry(b, i0)
-			if e < 0 || e > i0+within {
-				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", b.lo, b.hi, e-i0, within, g.slotsFrom(i0, 12))
+			e := -1
+			for i := i0; i < g.n(); i++ {
+				if S := g.S(i); S >= lo(i)-1e-9 && S <= b.hi+1e-9 {
+					e = i
+					break
+				}
 			}
-			g.outside(b, e, g.n())
+			g.report("drained samples: %d; the count %d, the floor %.2f until +%d", drained, within, floor, within)
+			if e < 0 || e > i0+within {
+				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", lo(i0), b.hi, e-i0, within, g.slotsFrom(i0, 12))
+			}
+			g.outsideLo(b, e, g.n(), lo)
 			if g.cost {
-				rw, fb, cr, st := false, 0, 0, 0
+				end := e
+				if end < 0 {
+					end = min(i0+within, g.n()-1)
+				}
+				first, fb, mixFB, cr, st := false, 0, 0, 0, 0
+				for i := i0 + 1; i <= end; i++ {
+					if g.S(i) > g.S(i-1)+1e-9 {
+						g.fail("a rise at %v between the change and entry (§17.10 (A))", g.tr.At[i])
+						break
+					}
+				}
 				for i := i0; i < g.n(); i++ {
 					c := g.tr.Results[i].CPU
-					if i <= e+1 {
-						rw = rw || c.DRewarmed
+					if i <= end && c.Kind == costmodel.Capped && c.FirstTerm && g.tr.Samples[i].Books.Completions == 0 {
+						first = true
 					}
 					if c.DFallback {
 						fb++
+					}
+					if c.DMixFallback {
+						mixFB++
 					}
 					if c.CRestarted {
 						cr++
 					}
 					st += c.StretchedLives
 				}
-				if !rw {
-					g.fail("no D̂ warm-start restart at the cut")
+				if !first {
+					g.fail("no capped sample at its first term with no completion of its own before entry (§17.10 (B))")
 				}
-				g.report("Little's fallback used in %d samples; ĉ restarts %d; cap-stretched lives in D̂ %d", fb, cr, st)
+				g.report("D_mix from the D̂ fallback in %d capped samples (else from D̂_q); Little's fallback %d; ĉ restarts %d; lives over tight samples in D̂ %d (in this self-throttled regime, the plant's real durations, §3.4)", mixFB, fb, cr, st)
 			}
 		}},
 		{name: "rising cost", cfg: func(seed uint64) Config {

@@ -15,3 +15,19 @@ var frozenPlants = map[string]frozen{
 	"drain0":   {sStar: 6.9454, dStar: 46.4097, nStart: 62, nFrom: 62, nAbove: 0},
 	"drain":    {sStar: 3.9046, dStar: 51.9911, nStart: 44, nFrom: 44, nAbove: 6},
 }
+
+// frozenXCap is each plant's throughput at the cap: X at its curve's largest
+// capacity (plan §4.5, design §17.8 item 4).
+var frozenXCap = map[string]float64{
+	"base":     10.8625,
+	"cost46":   5.4375,
+	"limit125": 5.4375,
+	"limit500": 21.7083,
+	"rising":   9.4333,
+	"drain0":   0.1620,
+	"drain":    0.0860,
+}
+
+// frozenNoLimitShare is the share at which the engine's fixed-capacity stall
+// at the demand (the ceiling, 32) crosses CPUPressureThreshold (plan §4.5).
+const frozenNoLimitShare = 0.7742
