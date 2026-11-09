@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: provider-runtime — saturation cost model, implementation plan
-description: Plan, nothing built, for implementing the saturation cost-model design as a stack of six PRs plus a measurement branch, starting with the §10 Go simulation driving the real estimator and law code, with each PR's scope, design sections, tests, review focus, dependencies and size, the design's ambiguities and the premises to verify.
+description: Plan, nothing built, for implementing the saturation cost-model design as a stack of six PRs plus the harness PR and the measurement PR, starting with the §10 Go simulation driving the real estimator and law code, with each PR's scope, design sections, tests, review focus, dependencies and size, the design's ambiguities and the premises to verify.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [plan, design, rate-limiting, saturation, cgroup, gc]
 timestamp: 2026-11-09T00:00:00Z
@@ -9,7 +9,8 @@ timestamp: 2026-11-09T00:00:00Z
 
 # Saturation cost model: implementation plan
 
-**Status:** plan, for the user's review. Nothing is built. The spec is
+**Status:** approved by the user on 2026-11-09, with the decisions in §9.
+Nothing is built. The spec is
 [design-saturation-cost-model](./design-saturation-cost-model.md) as merged at
 `d86c2b1` (PR #54, five independent reviews). Section numbers (§) are the
 design's. Code references are to `d86c2b1`; the measurement harness is on
@@ -31,7 +32,8 @@ checks is a copy.
 | 4 | The sampler: `cpu.stat`, `cpu.max` every sample, PSI `total`, runtime metrics, the Go memory limit once | §2, §3.1, §3.2, §4.4, §5, §8 (L7) | 450 / 600 | 3 | light |
 | 5 | The wiring: `costmodel` replaces `saturation.step`; options and API removals (Breaking); metrics; the example | §4.5, §7, §8, §9 | 700 / 900 | 4 | **yes** |
 | 6 | Docs and the log entry | §9, §13 | ~400 doc lines | 5 | — |
-| M | Measurement branch: the harness changes and the GKE block plan | §10 (GKE, harness) | ~300 harness lines | 5 | — |
+| H | The harness on `main`, as its own module, from #48's branch: harness, scripts and existing results, no `ratelimit` code | §10 (harness) | the harness as it is | — | — |
+| M | The harness changes and the GKE block plan, on `main` | §10 (GKE, harness) | ~300 harness lines | 5, H | — |
 
 That is about **3,900 lines of production Go and 6,800 of tests**, including the
 simulation engine (about 1,400). PRs 1 and 2 together are the §10 simulation;
@@ -75,7 +77,8 @@ are in §6. The ones that need the user are in §9. The premises are in §7.
 - **No cluster is touched** until the measurement block, whose cluster needs the
   user's approval (PR M).
 - **Releases.** Nothing is tagged until PR 6. The release is breaking for an
-  off-by-default feature, as #40 was (§9).
+  off-by-default feature, as #40 was. It is v1.13.0 if this stack finishes
+  before the credential-use stack, v1.14.0 if after (§9).
 
 ## 3. The PRs
 
@@ -335,13 +338,39 @@ entry, with "Breaking, for an off-by-default feature" (§9, §13 item 6).
 
 **Depends on:** PR 5. **Size:** about 400 doc lines.
 
-### PR M: The measurement branch and the GKE block plan
+### PR H: The harness on `main`
 
-The harness lives on the #48 branch, not on `main` (`hack/rlgov-measure`, its own
-module, with about 50,000 lines of results). It stays off `main` (§6, item 1).
-A new branch `measure/cost-model`, from `main` after PR 5, takes the harness's
-code from `c1c299c` without its results, and adds:
+Decided by the user (§9, item 4): the harness comes to `main` as its own module,
+before PR M.
 
+**Scope.** `hack/rlgov-measure` from #48's branch at `c1c299c`, as it is there:
+its `go.mod` and `go.sum` (module `rlgov-measure`, which requires
+provider-runtime through a `replace` to the repository), the control's
+`ctrl/go.mod` and `ctrl/go.sum` (standard names, so gitleaks' default allowlist
+covers their checksums), the Go sources, the scripts, the `.gitignore` that
+keeps credentials, build output and images out, and the existing `results/`
+(226 files). No `pkg/ratelimit` code from #48 comes with it.
+
+**What it builds against.** The harness's "new" arm (`opts_new.go`, build tag
+`!ctrl`) sets #48's options (`ExperimentalMemory`,
+`ExperimentalGoMemoryHeadroomRatio`), which `main` doesn't have, so on `main` it
+doesn't compile until PR M points it at the cost model's options. The control
+arm (`-tags ctrl`, against `d0632f1` through `ctrl/go.mod`) still builds. The PR
+says so, and CI is unaffected: the root module's `./...` doesn't include a
+nested module.
+
+**Tests.** The control arm builds (`go build -tags ctrl -modfile=ctrl/go.mod`);
+the docs lint passes; gitleaks passes on the results and the control's sums.
+
+**Depends on:** nothing. **Size:** the harness as it is, about 260 files, most
+of them results.
+
+### PR M: The harness changes and the GKE block plan
+
+On `main`, in `hack/rlgov-measure`, after PR H and PR 5:
+
+- the "new" arm's options pointed at the cost model's (`Memory`, `CPUTarget`,
+  `MemoryReserve`, `GoMemoryLimit`);
 - rates over measured intervals and the `dt` field (§10, "The harness changes
   first");
 - every model value of §10's list on every `STAT` line, from `Snapshot`;
@@ -353,9 +382,11 @@ And the block plan, a settings file fixed before run 1 in the style of
 `cpu2-settings.txt`: the CPU block (off and new, 5 runs each, rotating), the
 memory blocks (ramp, cold, heterogeneous, ABBA against `new3`'s recorded
 tarball after its digest is re-checked), with §10's bars. **The cluster needs the
-user's approval when the plan is ready**; nothing is run before.
+user's approval when the plan is ready**; nothing is run before. The results are
+committed in `results/`.
 
-**Depends on:** PR 5 for the image. **Size:** about 300 lines of harness changes.
+**Depends on:** PR 5 for the image, PR H for the harness. **Size:** about 300
+lines of harness changes.
 
 ## 4. The simulation's pass criteria: the gate
 
@@ -428,9 +459,8 @@ without it.
 ## 6. Ambiguities in the merged design, and my choice for each
 
 1. **Where the harness lives.** §10 specifies harness changes, but the harness
-   is only on the held #48 branch. Choice: a measurement branch from `main`,
-   never merged, as #48's was (PR M). Bringing it to `main` would add a second Go
-   module and its results to the library.
+   is only on the held #48 branch. I proposed a measurement branch. **Decided by
+   the user: on `main`, as its own module** (PR H, then PR M).
 2. **§4.3's table has figures, not pass conditions.** §10 says "every row of
    §4.3's table". Choice: the conditions in §4 above, set from the scratch
    figures with room for the real engine.
@@ -459,8 +489,8 @@ without it.
     1s stall share). Choice: keep the name, as §9 decided; the release note says
     the reading changed.
 11. **Release coordination with the credential-use stack,** which also plans
-    v1.13.0. Choice: whichever stack completes first takes v1.13.0, and the other
-    the next minor; neither tags mid-stack. This needs the user (§9).
+    v1.13.0. **Decided by the user:** whichever stack finishes first takes
+    v1.13.0, the other v1.14.0, and neither tags mid-stack.
 12. **The memory input on a cgroup v1 node.** The design disables inputs whose
     files are missing. Choice: with no `memory.max` and no Go limit, the memory
     input is disabled with its reason, and CPU still applies.
@@ -518,15 +548,19 @@ The estimates come from the sketch of each function's inputs and outputs, and
 from the gated queue's PR (#40) as a measure of tests per line for concurrency
 code.
 
-## 9. Open items for the user
+## 9. The user's decisions, 2026-11-09
 
-1. **The release number,** with the credential-use stack also aiming at v1.13.0
-   (§6, item 11).
-2. **The harness stays off `main`** on a measurement branch (§6, item 1), or
-   comes to `main` as a second module.
-3. **The pass conditions read into §4.3's table** (§4 above, §6 item 2).
-4. **Two PRs for the simulation, not one.** The brief asked for PR 1 to be the
-   simulation. Written as one, it would be about 2,500 lines of production code
-   and 4,700 of tests. Split by path, CPU first, each is reviewable, and the gate
-   is the two together.
-5. **The cluster for PR M,** when its plan is ready.
+The first version of this plan (`b98ff52`) put five items to the user. The user
+approved the plan and decided them:
+
+1. **Two simulation PRs,** CPU (PR 1) then memory (PR 2). The gate is passed only
+   when both are merged and every case passes in all 20 seeds.
+2. **The pass conditions read into §4.3's table,** as §4 states them.
+3. **The release:** whichever stack finishes first, this one or credential-use,
+   takes v1.13.0, and the other becomes v1.14.0. Neither tags mid-stack.
+4. **The harness goes on `main`, as its own module:** `hack/rlgov-measure` with
+   its own `go.mod`, the control in `ctrl/go.mod` and `ctrl/go.sum`, and the
+   results committed there. It comes over from #48's branch (`c1c299c`) as its
+   own PR, PR H, before PR M, with only the harness, scripts and existing
+   results, and no `ratelimit` code.
+5. **The cluster for PR M** will be asked for when its plan is ready.
