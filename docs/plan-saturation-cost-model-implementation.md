@@ -26,7 +26,7 @@ checks is a copy.
 
 | # | PR | Main design sections | Prod / test lines | Depends on | Concurrency review |
 |---|---|---|---|---|---|
-| 1 | `costmodel`: shared parts and the CPU path, the simulation engine, the CPU cases | §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §5.2, §6, §7, §10 (CPU rows) | 1,300 / 2,400 | — | no; **statistical review** |
+| 1 | `costmodel`: shared parts and the CPU path, the simulation engine, the CPU cases | §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §6, §7, §17, §10 (CPU rows) | 1,300 / 2,400 | — | no; **statistical review** |
 | 2 | `costmodel`: the memory path, the GC and heap model, the memory cases | §3.6, §4.4, §10 (memory rows), §16.3 | 1,200 / 2,300 | 1 | no; **statistical review** |
 | 3 | The Governor's books: slot-seconds, per-queue shares, pop times, `N±` after dispatch, closing at `t_read` | §3.2, §3.4, §8 | 250 / 600 | 2 | **yes** |
 | 4 | The sampler: `cpu.stat`, `cpu.max` every sample, PSI `total`, runtime metrics, the Go memory limit once | §2, §3.1, §3.2, §4.4, §5, §8 (L7) | 450 / 600 | 3 | light |
@@ -117,14 +117,14 @@ New `pkg/ratelimit/internal/costmodel/sim`, the simulation engine:
 - the counters a cgroup exposes: `usage_usec`, `nr_periods`, `nr_throttled`,
   PSI `some` stall time from runnable tasks waiting (computed from the model's
   own runqueues, not a formula);
-- a node model with other cgroups and CFS weights, for §5.1 (the stall's growth
-  past the share is the part the scratch scripts only assumed);
+- a node model with other cgroups and CFS weights, for §5.1's case with no CPU
+  limit, where pressure only blocks (design §13 item 11);
 - a gate with the gated queue's semantics (admission while in flight is under
   capacity, no preemption on a cut), per-queue workloads and a backlog;
 - a driver that, every simulated second, closes the books at a read instant,
   builds a `Sample` and calls `costmodel`, and publishes the capacity back.
 
-**Design sections:** §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §5.2, §6, §7, and §10's CPU
+**Design sections:** §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §6, §7, §17, and §10's CPU
 rows.
 
 **Tests.**
@@ -334,7 +334,10 @@ tests.
 `docs/api.md` (the option surface and the metrics), `docs/usage.md` where it
 shows saturation, the governor design's §7 pointing to the cost model, and the
 `log.md` entry: the unreleased "decided, not built" entry becomes the release
-entry, with "Breaking, for an off-by-default feature" (§9, §13 item 6).
+entry, with "Breaking, for an off-by-default feature" (§9, §13 item 6). The
+configuration docs say "set a CPU limit to get CPU saturation control", and the
+log entry states the behaviour change with no CPU limit: today's halving on
+pressure goes away, and pressure only blocks rises (design §5.1, §13 item 11).
 
 **Depends on:** PR 5. **Size:** about 400 doc lines.
 
@@ -587,20 +590,25 @@ only that the count was met. A case that meets its count by another path fails.
   `f ≥ 0.07`). The 2 is §3.5's change test, a held-out sample and then a
   restart. Mechanisms asserted: a capped sample within the first `ℓ`, then a
   held-out `k̂` sample, then a `k̂` restart.
-- **Limit halves: within `ℓ + 1 + c` samples**, 4 with `ℓ = 1` and `c = 2`. `ℓ`
+- **Limit halves, under the first design: within `ℓ + 1 + c` samples**, 4 with `ℓ = 1` and `c = 2`. `ℓ`
   is the change's own sample (a restart, which can't raise); the 1 is the first
   sample wholly at the new limit, which caps (a worst-case term, not a double
   count). There is no unresolvable-rule step: it has no path in the code (an
   active sample folds into `k̂` before the law reads it, and `2·SE` needs
   `n ≥ 3`). Mechanisms asserted: a restart in the change's sample, and a capped
   sample within `ℓ + 1`.
+- **Limit halves, with `D̂_q` kept across the change** (the reviewer's branch
+  "if `D̂_q` is kept", which the gate uses, the design having kept it, design
+  §17.2): **into the band within `ℓ + 1 = 2` samples, then the hold of up to
+  `⌈D̂/Δt⌉ + 1` samples, then `c`.** Mechanisms asserted: `S₁ ≤ θ'N̄₁` in the
+  change's sample, and a capped sample within `ℓ + 1` at its first term.
 - **Limit doubles keeps the original condition**, within 10% of the new target
   in 3 samples: the reviewer withdrew its blind loosening of it.
 - §4.4's sums double-count the crossing (cost doubles) and add a step with no
   mechanism (limit halves).
 - **Disclosure, after results:** these counts fail the cost-doubling case at
   seeds 2, 3 and 15 and the limit-halving case at seeds 8, 9 and 12, each from
-  a missing mechanism or a late entry caused by the review's findings 1 and 2
+  a missing mechanism or a late entry caused by the review's findings 1 and 2,
   not by the count.
 
 **Start from one slot: within the band by sample 5**, then the 5%-outside rule.
@@ -617,29 +625,26 @@ fixed-capacity value for the expensive queue alone (4.73). After it, the
 attributed monotone condition applies until the band. "Out of the cap within 6
 samples" is unchanged.
 
-**The dip: within `1 + ⌈τ/Δt⌉ + R + 1` samples of the dip's end**, where
-`R = ⌈ln((ρU_pre − B̂)/(ρL_eff − B̂))/ln(1 + Δt/D̂)⌉`, from `costmodel`'s own
-values at the release, so that a mis-sized cut can't grow its own allowance. The
-level: **`U ≥ ρ·pre·(1 − 3r̄)`**. The count is an upper bound, since the clear
-window may start before the dip ends. The `3r̄` replaces the blind `2r̄`, for
-consistency with `z = 3` and 20 seeds: at `2r̄` about 37% of 20-seed runs fail on
-correlated plateaus. **Disclosure:** it rescues nothing; the dip passes even the
-original `0.9·pre` in 20 of 20 seeds.
+**Removed with the learned limit** (design §5.1, §13 item 11: CPU saturation
+control requires a CPU limit): the dip, the blip, the node case and the node
+case's onset step, with their conditions above as the reviewer gave them. **In
+their place, no CPU limit, pressure only blocks:** on the node model with the
+container's share stepping from 400 to 800 and back to 400 ms/s, no sample's
+slots fall because of pressure; a rise is blocked in every sample over
+`CPUPressureThreshold` and in no other; and `S_cpu` is the ceiling throughout.
+(The blip's and the dip's removal is the plan author's reading of the decision,
+for the reviewer to confirm.)
 
-**The node case: stall over the threshold in force in at most 10% of samples at
-a steady share, and the mean CPU at a steady share at least
-`ρ(1 − 3r̄)·share`** (0.765 of the share). No upper bound is needed. The `3r̄`
-replaces `2r̄`; **disclosure:** the observed CPU was 0.93–0.97 of the share, so it
-passes either way. The stall condition fails in 20 of 20 seeds, which is the
-review's finding 3, a design issue.
+**Pending the reviewer's re-review of design §17**, not yet derived:
 
-**The node case's onset step:** the slots **in the sample that learns the
-limit** (the cut happens there, design §5.2) are within 10% of `S*_node`, where
-the engine's fixed-capacity curve under the same node model and share, with no
-model (`Config.Fixed`), crosses `ρL_eff`, interpolated between whole capacities,
-and `L_eff` is the run's learned value. The quota curve is no substitute. The
-test as written reads the next sample and uses `k̂` from three untrusted
-samples, and both are wrong.
+- **`c`.** The counts above use `c = 2`, the reviewer's value under the first
+  design. Design §17.4 makes `c = n_iter·(1 + ⌈D̂/Δt⌉)`, computed on the engine's
+  fixed-capacity curve and frozen before any run; the counts would use it.
+- **The cases design §17 adds:** the long drain (design §17.3: within the band,
+  at most 5% outside; asserts that `N̄`'s move at the cut restarted `D̂`'s warm
+  start; reports the samples drained); the CPU per completion rising 1% per slot
+  (design §17.5: the measured workload's conditions); and the baseline's tuning
+  rule (design §17.6).
 
 **Unchanged:** the conditions §4.4 lists as unchanged, and the seeds: 20, all of
 which must pass.
