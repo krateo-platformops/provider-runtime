@@ -1,0 +1,195 @@
+package credentialuse
+
+import (
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+// Unit tests for the verified set (§6.3): the skip predicate, and the
+// handlers that keep it.
+
+var t0 = time.Date(2026, 11, 8, 16, 0, 0, 0, time.UTC)
+
+func at(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+
+func holderMeta(uid types.UID, record string) *metav1.ObjectMeta {
+	m := &metav1.ObjectMeta{UID: uid, Name: "h", Namespace: "ns"}
+	if record != "" {
+		m.Annotations = map[string]string{AnnotationRefs: record}
+	}
+	return m
+}
+
+func recordOf(t *testing.T, ids ...ID) string {
+	t.Helper()
+	v, err := EncodeRecord(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func TestCanSkip(t *testing.T) {
+	p := SecretRef("ns", "s").ID()
+	cases := map[string]struct {
+		setup func(v *verified)
+		pUID  types.UID
+		want  bool
+	}{
+		"nothing known":                          {func(*verified) {}, "p1", false},
+		"written, but the record never observed": {func(v *verified) { v.wrote("p1", "ns", at(5)) }, "p1", false},
+		"observed by A1, then written": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "ns", at(2))
+		}, "p1", true},
+		"delivered by the informer, then written": {func(v *verified) {
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(1))
+			v.wrote("p1", "ns", at(2))
+		}, "p1", true},
+		"written, then observed: the write may predate the record": {func(v *verified) {
+			v.wrote("p1", "ns", at(1))
+			v.announced("h1", []ID{p}, nil, at(2))
+		}, "p1", false},
+		// recordSince is the first delivery of the run: a later version that
+		// still names P (a status update, say) doesn't move it, so a restart
+		// costs one A2, not one per update (§6.3).
+		"a later version in the same run keeps the first time": {func(v *verified) {
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(1))
+			v.wrote("p1", "ns", at(2))
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(3))
+		}, "p1", true},
+		"the later of observed and recordSince counts": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "ns", at(2))
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(3))
+		}, "p1", false},
+		"another incarnation of P": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "ns", at(2))
+		}, "p2", false},
+		"another holder namespace": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "other", at(2))
+		}, "p1", false},
+		"no incarnation in the cache": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "ns", at(2))
+		}, "", false},
+		// §6.5 L2: a relist after the write means the record may have gone
+		// and come back unseen.
+		"a relist after the write": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "ns", at(2))
+			v.listCompleted(at(3))
+		}, "p1", false},
+		"a relist before the write": {func(v *verified) {
+			v.listCompleted(at(1))
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(1))
+			v.wrote("p1", "ns", at(2))
+		}, "p1", true},
+		"released": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "ns", at(2))
+			v.released("p1")
+		}, "p1", false},
+		"the record dropped P (A1)": {func(v *verified) {
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(1))
+			v.announced("h1", nil, []ID{p}, at(2))
+			v.holderEvent("h1", holderMeta("h1", "[]"), at(3))
+			v.wrote("p1", "ns", at(4))
+		}, "p1", false},
+		"forgotten": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.wrote("p1", "ns", at(2))
+			v.forgot("h1")
+		}, "p1", false},
+		"an unparseable record ends the run": {func(v *verified) {
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(1))
+			v.holderEvent("h1", holderMeta("h1", "oops"), at(2))
+			v.wrote("p1", "ns", at(3))
+		}, "p1", false},
+		"a deleted holder": {func(v *verified) {
+			v.announced("h1", []ID{p}, nil, at(1))
+			v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(1))
+			v.wrote("p1", "ns", at(2))
+			v.holderEvent("h1", nil, at(3))
+		}, "p1", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			v := newVerified(widgetGK)
+			tc.setup(v)
+			if got := v.canSkip("h1", p, tc.pUID, "ns"); got != tc.want {
+				t.Errorf("canSkip = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// M1: away and back without the informer delivering the version in between.
+// recordSince keeps its first time, and A1's re-add overwrites observed, so
+// t_obs is the re-add's time, after the old write: no skip.
+func TestCanSkipAwayAndBack(t *testing.T) {
+	p := SecretRef("ns", "s").ID()
+	v := newVerified(widgetGK)
+	v.holderEvent("h1", holderMeta("h1", recordOf(t, p)), at(1)) // run starts
+	v.announced("h1", []ID{p}, nil, at(1))
+	v.wrote("p1", "ns", at(2))
+	if !v.canSkip("h1", p, "p1", "ns") {
+		t.Fatal("the first run doesn't skip")
+	}
+	v.announced("h1", nil, []ID{p}, at(3)) // away: A1 drops observed
+	v.announced("h1", []ID{p}, nil, at(5)) // and back, in a later pass
+	if v.canSkip("h1", p, "p1", "ns") {
+		t.Error("a ref A1 re-added skipped against a write from before it went away")
+	}
+	v.wrote("p1", "ns", at(6))
+	if !v.canSkip("h1", p, "p1", "ns") {
+		t.Error("after a new write, the ref doesn't skip")
+	}
+}
+
+// The protected informer's handler only ever drops written entries (§6.3,
+// §6.5 L6).
+func TestProtectedEvent(t *testing.T) {
+	f, _ := FinalizerName(widgetGK, "ns")
+	fOther, _ := FinalizerName(widgetGK, "other")
+	held := &metav1.ObjectMeta{UID: "p1", Finalizers: []string{f, fOther}}
+	cases := map[string]struct {
+		current       metav1.Object
+		keepNS, keepO bool
+	}{
+		"unchanged":                   {held, true, true},
+		"deleted or left the cache":   {nil, false, false},
+		"recreated":                   {&metav1.ObjectMeta{UID: "p2", Finalizers: []string{f, fOther}}, false, false},
+		"lost ns's finalizer":         {&metav1.ObjectMeta{UID: "p1", Finalizers: []string{fOther}}, false, true},
+		"stripped of every finalizer": {&metav1.ObjectMeta{UID: "p1"}, false, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			v := newVerified(widgetGK)
+			v.wrote("p1", "ns", at(1))
+			v.wrote("p1", "other", at(1))
+			v.wrote("p9", "ns", at(1))
+			v.protectedEvent(held, tc.current)
+			if _, ok := v.written[writtenKey{"p1", "ns"}]; ok != tc.keepNS {
+				t.Errorf("entry for ns kept = %v, want %v", ok, tc.keepNS)
+			}
+			if _, ok := v.written[writtenKey{"p1", "other"}]; ok != tc.keepO {
+				t.Errorf("entry for other kept = %v, want %v", ok, tc.keepO)
+			}
+			if _, ok := v.written[writtenKey{"p9", "ns"}]; !ok {
+				t.Error("another object's entry was dropped")
+			}
+		})
+	}
+	// It never creates one.
+	v := newVerified(widgetGK)
+	v.protectedEvent(held, held)
+	if len(v.written) != 0 {
+		t.Errorf("the handler created entries: %v", v.written)
+	}
+}
