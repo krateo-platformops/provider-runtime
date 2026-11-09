@@ -12,8 +12,9 @@ timestamp: 2026-11-09T00:00:00Z
 **Status:** design, for review. Nothing is built. It builds on
 [#58](https://github.com/krateo-platformops/provider-runtime/pull/58)
 (`logging.ContextLogger`, `logging.WithContext`), which is open at `cda449d`
-and has to merge first. The user decided its five open questions on
-2026-11-09, and §13 records the decisions.
+and has to merge first. The user decided its first five open questions on
+2026-11-09, and §13 records them (D1 to D5). The review on #60 raised a sixth,
+Q6, which is open: see §11.3, step 5.
 
 **The goal** (the user's decision). Every provider built on provider-runtime
 (git-provider, incident-provider, alert-provider and the others) gets
@@ -460,7 +461,13 @@ context (§6.1) and M to the parsed marker:
 3. Otherwise: **Link.** The root is a new root (`trace.WithNewRoot()`) with
    one link, `trace.Link{SpanContext: R}`. No marker.
 
-Only a new traceparent value makes a Parent pass (decision D3, §13). Only the
+Only a new traceparent value makes a Parent pass (decision D3, §13). The
+marker is keyed on the value, not on whether an annotation is present. So when
+a writer overwrites the annotation with a fresh context, the next pass that
+sees it is a Parent pass, even though the object carried a traceparent before.
+alert-provider's `Incident` is the case: the traceparent stamped at create, in
+Analyzing, is continued once. A fresh one, stamped from `incident.analyze` when
+the Incident goes to Open, is new and parents again (§11.3, step 5). Only the
 trace ID and span ID count as new: a change to the flags or to `tracestate`
 alone isn't a new causal event. A generation change with the same value is a
 Link pass. That covers a spec edit by a writer that doesn't restamp the
@@ -549,12 +556,21 @@ trace once.
 
 ### 6.5 Onto Kubernetes objects: `Inject`
 
-`tracing.Inject(ctx, obj)` sets `krateo.io/traceparent` from `ctx`'s trace
-context. That's the active span, or with tracing off, §6.4's inbound context.
-It sets `krateo.io/tracestate` when that context has one, and removes a stale
-`krateo.io/tracestate` when it doesn't. It returns false and changes nothing
-when there's no valid context. `InjectAnnotations` does the same on a map,
-like UR's `InjectTraceparent` (`tracing.go:98-107`).
+`tracing.Inject(ctx, obj)` writes `ctx`'s trace context onto `obj`. That's the
+active span, or with tracing off, §6.4's inbound context.
+- **It overwrites.** An existing `krateo.io/traceparent` is replaced with the
+  current context. An existing `krateo.io/tracestate` is replaced when the
+  context has a tracestate, and **removed** when it has none, so a stale
+  tracestate never travels with a new traceparent.
+- **Without a valid context,** it returns false and changes nothing, existing
+  annotations included.
+- **`InjectAnnotations`** does the same on a map, like UR's `InjectTraceparent`
+  (`tracing.go:98-107`).
+
+For annotations, overwriting is the point: a writer that does new work on the
+object stamps that work's context. `InjectHeader` (§6.6) is the opposite: it
+never overwrites an existing HTTP header, because there a header already set
+comes from a more specific span in the same process.
 
 The rules on the caller, in its doc comment:
 
@@ -568,6 +584,10 @@ The rules on the caller, in its doc comment:
   pass a new "first sight" downstream, plus a watch event. The
   composition-dynamic-controller avoids exactly this by excluding the annotation
   from its digest (§6.3).
+- **Never in a status write.** A status-subresource write keeps only `status`
+  and drops metadata (`status_strategy.go:67-91`). When the change that matters
+  is in status, the annotation has to go in a separate metadata write. §11.3,
+  step 5, shows what that does to the ordering.
 - **Never copy `krateo.io/traceparent-continued`.** It belongs to the object
   it's written on.
 
@@ -665,19 +685,24 @@ The root's status follows how the pass ended:
   alert-provider sets `OTEL_TRACES_SAMPLER=parentbased_always_on` explicitly
   (`helm/alert-provider/values.yaml:65-67`). Provider charts should set it
   explicitly too, so the value is visible.
-- **The endpoint.** The node-local Service is
-  `<release>-local.<namespace>.svc:4318`, a ClusterIP with
-  `internalTrafficPolicy: Local` (observability's
-  `charts/otel-collector-daemonset/templates/service-local.yaml`). Assuming
-  the release is `otel-collector-daemonset`, which I inferred from
-  core-provider's default endpoint, that's
-  `http://otel-collector-daemonset-local.<namespace>.svc:4318`. core-provider's
-  chart still defaults to the headless
-  `otel-collector-daemonset-opentelemetry-collector` Service
-  (`helm/core-provider/templates/configmap.yaml:13`). That Service isn't
-  node-local: the comment in `service-local.yaml` explains why. alert-provider
-  uses `http://$(HOST_IP):4318` (`templates/deployment.yaml:227-232`), which is
-  also node-local.
+- **The endpoint:**
+  `http://otel-collector-daemonset-local.krateo-system.svc:4318`.
+  - **Verified on krateo-057 by observability** (its review on #60). The
+    release is `otel-collector-daemonset`, and the Service is a ClusterIP
+    with `internalTrafficPolicy: Local` and 4 of 4 node endpoints: installer
+    checked the EndpointSlice. The 70 composition controllers export there.
+    The template is observability's
+    `charts/otel-collector-daemonset/templates/service-local.yaml`
+    (`<release>-local`).
+  - **Each provider chart sets it explicitly,** and doesn't inherit a
+    fallback. core-provider's chart value `otel.endpoint` defaults to `""`,
+    and its configmap then falls back to the headless
+    `otel-collector-daemonset-opentelemetry-collector` Service
+    (`helm/core-provider/templates/configmap.yaml:13`), which isn't node-local
+    (`service-local.yaml` explains why). installer sets the `-local` URL
+    explicitly on 057 for that reason (observability's review).
+  - alert-provider uses `http://$(HOST_IP):4318`
+    (`templates/deployment.yaml:227-232`), which is also node-local.
 
 ## 9. Cardinality and cost
 
@@ -788,10 +813,10 @@ What each consumer sets. The changes belong to each consumer's own session.
   to correlate it switches to `logging.NewSlogLogger` over `logging.NewOTelHandler`.
 - **Chart ConfigMap:**
   - `OTEL_TRACING_ENABLED`
-  - `OTEL_EXPORTER_OTLP_ENDPOINT` (the -local Service, §8)
+  - `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector-daemonset-local.krateo-system.svc:4318`, set explicitly (§8)
   - `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
   - `OTEL_TRACES_SAMPLER=parentbased_always_on`
-  - `OTEL_SERVICE_NAME`
+  - `OTEL_SERVICE_NAME=git-provider`, set explicitly (§11.5)
   - `SERVICE_VERSION`
   - `DEPLOYMENT_NAME: {{ include "git-provider.fullname" . }}`
   - `OTEL_ENABLED`, only if it also wants metrics.
@@ -805,7 +830,7 @@ What each consumer sets. The changes belong to each consumer's own session.
 
 - **Bump** from v1.8.2. That's several minors: the governor, the gated queue
   and the Ready contract came in between (`docs/log.md`).
-- **Main and chart** as git-provider. Its Logger is already slog over
+- **Main and chart** as git-provider, with `OTEL_SERVICE_NAME=incident-provider` (§11.5). Its Logger is already slog over
   `NewOTelJSONHandler` (`main.go:63-64`), so logs correlate after #58.
 - **Inject** nothing. It writes Pods and ConfigMaps
   (`internal/controllers/incident/incident.go:360-368`, `apply.go:384-395`),
@@ -841,15 +866,64 @@ provider-runtime now makes. All in one PR, with the bump:
    `incident.fire` still links to the span its context holds
    (`tracing.Detach`, `internal/tracing/tracing.go:146-152`), which is now
    provider-runtime's `observe`.
-5. In `kube.Create` of an `Incident` (`internal/incident/kube.go:100-113`), it
-   calls `prtracing.InjectAnnotations`. That's §6.5's case, and it continues the
-   trace into incident-provider.
+5. **It injects at three points of an Incident's life.** This is acmp's flow,
+   from its review on #60.
+   - **The lifecycle.** `Fire` creates the Incident in Analyzing, inside
+     `incident.fire` (`internal/incident/writer.go:457-463`). The RCA runs in
+     `incident.analyze` (`writer.go:605-631`). `finish` then writes the analysis
+     and its howToFix scripts and sets Open (`writer.go:468-494`).
+   - **Who remediates.** From Open on, incident-provider runs the scripts
+     (`writer.go:1-8`). Its Observe marks a check due only when there's a
+     current script (`internal/controllers/incident/machine.go:175-177`), and
+     its Update starts the check Pod (`incident.go:288-315`).
+
+   The three injections:
+   - **(a) At create:** `prtracing.InjectAnnotations` in `kube.Create`
+     (`internal/incident/kube.go:100-113`). incident-provider's first pass, on
+     the Analyzing Incident, is a child of `incident.fire`.
+   - **(b) At Open:** a **fresh** traceparent from the current
+     `incident.analyze` span, which overwrites (a)'s (§6.5). Because the marker
+     is keyed on the value (§6.2), it's new, and the next pass parents on it.
+   - **(c) At reanalysis:** the same as (b), from the `incident.analyze` that
+     `incident.reanalyze` starts (`reanalysis.go:37-40`), when it writes the
+     new scripts. That's acmp's decision, recorded in its session.
+
+   **The Open write can't carry the annotation.**
+   - `finish` writes through `patchStatus` and then `kube.PatchStatus`, which
+     is `client.Status().Patch` (`kube.go:115-120`).
+   - The Incident CRD has the status subresource
+     (incident-provider's `observability.krateo.io_incidents.yaml:495-496`,
+     `apis/incident/v1alpha1/types.go:405`).
+   - A status write drops metadata (§6.5), and a main-resource write drops
+     status (`customresource/strategy.go:166-176`).
+
+   So (b) and (c) have to be a separate metadata patch next to the status
+   write (`kube.Patch`, `kube.go:123-128`). That's two watch events, and
+   neither order guarantees that the pass that starts the check Pod is the
+   Parent pass under §6.2:
+   - **Annotation first, then Open.** The annotation's pass usually runs while
+     the Incident is still Analyzing. It's the Parent pass, and it writes the
+     marker. The Open pass, which starts the Pod, then links. The two events
+     coalesce into one Parent pass only if both land before a worker takes the
+     key.
+   - **Open first, then the annotation.** The Open pass sees (a)'s value,
+     already continued, so it links, and it starts the Pod. The annotation's
+     pass parents later, but only observes.
+
+   Getting the remediation into the RCA's trace is open question Q6 (§13).
 6. Its tests (`tracing_test.go:58-78`) and its configuration docs' span table
    (`docs/configuration.md:51-55`) move to `reconcile` and the lower-case
    children. On observability's side, the tail sampler comment and its test
    that name `alert.reconcile` (`tests/tailsampling-docker.py`) follow. The
    rules themselves key on `service.name` and `^incident\.`, so they still
    match.
+7. **It keeps the `incident.*` span names exactly:** `incident.fire`,
+   `incident.compare`, `incident.analyze` and `incident.reanalyze`. The tail
+   sampler keeps any trace with an `incident.*` span whole (the
+   `alert-provider-incident` rule, `^incident\.`). observability says
+   alert-provider pinned those names with a test in 0.2.67. Only the
+   reconcile-side spans (`alert.reconcile` and the `alert.*` actions) move to
+   provider-runtime's names.
 
 alert-provider's `OTEL_TRACING_ENABLED` defaults to `OTEL_ENABLED`
 (`internal/tracing/tracing.go:63-67`). It keeps its own Setup, so it keeps that
@@ -875,8 +949,34 @@ When a provider's chart turns tracing on, observability adds that provider's
 - **No sampler in code.** Providers set no sampler in code, and their charts
   keep `OTEL_TRACES_SAMPLER=parentbased_always_on` (§8). Without this step,
   every trace from a provider not on the list is kept at 100% (§9).
-- **Order.** The step lands before, or with, the chart change that sets
-  `OTEL_TRACING_ENABLED=true`.
+- **Order.** The sampler entry ships first. The provider's chart change that
+  sets `OTEL_TRACING_ENABLED=true` ships after it.
+- **What the audit join then finds.** With a provider under `sample-5pct`,
+  observability#127's join finds a provider object's reconcile after a write
+  about 1 time in 20 when that reconcile succeeded, and every time when it
+  failed, because `error-status` keeps it. A reconcile that is a Parent pass
+  under a stored portal trace is kept with that trace. So **a successful
+  provider reconcile missing from the join doesn't mean it never ran.**
+  Composition controllers are different: their reconcile traces are kept whole
+  on purpose, because the reconcile widgets read them (observability's review
+  on #60).
+
+**`service.name` per provider.** The sampler matches
+`resource.attributes["service.name"]` exactly, and a mismatch silently keeps a
+provider at 100%. So each provider's chart sets `OTEL_SERVICE_NAME` explicitly,
+to a fixed string and never one derived from the release name. Because the
+environment wins (§5), that string is the exported `service.name`.
+observability puts the same string in `outside-sampled-services`.
+
+| Provider | `OTEL_SERVICE_NAME` | Source |
+|---|---|---|
+| git-provider | `git-provider` | proposed: git-provider exports no service name today. Its chart has no `OTEL_SERVICE_NAME`, and its log handler names none (`main.go:59-66`) |
+| incident-provider | `incident-provider` | the name its logs already carry (`main.go:34,63`) |
+| alert-provider | `krateo-alert-provider` | its chart's `otel.serviceName` (`helm/alert-provider/values.yaml:68-69`), already in `outside-sampled-services` |
+| core-provider, if it adopts (§11.4) | `core-provider` | its `--otel-service-name` default, `<kebab(providerName)>-provider` with `providerName = "Core"` (`main.go:38,72`) |
+
+A provider not in this table picks its value when it adopts, and the same
+order holds: the sampler entry ships first, the chart change after.
 
 For the audit join (decision D5), observability maps each provider's API group
 to its Deployment name to join provider objects. `<resource>-<version>-controller`
@@ -982,6 +1082,47 @@ runtimes together.**
   not designed here. With the Kind alone, two providers that each have a Kind
   of the same name look the same. Each runtime's own session makes its change.
 
+**Q6 (open). How does an Incident's remediation join the RCA's trace?**
+§11.3, step 5, shows the problem. Under §6.2 the first pass to see a new value
+is its child. But alert-provider's Open is a status write, so the fresh value
+arrives in a separate write, and the pass that starts the check Pod isn't
+reliably that first pass. Under D4, incident-provider's own roots are kept 5% of
+the time when healthy, so a remediation that only links to the RCA is usually
+not stored at all.
+- **(a) Continue on the first pass that acts, not the first that sees**
+  (provider-runtime; it refines D3's mechanics, not its rule). Only a new value
+  makes a Parent pass, as decided.
+  - **The change.** In Parent mode, the marker is written just before the
+    pass's first Create, Update or Delete call, instead of at first sight. A
+    pass that only connects and observes stays Parent and writes nothing.
+  - **The bound.** If no pass acts within W of this process first seeing the
+    value, the next pass writes the marker and links. W is proposed at
+    10 minutes, and the first-seen time is kept in memory by UID, so a restart
+    reopens W once.
+  - **For the Incident,** with the annotation written first: the Analyzing
+    pass doesn't act, because no current script means no check is due
+    (`machine.go:175-177`), so it stays Parent. The Open pass calls Update,
+    which starts the Pod, and writes the marker just before. So the
+    remediation is a child of `incident.analyze`.
+  - **What it costs.** The observe-only passes inside W parent onto the trace,
+    and so do retries that fail before acting. Both are bounded by W.
+  - **What it requires** is a writer that stamps the annotation **before** the
+    change that triggers work. That's a rule to add to §6.5.
+- **(b) Put the trigger and the context in one write** (alert- and
+  incident-provider). What starts remediation would move out of status, into
+  a main-resource field or annotation that incident-provider reads, so that one
+  `kube.Patch` carries both. It's an API change in two other repos, and
+  provider-runtime is unchanged.
+- **(c) Accept a link.** Write the annotation, then Open. The remediation pass
+  is a new root linked to `incident.analyze`. Nothing changes anywhere, but the
+  remediation isn't in the RCA's trace, and usually isn't stored.
+- **Recommendation: (a).** "The first pass that acts on a new upstream context
+  is its child" says what a trace should say. It fixes the case without an API
+  change elsewhere, and it keeps the growth bounded. The cost is a second piece
+  of state (the in-memory first-seen time) and a rule change for writers
+  (stamp first), so it's yours to decide. If (a) is chosen, §6.2, §6.3, §6.5
+  and §10's tests change with it.
+
 ## 14. Checked, and not
 
 Checked in source:
@@ -1004,11 +1145,13 @@ Checked in source:
 
 Not checked:
 
-- **What krateo-057 runs** (the env values, object counts, and which endpoint
-  each Deployment uses). The brief reports the env convention as verified on
-  057 today, and §8's endpoint is from the charts. I don't touch clusters.
-- **The collector's Helm release name** `otel-collector-daemonset`, inferred
-  from core-provider's default endpoint.
+- **What krateo-057 runs**, checked by me: the env values, the object counts,
+  and which endpoint each Deployment uses. I don't touch clusters. The brief
+  reports the env convention as verified on 057. observability verified §8's
+  endpoint, the release name `otel-collector-daemonset` and the -local
+  Service's 4 of 4 node endpoints on 057, in its review on #60. alert-provider's
+  `incident.*` name test in 0.2.67 is as observability reports it; I didn't
+  read that test.
 - **Whether every provider's predicates let annotation-only updates through**
   (§6.3). Only alert-provider's was read.
 - **How long it takes to build:** not estimated.
