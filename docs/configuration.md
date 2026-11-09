@@ -4,7 +4,7 @@ title: provider-runtime — configuration
 description: Everything provider-runtime reads — build tags, environment consumed via the OTel SDK, option structs and their defaults (including the rate-limit governor), and the annotation switches honored at runtime.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, configuration, otel, annotations]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # Configuration
@@ -20,7 +20,7 @@ SDK reads inside `telemetry.Setup`, (c) option structs with defaults, and
 |---|---|---|
 | `generate` | `apis/apis.go` | Guards the `go:generate` directive that runs `controller-gen` to regenerate `apis/common/v1/zz_generated.deepcopy.go` (`make generate`). Never needed by consumers. |
 
-## Environment (read indirectly, only when metrics are enabled)
+## Environment (read indirectly, only when metrics or tracing are enabled)
 
 The library itself reads no environment variables. `telemetry.Setup` with
 `Config.Enabled=true` constructs `otlpmetrichttp.New(ctx)` and
@@ -31,6 +31,19 @@ The library itself reads no environment variables. `telemetry.Setup` with
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Where the OTLP-HTTP metric exporter sends (default `https://localhost:4318`). |
 | `OTEL_EXPORTER_OTLP_HEADERS`, `_TIMEOUT`, `_COMPRESSION`, `_CERTIFICATE`, … | Standard exporter tuning, per the OTel spec. |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | The exported resource attributes, via `resource.Default()`. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*`, `OTEL_SPAN_*_LIMIT` | Unreleased, with `Config.TracingEnabled`: the trace exporter, the sampler (default `parentbased_always_on`), the batcher and span limits, read by the SDK. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | Unreleased: with tracing on, `Setup` fails unless each is unset or `http/protobuf`. Traces go over OTLP/HTTP only. |
+
+`telemetry.ConfigFromEnv()` (unreleased) is the one place the library reads
+Krateo's own variables, and only when main calls it:
+
+| Variable | `Config` field | Default |
+|---|---|---|
+| `OTEL_ENABLED` | `Enabled` | `false` |
+| `OTEL_TRACING_ENABLED` | `TracingEnabled` | `false`, whatever `OTEL_ENABLED` says |
+| `OTEL_EXPORT_INTERVAL` | `ExportInterval` (a Go duration) | `0`, which means `30s` |
+| `DEPLOYMENT_NAME` | `DeploymentName` | empty |
+| `SERVICE_VERSION` | `ServiceVersion` | empty |
 
 The exported `service.name` comes, in order, from `OTEL_SERVICE_NAME`,
 `OTEL_RESOURCE_ATTRIBUTES`, `telemetry.Config.ServiceName`, and the SDK default
@@ -44,6 +57,9 @@ no effect.
 |---|---|---|
 | `Enabled` | `false` | When false, `Setup` returns a nil `Metrics` handle and a no-op shutdown — every `Metrics` method is nil-safe, so wiring it unconditionally is fine. |
 | `ServiceName` | empty | Sets `service.name` when the environment doesn't. See the order above. |
+| `TracingEnabled` | `false` | Unreleased: OTLP trace export, independent of `Enabled`. |
+| `ServiceVersion` | empty | Unreleased: `service.version`, when `OTEL_RESOURCE_ATTRIBUTES` doesn't set it. |
+| `DeploymentName` | empty | Unreleased: `k8s.deployment.name` and `service.instance.id`, each when `OTEL_RESOURCE_ATTRIBUTES` doesn't set it. |
 | `ExportInterval` | `30s` | Periodic-reader export interval for the OTLP metrics pipeline. |
 
 ## `controller.Options` (defaults from `DefaultOptions()`)

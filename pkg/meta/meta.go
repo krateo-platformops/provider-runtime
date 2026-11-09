@@ -376,3 +376,15 @@ func ShouldUpdate(o metav1.Object) bool {
 
 	return mp == ManagementPolicyDefault || mp == ManagementPolicyObserveCreateUpdate
 }
+
+// The W3C trace context of the reconcile that created or last changed an
+// object, so the controller that reconciles it continues the distributed trace
+// (docs/design-tracing.md §6). The same keys as unstructured-runtime's.
+const (
+	// AnnotationKeyTraceparent carries the W3C traceparent.
+	AnnotationKeyTraceparent = "krateo.io/traceparent"
+
+	// AnnotationKeyTracestate carries the W3C tracestate alongside
+	// AnnotationKeyTraceparent.
+	AnnotationKeyTracestate = "krateo.io/tracestate"
+)

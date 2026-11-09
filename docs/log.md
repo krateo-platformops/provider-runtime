@@ -59,7 +59,7 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   signals raises concurrency up to the ceiling; provider-runtime#50 is the
   follow-up.
 
-## 2026-11-09 — unreleased, designed, not built: trace every reconcile
+## 2026-11-09 — unreleased, designed, being built: trace every reconcile
 - **Design:** [design-tracing](./design-tracing.md), in review on #60.
   - `telemetry.Setup` gains a TracerProvider, and the reconciler opens a
     `reconcile` root span with `connect`, `observe`, `create`, `update` and
@@ -68,6 +68,14 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     acts on it, within a 10-minute window, and is linked after that.
   - The marker is the `krateo.io/traceparent-continued` annotation, written
     with an optimistic lock.
+- **Built so far:**
+  - `pkg/tracing`: `Decide`, `StartReconcile`, `Inject`, `InjectHeader` and
+    the event and step names.
+  - `telemetry.Setup`'s tracing (`Config.TracingEnabled`, `ConfigFromEnv`,
+    the shared resource, the protocol check).
+  - httpsignal's propagation of the active span.
+  - The new dependency `otlptracehttp` v1.45.0.
+  - The reconciler doesn't start spans yet; its wiring follows.
 - **Changes to existing behaviour, when it is built:**
   - **The critical write carries only the runtime's own keys.**
     `RetryingCriticalAnnotationUpdater` writes back only

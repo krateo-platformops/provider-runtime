@@ -219,6 +219,43 @@ For Krateo, that's core-provider#310.
 - **Metrics** — `telemetry.Setup(ctx, log, telemetry.Config{Enabled: true})`
   returns `(*Metrics, shutdown, error)`; pass the metrics handle to
   `reconciler.WithMetrics` and `controller.Options.QueueWaitRecorder`.
+- **Tracing** (unreleased; [the design](./design-tracing.md)). Read Krateo's
+  OTel convention in main and pass it to `Setup`, with your service name. Shut
+  it down after the manager returns, with a bounded context, so the batcher
+  flushes:
+
+  ```go
+  cfg, err := telemetry.ConfigFromEnv() // OTEL_ENABLED, OTEL_TRACING_ENABLED, DEPLOYMENT_NAME, SERVICE_VERSION, ...
+  if err != nil { /* ... */ }
+  cfg.ServiceName = "git-provider"
+  metrics, shutdown, err := telemetry.Setup(ctx, log, cfg)
+  if err != nil { /* ... */ }
+  defer func() {
+      ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+      defer cancel()
+      _ = shutdown(ctx)
+  }()
+  ```
+
+  `OTEL_TRACING_ENABLED` unset means off, whatever `OTEL_ENABLED` says. See
+  [configuration](./configuration.md) for the environment, and the design's
+  §11 for the chart side: the `HOST_IP` endpoint, `OTEL_SERVICE_NAME` and
+  `DEPLOYMENT_NAME`.
+  - *Outbound HTTP.* A client wrapped with `httpsignal.NewTransport` sends the
+    active span's `traceparent` on every request made with the method's `ctx`.
+    With tracing off it sends nothing.
+  - *Onto another controller's object.* When you create or update an object
+    another Krateo controller reconciles, call `tracing.Inject(ctx, obj)` on
+    it first, so that controller continues your trace. Follow the rules:
+    - only onto such an object, never a Pod, ConfigMap, Secret or your own
+      managed resource;
+    - only on a write you make anyway;
+    - never in a status write (the status subresource drops metadata);
+    - stamp before the change that triggers the work, when they're two writes;
+    - never copy `krateo.io/traceparent-continued`.
+  - *Each method's own `ctx`.* Use the `ctx` each method is given. A client
+    that keeps the `ctx` from `Connect` would parent later calls onto a span
+    that has ended.
 - **Rate limiting** — `ratelimiter.NewController()` for per-controller
   defaults, `ratelimiter.LimitRESTConfig(cfg, rps)` to bound client-side QPS,
   `workqueue.NewExponentialTimedFailureRateLimiter` for time-expiring

@@ -2,35 +2,13 @@ package telemetry
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"time"
 
-	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
 )
-
-const defaultExportInterval = 30 * time.Second
-
-// serviceNameKey is the OTel resource attribute naming the service.
-const serviceNameKey = attribute.Key("service.name")
-
-// Config controls OpenTelemetry metrics export.
-type Config struct {
-	Enabled bool
-	// ServiceName sets the exported service.name, unless OTEL_SERVICE_NAME or
-	// OTEL_RESOURCE_ATTRIBUTES already name one. Empty leaves it to those, or
-	// to the SDK's default. There is no library-wide default: every provider
-	// would then export the same service.name.
-	ServiceName    string
-	ExportInterval time.Duration
-}
 
 // Metrics exposes a small set of low-cardinality counters and histograms for
 // provider-runtime consumers.
@@ -92,73 +70,6 @@ type Metrics struct {
 }
 
 var _ ratelimit.MetricsRecorder = (*Metrics)(nil)
-
-// Setup creates and configures an OTLP metrics pipeline.
-//
-// newResource builds the exported resource. The environment wins over
-// serviceName, so an operator's OTEL_SERVICE_NAME keeps working.
-func newResource(ctx context.Context, serviceName string) (*resource.Resource, error) {
-	// A malformed OTEL_RESOURCE_ATTRIBUTES yields a partial resource, which
-	// resource.Default tolerates too.
-	env, err := resource.New(ctx, resource.WithFromEnv())
-	if err != nil && !errors.Is(err, resource.ErrPartialResource) {
-		return nil, err
-	}
-	if serviceName != "" {
-		if _, set := env.Set().Value(serviceNameKey); !set {
-			env, err = resource.Merge(env, resource.NewSchemaless(serviceNameKey.String(serviceName)))
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	return resource.Merge(resource.Default(), env)
-}
-
-// When metrics are disabled, Setup returns a nil Metrics handle and a no-op
-// shutdown function.
-func Setup(ctx context.Context, log logging.Logger, cfg Config) (*Metrics, func(context.Context) error, error) {
-	if log == nil {
-		log = logging.NewNopLogger()
-	}
-
-	if !cfg.Enabled {
-		return nil, func(context.Context) error { return nil }, nil
-	}
-
-	exportInterval := cfg.ExportInterval
-	if exportInterval <= 0 {
-		exportInterval = defaultExportInterval
-	}
-
-	exporter, err := otlpmetrichttp.New(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	res, err := newResource(ctx, cfg.ServiceName)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(exportInterval))
-	provider := sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(reader),
-		sdkmetric.WithResource(res),
-	)
-
-	meter := provider.Meter("github.com/krateo-platformops/provider-runtime")
-	metrics, err := newMetrics(meter)
-	if err != nil {
-		_ = provider.Shutdown(ctx)
-		return nil, nil, err
-	}
-
-	otel.SetMeterProvider(provider)
-	log.Info("OpenTelemetry metrics initialized")
-
-	return metrics, provider.Shutdown, nil
-}
 
 func newMetrics(meter metric.Meter) (*Metrics, error) {
 	var err error
