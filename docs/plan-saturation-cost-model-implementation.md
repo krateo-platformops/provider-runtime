@@ -695,14 +695,15 @@ plan author's summary of the reviewer's reasons.
 
 - **(a) Start from one slot, and the rising cost's entry:** `c₁` is frozen from an
   iteration that includes the predicted excess of `ĉ` while reconciles are in
-  flight, `ĉₙ = c·(1 + N̄ₙ·D/(Σ completions to n))`, or the entry allows
-  `c₁ + 1 + ⌈D̂/Δt⌉`. The noise-free iteration assumed `ĉ` exact from the first
-  sample, which §17.1's in-flight term makes it not.
+  flight, `ĉₙ ≤ c·(1 + N̄ₙ/ΣCₙ)`, or the entry allows `c₁ + 1 + ⌈D̂/Δt⌉`. The
+  noise-free iteration assumed `ĉ` exact from the first sample, which §17.1's
+  in-flight term makes it not. (The first form, `c·(1 + N̄ₙ·D/ΣCₙ)`, had a units
+  error, corrected by the reviewer at the review of `a1b144f`: there is no `D`.)
 - **(b) Limit halves:** "a capped sample at its first term, **or an active sample
-  at the law with `D̂` restarted under the new limit**, within `ℓ + 1`". The first
-  sample wholly at the new limit need not cap: when the change's own sample has
-  already cut to the new target, it is active, and the law with the restarted
-  `D̂` is the mechanism.
+  at the law with `D̂` restarted under the new limit**, within `ℓ + 1`". The
+  reason, the reviewer's: "The first sample wholly at the new limit need not read
+  capped (not every period throttles; under §17.8 its window must cap too), and
+  the active law with `D̂` restarted under the new limit is then the mechanism."
 - **(c) Limit halves, `S₁`:** `S₁ = min(S₀, (ρL' − B̂)N̄₁/(min(U₁, L') − B̂))` when
   `U₁ > ρL'`, and `S₁ = S₀` otherwise. The condition `S₁ ≤ θ'N̄₁` can hold only
   when `U₁ ≥ L'`, since the L11 value is at least `θ'N̄₁` whenever `U₁ < L'`; this
@@ -712,21 +713,28 @@ plan author's summary of the reviewer's reasons.
   condition had judged every sample at `r̄`.
 - **(e) Contention below the quota:** "during the dip, no rise in a sample over
   `CPUPressureThreshold`; after the dip's end, `S` above `S*(1 + 3r̄)` in at most
-  `2k_θ − 1` samples, `k_θ` from the slots at the dip's end", with
+  `2k_θ − 1 + (n_W − 1)` samples, `k_θ` from the slots at the dip's end", with
   `k_θ = ⌈ln(S_end/(S*(1 + 3r̄)))/ln(1/θ)⌉`. The dip's stall distribution is
   reported. (`k_θ`'s formula is the long drain's, with the slots at the dip's end
-  in place of `N̄₀`: the plan author's reading.) The first form allowed no excursion with item 2's exclusion, but the
-  slots held at the dip's start descend from there at the capped rule's pace.
+  in place of `N̄₀`: the plan author's reading.) The reason, the reviewer's: "some
+  of the dip's samples stall under CPUPressureThreshold, so their stretched lives
+  qualify for D̂ and the law may rise in them, since §6 blocks only above the
+  threshold; after the dip the excess descends at the capped rule's pace."
 - **(f) Mix shift, "out of the cap":** within
-  `min(⌈ln(32/S*)/ln(1/θ)⌉, ⌈W/Δt⌉ + 1)` samples, the slower of the `θ` descent
-  from the ceiling and the window's latency bounding it, not a fixed 6.
+  `min(⌈ln(32/S*)/ln(1/θ)⌉, ⌈W/Δt⌉ + 1) + (n_W − 1)` samples, not a fixed 6. The
+  min is the **faster** of the two mechanisms, the `θ` descent from the ceiling
+  and the first term's descent within the window's latency; `n_W − 1` is the
+  window's own latency in deciding the cap (design §17.8, item 1).
 
 **Also corrected by the reviewer:**
 
 - **Every count is in samples after the change's own sample `i0`.** Limit halves
   becomes "within 1 after `i0`".
-- **`ℓ_min` is asserted as a measured value**: the samples from the change until
-  the first sample whose lives are all at the new cost, measured in the run.
+- **`ℓ_min` is asserted as a measured value**: the samples from the change to the
+  first window-capped sample after it, measured and asserted. It is **not** the
+  samples until the first sample whose lives are all at the new cost, which is
+  about 34 samples in the long drain and far too lenient (corrected at the review
+  of `a1b144f`).
 - **The long drain's precondition:** the run is at steady state before the change,
   at least `τ_ĉ` plus 60 completions after entering the 30s plant's band, checked;
   and the `k_θ` precondition (`N̄₀ > S*'(1 + 3r̄)`, so that there is a descent to
@@ -742,18 +750,31 @@ plan author's summary of the reviewer's reasons.
 - **The no-limit case adds a share near the demand**, so that the stall straddles
   `CPUPressureThreshold` and the block is tested on both sides of it.
 
-**From design §17.8, for the reviewer to confirm:** the cost-doubling and
-limit-halving counts gain `⌈W/Δt⌉ − 1` (the cap decided over `W`); the
-cost-doubling case's change-test mechanism is asserted within `ℓ + 2⌈W/Δt⌉`
-samples (the test over two windows); the band's lower edge after a cost
-increase is `min(θ⌊S*⌋, S*'·C_W/(C_W + N̄_W))`, with the floor reported; and "false
-restarts, 30s" is INVALID unless `S` reaches its plant's band first.
+**The counts under design §17.8**, the reviewer's text verbatim (the review of
+`a1b144f`), replacing the placeholders the plan author had put here:
+
+- **Cost doubles:** into the band within `ℓ + 2n_W − 1` samples (5 with `ℓ = 2`
+  and `n_W = 2`). Mechanisms: a window-capped sample within `ℓ + n_W − 1`; a `ĉ`
+  deferral then a restart within `2⌈W/Δt⌉ + 1`, with no rise while pending; `D̂`'s
+  rewarm at the cut. The change-test mechanism applies to a change of at least
+  `3σ_W` in a window holding new lives (report `σ_W`), and is `3⌈W/Δt⌉ + 1` for a
+  change near `3σ_W`.
+- **Limit halves:** within 1 after `i0`, `W` judged against the current limit.
+- **Contention:** at most `2k_θ − 1 + (n_W − 1)` samples above `S*(1 + 3r̄)` after
+  the dip.
+- **Mix shift:** as in (f) above.
+- **`n_W`** is measured and reported at the first window-capped sample.
+- **The band's lower edge after a cost increase** is design §17.8 item 4's,
+  frozen from the plant. **"False restarts, 30s"** is INVALID unless `S` reaches
+  its plant's band first (design §17.8, item 1).
 
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
-modelled on Temporal's tuner at its defaults (design §17.8, item 6). The
-baselines are judged on the numeric conditions without the cost model's
-mechanism assertions.
+modelled on Temporal's tuner at its defaults (design §17.8, item 6): inside the
+engine at 50 ms decisions, with its own CPU reading interval. The baselines are
+judged on the numeric conditions without the cost model's mechanism assertions.
+Until the reservation-gating baseline runs as item 6 describes, its column says
+nothing about Temporal's design.
 
 **Both controllers.** The gate runs these conditions on the cost model and on
 the utilization-feedback baseline (PR 1's simulation, design §10), case by

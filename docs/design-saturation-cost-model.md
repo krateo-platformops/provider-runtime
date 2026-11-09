@@ -1786,6 +1786,19 @@ conditions the reviewer corrected after seeing results are the plan's §4.5.
 | Baselines | The level PI's `K_p` at the grid's edge; no baseline shaped like Temporal's | §17.8, item 6: the grid extended and re-tuned; a reservation-gating baseline modelled on Temporal's tuner at its defaults |
 | Conditions | The reviewer's own errors in §4.5 | The plan's §4.5, "Corrected after seeing results" |
 
+**The statistical review of §17.8 and the plan's §4.5, `a1b144f`, 2026-11-09.**
+Two High and three Medium, each with its text, applied verbatim; not yet ready
+for code.
+
+| Item | Finding | Answer |
+|---|---|---|
+| High | No rule against a rise while `ĉ`'s change test is pending: the stale-low `ĉ` and the wait-heavy samples after a cut bring back seed 6's sawtooth | §17.8 item 2: no sample may raise the slots from a deferred window's close until the next window decides, and a window whose running `c_W` is beyond 3σ is pending from that sample |
+| High | The reservation-gating baseline wasn't faithful: per-sample issues at the sample's start, and a 1s CPU reading | §17.8 item 6: inside the engine at 50 ms decisions, each issue one slot with the PID re-checked; the CPU read on Temporal's 100 ms refresh, cited; with no limit, the node's whole utilization. Until then its column says nothing about Temporal's design |
+| Medium | Dropping the counter test over `W` | §17.8 item 1: kept over the window, one boundary period per sample; `W` judged against the current limit, so limit halves gains no term |
+| Medium | The floor from the run's own values | §17.8 item 4: frozen from the plant until the window after `ĉ`'s restart has closed |
+| Medium | The plan's §4.5: the units error in (a), the reasons in (b) and (e), (f) as the faster mechanism, `ℓ_min`'s definition, and the counts | The plan's §4.5, the reviewer's text verbatim |
+| Low | Cap-stretched lives entering `D̂`; Little's fallback during a rise | §17.8 item 7 |
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -2261,19 +2274,25 @@ slots at about 1 to 3 against a target of 6.95 (the first run). Amended:
 
 - A sample is **capped over its window `W`**, the window `c_W` uses (the most
   recent samples spanning at least max(the longest lifetime among the
-  completions in the window, `a_oldest`) + `Δt`, §17.1): capped when
-  `ΣΔU over W ≥ L·|W| − slack·n_W`, with `|W|` the window's length, `n_W` its
-  samples and `slack` §3.2's. The every-period counter test is dropped over `W`:
-  over a window that holds whole lives, total CPU at the limit means the
-  reconciles' demand is at the limit, whatever any one period did.
+  completions in the window, `a_oldest`) + `Δt`, §17.1): capped when "ΣΔU over W
+  ≥ L·|W| − slack·n_W **AND** Σ nr_throttled ≥ Σ nr_periods − n_W over W (one
+  boundary period per sample)", with `|W|` the window's length, `n_W` its samples
+  and `slack` §3.2's. The counter test is kept, over the window: at one slot in
+  the long drain about 80% of periods are unthrottled, so the window doesn't read
+  capped, while a container at the limit throttles nearly every period. The
+  window is **judged against the current limit**, `L` the limit in force now, so
+  a limit halving reads capped at the first sample wholly at the new limit.
+  (The first version of this item dropped the counter test; the review of
+  `a1b144f` restored it.)
 - Only a sample capped over its window is a capped sample: the capped rule
   applies to it, and `D̂` excludes the lives that overlapped it (§17.1). A sample
   whose own periods were all throttled but whose window is under the limit is
   active.
 - When reconciles are short, as in the measured workload, `W` is one or two
   samples and the rule is §3.2's within a sample's slack. When they are long,
-  the cap is seen a window late. **The cost-doubling and limit-halving counts
-  gain `⌈W/Δt⌉ − 1`** (the plan's §4.5).
+  the cap is seen a window late. The cost-doubling count gains the window's
+  latency; the limit-halving count gains no extra term, since `W` is judged
+  against the current limit (the plan's §4.5).
 - "False restarts, 30s" is **INVALID unless `S` reaches its plant's band** before
   the restarts are counted: in the first run it passed with 0 restarts while the
   slots sat near the floor.
@@ -2286,9 +2305,14 @@ now runs on **consecutive, non-overlapping `c_W` windows**: each closed window's
 `c_W` is one observation for the 3σ test, its deferral and its two-in-a-row
 restart (§17.1). The sums are still fed every sample, and the test still removes
 nothing from them. A window holds whole lives, so its `c_W` has the phase noise
-removed and its spread is the work's. Detection takes about two windows, so the
-change test's term in the cost-doubling count is `2⌈W/Δt⌉` samples (the plan's
-§4.5).
+removed and its spread is the work's. Detection takes about two windows (the
+plan's §4.5 gives the count).
+
+From the close of a deferred window until the next window decides, no sample may
+raise the slots. A window in progress whose running c_W is already beyond 3σ, on
+either side, counts as pending from that sample. The running `c_W` is computed
+every sample anyway. Without this, the stale-low `ĉ` and the wait-heavy samples
+after a cut bring back the sawtooth of seed 6 (the review of `a1b144f`).
 
 **3. Medium-high: the warm-start restart detects a move of the published `S`.**
 §17.4 restarted `D̂`'s warm start when `N̄` moved by more than 3σ of its own
@@ -2300,13 +2324,13 @@ more is always a move.
 
 **4. Medium: the first term's floor after a cost increase.** After the CPU per
 reconcile rises, the reconciles in flight have spent CPU at the new cost and not
-yet completed, so `c_W` includes their CPU without their completions. With
-`C_W` completions in the window and `N̄_W` in flight at its end, for CPU-first
-reconciles `c_W ≤ c'·(1 + N̄_W/C_W)`, so the capped rule's first term is at least
-`S*'·C_W/(C_W + N̄_W)`: the **predicted floor**, an undershoot towards less CPU
-that §4.3's single crossing allows. The band's lower edge in the cases that
-follow a cost increase is `min(θ⌊S*⌋, the predicted floor)`, with the floor
-computed from the run's own `C_W` and `N̄_W` and stated in the report.
+yet completed, so `c_W` includes their CPU without their completions, and the
+capped rule's first term undershoots, towards less CPU, as §4.3's single crossing
+allows. After a cost increase, the band's lower edge is
+min(θ⌊S*'⌋, S*'·(D_mix/D*')·C_W/(C_W + N₀)), frozen from the plant (N₀ = ⌈S_pre⌉,
+C_W = X'_cap·|W| from the frozen curve, D(S*') = dStar), until the window after
+ĉ's restart has closed; θ⌊S*'⌋ after. (The first version computed the floor from
+the run's own values; the review of `a1b144f` froze it from the plant.)
 
 **5. Three corrections to the code's reading of §17.1:**
 
@@ -2325,19 +2349,50 @@ computed from the run's own `C_W` and `N̄_W` and stated in the report.
   since the first tuning chose `K_p` at the grid's lower edge; the same rule, on
   the headline case, seeds 101–120, the gains committed before the gate.
 - **A reservation-gating baseline, modelled on Temporal's resource-based tuner
-  as read in its source** (§17.6), with no claim of parity. A PID on the CPU
-  error, `e = 0.9 − U/L` (the container's CPU against its limit), with Temporal's
-  defaults: `K_p = 5`, `K_i = 0`, `K_d = 1`. It issues a slot at a reservation only
-  when the PID's output exceeds 0.05, at most one per 50 ms ramp throttle,
-  always when fewer than the minimum of slots (1) are issued, and never beyond
-  the maximum (the ceiling). In the simulation, where the controller acts once
-  per sample, the capacity it publishes is the reconciles in flight plus the
-  issues the next sample allows: as many as the ramp throttle permits (20 in a
-  1s sample) while the output is over the threshold, none otherwise. The PID
-  sees one CPU reading per sample, so its derivative acts at the first decision
-  after a reading and is 0 at the others. Its gains are Temporal's defaults, not
-  tuned, and frozen the same way. With no CPU limit it reads the host's CPU, as
-  Temporal's does, which in the simulation is the node's CPUs.
+  as read in its source** (§17.6), with no claim of parity, revised at the review
+  of `a1b144f`, whose two errors both counted against it:
+  - **It runs inside the engine, at 50 ms decision ticks**, Temporal's ramp
+    throttle for activities (`internal/resource_tuner.go` at `705a0db`,
+    `DefaultActivityResourceBasedSlotSupplierOptions`, lines 148–154: `RampThrottle` 50 ms,
+    `MinSlots` 1). At each tick with work waiting it may issue one slot: always
+    when fewer than the minimum are issued; otherwise, below the maximum (the
+    ceiling), only when the PID's output exceeds 0.05 (`CpuOutputThreshold`, line 294; the decision, `pidDecision`, lines 362–391),
+    the PID re-checked before each issue. Each issue raises the capacity by one;
+    a completion releases its slot. It does not publish a per-sample capacity.
+  - **Its CPU reading has its own interval, from Temporal's source**:
+    `contrib/sysinfo/sysinfo.go` at `3f64d34`, `maybeRefresh`, lines 77–86,
+    re-reads the CPU only when at least 100 ms have passed since the last read
+    (`time.Since(...) < 100*time.Millisecond` returns without reading), and
+    `contrib/sysinfo/cgroups.go` at `3f64d34`, `updateCpuUsage`, lines 70–101,
+    computes the usage as the `usage_usec` delta since the previous read over the
+    quota. So the reading is the container's CPU over the last 100 ms or more,
+    taken lazily at a decision, and the PID's derivative acts per reading: at the
+    decision after a new reading it sees the error's change over the time since
+    the last decision, and at the next one, with the same reading, a derivative
+    of 0.
+  - **The PID** (`internal/resource_tuner.go`, `pidController.update`, lines 314–320):
+    `e = 0.9 − usage`, `output = K_p·e + K_i·∫e + K_d·de/dt`, with Temporal's
+    defaults `K_p = 5`, `K_i = 0`, `K_d = 1`, updated at each decision with `dt`
+    the time since the previous decision. Its gains are Temporal's defaults, not
+    tuned, and frozen the same way.
+  - **With no CPU limit, "host CPU" is the node's whole utilization**
+    (`sysinfo.go` lines 93 and 74: gopsutil's `cpu.Percent` over the host when the
+    cgroup reading is 0): in the simulation, the container's CPU plus the other
+    cgroups' CPU the node model runs, over the node's CPUs. Where the node model
+    gives the container a share, the other cgroups are taken to use the rest of
+    the node's CPUs: a modelling assumption, stated with the case.
+  - Until it runs this way, its column in the gate says nothing about Temporal's
+    design.
+
+**7. Two lows, stated:**
+
+- **(a)** Transitional cap-stretched lives enter `D̂`: a life whose window didn't
+  read capped but whose reconcile was stretched by throttling before the window
+  caught it. It is a small bias towards more slots, which a cut of a slot or more
+  flushes (§17.8 item 3's rewarm). The gate reports it.
+- **(b)** Little's fallback is used only within a hold, or at an `S` that hasn't
+  moved by a slot or more in the last `τ`, because `A/C` reads high during a rise:
+  the slot-seconds of the reconciles just admitted come before their completions.
 
 **What this revision doesn't change:** the law, `(ρL − B̂)·D̂/ĉ`; the deferral;
 the ratio estimator's standard error; the limit change's handling (§17.2); the
