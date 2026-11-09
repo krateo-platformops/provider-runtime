@@ -4,13 +4,14 @@ package sim
 
 // frozenPlants are each case plant's S*, D(S*) and n_iter from its fixed-
 // capacity curve (plan §4.5). nStart counts from one slot to θ⌊S*⌋; nFrom
-// from the base plant's S* into this plant's band.
+// from the base plant's S* into this plant's band; nAbove from
+// X*·D(⌈S*(1 + 3r̄)⌉) down to S*(1 + 3r̄).
 var frozenPlants = map[string]frozen{
-	"base":     {sStar: 4.7167, dStar: 0.4814, nStart: 2, nFrom: 1},
-	"cost46":   {sStar: 2.8403, dStar: 0.5800, nStart: 1, nFrom: 5},
-	"limit125": {sStar: 2.8237, dStar: 0.5760, nStart: 1, nFrom: 5},
-	"limit500": {sStar: 8.7623, dStar: 0.4482, nStart: 2, nFrom: 1},
-	"rising":   {sStar: 4.6098, dStar: 0.4874, nStart: 2, nFrom: 1},
-	"drain0":   {sStar: 6.9454, dStar: 46.4097, nStart: 62, nFrom: 62},
-	"drain":    {sStar: 3.9046, dStar: 51.9911, nStart: 44, nFrom: 44},
+	"base":     {sStar: 4.7167, dStar: 0.4814, nStart: 2, nFrom: 1, nAbove: 1},
+	"cost46":   {sStar: 2.8403, dStar: 0.5800, nStart: 1, nFrom: 5, nAbove: 2},
+	"limit125": {sStar: 2.8237, dStar: 0.5760, nStart: 1, nFrom: 5, nAbove: 2},
+	"limit500": {sStar: 8.7623, dStar: 0.4482, nStart: 2, nFrom: 1, nAbove: 0},
+	"rising":   {sStar: 4.6098, dStar: 0.4874, nStart: 2, nFrom: 1, nAbove: 1},
+	"drain0":   {sStar: 6.9454, dStar: 46.4097, nStart: 62, nFrom: 62, nAbove: 0},
+	"drain":    {sStar: 3.9046, dStar: 51.9911, nStart: 44, nFrom: 44, nAbove: 6},
 }
