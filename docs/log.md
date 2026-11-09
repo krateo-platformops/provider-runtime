@@ -12,7 +12,7 @@ timestamp: 2026-11-09T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## 2026-11-09 — unreleased, v1.13.0: logs can correlate with traces
+## 2026-11-09 — v1.13.0: logs can correlate with traces
 - **Additive; nothing breaks.** `logging.ContextLogger` (`WithContext(ctx)
   Logger`) is an optional interface, so a `Logger` written without it still
   compiles. The helper `logging.WithContext(l, ctx)` binds `l` when it
