@@ -4,7 +4,7 @@ title: provider-runtime — index
 description: The map of the provider-runtime documentation bundle, the Go library every Krateo provider controller is built on.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, managed-resource, reconciler]
-timestamp: 2026-11-08T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # provider-runtime

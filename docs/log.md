@@ -4,7 +4,7 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-08T00:00:00Z
+timestamp: 2026-11-09T00:00:00Z
 ---
 
 # Log
@@ -14,7 +14,7 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
 ## 2026-11-09 — unreleased, decided, not built: size local capacity from what reconciles cost
 - **Design:** [design-saturation-cost-model](./design-saturation-cost-model.md),
-  under independent review. The saturation input stops halving on a pressure
+  reviewed independently five times. The saturation input stops halving on a pressure
   reading and recovering on a timer. It measures what reconciles cost, CPU per
   slot-second and live heap per reconcile, and computes how many fit in the
   container's limits: CPU at `CPUTarget` (0.9) of `cpu.max`, memory within the
