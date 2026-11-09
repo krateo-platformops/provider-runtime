@@ -270,6 +270,18 @@ func TestAcquireOutcomes(t *testing.T) {
 		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{Finalizers: []string{"example.com/other"}}))
 		must(r.m.Delete(secretKey("ns", "s")))
 	}
+	t.Run("missing, then appeared but can't be held: no establishing", func(t *testing.T) {
+		r := newRig(t)
+		h := r.holder(t, "h", false)
+		a, err := r.p.acquire(ctx, h, []Ref{SecretRef("ns", "s")})
+		if err != nil || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonMissing {
+			t.Fatalf("acquire = %+v, %v; want Missing", a, err)
+		}
+		deletingSecret(r) // it appears already being deleted: A2 can't add the finalizer
+		if err := r.p.beforeEstablish(ctx, h, a); err == nil {
+			t.Error("beforeEstablish let the holder establish on a ref it couldn't hold (§6.7)")
+		}
+	})
 	t.Run("being deleted, a new holder must not connect", func(t *testing.T) {
 		r := newRig(t)
 		deletingSecret(r)
@@ -641,6 +653,71 @@ func TestReleaseFastPath(t *testing.T) {
 	res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()})
 	if err != nil || len(res.Released) != 0 || len(r.srv.calls) != 0 {
 		t.Errorf("release = %+v, %v, calls %v", res, err, r.srv.calls)
+	}
+}
+
+// R0 settles nothing for a P its cache doesn't have, whatever the cached
+// holders say: the batch reads P live.
+func TestReleaseFastPathNeedsP(t *testing.T) {
+	r := newRig(t)
+	heldSecret(r)
+	userOf(r, "h", true)
+	r.views = holdersOnly{modelViews{m: r.m}}
+	res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()})
+	if err != nil || len(res.Released) != 0 {
+		t.Fatalf("release = %+v, %v", res, err)
+	}
+	if len(r.srv.calls) == 0 {
+		t.Error("R0 settled a P its cache doesn't have")
+	}
+}
+
+// holdersOnly are caches that have the holders but not P.
+type holdersOnly struct{ modelViews }
+
+func (holdersOnly) Protected(ID) (*metav1.PartialObjectMetadata, bool) { return nil, false }
+
+// A Namespace that is gone counts as deleting (§5): P is kept for its live
+// users, after the grace too.
+func TestReleaseTreatsAMissingNamespaceAsDeleting(t *testing.T) {
+	r := newRig(t)
+	heldSecret(r, "example.com/other")
+	userOf(r, "h", true)
+	must(r.m.Delete(secretKey("ns", "s")))
+	sawDeletion(r)
+	r.tick(2 * time.Minute)
+	r.srv.before = func(op, kind, name string) error {
+		if op == "get" && kind == apimodel.NamespaceKind.Kind {
+			return apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, name)
+		}
+		return nil
+	}
+	res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Released) != 0 || len(res.Decisions) != 1 || !res.Decisions[0].Input.NamespaceDeleting {
+		t.Errorf("release = %+v; want P kept, its namespace deleting", res)
+	}
+}
+
+// A successful R3 drops this process's written entry for P and N at once,
+// and leaves other namespaces' entries (§6.2 R3).
+func TestReleaseDropsWritten(t *testing.T) {
+	r := newRig(t)
+	heldSecret(r)
+	s := r.get(t, secretKey("ns", "s"))
+	r.p.ver.wrote(s.UID, "ns", r.now)
+	r.p.ver.wrote(s.UID, "other", r.now)
+	res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()})
+	if err != nil || len(res.Released) != 1 {
+		t.Fatalf("release = %+v, %v", res, err)
+	}
+	if r.p.ver.hasWritten(s.UID, "ns") {
+		t.Error("the released (P, N) kept its written entry")
+	}
+	if !r.p.ver.hasWritten(s.UID, "other") {
+		t.Error("another namespace's written entry was dropped")
 	}
 }
 

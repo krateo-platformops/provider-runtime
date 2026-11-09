@@ -85,7 +85,21 @@ MUTANTS = [
 # Mutants that are expected to survive, because another check makes them
 # equivalent. They run anyway, and are reported as EQUIVALENT only if they
 # survive; a kill is reported as a kill.
-EQUIVALENT = {}
+EQUIVALENT = {
+    # Revision 17's exact-version rule (H1 of #59's review) makes these two
+    # guards defence in depth. A skip needs the informer to have delivered
+    # the very version the pass works from, and it delivers every version in
+    # order or relists (lastList bounds t_obs). So the run naming P that the
+    # version belongs to began at a delivery after the A1 that started it:
+    # either this pass's A1, whose response the informer can't deliver before
+    # it lands, or an earlier one. An entry written before that delivery
+    # can't satisfy t_obs < t_issue, and none can be written between this
+    # pass's A1 and its own A2.
+    "a ref this pass's A1 added may skip A2":
+        "equivalent: t_obs is at least the delivery of the run's first version, after this pass's A1",
+    "an unparseable record's refs aren't treated as added":
+        "equivalent: an unparseable record names nothing, so no delivered run names P until A1 rewrites it",
+}
 
 
 # The tests that exercise the protocol: its unit tests first, and only if they
