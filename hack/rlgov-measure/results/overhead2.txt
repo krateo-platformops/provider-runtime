@@ -1,0 +1,17 @@
+setup: Greeting CRD established on gke_integration-test-431120_us-central1-a_rlgov-measure
+2026-11-08T17:43:21Z overhead2-start gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+cleaned ovh2-new-1
+done ovh2-new-1: # restarts=0 # lastTerminated=
+cleaned ovh2-ctrl-1
+done ovh2-ctrl-1: # restarts=0 # lastTerminated=
+cleaned ovh2-new-2
+done ovh2-new-2: # restarts=0 # lastTerminated=
+cleaned ovh2-ctrl-2
+done ovh2-ctrl-2: # restarts=0 # lastTerminated=
+cleaned ovh2-new-3
+done ovh2-new-3: # restarts=0 # lastTerminated=
+cleaned ovh2-ctrl-3
+done ovh2-ctrl-3: # restarts=0 # lastTerminated=
+2026-11-08T17:59:51Z overhead2-end gke-rlgov-measure-default-pool-11ffa2b6-lmxm 4264eb41-4967-4e25-9b77-65db915667be v1.35.8-gke.1439001 6.12.94+
+OVERHEAD-DONE
+overhead exit 0

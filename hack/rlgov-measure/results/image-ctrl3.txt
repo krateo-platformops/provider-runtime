@@ -1,0 +1,1 @@
+ctrl3 d0632f1 (harness at 6d76a36bcff5e2e0d45d56fecf96f023e7094c63) sha256:7c21374b46d7ea7388ee79c89791d9f0c2f548a2531c108e856a383b4f95eb4d local tarball images/measure-ctrl3.tar, not pushed

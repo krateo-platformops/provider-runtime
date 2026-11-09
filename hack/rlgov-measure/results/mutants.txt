@@ -1,0 +1,65 @@
+baseline passed
+
+KILLED    Start doesn't apply the limit
+          TestStartAppliesTheGoMemoryLimitToTheRuntime
+KILLED    limit set with the memory input off
+          TestGoMemoryLimitUntouchedWithTheMemoryInputOff,TestHardWorkingSetRatioDropsToOneAtOnce,TestMissingInputIsDisa
+KILLED    GOMEMLIMIT ignored
+          TestGoMemoryLimitExplicitValueWins
+KILLED    the program's own limit ignored
+          TestGoMemoryLimitExplicitValueWins
+KILLED    option ignored
+          TestGoMemoryLimitExplicitValueWins
+KILLED    limit ratio 0.9
+          TestGoMemoryLimitComesFromMemoryMax,TestStartAppliesTheGoMemoryLimitToTheRuntime
+KILLED    limit is memory.max itself
+          TestGoMemoryLimitComesFromMemoryMax,TestStartAppliesTheGoMemoryLimitToTheRuntime
+KILLED    limit from memory.max not logged
+          TestGoMemoryLimitComesFromMemoryMax
+KILLED    limit set though memory.max isn't real
+          TestGoMemoryLimitNeedsARealMemoryMax
+KILLED    negative limit accepted
+          TestGoMemoryLimitOptionMustNotBeNegative
+KILLED    headroom ratio default 0.10
+          TestGoMemoryHeadroomHalvesAtItsRatio
+KILLED    headroom ratio default not applied
+          TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomNamesItselfInTheCut
+KILLED    ratio exclusive
+          TestGoMemoryHeadroomHalvesAtItsRatio
+KILLED    headroom never cuts
+          TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomHasNoHardLevel,TestGoMemoryHeadroomNamesItselfInTheCu
+KILLED    headroom has a hard level
+          TestGoMemoryHeadroomHalvesAtItsRatio,TestGoMemoryHeadroomHasNoHardLevel
+KILLED    cause doesn't name the headroom
+          TestGoMemoryHeadroomNamesItselfInTheCut
+KILLED    memory.stat still read with headroom
+          TestGoMemoryHeadroomReplacesTheWorkingSet
+KILLED    memory.stat never read
+          TestHardWorkingSetRatioDropsToOneAtOnce,TestMissingInputIsDisabledNotSaturated,TestSoftWorkingSetRatioHalves,T
+KILLED    working set not replaced
+          TestGoMemoryHeadroomReplacesTheWorkingSet
+KILLED    headroom read with the input off
+          TestGoMemoryHeadroomIsOffWithTheMemoryInputOff
+KILLED    an input nobody asked for is logged
+          TestGoMemoryHeadroomIsOffWithTheMemoryInputOff
+KILLED    used counts garbage
+          TestGoMemoryReaderCountsLiveHeapNotGarbage
+KILLED    used leaves out the non-heap memory
+          TestGoMemoryReaderCountsMemoryOutsideTheHeap
+KILLED    unknown metric reaches Uint64
+          TestGoMemoryReaderSurvivesAnUnknownMetric
+KILLED    read allocates
+          TestGoMemoryReaderDoesNotAllocate
+KILLED    no limit reads as a limit
+          TestGoHeadroomReading,TestHardWorkingSetRatioDropsToOneAtOnce,TestMissingInputIsDisabledNotSaturated,TestRateL
+KILLED    unreported limit reads as a limit
+          TestGoHeadroomReading
+KILLED    past the limit underflows
+          TestGoHeadroomReading,TestGoMemoryHeadroomHasNoHardLevel
+KILLED    ratio above 1 accepted
+          TestGoMemoryHeadroomRatioMustBeAShare
+KILLED    ratio below 0 accepted
+          TestGoMemoryHeadroomRatioMustBeAShare
+
+KILLED=30 of 30
+tree restored
