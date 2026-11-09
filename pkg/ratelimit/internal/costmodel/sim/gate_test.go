@@ -788,7 +788,7 @@ func falseRestarts(g *gctx) {
 	}
 	n := 0
 	for i, r := range g.tr.Results {
-		if i < 120 || !(r.CPU.CRestarted || r.CPU.DRestarted) {
+		if i < 120 || (!r.CPU.CRestarted && !r.CPU.DRestarted) {
 			continue
 		}
 		n++

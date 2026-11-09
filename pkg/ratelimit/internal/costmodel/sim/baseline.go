@@ -52,7 +52,7 @@ func (b *baseline) Step(s costmodel.Sample, ceiling int) costmodel.Result {
 	} else {
 		b.u += dt / (b.cfg.TauU + dt) * (used - b.u)
 	}
-	S := b.prev
+	var S float64
 	stall := 100 * s.Stall.Seconds() / dt
 	over := s.StallPresent && stall > b.cfg.PressureThreshold
 	held := false
