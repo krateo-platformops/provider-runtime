@@ -445,11 +445,11 @@ different 403s exist (core-provider found this; verified in
 
 | Class | Status | How it is recognised | Meaning |
 |---|---|---|---|
-| (a) **Deleting** | 422, reason Invalid | a cause of type `FieldValueForbidden` on field `metadata.finalizers` (`ValidateNoNewFinalizers`, via `NewInvalid` in `pkg/registry/rest/update.go:157`) | P is being deleted and lacks the finalizer |
+| (a) **Deleting** | 422, reason Invalid | a cause of type `FieldValueForbidden` on field `metadata.finalizers`, whose message starts `Forbidden: no new finalizers can be added if the object is being deleted` (`ValidateNoNewFinalizers`, `objectmeta.go:131`, via `NewInvalid` in `pkg/registry/rest/update.go:157`) | P is being deleted and lacks the finalizer |
 | (b) **policy denial** | 403, reason Forbidden | a policy's text (below), and not (c). Our policy sets `reason: Forbidden` on its validation (§10.6.1), so its denials are 403 | an admission policy refused the write |
 | (c) **policy config error** | 422, reason Invalid | a policy's text containing `failed to configure binding`, and **no** `metadata.finalizers` cause | a policy binding couldn't be configured, for example `cu-policy-params` missing (§10.6.1) |
-| (d) **RBAC** | 403, reason Forbidden | the authorizer's own message, `User "<name>" cannot <verb> resource "<resource>" in API group "<group>"`, followed by ` in the namespace "<ns>"` or ` at the cluster scope` (`pkg/endpoints/handlers/responsewriters/errors.go:60-80`). The exact text is pinned by an envtest | the caller lacks the permission |
-| (e) **other admission denial** | 403, reason Forbidden | neither (b) nor (d): a webhook denial, or NamespaceLifecycle refusing a create in a terminating namespace (`pkg/admission/plugin/namespace/lifecycle/admission.go:179`). Counted in `credentialuse_admission_denied_total`, so an RBAC message the pattern no longer matches shows up | an admission plugin refused the write |
+| (d) **RBAC** | 403, reason Forbidden | the authorizer's own message, `User "<name>" cannot <verb> resource "<resource>" in API group "<group>"` (each part written with `%q`, so escaped quotes are allowed), followed by ` in the namespace "<ns>"` or ` at the cluster scope` (`pkg/endpoints/handlers/responsewriters/errors.go:60-80`). The exact text is pinned by an envtest | the caller lacks the permission |
+| (e) **other admission denial** | 403 | neither (b) nor (d), or a 403 whose reason isn't Forbidden: a webhook denial, or NamespaceLifecycle refusing a create in a terminating namespace (`pkg/admission/plugin/namespace/lifecycle/admission.go:179`). Counted in `credentialuse_admission_denied_total`, so an RBAC message the pattern no longer matches shows up | an admission plugin refused the write |
 
 **A policy's text is not a message prefix** (corrected in revision 16). The
 dispatcher wraps a denial in `admission.NewForbidden`, so the status message
@@ -471,11 +471,10 @@ revision 16). The format is identical in `k8s.io/apiserver` v0.31.0, v0.33.0,
 v0.35.0, v0.36.5 and v0.37.2, read from the module cache
 (`pkg/endpoints/handlers/responsewriters/errors.go`, `forbiddenMessage`); in
 v0.31.0 `Forbidden` builds the message inline, with the same `: <reason>`
-suffix. CI pins the exact text on envtest 1.37.0, and the same test runs on
-1.34, 1.35 and 1.36 locally. Neither provider-runtime nor installer states
-the oldest Kubernetes version Krateo supports (installer's chart has no
-`kubeVersion` constraint), so that is open for the user (§18). Once it is
-named, the envtest pins the text on it too.
+suffix. **Krateo's minimum Kubernetes is 1.36** (the user's decision,
+§18). CI pins the exact text on envtest 1.37.0 and on 1.36.2, the latest
+1.36 patch, in `.github/workflows/run-tests.yaml`, and the same test also
+passes locally on 1.34 and 1.35.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an
@@ -542,19 +541,31 @@ for the set of protected objects pending there (R7). For each pending P:
 - **R3. Release** each P the table says to release, with one JSON patch:
 
   ```json
-  [{"op":"test",   "path":"/metadata/annotations/<F escaped>", "value":"<e>"},
+  [{"op":"test",   "path":"/metadata/uid",                     "value":"<P's uid>"},
+   {"op":"test",   "path":"/metadata/annotations/<F escaped>", "value":"<e>"},
    {"op":"test",   "path":"/metadata/finalizers/<i>",          "value":"<F>"},
+   {"op":"test",   "path":"/metadata/finalizers",              "value":[<the array R1 read>]},
    {"op":"remove", "path":"/metadata/finalizers/<i>"},
    {"op":"remove", "path":"/metadata/annotations/<F escaped>"}]
   ```
 
   `<F escaped>` is the finalizer name with `/` written as `~1` (RFC 6901).
-  Two cases add to the patch, and both then also test the whole
-  `/metadata/finalizers` array as R1 read it:
+  Two cases add to the patch:
   - when F is K's last finalizer on P (no other namespace's), the patch
     also removes K's marker label;
   - when F is the last `credential-use.` finalizer of any kind, it also
     removes the held label.
+
+  **The uid and the whole array are always tested** (L5 and L1 of the review
+  of #53, the latter the user's decision). An earlier revision tested the
+  array only when a label went. The uid test keeps a release built from one
+  incarnation off another with the same name and keys. The array test means
+  no two releasers can apply from one read: two releasers of K, for
+  namespaces a and b, that both read `[Fa, Fb]` are neither last, so without
+  it both would apply and leave the labels on an object nothing holds. With
+  it, the second fails, re-reads `[Fb]`, is last, and removes them. The cost
+  is a retry whenever the array changed since R1, for any reason. Finalizer
+  arrays change rarely, and the retries are bounded (above).
 
   **Every value the patch removes is tested first** (L1 of the review of
   revision 16): the epoch, the finalizer at *i*, and each label it removes,
@@ -634,7 +645,9 @@ tG, whose R2 list reads at tL > tG, and whose R3 patch lands at tR > tL.
   *e*, and R3's first test fails. This holds even if another releaser
   removed the finalizer between tG and tW and A2 re-added it: the epoch is
   still fresh. The releaser starts again from R1. Its next list is after
-  tW > tA, so it sees H.
+  tW > tA, so it sees H. R3 also tests the uid and the whole finalizer array
+  as R1 read it (§6.2), so any other write to the array in between breaks
+  it too, and so does a recreate behind the same name.
 - **tW > tR.** The finalizer was gone before A2. A2 adds it back (held), or
   is rejected because P is being deleted (Deleting), and the acquirer
   knows which.
@@ -3805,7 +3818,7 @@ amendment keeps the merged design's safety proofs. Its findings:
 | M2 The consent-read `RetryAfter` had no backoff: exponential per (holder, ref), from 1s doubling to the poll interval, reset on success; an overload test | §11.3, §8 step 5, §14 |
 | L1 An R3 422 against an unchanged resourceVersion is an error with an event and a metric, not contention; each retry rebuilds the patch, which tests every value it removes | §6.2, §12, §14 |
 | L2 A1 copies the whole returned `ObjectMeta`, and re-reads the object before the next write when the generation or labels changed | §6.2 A1 |
-| L3 Class (e) is counted; the RBAC message format is the same from apiserver v0.31.0 to v0.37.2; the oldest supported Kubernetes version is open | §6.2, §12, §18 |
+| L3 Class (e) is counted; the RBAC message format is the same from apiserver v0.31.0 to v0.37.2; Krateo's minimum Kubernetes is 1.36 (the user's decision), and CI pins the message on 1.36.2 and 1.37.0 | §6.2, §12, §18 |
 | L4 Guarded CRD writes are bounded to 5 attempts, and a starved count write is logged and counted | §7.3, §12 |
 
 ## 18. Open questions for the user
@@ -3814,9 +3827,10 @@ amendment keeps the merged design's safety proofs. Its findings:
 §5.2), NQ3 (the builder line, §7.5) and NQ4 (provider-runtime#46). In
 revision 16, IP1 to IP5 (§17).
 
-**Open:** the oldest Kubernetes version Krateo supports. Neither
-provider-runtime nor installer states one. The RBAC message's format is the
-same from Kubernetes 1.31 to 1.37 (§6.2), and once a minimum is named, the
-envtest that pins the message runs on it too.
+**Decided after the review of revision 16:** Krateo's minimum Kubernetes
+is **1.36**. CI runs the premise envtests, the exact RBAC message among
+them, on 1.36.2 and 1.37.0 (§6.2).
+
+Nothing is open.
 
 Nothing is open. No question needs the user.
