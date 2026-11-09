@@ -1,0 +1,439 @@
+TestGateReport (SIM_GATE=1) at 0dfa94e: design §17.9 items 1–8 and plan §4.5 as corrected, on the cost
+model, the level PI at its committed gains (95d54b2) and at ×0.5 and ×2, and the reservation gate at
+Temporal's defaults. Seeds 1–20. Per cell: seeds passing; below, failure kinds counted across seeds,
+and seeds 1–3's reports. Not every case passes, so no confirmation run on seeds 21–40 was made.
+
+20 seeds; 19m28s
+
+| Case | cost model | level PI ×1 | level PI ×0.5 | level PI ×2 | reservation gate |
+|---|---|---|---|---|---|
+| headline | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| start from one slot | 20/20 | 20/20 | 6/20 | 10/20 | 0/20 |
+| cost doubles | 19/20 | 0/20 | 0/20 | 0/20 | 0/20 |
+| limit halves | 16/20 | 9/20 | 0/20 | 0/20 | 0/20 |
+| limit doubles | 16/20 | 0/20 | 0/20 | 20/20 | 0/20 |
+| wait doubles | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| usage noise | 20/20 | 12/20 | 20/20 | 0/20 | 0/20 |
+| H1 biased background | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| H1 noisy background | 20/20 | 20/20 | 20/20 | 20/20 | 0/20 |
+| H1 bursts above one slot | 20/20 | 19/20 | 20/20 | 19/20 | 20/20 |
+| false restarts, 0.47s | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| false restarts, 30s | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| mix shift seen | 13/20 | 0/20 | 0/20 | 0/20 | 1/20 |
+| mix shift never seen | 19/20 | 0/20 | 0/20 | 0/20 | 15/20 |
+| no limit, pressure only blocks | 20/20 | 20/20 | 20/20 | 20/20 | 20/20 |
+| contention below the quota | 0/20 | 0/20 | 0/20 | 0/20 | 0/20 |
+| long drain | 0/20 | 0/20 | 0/20 | 0/20 | 0/20 (12 invalid) |
+| rising cost | 19/20 | 18/20 | 7/20 | 0/20 | 0/20 |
+
+H1 bursts above one slot — cost model:
+  seed 1: mean CPU 87.9% of the limit (target 90%, shifted down by at most a few points)
+  seed 2: an untrusted fall at 21.001s: 3.05 to 3.00 with U over ρL
+  seed 2: an untrusted fall at 22.001s: 3.00 to 2.94 with U over ρL
+  seed 2: an untrusted fall at 23s: 2.94 to 2.91 with U over ρL
+  seed 2: an untrusted fall at 40.001s: 3.39 to 3.31 with U over ρL
+  seed 2: an untrusted fall at 44.001s: 3.45 to 3.34 with U over ρL
+  seed 2: mean CPU 86.5% of the limit (target 90%, shifted down by at most a few points)
+  seed 3: an untrusted fall at 19.001s: 3.32 to 2.98 with U over ρL
+  seed 3: an untrusted fall at 20.001s: 2.98 to 2.97 with U over ρL
+  seed 3: an untrusted fall at 26.001s: 3.57 to 3.56 with U over ρL
+  seed 3: an untrusted fall at 28.001s: 3.56 to 3.52 with U over ρL
+  seed 3: mean CPU 86.6% of the limit (target 90%, shifted down by at most a few points)
+
+H1 bursts above one slot — level PI ×0.5:
+  seed 1: an untrusted fall at 1m34.001s: 5.64 to 5.59 with U over ρL
+  seed 1: an untrusted fall at 1m35.001s: 5.59 to 5.56 with U over ρL
+  seed 1: an untrusted fall at 1m37.001s: 5.56 to 5.52 with U over ρL
+  seed 1: mean CPU 93.3% of the limit (target 90%, shifted down by at most a few points)
+  seed 2: an untrusted fall at 19.001s: 10.77 to 10.73 with U over ρL
+  seed 2: mean CPU 92.1% of the limit (target 90%, shifted down by at most a few points)
+  seed 3: an untrusted fall at 1m7s: 5.73 to 5.68 with U over ρL
+  seed 3: an untrusted fall at 1m8.001s: 5.68 to 5.63 with U over ρL
+  seed 3: mean CPU 91.4% of the limit (target 90%, shifted down by at most a few points)
+
+H1 bursts above one slot — level PI ×1:
+  1× an unattributed fall at …
+  seed 1: mean CPU 91.2% of the limit (target 90%, shifted down by at most a few points)
+  seed 2: mean CPU 91.3% of the limit (target 90%, shifted down by at most a few points)
+  seed 3: an untrusted fall at 18.001s: 16.00 to 15.95 with U over ρL
+  seed 3: mean CPU 91.1% of the limit (target 90%, shifted down by at most a few points)
+
+H1 bursts above one slot — level PI ×2:
+  1× an unattributed fall at …
+  seed 1: mean CPU 89.9% of the limit (target 90%, shifted down by at most a few points)
+  seed 2: mean CPU 90.2% of the limit (target 90%, shifted down by at most a few points)
+  seed 3: an untrusted fall at 18.001s: 16.00 to 15.91 with U over ρL
+  seed 3: mean CPU 90.1% of the limit (target 90%, shifted down by at most a few points)
+
+H1 bursts above one slot — reservation gate:
+  seed 1: mean CPU 98.1% of the limit (target 90%, shifted down by at most a few points)
+  seed 2: mean CPU 98.2% of the limit (target 90%, shifted down by at most a few points)
+  seed 3: mean CPU 98.2% of the limit (target 90%, shifted down by at most a few points)
+
+H1 noisy background — reservation gate:
+  20× below the ceiling at …
+
+contention below the quota — cost model:
+  20× above S*( …
+  seed 1: the dip's stall: min 15.4, median 53.0, max 58.1, over 50 in 8 of 15
+  seed 1: the excursion above the band: 14 samples, at most 10.58 slots over
+  seed 2: the dip's stall: min 10.0, median 55.1, max 58.1, over 50 in 12 of 15
+  seed 2: the excursion above the band: 13 samples, at most 9.95 slots over
+  seed 3: the dip's stall: min 21.0, median 58.1, max 58.1, over 50 in 13 of 15
+  seed 3: the excursion above the band: 15 samples, at most 10.58 slots over
+
+contention below the quota — level PI ×0.5:
+  20× above S*( …
+  seed 1: the dip's stall: min 37.7, median 58.1, max 58.1, over 50 in 12 of 15
+  seed 1: the excursion above the band: 66 samples, at most 4.63 slots over
+  seed 2: the dip's stall: min 29.7, median 57.5, max 58.1, over 50 in 12 of 15
+  seed 2: the excursion above the band: 61 samples, at most 4.77 slots over
+  seed 3: the dip's stall: min 29.9, median 58.1, max 58.1, over 50 in 12 of 15
+  seed 3: the excursion above the band: 66 samples, at most 4.59 slots over
+
+contention below the quota — level PI ×1:
+  20× above S*( …
+  seed 1: the dip's stall: min 18.0, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 1: the excursion above the band: 65 samples, at most 9.71 slots over
+  seed 2: the dip's stall: min 33.6, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 2: the excursion above the band: 64 samples, at most 9.70 slots over
+  seed 3: the dip's stall: min 14.3, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 3: the excursion above the band: 65 samples, at most 9.57 slots over
+
+contention below the quota — level PI ×2:
+  20× above S*( …
+  seed 1: the dip's stall: min 28.1, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 1: the excursion above the band: 36 samples, at most 10.58 slots over
+  seed 2: the dip's stall: min 14.3, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 2: the excursion above the band: 36 samples, at most 10.58 slots over
+  seed 3: the dip's stall: min 26.3, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 3: the excursion above the band: 39 samples, at most 10.58 slots over
+
+contention below the quota — reservation gate:
+  20× above S*( …
+  seed 1: the dip's stall: min 14.4, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 1: the excursion above the band: 4 samples, at most 10.58 slots over
+  seed 2: the dip's stall: min 15.2, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 2: the excursion above the band: 9 samples, at most 10.58 slots over
+  seed 3: the dip's stall: min 14.7, median 58.1, max 58.1, over 50 in 14 of 15
+  seed 3: the excursion above the band: 5 samples, at most 10.58 slots over
+
+cost doubles — cost model:
+  1× no window-capped sample within ℓ + n_W − …
+  seed 1: n_W 3 at the first window-capped sample (+3)
+  seed 1: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+  seed 1: σ_W 0.00078 before the change; the change Δc/σ_W ≈ 29.4
+  seed 1: W_test 3 samples; the restart at +5, the horizon 7
+  seed 1: 2 untrusted samples without a standard error excluded from the band rule
+  seed 2: n_W 2 at the first window-capped sample (+2)
+  seed 2: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+  seed 2: σ_W 0.00083 before the change; the change Δc/σ_W ≈ 27.8
+  seed 2: W_test 3 samples; the restart at +5, the horizon 7
+  seed 2: 3 untrusted samples without a standard error excluded from the band rule
+  seed 3: n_W 2 at the first window-capped sample (+1)
+  seed 3: the floor 1.61 until +6, then θ⌊S*'⌋ = 1.80
+  seed 3: σ_W 0.00113 before the change; the change Δc/σ_W ≈ 20.4
+  seed 3: W_test 2 samples; the restart at +4, the horizon 5
+  seed 3: 5 untrusted samples without a standard error excluded from the band rule
+
+cost doubles — level PI ×0.5:
+  20× into the band [ …
+  4× outside the band [ …
+  seed 1: n_W 3 at the first window-capped sample (+3)
+  seed 1: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+  seed 2: n_W 3 at the first window-capped sample (+3)
+  seed 2: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+  seed 3: n_W 3 at the first window-capped sample (+3)
+  seed 3: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+
+cost doubles — level PI ×1:
+  16× outside the band [ …
+  20× into the band [ …
+  seed 1: n_W 2 at the first window-capped sample (+1)
+  seed 1: the floor 1.61 until +5, then θ⌊S*'⌋ = 1.80
+  seed 2: n_W 2 at the first window-capped sample (+1)
+  seed 2: the floor 1.61 until +5, then θ⌊S*'⌋ = 1.80
+  seed 3: n_W 3 at the first window-capped sample (+3)
+  seed 3: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+
+cost doubles — level PI ×2:
+  16× into the band [ …
+  20× outside the band [ …
+  seed 1: n_W 2 at the first window-capped sample (+8)
+  seed 1: the floor 1.61 until +5, then θ⌊S*'⌋ = 1.80
+  seed 2: n_W 2 at the first window-capped sample (+1)
+  seed 2: the floor 1.61 until +5, then θ⌊S*'⌋ = 1.80
+  seed 3: n_W 3 at the first window-capped sample (+3)
+  seed 3: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+
+cost doubles — reservation gate:
+  13× into the band [ …
+  20× outside the band [ …
+  seed 1: n_W 3 at the first window-capped sample (+3)
+  seed 1: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+  seed 2: n_W 3 at the first window-capped sample (+3)
+  seed 2: the floor 1.61 until +7, then θ⌊S*'⌋ = 1.80
+  seed 3: n_W 2 at the first window-capped sample (+3)
+  seed 3: the floor 1.61 until +5, then θ⌊S*'⌋ = 1.80
+
+false restarts, 0.47s — cost model:
+  seed 1: restarts after warm-up: 3 in an hour
+  seed 2: restarts after warm-up: 2 in an hour
+  seed 3: restarts after warm-up: 9 in an hour
+
+false restarts, 30s — cost model:
+  seed 1: into the 30s plant's band at 11m1s
+  seed 1: restarts after warm-up: 0 in an hour
+  seed 2: into the 30s plant's band at 9m4.001s
+  seed 2: restarts after warm-up: 1 in an hour
+  seed 3: into the 30s plant's band at 10m55.001s
+  seed 3: restarts after warm-up: 0 in an hour
+
+false restarts, 30s — level PI ×0.5:
+  seed 1: into the 30s plant's band at 45.001s
+  seed 2: into the 30s plant's band at 45.001s
+  seed 3: into the 30s plant's band at 1m20s
+
+false restarts, 30s — level PI ×1:
+  seed 1: into the 30s plant's band at 30.001s
+  seed 2: into the 30s plant's band at 30.001s
+  seed 3: into the 30s plant's band at 44s
+
+false restarts, 30s — level PI ×2:
+  seed 1: into the 30s plant's band at 22.001s
+  seed 2: into the 30s plant's band at 21s
+  seed 3: into the 30s plant's band at 29.001s
+
+false restarts, 30s — reservation gate:
+  seed 1: into the 30s plant's band at 1.001s
+  seed 2: into the 30s plant's band at 1.001s
+  seed 3: into the 30s plant's band at 1.001s
+
+limit doubles — cost model:
+  4× not within …
+  seed 1: 3 untrusted samples without a standard error excluded from the band rule
+  seed 2: 3 untrusted samples without a standard error excluded from the band rule
+  seed 3: 3 untrusted samples without a standard error excluded from the band rule
+
+limit doubles — level PI ×0.5:
+  20× not within …
+
+limit doubles — level PI ×1:
+  20× not within …
+
+limit doubles — reservation gate:
+  14× not within …
+  6× outside the band [ …
+
+limit halves — cost model:
+  1× outside the band [ …
+  4× into the band [ …
+  seed 1: 3 untrusted samples without a standard error excluded from the band rule
+  seed 2: 4 untrusted samples without a standard error excluded from the band rule
+  seed 3: 5 untrusted samples without a standard error excluded from the band rule
+
+limit halves — level PI ×0.5:
+  20× into the band [ …
+  2× outside the band [ …
+
+limit halves — level PI ×1:
+  10× outside the band [ …
+  4× into the band [ …
+
+limit halves — level PI ×2:
+  13× into the band [ …
+  20× outside the band [ …
+
+limit halves — reservation gate:
+  19× into the band [ …
+  20× outside the band [ …
+
+long drain — cost model:
+  20× into the band [ …
+  9× outside the band [ …
+  seed 1: drained samples: 502; N̄₀ 6.84, k_θ 4, ℓ_min 51, n_W 60
+  seed 1: 164 untrusted samples without a standard error excluded from the band rule
+  seed 1: Little's fallback used in 0 samples; ĉ restarts 1; cap-stretched lives in D̂ 58
+  seed 2: drained samples: 427; N̄₀ 7.75, k_θ 6, ℓ_min 75, n_W 65
+  seed 2: 74 untrusted samples without a standard error excluded from the band rule
+  seed 2: Little's fallback used in 0 samples; ĉ restarts 1; cap-stretched lives in D̂ 59
+  seed 3: drained samples: 650; N̄₀ 7.68, k_θ 6, ℓ_min 80, n_W 75
+  seed 3: 167 untrusted samples without a standard error excluded from the band rule
+  seed 3: Little's fallback used in 0 samples; ĉ restarts 1; cap-stretched lives in D̂ 64
+
+long drain — level PI ×0.5:
+  1839× a rise at …
+  20× outside the band [ …
+  seed 1: drained samples: 760; N̄₀ 6.53, k_θ 4, ℓ_min 71, n_W 51
+  seed 2: drained samples: 791; N̄₀ 6.25, k_θ 4, ℓ_min 9, n_W 47
+  seed 3: drained samples: 836; N̄₀ 6.58, k_θ 4, ℓ_min 37, n_W 55
+
+long drain — level PI ×1:
+  1369× a rise at …
+  16× outside the band [ …
+  4× no window-capped sample after the change: ℓ_min unmeasurable
+  seed 1: drained samples: 936; N̄₀ 7.73, k_θ 6, ℓ_min 56, n_W 69
+  seed 3: drained samples: 955; N̄₀ 7.87, k_θ 6, ℓ_min 254, n_W 49
+
+long drain — level PI ×2:
+  1237× a rise at …
+  20× outside the band [ …
+  seed 1: drained samples: 1058; N̄₀ 8.25, k_θ 6, ℓ_min 132, n_W 68
+  seed 2: drained samples: 1051; N̄₀ 8.50, k_θ 7, ℓ_min 68, n_W 66
+  seed 3: drained samples: 1057; N̄₀ 7.02, k_θ 5, ℓ_min 35, n_W 47
+
+long drain — reservation gate:
+  12× INVALID: no drained sample: the case didn't exercise a drain
+  20× into the band [ …
+  20× outside the band [ …
+  9× a rise at …
+  seed 1: drained samples: 0; N̄₀ 12.84, k_θ 10, ℓ_min 0, n_W 54
+  seed 2: drained samples: 1; N̄₀ 8.08, k_θ 6, ℓ_min 0, n_W 54
+  seed 3: drained samples: 1; N̄₀ 8.34, k_θ 6, ℓ_min 0, n_W 56
+
+mix shift never seen — cost model:
+  1× capped at …
+
+mix shift never seen — level PI ×0.5:
+  2311× capped at …
+
+mix shift never seen — level PI ×1:
+  2313× capped at …
+
+mix shift never seen — level PI ×2:
+  1512× capped at …
+
+mix shift never seen — reservation gate:
+  4× rose while capped at …
+  6× capped at …
+
+mix shift seen — cost model:
+  1× 2 crossings of the band after the shift, want at most one
+  1× an upward crossing at …
+  6× not out of the cap within …
+  seed 1: an untrusted fall at 2m8.001s: 7.12 to 4.25 with U over ρL
+  seed 1: ĉ restarts not caused by a scenario change: 0
+  seed 2: ĉ restarts not caused by a scenario change: 0
+  seed 3: an untrusted fall at 2m9.001s: 8.68 to 5.64 with U over ρL
+  seed 3: ĉ restarts not caused by a scenario change: 0
+
+mix shift seen — level PI ×0.5:
+  20× not out of the cap within …
+  seed 1: an untrusted fall at 2m4.001s: 32.00 to 31.96 with U over ρL
+
+mix shift seen — level PI ×1:
+  20× not out of the cap within …
+  seed 2: an untrusted fall at 2m4.001s: 32.00 to 31.92 with U over ρL
+
+mix shift seen — level PI ×2:
+  20× not out of the cap within …
+  seed 1: an untrusted fall at 3m19s: 5.87 to 5.61 with U over ρL
+  seed 1: an untrusted fall at 3m20.001s: 5.61 to 5.49 with U over ρL
+  seed 1: an untrusted fall at 3m21.001s: 5.49 to 5.24 with U over ρL
+  seed 2: an untrusted fall at 3m14.001s: 7.56 to 7.32 with U over ρL
+  seed 2: an untrusted fall at 3m15.001s: 7.32 to 7.02 with U over ρL
+  seed 2: an untrusted fall at 3m17.001s: 6.73 to 6.53 with U over ρL
+  seed 3: an untrusted fall at 2m4.001s: 32.00 to 31.84 with U over ρL
+  seed 3: an untrusted fall at 3m18.001s: 6.26 to 6.01 with U over ρL
+  seed 3: an untrusted fall at 3m19s: 6.01 to 5.83 with U over ρL
+  seed 3: an untrusted fall at 3m21.001s: 5.58 to 5.56 with U over ρL
+  seed 3: an untrusted fall at 3m23.001s: 5.66 to 5.53 with U over ρL
+
+mix shift seen — reservation gate:
+  1× 7 crossings of the band after the shift, want at most one
+  1× 9 crossings of the band after the shift, want at most one
+  2× 2 crossings of the band after the shift, want at most one
+  2× 6 crossings of the band after the shift, want at most one
+  36× an upward crossing at …
+  4× 4 crossings of the band after the shift, want at most one
+  4× 5 crossings of the band after the shift, want at most one
+  5× 3 crossings of the band after the shift, want at most one
+  9× not out of the cap within …
+
+no limit, pressure only blocks — cost model:
+  seed 1: samples over the threshold: 597; at the share near demand, 1 of 301
+  seed 2: samples over the threshold: 597; at the share near demand, 1 of 301
+  seed 3: samples over the threshold: 597; at the share near demand, 1 of 301
+
+no limit, pressure only blocks — level PI ×0.5:
+  seed 1: samples over the threshold: 599; at the share near demand, 1 of 301
+  seed 2: samples over the threshold: 599; at the share near demand, 1 of 301
+  seed 3: samples over the threshold: 599; at the share near demand, 1 of 301
+
+no limit, pressure only blocks — level PI ×1:
+  seed 1: samples over the threshold: 599; at the share near demand, 1 of 301
+  seed 2: samples over the threshold: 599; at the share near demand, 1 of 301
+  seed 3: samples over the threshold: 599; at the share near demand, 1 of 301
+
+no limit, pressure only blocks — level PI ×2:
+  seed 1: samples over the threshold: 599; at the share near demand, 1 of 301
+  seed 2: samples over the threshold: 599; at the share near demand, 1 of 301
+  seed 3: samples over the threshold: 599; at the share near demand, 1 of 301
+
+no limit, pressure only blocks — reservation gate:
+  seed 1: not judged: the slots fell at 3s with no limit: 3.00 to 2.00
+  seed 2: not judged: the slots fell at 5s with no limit: 3.00 to 2.00
+  seed 3: not judged: the slots fell at 16s with no limit: 3.00 to 2.00
+
+rising cost — cost model:
+  1× S …
+  seed 1: 2 untrusted samples without a standard error excluded from the band rule
+  seed 1: max S 4.89 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 4 samples without a standard error excluded
+  seed 2: 2 untrusted samples without a standard error excluded from the band rule
+  seed 2: max S 4.86 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 4 samples without a standard error excluded
+  seed 3: 2 untrusted samples without a standard error excluded from the band rule
+  seed 3: max S 4.84 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 4 samples without a standard error excluded
+
+rising cost — level PI ×0.5:
+  13× into the band [ …
+  seed 1: max S 4.91 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 2: max S 4.89 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 3: max S 5.02 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+
+rising cost — level PI ×1:
+  1× outside the band [ …
+  2× S …
+  seed 1: max S 5.09 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 2: max S 5.25 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 3: max S 5.17 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+
+rising cost — level PI ×2:
+  20× S …
+  7× outside the band [ …
+  seed 1: max S 5.52 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 2: max S 5.53 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 3: max S 5.62 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+
+rising cost — reservation gate:
+  20× S …
+  20× mean CPU over the last …
+  20× outside the band [ …
+  seed 1: max S 6.00 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 2: max S 6.00 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+  seed 3: max S 6.00 against S* 4.61 (predicted excess 0.01·(S* − 1)·S* = 0.17); 0 samples without a standard error excluded
+
+start from one slot — cost model:
+  seed 1: 2 untrusted samples without a standard error excluded from the band rule
+  seed 1: ĉ restarts not caused by a scenario change: 0
+  seed 2: 2 untrusted samples without a standard error excluded from the band rule
+  seed 2: ĉ restarts not caused by a scenario change: 0
+  seed 3: 2 untrusted samples without a standard error excluded from the band rule
+  seed 3: ĉ restarts not caused by a scenario change: 0
+
+start from one slot — level PI ×0.5:
+  14× into the band [ …
+
+start from one slot — level PI ×2:
+  10× outside the band [ …
+
+start from one slot — reservation gate:
+  20× outside the band [ …
+
+usage noise — level PI ×1:
+  8× slots' standard deviation …
+
+usage noise — level PI ×2:
+  20× slots' standard deviation …
+
+usage noise — reservation gate:
+  20× slots' standard deviation …

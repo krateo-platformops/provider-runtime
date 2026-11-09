@@ -36,9 +36,9 @@ func TestExplore(t *testing.T) {
 	for i, at := range tr.At {
 		r := tr.Results[i]
 		c := r.CPU
-		fmt.Fprintf(&b, "t=%6.1f S=%6.2f cap=%2d U=%.3f L=%.3f kind=%-6s c=%.4f D=%.3f N=%.2f C=%2d stall=%5.1f tr=%v pace=%v guard=%v unres=%v held=%v def=%v crs=%v rw=%v hold=%v fb=%v chg=%v first=%v\n",
+		fmt.Fprintf(&b, "t=%6.1f S=%6.2f cap=%2d U=%.3f L=%.3f kind=%-6s c=%.4f D=%.3f N=%.2f C=%2d stall=%5.1f thr=%d/%d tr=%v pace=%v guard=%v unres=%v held=%v def=%v crs=%v rw=%v hold=%v fb=%v chg=%v first=%v\n",
 			at.Seconds(), r.Slots, tr.Capacity[i], tr.Used(i), tr.Samples[i].Limit, c.Kind, c.PerCompletion, c.Duration,
-			c.InFlight, tr.Samples[i].Books.Completions, c.Stall, c.Trusted, c.Paced, c.Guarded, c.Unresolvable, r.Held,
+			c.InFlight, tr.Samples[i].Books.Completions, c.Stall, tr.Samples[i].Throttled, tr.Samples[i].Periods, c.Trusted, c.Paced, c.Guarded, c.Unresolvable, r.Held,
 			c.CDeferred, c.CRestarted, c.DRewarmed, c.DHold, c.DFallback, c.ChangeSample, c.FirstTerm)
 	}
 	t.Log("\n" + b.String())
