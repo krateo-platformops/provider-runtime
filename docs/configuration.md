@@ -32,7 +32,7 @@ The library itself reads no environment variables. `telemetry.Setup` with
 | `OTEL_EXPORTER_OTLP_HEADERS`, `_TIMEOUT`, `_COMPRESSION`, `_CERTIFICATE`, … | Standard exporter tuning, per the OTel spec. |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | The exported resource attributes, via `resource.Default()`. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*`, `OTEL_SPAN_*_LIMIT` | Unreleased, with `Config.TracingEnabled`: the trace exporter, the sampler (default `parentbased_always_on`), the batcher and span limits, read by the SDK. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | Unreleased: with tracing on, `Setup` fails unless each is unset or `http/protobuf`. Traces go over OTLP/HTTP only. |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL` | Unreleased: with tracing on, `Setup` fails unless the traces protocol is unset or `http/protobuf`. The signal-specific variable decides when it's set, as OTel specifies. Traces go over OTLP/HTTP only. |
 
 `telemetry.ConfigFromEnv()` (unreleased) is the one place the library reads
 Krateo's own variables, and only when main calls it:
