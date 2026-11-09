@@ -305,13 +305,6 @@ func TestCriticalWriteAfterFailedCreateKeepsAFreshTraceparent(t *testing.T) {
 // re-reads the object and writes the runtime's keys onto that fresh read. A
 // value another writer set between the attempts survives, and the keys the
 // caller set in memory are still written.
-//
-// This doesn't tell a capture taken once, before the loop, from one taken
-// inside it. A failed Update leaves the object as it was (client-go's
-// Result.Into returns before decoding), so the first attempt's merged
-// annotations are still on it, and a capture inside the loop takes the same
-// keys again. The two are equivalent; the capture stays before the loop
-// because that says what's meant.
 func TestUpdateCriticalAnnotationsRetriesOnConflict(t *testing.T) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	stored := &fake.Managed{}
@@ -350,5 +343,39 @@ func TestUpdateCriticalAnnotationsRetriesOnConflict(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, srv.annotations()); diff != "" {
 		t.Errorf("stored annotations after the retry: -want, +got:\n%s", diff)
+	}
+}
+
+// The capture stays before the loop so a runtime key the caller didn't carry
+// is never written back from an earlier attempt's read. After a failed
+// attempt the object holds that attempt's read plus the merge, so a capture
+// taken inside the loop would pick up external-name x1 from the first read and
+// write it over the x2 another writer set before the second.
+func TestUpdateCriticalAnnotationsNeverWritesBackAnEarlierRead(t *testing.T) {
+	stored := &fake.Managed{}
+	stored.SetName("cool")
+	stored.SetAnnotations(map[string]string{meta.AnnotationKeyExternalName: "x1"})
+	srv := &storedObject{obj: stored}
+	srv.updateErrs = []error{kerrors.NewConflict(schema.GroupResource{Resource: "manageds"}, "cool", errors.New("modified"))}
+	srv.beforeGet = func(n int, s *fake.Managed) {
+		if n == 2 {
+			meta.AddAnnotations(s, map[string]string{meta.AnnotationKeyExternalName: "x2"})
+		}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	inMemory := &fake.Managed{}
+	inMemory.SetName("cool")
+	inMemory.SetAnnotations(map[string]string{meta.AnnotationKeyExternalCreateFailed: now})
+
+	if err := NewRetryingCriticalAnnotationUpdater(srv.client()).UpdateCriticalAnnotations(context.Background(), inMemory); err != nil {
+		t.Fatalf("UpdateCriticalAnnotations: %v", err)
+	}
+	got := srv.annotations()
+	if got[meta.AnnotationKeyExternalName] != "x2" {
+		t.Errorf("krateo.io/external-name = %q, want the x2 another writer set; the first attempt's read was written back", got[meta.AnnotationKeyExternalName])
+	}
+	if got[meta.AnnotationKeyExternalCreateFailed] != now {
+		t.Errorf("krateo.io/external-create-failed = %q, want the caller's %q", got[meta.AnnotationKeyExternalCreateFailed], now)
 	}
 }

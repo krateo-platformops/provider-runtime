@@ -61,6 +61,8 @@ func NewRetryingCriticalAnnotationUpdater(c client.Client) *RetryingCriticalAnno
 // or other metadata are reset to their current state according to the API
 // server.
 func (u *RetryingCriticalAnnotationUpdater) UpdateCriticalAnnotations(ctx context.Context, o client.Object) error {
+	// Captured once, before the loop, so a runtime key the caller didn't carry is
+	// never written back from an earlier attempt's read.
 	a := criticalAnnotations(o)
 	err := retry.OnError(retry.DefaultRetry, resource.IsAPIError, func() error {
 		nn := types.NamespacedName{Name: o.GetName(), Namespace: o.GetNamespace()}
