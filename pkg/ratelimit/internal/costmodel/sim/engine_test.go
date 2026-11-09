@@ -65,3 +65,30 @@ func TestEngineStall(t *testing.T) {
 		prev = w.stall
 	}
 }
+
+// TestEngineThrottlingIsTheQuotas checks nr_throttled: a node share under the
+// quota throttles no period; demand over the quota with no share throttles
+// every period with demand.
+func TestEngineThrottlingIsTheQuotas(t *testing.T) {
+	periods := func(cfg Config) (throttled, total uint64) {
+		tr := Run(cfg)
+		for i, s := range tr.Samples {
+			if tr.At[i] >= 10*time.Second {
+				throttled += s.Throttled
+				total += s.Periods
+			}
+		}
+		return throttled, total
+	}
+	cfg := measured(1)
+	cfg.Duration, cfg.Fixed = 40*time.Second, 8
+	cfg.Share = func(time.Duration) float64 { return 0.125 }
+	if thr, n := periods(cfg); thr != 0 || n == 0 {
+		t.Errorf("a 0.125 share under a 250m quota: %d of %d periods throttled, want 0", thr, n)
+	}
+	cfg.Share = nil
+	cfg.Fixed = 16
+	if thr, n := periods(cfg); thr != n || n == 0 {
+		t.Errorf("demand over the quota, no share: %d of %d periods throttled, want all", thr, n)
+	}
+}

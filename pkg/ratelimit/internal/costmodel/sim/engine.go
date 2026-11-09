@@ -179,6 +179,7 @@ func Run(cfg Config) *Trace {
 		nextSample = cfg.SamplePeriod
 		demand     []float64
 		avail      = make([]float64, cfg.Procs)
+		qleft      = make([]float64, cfg.Procs) // each thread's quota runtime this millisecond
 	)
 	limitAt := func(t time.Duration) float64 {
 		if cfg.LimitAt != nil {
@@ -290,6 +291,7 @@ func Run(cfg Config) *Trace {
 						local[j] += pull
 					}
 					a = math.Min(rate, local[j])
+					qleft[j] = local[j]
 				}
 				avail[j] = a
 				capacity += a
@@ -301,8 +303,12 @@ func Run(cfg Config) *Trace {
 			}
 			share = waterFill(demand, capacity)
 			ran = math.Min(capacity, total)
-			// Charge the slices for what ran, and record throttling where a
-			// thread wanted more than its CPU could give.
+			// Charge the slices for what ran, and record throttling where the
+			// quota bounds a thread: the pool is exhausted and the thread's
+			// slice is under what it could run and wanted. A thread held back
+			// only by the node's share is not throttled: nr_throttled counts
+			// quota exhaustion alone (sched-bwc.rst). When both bind
+			// (local < rate < want), it counts.
 			want := math.Min(1, total/float64(w))
 			for j := 0; j < w; j++ {
 				used := 0.0
@@ -311,7 +317,7 @@ func Run(cfg Config) *Trace {
 				}
 				if L > 0 {
 					local[j] -= used
-					if avail[j] < want-1e-12 {
+					if pool <= 1e-12 && qleft[j] < math.Min(rate, want)-1e-12 {
 						periodThrottled = true
 					}
 				}
