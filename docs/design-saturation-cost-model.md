@@ -9,7 +9,7 @@ timestamp: 2026-11-08T00:00:00Z
 
 # Size local capacity from what reconciles cost
 
-**Status:** design, revised after its first independent review (§15), for
+**Status:** design, revised after its second independent review (§15), for
 re-review. Nothing is built. The open questions were decided by the user on
 2026-11-08 (§13). It replaces the
 mechanical step of §7 of [design-rate-limit-governor](./design-rate-limit-governor.md)
@@ -163,7 +163,7 @@ right.)
 | `A_q`, `C_q` | the same per queue (per controller) | | the Governor's books |
 | `B̂` | background CPU, a lower bound | cores | idle and active samples, §3.3 |
 | `L_eff` | effective CPU limit with no `cpu.max` | cores | learned at pressure onset, §5.1 |
-| `â` | heap allocated per completed reconcile | bytes | `/gc/heap/allocs:bytes`, §3.6 |
+| `m̂`, `Û₀`, `σ̂` | memory per reconcile in flight (upper bound), caches (lower bound), residual spread | bytes | regression of post-GC `live` on in flight, §3.6 |
 | `G` | Go memory limit | bytes | `/gc/gomemlimit:bytes` |
 | `r` | memory reserve, `MemoryReserve` | fraction of `G` | option, default 0.15 |
 
@@ -285,8 +285,12 @@ reconcile ends, which is the timing hazard Hellerstein (ACC 2004, via the
 survey) warns of when reconciles last as long as the control interval.
 `D̂` is used only in capped samples (§4.2), and exported. So is its per-queue
 form, `D̂_q = ΣA_q/ΣC_q` over the active samples of each queue, which keeps its
-value across a restart of the shared estimates: a queue's reconciles take as
-long uncontended whatever else is running.
+value across a restart of the shared estimates. It is not an uncontended
+duration (§15, L4): active samples can be partly throttled, at the target
+especially (§1: 0.473s at 4.56 slots against 0.429s at one), so `D̂_q` is at least
+the uncontended duration and usually a little longer. That errs on the safe
+side where it is used: a longer `D̂_q` makes the capped term of §4.2 land higher,
+which is less undershoot, while the term `θN̄` still bounds it from above.
 
 ### 3.5 Smoothing, warm-up, change, and trust
 
@@ -338,53 +342,61 @@ delta can be off by the whole live heap. The live heap is measured only at the
 end of a GC, so that is when memory is observed:
 
 - **An observation** is a sample in which `/gc/cycles/total` rose. It records
-  `live` (`/gc/heap/live:bytes`) and pairs it with `N⁻`, the fewest reconciles
-  in flight during that sample. The pairing is deliberately low. The GC ended
-  at an unknown moment inside the sample, and admissions since then must not be
-  counted as already in the heap, or the room left would be overstated.
-  (A GC notification would pair exactly, but `runtime.AddCleanup` runs its
-  function "some time after" the object is unreachable, possibly "arbitrarily far
-  into the future", `GOROOT/src/runtime/mcleanup.go`, so it can't.)
-- **The allocation bound** `â` is the heap allocated per completed reconcile,
-  `Δ/gc/heap/allocs:bytes / C`, smoothed by §3.5's rules. A reconcile can't keep
-  more than it allocated, and everything else allocating in the sample makes the
-  figure larger still, so `â ≥ m`, the true live memory per reconcile in flight.
-  It exists from the first completion.
-- **The baseline** `Û₀` is the largest lower bound the observations give:
+  `live` (`/gc/heap/live:bytes`) and the fewest and most reconciles in flight
+  during that sample, `N⁻` and `N⁺`. The GC ended at an unknown moment inside the
+  sample, so the count at the GC lies somewhere in `[N⁻, N⁺]`. (A GC notification
+  would pair exactly, but `runtime.AddCleanup` runs its function "some time
+  after" the object is unreachable, possibly "arbitrarily far into the future",
+  `GOROOT/src/runtime/mcleanup.go`, so it can't.)
+- **The regression.** Across observations, `live = U₀ + m·N + ε`: `U₀` the
+  informer caches and runtime state, `m` the mean live memory per reconcile in
+  flight, weighted by the time each holds a slot, and `ε` the spread from which
+  reconciles happen to be in flight. It is fitted by least squares:
+  - **Regressor:** the midpoint of `[N⁻, N⁺]`, with an error of variance
+    `(N⁺ − N⁻)²/12`. An error in the regressor biases a plain slope towards
+    zero, the unsafe side, so the slope is corrected for it, the
+    errors-in-variables method of moments: `m_fit = cov(N, live) / (var(N) − σ̄ᵤ²)`,
+    with `σ̄ᵤ²` the weighted mean of those error variances.
+  - **Window and weighting:** each observation weighted by `exp(−age/τ_m)`,
+    `τ_m = 10 min`, and otherwise equally. The caches and the mix change over
+    minutes, not seconds, and a long window keeps the warm-up's few-slot
+    observations, which give the fit its spread (below). A shift in the queues'
+    shares (§3.5) restarts the fit, since `m` is a property of the mix.
+  - **Confidence level:** one-sided 97.5%, `z = 1.96` (a Student-t quantile with
+    the effective degrees of freedom when they are under 30). From the fit:
+    `m̂ = m_fit + z·SE(m_fit)`, the upper bound of the slope; `Û₀ = U₀_fit −
+    z·SE(U₀_fit)`, the lower bound of the intercept; `σ̂`, the residual standard
+    deviation; and the upper prediction bound of `live` at `N`,
+    `L̂⁺(N) = U₀_fit + m_fit·N + z·√(σ̂² + Var(U₀_fit + m_fit·N))`, which covers a
+    new observation at `N` with probability 97.5% when the model holds.
+  - **Identified** when the effective number of observations is at least 10, the
+    corrected spread `var(N) − σ̄ᵤ²` is at least one slot squared, and the slope
+    is positive with relative standard error at most 0.25. The warm-up gives the
+    spread: it starts at one slot (§7), so the first observations have one or
+    two in flight and later ones a full set. A full set alone doesn't: with 11
+    or 12 in flight and nothing lower, the scratch fit is never identified. With
+    a relative standard error of 0.25, `m̂` falls below `m/2` only if the fit is
+    more than four standard errors low, probability under `3×10⁻⁵`.
+- **Before the fit is identified**, and whenever it isn't, the memory input runs
+  a fallback (§4.4) on the first draft's baseline: `Û₀,idle`, the lowest `live` at
+  an observation with nothing in flight at any moment, 0 until there is one.
 
-  `Û₀ = max over the observations in the window of ( live − â·N⁺ )`, and ≥ 0
+**Why a regression, not an allocation bound** (§15, H1-new). The revision before
+this one capped `m̂` by the heap allocated per completed reconcile, `Δallocs/C`,
+taking it for an upper bound on `m`. It isn't one: it weights each completion
+once, while `m` weights each reconcile by the time it holds a slot. The
+reviewer's case, like oasgen's mix: 150 fast Observes a second (50ms, 200 KB) and
+2 creates a second (2s, 20 MB), about 11 in flight. Per completion that is
+0.46 MB, per reconcile in flight 7.1 MB, so the cap admitted about 300 slots,
+the ceiling in practice, and an OOMKill. The regression measures `m` itself: in
+2,000 scratch trials of that mix with the warm-up's spread, its upper bound
+covered `m` in 99.8%, with a median of 9.3 MB, 31% above it.
 
-  where `N⁺` is the most reconciles in flight during that observation's sample.
-  Since `live = U₀ + m·N` with `N ≤ N⁺` and `m ≤ â`, each term is at most `U₀`,
-  the informer caches and runtime state, and so is their maximum. An observation
-  with nothing in flight gives `live` itself, the exact value. The warm-up
-  makes the bound tight early: it starts at one slot (§7), so the first
-  observations have `N⁺` of 1 or 2 and bound `U₀` to within one or two `â` of
-  its value. The window is the last `⌈3τ/Δt⌉` observations, because caches can
-  shrink when objects are deleted, and an old maximum could then exceed the
-  present `U₀`.
-- **Per reconcile**, `m̂ = min( smoothed (live − Û₀)/N⁻ , â )`, the first over
-  observations with `N⁻ ≥ 1` (§3.5's rules, weighted by `N⁻`). Both are upper
-  bounds on `m`: the first because `Û₀ ≤ U₀` and `N⁻ ≤ N`, the second as above.
-  So their minimum is too, and `m̂ ≥ m` by construction. For memory that bias is
-  the point: §4.4 shows it makes the approach to the limit come from below.
-  Until three observations with `N⁻ ≥ 1` exist, the fewest that give a variance,
-  `m̂ = â`.
-
-**Why the cap and the bound** (§15, H2). The first draft took `Û₀` only from
-fully idle observations, 0 without one. A controller that starts with a backlog
-may never have one, and then `(live − 0)/N⁻ = m + U₀/N⁻` carries the whole
-informer cache into each reconcile's cost. With 140 MB of caches, a 166 MB budget
-and 2 MB per reconcile, 13 slots fit; the draft's law moves from one slot toward
-13 with slope `1 − m/m̂ ≈ 0.99` per GC, and was still at 5.6 slots after 20 GCs.
-With `â = 4 MB` the fixed law reaches 95% of 13 in 3 GCs (§4.4).
-
-The survey suggests a regression of `live` on in-flight count, whose intercept is
-the informer caches. The headroom form of §4.4 doesn't need the intercept, only
-an upper bound on `m`, and a regression is unbiased, which for memory is the
-wrong side to err on. It also needs variation in the in-flight count, which a
-full set of slots doesn't give; the warm-up's few-slot observations are the
-variation the lower bound above uses.
+**Why not the first draft's idle baseline alone.** Without a fully idle
+observation it is 0, and `(live − 0)/N⁻` carries the informer caches into every
+reconcile's cost: 13 slots fit in the review's case (140 MB of caches, a 166 MB
+budget, 2 MB each), and that estimator was at 5.6 after 20 GCs (§15, H2). The
+fallback of §4.4 therefore uses it only to size decreases, never to size rises.
 
 ## 4. The formula
 
@@ -429,9 +441,11 @@ Three candidates, checked against the measured curve:
      `g = min( (ρL − B̂)/cᵢ × D_mixᵢ , θ × N̄ᵢ )`, `θ = (ρL − B̂)/(L − B̂)`
 
      where `cᵢ = (ΔUᵢ − B̂Δtᵢ)/Cᵢ` is this sample's CPU per completion (true at
-     the cap), and `D_mixᵢ = Σ_q C_q,ᵢ D̂_q / Cᵢ` the uncontended duration of the
-     reconciles this sample ended, each queue's `D̂_q` from its active samples
-     (§3.4), mixed in this sample's proportions. It is computed only if every
+     the cap), and `D_mixᵢ = Σ_q C_q,ᵢ D̂_q / Cᵢ` the duration of the reconciles
+     this sample ended as their queues ran in active samples, each queue's
+     `D̂_q` (§3.4), mixed in this sample's proportions. Active samples can be
+     partly throttled, so `D_mix` is at least the uncontended duration, which
+     errs on the safe side: less undershoot (§3.4). It is computed only if every
      queue that ended a reconcile in the sample has a `D̂_q`. The first term is
      the survey's uncontended-duration formula with the cost and the mix of now;
      it lands near the target, below it by the throttling stretch when the cost
@@ -441,8 +455,9 @@ Three candidates, checked against the measured curve:
      concurrency (A2 below), `U(θN̄) ≥ ρL`, and the target lies at or below
      `θN̄`. It guarantees a descent when the first term is missing or stale. With
      `Cᵢ = 0` only the second term applies.
-   - **A cost too small to resolve.** If `k̂ = 0`, or from the third sample
-     `k̂ < 2·SE(k̂)`, the reconciles' CPU can't be told from the noise of the
+   - **A cost too small to resolve.** If `k̂ ≤ 0` or `k̂ < 2·SE(k̂)` (the standard
+     error exists from the third sample), the reconciles' CPU can't be told from
+     the noise of the
      background, and the CPU isn't what binds: `g` is the ceiling, reached
      through §7's pacing. `B̂` is at or below every recent active sample (§3.3),
      so `k̂ ≥ 0` always and the law never divides by zero or by a negative.
@@ -464,6 +479,20 @@ Three candidates, checked against the measured curve:
    can't do better than `θN̄`. A plant whose knee sits at `N̄ᵢ` fits the same
    sample and has its target at `θN̄ᵢ`, so any lower value could undershoot it.
    Descending faster takes history, which is what `D̂_q` is.
+
+   **How fast the first term descends** (§15, second review, L1). Since
+   `ΔUᵢ = LΔtᵢ` at the cap, `(ρL − B̂)/cᵢ = θ·Xᵢ`, and so the first term is
+   `θ·Xᵢ·D_mixᵢ = θ·N̄ᵢ·(D_mixᵢ/Dᵢ)`, with `Dᵢ = Aᵢ/Cᵢ` this sample's contended
+   duration: the contraction `θ` divided by the stretch `Dᵢ/D_mixᵢ` of the
+   reconciles that ended. For one steady class the throughput at the cap is
+   fixed, so the term is the same value every sample and lands near the target
+   in one step. After a mix shift the completions lag the slots' new
+   composition, the stretch stays large, and the descent is geometric at about
+   `θ·D_mix/D` per sample. In the reviewer's example: 32 → 14.7 → 6.9 → 3.45 →
+   1.9 → 1.2, out of the cap in 5 samples, against about 30 at `θ` alone. It can
+   end under the target, as there: that is the single crossing of §4.3, towards
+   less CPU, and the active law then rises monotonically. §10's mix-shift case
+   checks the rate.
 
 ### 4.3 Convergence, and why it doesn't oscillate
 
@@ -570,56 +599,98 @@ With a Go memory limit `G`, the GC holds the heap under `G` by collecting more
 often; what it can't do is free live memory. The budget for the live heap is
 `H = (1 − r) G − nonheap`, `nonheap` being #48's non-heap runtime memory
 (`/memory/classes/total` minus released, objects, unused and free heap). `r`
-leaves the GC room between the live heap and the limit. At each observation:
+leaves the GC room between the live heap and the limit. With no Go limit but a
+`memory.max` of `M` (for example `GOMEMLIMIT=off`), the peak heap is about
+`live × (1 + GOGC/100)`, so `H = ((1 − r) M − nonheap)/(1 + GOGC/100)`. This
+replaces the working-set ratios.
 
-`S_mem = N⁻ + (H − live) / m̂`
+**The law, once the fit is identified** (§3.6). At each observation:
 
-the reconciles running at the GC plus as many more as the room left holds. With
-no Go limit but a `memory.max` of `M` (for example `GOMEMLIMIT=off`), the peak
-heap is about `live × (1 + GOGC/100)`, so `H = ((1 − r) M − nonheap)/(1 + GOGC/100)`.
-This replaces the working-set ratios.
+`S_mem = min( N_pred , N_room )`
 
-**Convergence**, re-derived for the revision (§15, H2). Take `live = U₀ + mN`
-at a GC with `N` in flight (the mean per reconcile in flight, `m`), and the
-target `N* = (H − U₀)/m` when `H > U₀`.
+- `N_pred`, the largest `N` up to the ceiling with `L̂⁺(N) ≤ H`: the most
+  reconciles whose live heap, predicted with its spread and the fit's own
+  uncertainty, stays under the budget with probability 97.5%.
+- `N_room = N⁻ + (H − live)/m̂`, the reconciles running at the GC plus as many
+  more as the room this GC showed holds, at the upper bound of the cost. It
+  binds when this observation's `live` is above what the fit predicts: a burst
+  of heavy reconciles, or caches that grew faster than the window follows.
 
-- **The estimates are on the safe side.** `Û₀ ≤ U₀` (each term of its maximum
-  is, §3.6) and `m ≤ m̂ ≤ â` (both terms of its minimum bound `m` from above).
-- **Each step rises and never passes the target.** With `N⁻ ≤ N`:
-  `S' = N⁻ + (H − U₀ − mN)/m̂ ≤ N + (H − U₀ − mN)/m = N*`; and for `N < N*`,
-  with `N⁻ = N`, `S' − N = (H − U₀ − mN)/m̂ > 0`. The slope of the map is
-  `1 − m/m̂` in `[0, 1 − m/â]`, so each observation closes at least a fraction
-  `m/â` of the remaining distance. Monotone, from below, never past `H`.
-- **Above the target**, after a burst of heavy reconciles or a cache that grew,
-  `H − live < 0` and `S' < N⁻`: no grants until enough reconciles end. Down to
-  the floor if the caches alone exceed the budget (`H ≤ U₀`): there is no fixed
-  point above one slot, and one is the right answer.
-- **No fully idle observation is needed.** The draft needed one for `Û₀`; now
-  `m̂ ≤ â` holds the slope at `1 − m/â` from the first completion, and the
-  warm-up's few-slot observations tighten `Û₀` and so `m̂`. The fixed point is
-  the same `N*`.
+`N_pred` is what the decided estimator gives (§13 item 9): the fit's slope and
+intercept, with their uncertainty and the residual spread. The reviewer's mix
+showed why the spread has to be in it. Its live heap varies by about 40 MB from
+one GC to the next, depending on how many 20 MB creates happen to be in flight,
+so a law aimed at the *mean* live heap, `(H − U₀)/m`, put it over the budget in
+130 of 300 GCs. With `N_pred` the same scratch run held 7 to 17 slots, and live
+was over `H` in 9 to 21 of 300 GCs, 3–7%, and over the Go limit `G` in at most
+1 of 300, across three seeds. `Û₀`, the lower bound of the intercept, doesn't
+set slots: a lower baseline would mean more room, so it is the unsafe side. It is
+exported as the caches' size and used where a lower bound is the safe one.
 
-The low pairing leaves `live` short of `H` by about `m̂ × (N − N⁻)`, typically
-one reconcile's memory; that is the price of not counting admissions as if they
-had happened before the GC. Unlike the CPU law, nothing here depends on
-duration, and between two GCs `S_mem` doesn't change, so new admissions are
-paced by the GCs that measure them.
+**The fallback, before identification and whenever the fit isn't identified.**
 
-**The review's cases** (scratch fluid model, one GC per step, 2 MB per
-reconcile, a backlog from the start and no idle observation, ceiling 64):
+- **Rises:** one slot per observation whose `live` is under `H`, and never more
+  than §7's warm-up pacing. A rise is sized by no estimate, so the caches can't
+  stall it, and each one is measured by the next GC before the next rise.
+- **Decreases:** when `live` is over `H`, one slot per observation, and no grants
+  while it stays over (the GC limiter's rule below applies as well). The
+  estimate that would size a larger cut, `(live − Û₀,idle)/N⁻`, carries the
+  caches when there was no idle observation, which makes it too large and so the
+  cut too small; one slot per GC is the pace the data supports.
+- **What it risks:** between two GCs, one reconcile more than the last GC
+  measured, so `live` can pass `H` by up to one reconcile's live memory. That is
+  what `r` covers when a reconcile keeps less than `r·G`, 31 MB at 256Mi; §10's
+  heterogeneous case has 20 MB creates.
+- **It ends itself.** The rises spread the in-flight count from one slot up,
+  which is what identifies the fit. In the scratch runs it was identified at the
+  10th GC with 2 MB reconciles and the 14th to 20th with the reviewer's mix.
+- **It is one of the design's fixed steps.** One slot per GC is a fixed step,
+  paced by measurements, not by a timer, and it applies only while the
+  estimator has nothing better to go on.
 
-| Caches `U₀` | Budget `H` | Target `N*` | `â` | The reviewed law | This revision |
+**Convergence, with the confidence bound.** Take `live = U₀ + mN + ε`, the
+model of §3.6, with `ε` independent of `N` and the mix of reconciles in flight
+the same at every `N` (assumption A4).
+
+- **What is proved is a probability, not a construction.** At any one
+  observation, `m̂ ≥ m` with probability at least 97.5% and `L̂⁺(N)` covers the
+  live heap at `N` with probability 97.5%, when A4 holds. The scratch coverage of
+  `m̂` was 99.8% on the reviewer's mix, above the nominal level because the
+  error-in-variables correction and the spread both push the bound up.
+- **When the bound holds** (`m̂ ≥ m`), the map `S' = N⁻ + (H − U₀ − mN)/m̂` rises
+  for `N < N*` and stays at or below `N* = (H − U₀)/m`, with slope `1 − m/m̂` in
+  `[0, 1)`: monotone, from below. `N_pred ≤ N*` too, up to the 2.5% tail of
+  `ε`. So `S_mem` approaches its target from below and doesn't pass it.
+- **When it fails**, `m̂ = (1 − δ)m` for some `δ > 0`, and the step overshoots the
+  remaining room by `δ/(1 − δ)` of it. Identification requires a relative
+  standard error of at most 0.25, so `δ > 1/2`, where the map would stop
+  converging, needs the fit four standard errors low, probability under
+  `3×10⁻⁵`. A smaller `δ` overshoots part of the room left, and the next GC's
+  `N_room` takes it back.
+- **Above the target**, after a burst of heavy reconciles or caches that grew,
+  `H − live < 0`, `N_room < N⁻`, and there are no grants until enough reconciles
+  end. Down to the floor if the caches alone exceed the budget: there is no
+  fixed point above one slot, and one is the right answer.
+- **The fixed point is `N_pred`**, which sits below `N*` by the spread the fit
+  measured: the price of a mix whose live heap varies.
+
+The low pairing in `N_room` leaves `live` short of `H` by about
+`m̂ × (N − N⁻)`, typically one reconcile's memory; that is the price of not
+counting admissions as if they had happened before the GC. Unlike the CPU law,
+nothing here depends on duration, and between two GCs `S_mem` doesn't change, so
+new admissions are paced by the GCs that measure them.
+
+**The review's cases** (scratch, one GC per step, a backlog from the start and
+no idle observation, ceiling 64, the fallback until the fit is identified):
+
+| Caches `U₀` | Budget `H` | Per reconcile | Target | Identified at | Result |
 |---|---|---|---|---|---|
-| 140 MB | 166 MB | 13 | 4 MB | 5.6 slots after 20 GCs | 7.0, 10.8, 12.4, 12.8: 95% in 3 GCs |
-| 140 MB | 166 MB | 13 | 50 MB | 5.6 after 20 | 1.5, 2.0, 2.6, …: 95% in 24 GCs |
-| 300 MB | 600 MB | 150 | 50 MB | 62.9 after 20 | 7.0, 16.7, 29.2, …: at the ceiling in 6 GCs |
-| 500 MB | 690 MB | 95 | 4 MB | 17.8 after 20 | 48, then the ceiling in 2 GCs |
-| 500 MB | 690 MB | 95 | 50 MB | 17.8 after 20 | 4.8, 10.6, 18.0, …: at the ceiling in 9 GCs |
+| 140 MB | 166 MB | 2 MB, sd 1 MB | 13 | GC 10 | 90% of the target by GC 21, then 11 or 12; live over `H` by the noise only |
+| 300 MB | 600 MB | 2 MB | 150, ceiling 64 | GC 10 | the ceiling at GC 10 |
+| 500 MB | 690 MB | 2 MB | 95, ceiling 64 | GC 10 | the ceiling at GC 10 |
+| 30 MB | 166 MB | the reviewer's mix, `m` 7.1 MB | 19.2 by the mean | GC 14–20 | 7–17 slots; live over `H` in 3–7% of GCs, over `G` in at most 1 of 300 |
 
-None passed its target. The slower rows are those where a reconcile allocates
-25 times what it keeps; the convergence rate is `m/â` per GC, but with a Go
-limit a GC comes at least each time the heap grows by `G − live`, so GCs are most
-frequent exactly when reconciles allocate most.
+The first revision's figures with `â` (§15, H2) are withdrawn with `â`.
 
 **When the GC CPU limiter has engaged** since the last sample
 (`/gc/limiter/last-enabled:gc-cycle` changed), the GC is already losing; the room
@@ -627,19 +698,18 @@ is treated as zero, `S_mem ≤ N⁻`, until a GC shows room again. It is the ear
 memory alarm the runtime gives (the survey; the metric is in `doc.go:233`).
 
 **What it can't see:** memory outside the Go runtime (cgo, mmap'd files), and a
-burst of reconciles that all reach their peak at once when their mean is lower
-(`m̂` is a mean over phases). Both are what `r` and the gap between `G` and
-`memory.max` are for. `G` is 0.8 of `memory.max` when the runtime sets it
-(#48), so with `r = 0.15` the live heap is held to about 68% of the container's
-limit.
+mix that changes faster than the fit's window. Both are what `r` and the gap
+between `G` and `memory.max` are for. `G` is 0.8 of `memory.max` when the
+runtime sets it (#48), so with `r = 0.15` the live heap is held to about 68% of
+the container's limit.
 
 **The worked example**, #48's ramp workload: 16 MiB held 1s per Observe, 256Mi,
 `G = 214748364` bytes (204.8 MiB). Idle live heap 2 MiB
 (`results/b2-ramp-new-1.log`). `H ≈ 0.85 × 204.8 − ~8 ≈ 166 MiB` (non-heap
-estimated from the log's mapped figures, not measured), `m ≈ 16 MiB`, so
-`S_mem ≈ 10`. #48 ran at a mean local capacity of 8 and 6.2 calls in flight, at
-6.12 Observes/s, 20 of 20 clean. This is a prediction, and the memory bar of §10
-is clean runs, not this number.
+estimated from the log's mapped figures, not measured), `m ≈ 16 MiB`, so the
+mean target is about 10 slots, and `N_pred` a little under it. #48 ran at a mean
+local capacity of 8 and 6.2 calls in flight, at 6.12 Observes/s, 20 of 20 clean.
+This is a prediction, and the memory bar of §10 is clean runs, not this number.
 
 ### 4.5 Slots
 
@@ -711,73 +781,93 @@ logged by the harness (§10).
 
 ### 5.1 No CPU limit: a measured effective limit
 
-Decided by the user (§13 item 3, §15 M2). With no quota, the container can use
-the whole node, and the limit that matters is what the node gives it when other
-pods want the same CPUs. That limit is never written anywhere; it shows only as
-stall.
+Decided by the user, including the gradual release (§13 item 3; §15 M2, M2-a).
+With no quota, the container can use the whole node, and the limit that matters
+is what the node gives it when other pods want the same CPUs. That limit is never
+written anywhere; it shows only as stall.
 
 - **Free.** While the stall share stays at or under `CPUPressureThreshold`,
   there is no CPU cap: `S_cpu` is the ceiling, reached through §7's pacing. The
   estimates (`k̂`, `ĉ`, `D̂`, `D̂_q`, `B̂`) are kept from active samples as with a
-  limit, so they are ready when one is learned.
+  limit, so they are ready when one is learned. So is `U_pre`, the CPU obtained
+  without stall just before any onset: `ΣΔU/ΣΔt` over the samples of the last
+  `τ` that were under the threshold.
 - **Onset, and the onset window.** The first sample with the stall share over
   the threshold starts an onset window: that sample and every one after it that
-  stays over the threshold. Over the window the effective limit is the CPU the
-  container actually obtained,
+  stays over the threshold. Over the window the CPU the container actually
+  obtained is
 
   `L_eff = ΣΔU / ΣΔt` over the window's samples,
 
-  a ratio of sums, so the first sample sets it and the rest refine it; it is
-  frozen when the window ends. While runnable work is waiting for a CPU, what
-  the container obtains is what the node is giving it: censored, like usage at a
-  quota.
+  a ratio of sums. While runnable work is waiting for a CPU, what the container
+  obtains is what the node is giving it: censored, like usage at a quota.
+- **A limit is learned only from a window that spans `τ`** (§15, M2-a). A shorter
+  window only blocks rises (§6) and learns nothing, so a one-second blip can't
+  set a limit that takes minutes to release. Once the window reaches `τ`, `L_eff`
+  is frozen at its value and held; the rest of the window doesn't change it. The
+  price is up to `τ` of stall before the first cut, with rises blocked.
 - **Held.** With `L_eff` set, the CPU law is §4.2's, with `L_eff` in place of `L`
   everywhere: the active-sample law `(ρL_eff − B̂)/k̂`; the sign guard against
   `ρL_eff`; and a sample with the stall over the threshold is a *pressured*
   sample (§3.2), treated as capped at `L_eff`: it doesn't feed `k̂` or `D̂`, and it
   descends by `min((ρL_eff − B̂)/cᵢ × D_mixᵢ, θ_eff N̄ᵢ)`, with
-  `θ_eff = (ρL_eff − B̂)/(L_eff − B̂)`. That descent is the cut at onset: one
-  computed step, from the costs measured while the node had room, to the slots
-  that use `ρ` of what it gives now.
-- **Re-learned at the next onset.** A new run of samples over the threshold,
-  after a clear stretch, opens a new onset window, and its `L_eff` replaces the
-  old one, up or down.
-- **Released when pressure clears.** Pressure has cleared when the stall share
-  over the last `τ` (§3.5's window, a ratio of sums) is at or under the
-  threshold. The release is stepwise: each clear window raises `L_eff` by `1/ρ`,
-  and the evidence window starts again. When `S_cpu` at the raised `L_eff`
-  reaches the ceiling, `L_eff` is dropped and the input is free again.
+  `θ_eff = (ρL_eff − B̂)/(L_eff − B̂)`. That descent is the cut at onset: computed
+  from the costs measured while the node had room, to the slots that use `ρ` of
+  what it gives now.
+- **Re-learned at the next onset.** A new window over the threshold, after a
+  clear stretch, that spans `τ` replaces `L_eff`, up or down.
+- **Released when pressure clears, gradually.** Pressure has cleared when the
+  stall share over the last `τ` (§3.5's window, a ratio of sums) is at or under
+  the threshold. The first clear window after a hold sets
+  `L_eff ← max(L_eff/ρ, U_pre)`: back at once to what the container obtained
+  without stall before the onset, when that is more, which a dip that has passed
+  makes likely. Each later clear window raises `L_eff` by `1/ρ`, and the evidence
+  window starts again. When `S_cpu` at the raised `L_eff` reaches the ceiling,
+  `L_eff` is dropped and the input is free again.
 
-**Why stepwise, and why it converges.** In a held phase `L_eff` is a fixed
-limit, so §4.3 applies as written, with `L_eff` for `L`: the law settles
-monotonically where the container's CPU is `ρL_eff`. Across phases there is no
-fixed point to prove, because the effective limit can't be observed without
-stall, and stall appears only past it: the limit can be found only by using
-more. Releasing it whole, which is the decision read literally, sends the slots
-to the ceiling in a few samples and back at the next onset. In the draft's fluid
-model of a node giving the container 400 ms/s, the slots swung between 7.3 and
-23.9 and the stall was over the threshold in half the samples. Released by `1/ρ`
-per clear window, each try is one 11% step taken after a window of evidence: the
-same model held the slots between 9.9 and 18.0, with the stall over the
-threshold in 5 of 160 samples. A share that doubled was found in about 66s, six
-or seven windows; one that halved was followed at the next onset, in one
-sample. Where in that band the slots settle depends on how the stall grows past
-the share, which the model only assumes; the Go simulation's node model and the
-re-measure have to show it (§10). The release rule is this revision's reading of
-"released when pressure clears", and §13 item 3 records it for the user to
-confirm.
+**The one fixed step on a fixed timer.** The `×1/ρ` per clear window is a fixed
+step, 11% at `ρ = 0.9`, taken on a fixed timer, one window of `τ`. It is the only
+step on a timer in the design, and the user chose it. (The memory fallback's one
+slot per GC, §4.4, is also a fixed step, but it is paced by measurements and
+lasts only until the fit is identified.) It is needed because this limit can't
+be observed without stall: with no quota, the node's share shows only when the
+container passes it, so the share can be found only by trying a little more, and
+something has to say how much more and how often. `U_pre`'s jump is not that
+step: it returns to a level measured clean. Every other change of the slots
+comes from a measurement (§7).
+
+**Why it converges where it can.** In a held phase `L_eff` is a fixed limit, so
+§4.3 applies as written, with `L_eff` for `L`: the law settles monotonically
+where the container's CPU is `ρL_eff`. Across phases there is no fixed point to
+prove, because stall appears only past the share: the limit can be found only by
+using more. Releasing it whole sends the slots to the ceiling in a few samples
+and back at the next onset. In the draft's fluid model of a node giving the
+container 400 ms/s, the slots swung between 7.3 and 23.9 and the stall was over
+the threshold in half the samples. Released by `1/ρ` per clear window, the same
+model held the slots between 9.9 and 18.0, with the stall over the threshold in
+5 of 160 samples. A share that doubled was found in about 66s, six or seven
+windows; one that halved was followed at the next onset. **Blips** (§15, M2-a),
+on a node that normally gives 4 cores: a 1s drop to 0.5 core learned no limit,
+and the CPU never fell; a 15s drop learned one after `τ`, cut the slots, and once
+the drop ended the CPU was back at 90% of 4 cores two samples later, through
+`U_pre`. Without the two fixes, the 1s blip left the container at 1.6 cores two
+minutes later. Where in the band the slots settle depends on how the stall grows
+past the share, which the scratch model only assumes; the Go simulation's node
+model and the re-measure have to show it (§10).
 
 **Its interaction with the other rules.** While free, a sample over the
-threshold is an onset, and blocks the rise in that sample like any pressured
-sample (§6). While held, pressure blocks rises (§6), the sign guard uses
-`ρL_eff`, and capped-sample rules use `L_eff`. With a quota and no node
-contention none of this runs: the quota is the limit.
+threshold blocks the rise in that sample like any pressured sample (§6), and
+opens or extends an onset window. While held, pressure blocks rises (§6), the
+sign guard uses `ρL_eff`, and capped-sample rules use `L_eff`. With a quota none
+of this runs: the quota is the limit, and contention below it is handled by §6's
+block alone.
 
 **The change from today.** Today, with no `cpu.max`, a pressure reading over 50
 halves local capacity and it climbs back by one per 30s. Now nothing slows the
-controller until the stall appears; at onset the slots go in one computed step
-to what uses 90% of the CPU the node is giving, and they rise again in steps of
-`1/ρ` per clear window.
+controller until the stall appears. A stall shorter than `τ` only holds the
+slots. A longer one cuts them, in one computed step, to what uses 90% of the CPU
+the node gives; when it clears they return to the pre-onset level if that was
+higher, then rise by `1/ρ` per clear window.
 
 ## 6. Pressure
 
@@ -799,9 +889,13 @@ the sample's own resolution, and the kernel documents it for exactly this, "to
 allow detection of latency spikes which wouldn't necessarily make a dent in the
 time averages" (`psi.rst`, quoted in the survey).
 
-**Why it doesn't bring the mechanical behaviour back.** It has no step size, no
-hold-off and no recovery rule. A blocked sample keeps a value the model computed
-earlier; the next unblocked sample takes the model's value again. A noisy
+**Why it doesn't bring the mechanical behaviour back.** The block has no step
+size, no hold-off and no recovery rule. A blocked sample keeps a value the model
+computed earlier; the next unblocked sample takes the model's value again. With
+no `cpu.max`, a stall that lasts `τ` also teaches the model a limit (§5.1), and
+releasing that limit is the design's one fixed step on a fixed timer, `×1/ρ` per
+clear window, chosen by the user because a node's share can't be observed
+without stall. The block itself stays what it is: a held rise. A noisy
 sensor costs at worst a held rise, never a cut, so a 1s stall share that is
 jumpier than `avg10` does no harm.
 
@@ -826,8 +920,16 @@ operating point isn't measured; §10 records it.
 
 ## 7. How fast slots may change
 
-No fixed step, no hold-off, no halving. Every limit on a change comes from the
-data:
+No halving and no hold-off. Every limit on a change comes from the data, with
+two exceptions, both stated where they apply:
+
+- **The one fixed step on a fixed timer:** with no `cpu.max`, a learned limit is
+  released by `×1/ρ` per clear window of `τ` (§5.1). The user chose it, because
+  the node's share can't be observed without stall and so has to be probed.
+- **One fixed step paced by measurements:** the memory fallback rises and falls
+  by one slot per GC observation until its fit is identified (§4.4).
+
+Everything else:
 
 - **Decreases** take effect in the sample that computes them, to the computed
   value.
@@ -853,8 +955,10 @@ data:
   per completion, so the first minute runs at a few slots whatever the limits
   allow. That is the price of not admitting work before any of it has been
   measured.
-- **Memory increases** are bounded by the room the last GC showed, and don't
-  move between GCs (§4.4).
+- **Memory increases** are bounded by what the fit predicts and the room the
+  last GC showed, and don't move between GCs (§4.4). Before the fit is
+  identified they come only from the fallback, one slot per GC under `H`, and
+  never faster than the warm-up pacing above: never a jump to the ceiling.
 - **Capped and pressured samples** never raise (§4.2, §5.1), and **pressure**
   blocks rises (§6).
 
@@ -963,7 +1067,8 @@ whole number) and the input gauges, with `memory_working_set` gone and
 | `…local.cpu.effective_limit` | cores | `L_eff` while held (§5.1); nothing while free or with a quota |
 | `…local.queue.slot_share{controller}` | fraction | each queue's smoothed share of the slot-time, `A_q/A` |
 | `…local.estimate.restarts{estimate, cause}` | count | restarts by estimate (`k`, `c`, `d`, `m`) and cause (`cost`, `mix`) |
-| `…local.memory.budget`, `…memory.live`, `…memory.baseline`, `…memory.per_reconcile` | bytes | `H`, `live`, `Û₀`, `m̂` |
+| `…local.memory.budget`, `…memory.live`, `…memory.baseline`, `…memory.per_reconcile`, `…memory.spread` | bytes | `H`, `live`, `Û₀` (lower bound), `m̂` (upper bound), `σ̂` |
+| `…local.memory.identified` | 0/1 | the regression identified (§3.6); 0 means the fallback runs |
 
 and a counter `…local.pressure_blocked`, samples in which pressure held a rise.
 `Snapshot` gains the same values. They are provider-runtime's own; core-provider's
@@ -995,11 +1100,17 @@ stepwise release (§5.1); error diffusion averaging to the real value within
 `1/n`, its carry staying in `[0, 1)`, and each reset of §4.5 (a new `cpu.max`, a
 new Go limit, a clamp, a change of binding input, a restart) followed by `⌊S⌋`;
 a pressure-held sample keeping the carry. Memory with a fake runtime-metrics
-reader (#48's `goMemory` seam): observation only when the GC count rises, the
-`N⁻` pairing, `Û₀` as the windowed maximum of `live − â·N⁺` with and without an
-idle observation, `m̂` capped at `â`, the allocation bound alone for the first
-three observations, the limiter alarm, `GOGC` without a Go limit, `GOGC=off`; a
-second Governor's `Start` leaving the Go memory limit alone and warning (L7).
+reader (#48's `goMemory` seam): observation only when the GC count rises, `N⁻`
+and `N⁺` recorded with it; the regression against a reference least-squares fit,
+its errors-in-variables correction, its exponential weights, its 97.5% bounds
+and prediction bound; each identification condition failing on its own (too few
+observations, too little spread, a non-positive slope, a relative standard error
+over 0.25), and a full set of slots alone never identifying; the fallback's rise
+of one slot per observation under `H`, its decrease of one per observation over
+it, never past the warm-up pacing, and its hand-over to the fit; a restart of the
+fit on a queue-share shift; `S_mem = min(N_pred, N_room)` with each term binding;
+the limiter alarm, `GOGC` without a Go limit, `GOGC=off`; a second Governor's
+`Start` leaving the Go memory limit alone and warning (L7).
 
 **Simulation in Go,** superseding the Python scripts behind §4.3's figures, which
 were never committed: a discrete-event model of the
@@ -1016,9 +1127,12 @@ over `H`. And the review's cases, each with its pass condition:
 | H1: 500m, 3ms of CPU per 0.8s reconcile, `B` 15 ms/s, idle samples with bursts to 60 ms/s | the slots reach the ceiling within 10 samples and never return to the floor |
 | H1: the same, `B` noisy (sd 10 ms/s) against 3.75 ms/s per slot, 10 minutes | never below the ceiling after warm-up |
 | H1: the measured workload with `B` 20 ms/s and idle bursts above `U(1)` | monotone from one slot to the target, mean CPU 85–95% |
-| H2: a backlog from the start, no idle observation, caches of 100, 300 and 500 MB against budgets that fit them, 2 MB kept and 4 or 50 MB allocated per reconcile | no observation with `live` over `H`; 95% of `min(N*, ceiling)` within 30 GCs |
-| M1: a cheap queue (1ms of CPU, 2s each) at the ceiling, then an expensive one (23ms, 0.43s) taking the backlog | with the expensive queue seen uncapped before: within 2 samples of its target; never seen: a descent of at least `θ` per sample, and no rise while capped |
+| H2: a backlog from the start, no idle observation, caches of 100, 300 and 500 MB against budgets that fit them, 2 MB kept and 4 or 50 MB allocated per reconcile | the fit identified within 20 GCs; `live` over `H` by no more than one reconcile's memory; 90% of `min(N_pred, ceiling)` within 30 GCs |
+| H1-new: heterogeneous durations, the reviewer's mix: 150 fast Observes a second (50ms, 200 KB) and 2 creates a second (2s, 20 MB), against 256Mi with a Go limit | no OOMKill; `live` over `G` in at most 1% of GCs; over `H` in at most 10%; the fit identified within 30 GCs; the slots never above the mean target `(H − U₀)/m` |
+| H1-new: the same mix with no warm-up spread (started at a full set of slots by a fake) | never identified; the fallback rules throughout; no OOMKill |
+| M1: a cheap queue (1ms of CPU, 2s each) at the ceiling, then an expensive one (23ms, 0.43s) taking the backlog | with the expensive queue seen uncapped before: the capped descent geometric at the rate §4.2 derives, `θ·D_mix/Dᵢ` per sample, out of the cap within 6 samples (the reviewer's example: 32 → 14.7 → 6.9 → 3.45, 5 samples at the cap, against about 30 at `θ`); at most one crossing of the target, then a monotone rise to it; never seen: a descent of at least `θ` per sample, and no rise while capped |
 | M2: no `cpu.max`, a node model with CFS shares among other cgroups, the container's share stepping from 400 to 800 and back to 400 ms/s | at onset, one step to within 10% of the law's value at `ρL_eff`; stall over the threshold in at most 10% of samples at a steady share; a doubled share found within 10 windows |
+| M2-a: a node that gives 4 cores, with a 1s blip to 0.5 core, and separately a 15s dip to 0.5 core | the blip learns no limit and blocks rises for its sample only; the dip learns one after `τ`, and once it ends the CPU is back to 90% of the pre-onset level within one clear window (scratch: 2 samples after the dip) |
 
 The node model is the part the scratch scripts only assumed: how the stall grows
 as demand passes the share. It is built from CFS's weighted sharing on a fixed
@@ -1054,7 +1168,8 @@ alternation between 4 and 5.
   `L·Δt − slack`; whether the sign guard held; trust and restarts per estimate,
   with their cause; each queue's slot share; the 1s stall share, whether it
   blocked a rise, and the learned limit's phase and `L_eff`; and, with memory
-  on, `H`, `live`, `Û₀`, `â`, `m̂`, `N⁻`, `N⁺` and whether the sample held a GC
+  on, `H`, `live`, `Û₀`, `m̂`, `σ̂`, `N_pred`, `N_room`, whether the fit is
+  identified, `N⁻`, `N⁺` and whether the sample held a GC
   observation. The report script computes the bars from these same lines.
 
 The memory block repeats #48's (`results/block2-settings.txt`): ramp (16 MiB held
@@ -1065,6 +1180,17 @@ least 18 of 20 ramp runs, no crash loop in at least 9 of 10 cold starts, no
 OOMKill in either, restarts split by cause, throughput not below the control's
 clean runs, the sampler's cost reported. The real-provider line stays open until
 git-provider's rollout resumes.
+
+**A third memory workload, heterogeneous durations** (§15, H1-new), added to the
+block with its settings fixed before its first run: 64 Greetings before start,
+poll 1s, 256Mi, 2 CPU, 240s, 10 runs ABBA against the same control. One Greeting
+in ten (by name, so both arms see the same ones) is a "create": its Observe
+allocates and holds 32 MiB for 2s. The rest allocate and hold 256 KiB for 50ms.
+The harness gains the variables for the two classes. Most Observes are short and
+light, while most of the slot-time, and so most of the memory, goes to the long
+heavy ones: the shape that defeated the allocation bound. Bar: clean in at least
+9 of 10 runs and in no fewer than the control; no OOMKill; `m̂`, `σ̂`, `N_pred` and
+whether the fit was identified reported per run, with the time it took.
 
 **The control arm is #48's measured build, `new3`** (decided, §13 item 8), recorded
 in `results/image-new3.txt` as commit `6d76a36bcff5e2e0d45d56fecf96f023e7094c63`
@@ -1156,7 +1282,7 @@ Each new behaviour gets a revert check, as before.
 | Compute the knee, let pressure only veto | Adopted, with "veto" as a block on rises (§6) |
 | A wall-clock duration under load is a ratchet; use the uncontended one | Agreed that the live duration alone is a ratchet in practice: with `ρ < 1` it contracts by `θ` per sample, too slowly once smoothed (§4.2). Measured against the uncontended one: it undershoots by the period-level throttling stretch at small quotas, 84% instead of 90%. So the live duration in active samples, where its fixed point is exact, and the uncontended formula in capped samples |
 | CPU per reconcile by regression with a background intercept, ≥ 60 completions per window | The setpoint is independent of the background estimate (§4.3), and the regression is confounded at the operating point; the background is a lower bound from idle and active samples, because an overestimate is what made the law singular in review (§3.3; §15, H1). The 60-completion window is adopted in `τ` and trust (§3.5). On this workload the regression gives 23.1–23.3ms and a background within noise of zero |
-| Memory from the post-GC live heap, regressed on in-flight; a hard ceiling with hysteresis | Post-GC live heap adopted; the headroom form needs no intercept, only an upper bound on the memory per reconcile, kept upward by the allocation bound and a baseline bounded from below by the data (§3.6; §15, H2). "Fast decrease, slow increase" is met by data rather than a band: decreases at once, increases only by the room the last GC showed (§4.4) |
+| Memory from the post-GC live heap, regressed on in-flight; a hard ceiling with hysteresis | Adopted after the second review, as the survey proposed: post-GC live heap regressed on in-flight count, with the upper bound of the slope, the lower bound of the intercept and the upper prediction bound (§3.6, §4.4; §15, H1-new). The first revision's allocation bound wasn't an upper bound. "Fast decrease, slow increase" is met by data rather than a band: decreases at once, increases only by what the fit predicts and the last GC showed (§4.4) |
 | Two timescales: a ~10s cost-model tick with forgetting over tens of minutes and a step cap; a fast PSI loop that cuts once with a cooldown | Two timescales kept as estimates (`τ ≥ 10s`) and a 1s law; no fixed step cap and no cut, which the user ruled out; the law uses slot-seconds, which accrue continuously, so the completion-timing hazard behind a long tick doesn't arise (§3.4). Forgetting over tens of minutes would leave a cost change unlearned for that long; the restart handles changes instead (§3.5) |
 | PSI from the `total` delta, not `avg10` | Adopted (§6) |
 | Calibrate PSI at the operating point; 50 doesn't fit small quotas | True for a cut. For a block, 50 sits above the measured operating point (8–17) and below the cap (56); kept provisional, distribution recorded (§6, §10) |
@@ -1169,9 +1295,10 @@ Each new behaviour gets a revert check, as before.
 
 ## 13. Decided by the user, 2026-11-08
 
-The first draft put these eight questions to the user, with options and a
-recommendation each. The user decided all of them, with the coordinator
-deciding item 8.
+The first draft put items 1 to 8 to the user as questions, with options and a
+recommendation each. The user decided them, with the coordinator deciding item
+8. Item 9 was decided by the coordinator after the second review, and the user
+confirmed item 3's gradual release then.
 
 1. **Whole slots: error diffusion** (§4.5). On the measured curve 4 slots use 81%
    of the limit and 5 use 97%, against a target of 4.56. Rounding down would hold
@@ -1190,10 +1317,14 @@ deciding item 8.
    no pressure, no CPU cap; at pressure onset the limit is the CPU actually
    obtained over the onset window, and the same law applies with it; it is
    released when pressure clears and re-learned at the next onset (§5.1). This
-   replaces today's halving on pressure when there is no quota. **For the user
-   to confirm:** §5.1 releases the limit by `1/ρ` per clear window rather than
-   all at once, because a release all at once swung the slots between 7 and 24 in
-   the fluid model, with the stall over the threshold in half the samples.
+   replaces today's halving on pressure when there is no quota. **The gradual
+   release, confirmed by the user:** the limit is released by `1/ρ` per clear
+   window rather than all at once, because a release all at once swung the
+   slots between 7 and 24 in the fluid model, with the stall over the threshold
+   in half the samples. It is the design's one fixed step on a fixed timer
+   (§5.1, §6, §7). With the second review's fixes (§15, M2-a), a limit is
+   learned only from an onset window that spans `τ`, and the first clear window
+   returns to the CPU obtained without stall before the onset when that is more.
 4. **Pressure's bar** (folded into 2): rises blocked in at most 10% of
    steady-state samples, with the distribution reported. "Pressure near the
    threshold" is dropped: the model targets CPU, and pressure at the operating
@@ -1215,6 +1346,17 @@ deciding item 8.
    the `measure` binary's hash with the tarball's, and its result is reported but
    doesn't block (§10). The first decision, a rebuild used only if its image
    digest matched, was replaced, because that digest can't be expected to match.
+9. **The memory estimator is a regression**, decided by the coordinator after the
+   second review (§15, H1-new): post-GC `live` on the in-flight count, the upper
+   confidence bound of the slope as `m̂` and the lower bound of the intercept as
+   `Û₀`, with a fallback when it isn't identified, and warm-up pacing before the
+   first identified estimate (§3.6, §4.4). Two points of this revision's for the
+   coordinator to confirm: the slots use the fit's upper *prediction* bound, which
+   also covers the live heap's spread, because a law aimed at the mean was over
+   the budget in 130 of 300 GCs on the reviewer's own mix; and the fallback's
+   rises are one slot per GC under the budget, sized by no estimate, because the
+   idle-only baseline the decision names stalls at one slot when there is no
+   idle observation, which was H2.
 
 ## 14. Checked, and not
 
@@ -1230,6 +1372,13 @@ recorded `new3` tarball's digest (§10); provider-runtime#50 is open with that
 title.
 
 **Not checked here:**
+
+- That the regression's 97.5% bounds hold for real reconcile mixes. They hold
+  under the model of §3.6 (linear in the in-flight count, a mix that doesn't
+  change with it, independent spread); the scratch coverage on the reviewer's mix
+  was 99.8%. The errors-in-variables correction is the standard method-of-moments
+  one, applied here to an interval-censored regressor; §10's heterogeneous cases
+  and the GKE mixed workload test it.
 
 - Whether `nr_throttled` counts periods or per-CPU throttling events, and whether
   `nr_periods` counts idle periods. The kernel doc defines them in one line each.
@@ -1269,3 +1418,20 @@ seven Low. Each item and where this revision answers it:
 | L5 | `A` closed at the lock, not at the read | §3.2: closed at `t_read`, the changes after it carried forward |
 | L6 | Zero-length dips counted in `N⁻` | §3.2: `N⁻` and `N⁺` updated after the dispatch of each critical section |
 | L7 | A second Governor's `Start` | §8: the Go memory limit is set once per process; a later `Start` changes nothing and warns |
+
+H2's answer, the allocation bound, is withdrawn by the second review's H1-new
+below. The rest of the first review's answers stand.
+
+**Second independent review, of `46f9afe`, 2026-11-09.** H1, M1 and L1–L7 of the
+first review resolved. One new High, one Medium and four Lows, with the decisions
+taken on them:
+
+| Item | Finding | Answer |
+|---|---|---|
+| H1-new, High | `â = Δallocs/C` is not an upper bound on `m`: it weights each completion once, `m` weights reconciles by their time in flight. The reviewer's mix (150/s at 50ms and 200 KB, 2/s at 2s and 20 MB): `â` 0.46 MB against `m` 7.1 MB, slots to the ceiling, an OOMKill, and a negative slope in §4.4's map | Decided by the coordinator (§13 item 9): `â` removed; a regression of post-GC `live` on in-flight count, with the upper bound of the slope as `m̂` and the lower bound of the intercept as `Û₀` (§3.6): window `τ_m = 10 min` with exponential weights, one-sided 97.5%, an errors-in-variables correction for the interval-censored count, identified with at least 10 observations, a slot squared of spread and a relative standard error of at most 0.25. A fallback when it isn't identified, rising one slot per GC under the budget and never faster than warm-up pacing. Convergence restated as a probability (§4.4). This revision adds the upper prediction bound to the slots, because aimed at the mean the reviewer's mix was over budget in 130 of 300 GCs, and sizes the fallback's rises by no estimate, because the idle-only baseline stalls; both for the coordinator to confirm (§13 item 9). §10: the heterogeneous simulation cases and a third GKE memory workload |
+| M2-a, Medium | One stall blip sets `L_eff`, and the release takes minutes: a 1s spike to 0.5 core on a node that gives 4 holds the container down for about 3.5 min | §5.1: a limit is learned only from an onset window that spans `τ`, a shorter one only blocks rises; the first clear window sets `L_eff ← max(L_eff/ρ, U_pre)`. Scratch: the blip learns nothing; a 15s dip is back at 90% two samples after it ends. §10: the blip and dip cases |
+| M2 | The user confirmed the gradual release | §13 item 3, decided |
+| L2 | The `×1/ρ` release is a fixed step on a fixed timer, which "no fixed step" contradicted | §5.1, §6 and §7 say so plainly: the design's one fixed step on a fixed timer, chosen by the user, because a node's share can't be observed without stall. §7 also names the memory fallback's step, which is paced by GCs |
+| L1 | The rate of `D_mix`'s descent at the cap | §4.2: the first term is `θ·N̄·D_mix/D`, geometric at about `θ·D_mix/D` per sample after a mix shift; the reviewer's example, 5 samples at the cap against about 30 at `θ`; §10's mix-shift case checks it |
+| L3 | The unresolvable rule's wording | §4.2: `k̂ ≤ 0` or `k̂ < 2·SE` |
+| L4 | `D̂_q` is not uncontended | §3.4 and §4.2: it is from active samples, at least the uncontended duration, which errs on the safe side |
