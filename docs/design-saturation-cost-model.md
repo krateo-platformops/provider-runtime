@@ -191,7 +191,7 @@ lock: the entries after `t_read` are carried into the next sample. So the CPU
 and the slot-time of a sample cover the same interval, whatever the wait for the
 lock. No I/O happens under `g.mu`.
 
-Each sample is one of four kinds, and only the kind it is updates anything:
+Each sample is one of five kinds, and only the kind it is updates anything:
 
 - **Idle**: `A = 0` and `C = 0`. It measures the background, and nothing else.
 - **Capped**: the cgroup used its quota in every period of the sample:
@@ -207,10 +207,16 @@ Each sample is one of four kinds, and only the kind it is updates anything:
   them (§10). In a capped sample the CPU used says nothing about how much more
   the reconciles wanted: it is censored at `L`. Its durations measure the
   throttling, not the work.
-- **Pressured**, only with no `cpu.max` and a learned effective limit held
-  (§5): the stall share is over `CPUPressureThreshold`. It is censored at the
-  CPU the node gave, as a capped sample is at the quota, and is treated like
-  one.
+- **Pressured**, only with no `cpu.max`: the stall share is over the threshold
+  in force (§5.2). It is censored at the CPU the node gave, as a capped sample is
+  at the quota, and is treated like one. That holds whether a limit is held or
+  not (amended after the first simulation run, §5.2): an onset window's samples
+  measure the node, not what the reconciles cost.
+- **Draining**: `N⁻` is above the capacity in force, so every moment of the
+  sample had more in flight than the capacity allows, as after a cut, which
+  preempts nothing (§8). Its CPU and durations measure the cut's excess, not the
+  cost at the new capacity: it feeds only `ĉ`, like a capped sample, and can't
+  raise the slots (amended after the first simulation run, §15).
 - **Active**: anything else.
 
 ### 3.3 CPU per reconcile, and the background
@@ -326,6 +332,18 @@ with few completions weighs little and none divides by zero.
   not, so it can't raise the slots. Without the hold-out the outlier inflates the variance and
   the second one no longer looks like a change: the draft's simulation showed a
   cost step then oscillating between 2.5 and 4.5 slots (§4.3).
+- **Neither a held-out sample nor a restart raises the slots in its own sample**
+  (amended after the first simulation run, §15). A held-out sample says the
+  estimate may be stale, and the law's value computed from it may then be too
+  high: the slots may fall in that sample but not rise, and the next sample
+  decides, averaged in or restarting. A restart's own sample would otherwise rise
+  by the pacing's `Cᵢ`, which is a rise caused by the restart; after it, the
+  estimate is untrusted, and rises are paced (§7).
+- **A new limit is a new plant** (amended after the first simulation run, §15).
+  A change of `cpu.max` restarts `k̂`, `ĉ` and `D̂` (not `D̂_q`), as a cost change
+  does: the CPU per slot-second depends on how much throttling the limit causes
+  (§4.2), so the estimate describes a plant that is gone. The carry resets with
+  it (§4.5).
 - **A move in concurrency is not a change in cost.** `k` falls as `S` rises
   past the knee (§4.3), so right after a large move in the slots a sample's `k`
   differs from the mean without anything having changed. The test therefore
@@ -335,7 +353,10 @@ with few completions weighs little and none divides by zero.
   after, at a steady `N̄`.
 - **A shift in the mix is a change.** The same 3σ, two-in-a-row test runs on
   each queue's share of the slot-time, `A_q/A`. A shift restarts `k̂`, `D̂` and
-  `ĉ` (not `D̂_q`). With one queue there is nothing to test.
+  `ĉ` (not `D̂_q`). With one queue there is nothing to test. Every queue seen
+  since the start is tested in every sample with work, at share 0 when it had no
+  slot-time: a queue going quiet is a change of mix as much as one starting
+  (amended after the first simulation run, §15).
 - **Trust.** An estimate is trusted once it has 60 completions since its start
   and its relative standard error, `sd / (mean × √n_eff)`, is at most
   `(1 − ρ)/2`: two standard errors fit inside the margin the target leaves. The
@@ -1044,6 +1065,101 @@ slots. A longer one cuts them, in one computed step, to what uses 90% of the CPU
 the node gives; when it clears they return to the pre-onset level if that was
 higher, then rise by `1/ρ` per clear window.
 
+### 5.2 No CPU limit: the threshold calibrated at the operating point
+
+Decided by the user, 2026-11-09 (§13 item 10), after the first run of §10's
+simulation. Under node contention the container stalls even below its share:
+with other cgroups wanting the same CPUs, its runnable threads wait whenever
+those run. In the simulation's node model, a container held at 90% of a 400 ms/s
+share showed a stall share of about 50 per sample, with a standard deviation of
+3 to 4, against about 56 past the share. A fixed threshold of 50 then reads half
+the operating point's samples as pressure: rises blocked, pressured samples cut,
+and runs of them re-learning a lower limit. So with no `cpu.max` the threshold is
+calibrated from the stall the container shows at its operating point.
+
+**What is measured.** Two stall shares, each a ratio of sums like every rate here:
+
+- **Past the share, `μp`**: the stall share over the window that learned the
+  limit, the onset window or a held run that re-learned it (§5.1). Over that
+  window the container obtained `L_eff` and wanted more: it is the stall of a
+  container past its share. It is frozen with `L_eff`.
+- **At the operating point, `μo`**: the stall share of the clear samples (under
+  the threshold in force) while the limit is held, smoothed with §3.5's window
+  `τ` and warm start. In those samples the law runs the container at `ρ` of the
+  share it measured: it is the stall the container shows while running at its
+  measured share. It is defined from the third such sample, as §3.5's standard
+  errors are.
+
+**The threshold in force:**
+
+- with a `cpu.max`, or with none and no limit held: `CPUPressureThreshold`, as
+  in §6;
+- while a limit is held, once `μo` is defined and below `μp`: their midpoint,
+  `(μo + μp)/2`, so a sample is read as whichever of the two it is closer to;
+- while a limit is held, before `μo` is defined, or when the operating point
+  stalls as much as past the share (`μo ≥ μp`): `μp`, so only a stall as high as
+  the one past the share counts as pressure;
+- never below `CPUPressureThreshold`. The calibration exists so that the
+  operating point's own stall doesn't read as pressure; it never makes the block
+  more sensitive than the option, so where the operating point stalls little,
+  §6 is unchanged.
+
+The threshold in force is what every rule that reads "the threshold" uses with no
+`cpu.max`: §6's block, the pressured kind (§3.2), and §5.1's windows. It is
+exported with the other CPU metrics (§9).
+
+**Why the midpoint.** It is the boundary that reads each sample as the nearer of
+the two measured levels, and it has no constant of its own. Two alternatives
+were tried in the simulation and rejected. The operating point plus three of its
+standard deviations (§3.5's change rule) ignores what past the share looks like:
+in the node model, where the stall past the share is about 1.5 to 2 standard
+deviations above the operating point, it lay above every stall past the share,
+so nothing would read as pressure again and the release would run to the ceiling.
+The point equally many standard deviations from each, `μo + (μp − μo)·σo/(σo + σp)`,
+is right for two well-spread levels but degenerate when one has no spread: in the
+node model the stall past the share is bounded (§10) and nearly constant, which
+put the threshold on `μp` itself, read half the samples past the share as clear,
+and so no re-learning window ever spanned `τ`.
+
+**How it is re-learned.** `μo` follows the operating point continuously, over
+`τ`: each `×1/ρ` release moves the operating point, and `μo` with it. `μp` is
+replaced at each learn, by the window that learned the new limit, and `μo`
+restarts with it, because a new limit is a new operating point. Both are dropped
+when the limit is dropped and the input is free again; a new `cpu.max` drops them
+too (§5.1).
+
+**Its interaction with §5.1's onset, freeze and release.**
+
+- **Onset.** While free there is no operating point, so the onset window is
+  opened, and extended, by samples over `CPUPressureThreshold`, as before. While
+  held, a run over the threshold in force opens the re-learning window. The
+  sample that completes a window spanning `τ` is classified against the threshold
+  that opened it, so it is the pressured sample whose descent is the cut at onset.
+- **Onset samples are pressured** (amended after the first simulation run,
+  §3.2). §5.1 says the cut is "computed from the costs measured while the node
+  had room". Fed with the onset window's contended samples, `k̂` and `D̂` carried
+  the contention, and the cut became the capped rule's geometric descent, about
+  10% a sample (in the simulation, 32 → 24 → 22 → 20 → … → 14 over seven
+  samples), instead of one computed step (now 32 → 13 in one). It matters for the calibration too: the operating
+  point is measured only once the cut has put the container there.
+- **Freeze.** `L_eff` and `μp` are frozen together, from the same window, when it
+  reaches `τ`; the rest of that window changes neither.
+- **Release.** A clear window is `τ` of samples none of which is over the
+  threshold in force, so at the operating point it clears once `μo` is measured.
+  The release is §5.1's: `U_pre` at the first, then `×1/ρ`. The threshold is kept
+  through the releases and re-learned over `τ` after each, and when the law at the
+  raised `L_eff` reaches the ceiling, the limit and the calibration are dropped
+  together.
+
+**What it can't do.** The calibration can only separate what the stall
+separates. Where the operating point and past the share stall nearly alike, as in
+the simulation's node model, samples near the midpoint fall on either side, and
+some of the operating point's samples still read as pressure: each costs a held
+rise and one capped-rule step, and only a run of them spanning `τ` re-learns.
+Whether a real node separates them better is for the harness to measure (PR M):
+the node model's stall past the share is bounded by the engine's calibration to
+the measured stall at a quota (§10), an assumption.
+
 ## 6. Pressure
 
 **What it does: it blocks increases, and nothing else.** When the CPU stall
@@ -1087,7 +1203,8 @@ evidence for not needing a cut: at the cap, with pressure 56 and the
 incident-provider liveness probe, the off arm had no failed probe in 5 runs.
 
 **The threshold stays 50, provisional.** It now reads a 1s stall share instead of
-`avg10`. Measured `avg10` (§1): 8–17 at four or five slots, 37 at six, 56 at the
+`avg10`. With no `cpu.max`, while a learned limit is held, the threshold in force
+is calibrated at the operating point instead, never below 50 (§5.2). Measured `avg10` (§1): 8–17 at four or five slots, 37 at six, 56 at the
 cap. So for blocking, 50 separates "at the cap" from the operating point. The
 survey's point that a fixed threshold doesn't fit small quotas applies to a cut:
 a block at the operating point costs nothing. The 1s stall share's spread at the
@@ -1244,6 +1361,7 @@ whole number) and the input gauges, with `memory_working_set` gone and
 | `…local.in_flight` | reconciles | `N̄` |
 | `…local.cpu.capped` | 0/1 | last sample capped, or pressured with a learned limit |
 | `…local.cpu.effective_limit` | cores | `L_eff` while held (§5.1); nothing while free or with a quota |
+| `…local.cpu.pressure_threshold` | percent | the threshold in force (§5.2): `CPUPressureThreshold`, or the calibrated one while a limit is held |
 | `…local.queue.slot_share{controller}` | fraction | each queue's smoothed share of the slot-time, `A_q/A` |
 | `…local.estimate.restarts{estimate, cause}` | count | restarts by estimate (`k`, `c`, `d`, `m`) and cause (`cost`, `mix`) |
 | `…local.memory.budget`, `…memory.live`, `…memory.baseline`, `…memory.per_reconcile`, `…memory.spread` | bytes | `H`, `live`, `Û₀` (lower bound), `m̂` (upper bound), `σ̂` |
@@ -1280,7 +1398,11 @@ that has no `D̂_q` (only `θN̄`); trust, and no trust before the third sample;
 the untrusted increase bound `Sᵢ₋₁ + Cᵢ`; pressure blocking a rise, letting a
 fall through, and holding at `min(S_onset, S_model)` when the model recovers
 within a run (L3); the learned limit's onset window, hold, re-learning and
-stepwise release (§5.1); error diffusion averaging to the real value within
+stepwise release (§5.1); the calibrated threshold (§5.2): `μp` until the operating
+point is measured, then the midpoint, never below the option, and the option with
+a `cpu.max`; a held-out sample and a restart's own sample not raising the slots,
+a new `cpu.max` restarting the CPU estimates, a draining sample, and a queue
+going quiet failing the share test (§3.2, §3.5); error diffusion averaging to the real value within
 `1/n`, its carry staying in `[0, 1)`, and each reset of §4.5 (a new `cpu.max`, a
 new Go limit, a clamp, a change of binding input, a restart) followed by `⌊S⌋`;
 a pressure-held sample keeping the carry. Memory with a fake runtime-metrics
@@ -1341,7 +1463,7 @@ over `H`. And the review's cases, each with its pass condition:
 | Fourth review, L1: grants that always land after the sampler's read, so that no certain-rise pair ever occurs | `g⁺` from the stand-ins throughout (the fit's, else the `N⁺` pairs'); never over `G` |
 | H1-new: the same mix with no spread at all (a fake holding the count fixed) | never identified; the fallback rules throughout; no OOMKill |
 | M1: a cheap queue (1ms of CPU, 2s each) at the ceiling, then an expensive one (23ms, 0.43s) taking the backlog | with the expensive queue seen uncapped before: the capped descent geometric at the rate §4.2 derives, `θ·D_mix/Dᵢ` per sample, out of the cap within 6 samples (the reviewer's example: 32 → 14.7 → 6.9 → 3.45, 5 samples at the cap, against about 30 at `θ`); at most one crossing of the target, then a monotone rise to it; never seen: a descent of at least `θ` per sample, and no rise while capped |
-| M2: no `cpu.max`, a node model with CFS shares among other cgroups, the container's share stepping from 400 to 800 and back to 400 ms/s | at onset, one step to within 10% of the law's value at `ρL_eff`; stall over the threshold in at most 10% of samples at a steady share; a doubled share found within 10 windows |
+| M2: no `cpu.max`, a node model with CFS shares among other cgroups, the container's share stepping from 400 to 800 and back to 400 ms/s | at onset, one step to within 10% of the law's value at `ρL_eff`; stall over the threshold in force (§5.2) in at most 10% of samples at a steady share; a doubled share found within 10 windows |
 | M2-a: a node that gives 4 cores, with a 1s blip to 0.5 core, and separately a 15s dip to 0.5 core | the blip learns no limit and blocks rises for its sample only; the dip learns one after `τ`, and once it ends the CPU is back to 90% of the pre-onset level within one clear window (scratch: 2 samples after the dip) |
 
 The node model is the part the scratch scripts only assumed: how the stall grows
@@ -1514,7 +1636,8 @@ Each new behaviour gets a revert check, as before.
 The first draft put items 1 to 8 to the user as questions, with options and a
 recommendation each. The user decided them, with the coordinator deciding item
 8. Item 9 was decided by the coordinator after the second review, and the user
-confirmed item 3's gradual release then.
+confirmed item 3's gradual release then. Item 10 was decided by the user on
+2026-11-09, after the first run of the simulation.
 
 1. **Whole slots: error diffusion** (§4.5). On the measured curve 4 slots use 81%
    of the limit and 5 use 97%, against a target of 4.56. Rounding down would hold
@@ -1603,6 +1726,14 @@ confirmed item 3's gradual release then.
    stand-in at any `n`; a block check on the spread; batch means for the block
    checks and Newey–West, with a bandwidth from the longest hold, for the fit;
    cuts by the slope's lower bound.
+10. **With no `cpu.max`, the pressure threshold is calibrated at the operating
+    point** (§5.2), decided by the user on 2026-11-09 after the first simulation
+    run showed the operating point's own stall at about the fixed threshold
+    under node contention. Derived from data, the stall share the container shows
+    while running at its measured share; the user asked that it say how it is
+    measured, how it is re-learned and how it meets §5.1's onset, freeze and
+    release, and that the node case stay in the gate. The same decision folded
+    the first run's four fixes to the law into the design (§3.2, §3.5, §15).
 
 ## 14. Checked, and not
 
@@ -1723,6 +1854,22 @@ and four Low.
 | L3 | A cut divided the excess by the slope's upper bound | §4.4: `N_room` cuts by the lower bound `m̂⁻`, by `m_fit` when that bound is not positive, and by at least one slot |
 | L4 | §16 should say what `N_room` and the errors-in-variables correction are for, list the autocovariance minimum and the cut's direction, and cover the CPU path | §16: one budget for the whole design, shared, CPU, memory and constants |
 
+**The first run of §10's simulation, PR 1, 2026-11-09.** Not a review: the Go
+simulation driving the real estimator and law, run before the gate's statistical
+review. It found four things the design's rules left open, fixed in PR 1, and
+one the user decided (§13 item 10); this amendment states them. The pass
+conditions the plan had read into §10 were revised separately, in the plan's
+§4.4, each derived from a guarantee stated here and judged by a reviewer who has
+not seen the results.
+
+| Item | Finding | Answer |
+|---|---|---|
+| A held-out sample raised the slots | A sample held out by §3.5's change test leaves `k̂` as it was, which may be stale; the law's value from the stale `k̂` could still raise the slots in that sample, into the change the test had just seen | §3.5: a held-out sample may lower the slots but not raise them, and neither can a restart in its own sample. §10's false-restart case asserts that no restart raises the slots |
+| A new `cpu.max` kept the old plant's estimate | `k̂` measured under one limit describes that limit's throttling; carried into a halved or doubled limit, it is a plant that is gone, and the change test, which compares samples to the old mean, restarts it only after two samples that disagree | §3.5: a change of `cpu.max` restarts `k̂`, `ĉ` and `D̂` (not `D̂_q`), with the carry (§4.5). The limit-halving and limit-doubling cases |
+| Samples after a cut measured the cut | A cut preempts nothing (§8), so for a while every moment has more in flight than the new capacity; those samples' CPU and durations are the old capacity's, fed to `k̂` and `D̂` as the new one's, and they could raise the slots back | §3.2: the draining kind, `N⁻` above the capacity in force: it feeds only `ĉ` and can't raise the slots. The cost-doubling and limit-halving cases |
+| A queue going quiet was no change of mix | §3.5's share test ran only on the queues present in a sample, so a queue that stopped had no sample to fail the test, and the shared estimates kept describing the old mix | §3.5: every queue seen is tested in every sample with work, at share 0 when it had none. The mix-shift case |
+| No CPU limit: the operating point's stall at the threshold | Under node contention the container held at 90% of its share stalled about as much as the fixed threshold (about 50 per sample, against about 56 past the share), so half its samples read as pressure; and the onset window's contended samples fed `k̂` and `D̂`, which turned the cut at onset into a descent of 10% a sample | §5.2, decided by the user (§13 item 10): the threshold calibrated at the operating point, between its stall and the stall past the share, re-learned with each limit, never below the option. §3.2: a sample over the threshold with no `cpu.max` is pressured whether a limit is held or not, so the cut is computed from costs measured while the node had room. §10: the node case stays in the gate |
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -1759,6 +1906,11 @@ go. "Scratch" means one of the never-committed simulations of §4.3, §4.4 and
 | §5.1, onset window, frozen only after `τ` | A one-second blip setting a limit that takes minutes to release | Second review, M2-a: 3.5 minutes reduced |
 | §5.1, pressured samples treated as capped | The ratchet again under node contention | Scratch: slots held at the share's demand twice over |
 | §5.1, release: `U_pre` on the first clear window, then `×1/ρ` per window | A full release swinging the slots between 7 and 24; a passed dip held down | Scratch; second review, M2-a; the `×1/ρ` step decided (§13 item 3) |
+| §5.2, the threshold calibrated at the operating point, never below the option | The operating point's own stall read as pressure under node contention: rises blocked, cuts, a lower limit re-learned | The first simulation run; decided (§13 item 10) |
+| §3.2, onset samples pressured | A cut at onset spread over seven samples by contended costs | The first simulation run (§15) |
+| §3.2, the draining kind | The samples after a cut measuring the old capacity as the new | The first simulation run (§15) |
+| §3.5, no rise in a held-out sample or a restart's own sample | A stale estimate raising the slots into the change just seen | The first simulation run (§15) |
+| §3.5, a new `cpu.max` restarts the CPU estimates | The old limit's throttling carried into the new limit's law | The first simulation run (§15) |
 
 ### 16.3 Memory
 
@@ -1800,7 +1952,7 @@ go. "Scratch" means one of the never-committed simulations of §4.3, §4.4 and
 |---|---|---|
 | `SamplePeriod` | 1s | `avg10`-era default kept; the law and the books don't depend on it beyond the measured `Δt` |
 | `CPUTarget`, `ρ` | 0.9 | Decided (§13 item 2) |
-| `CPUPressureThreshold` | 50, provisional | Above the measured operating point (8–17), below the cap (56) (§6) |
+| `CPUPressureThreshold` | 50, provisional | Above the measured operating point (8–17), below the cap (56) (§6). With no `cpu.max` and a limit held, the floor of the calibrated threshold, the midpoint of the stall at the operating point and past the share (§5.2) |
 | `τ` (CPU estimates) | `max(10s, 60/X̂)` | Ten samples, and Spinner's 60 completions |
 | `W` (the `B̂` minimum's window) | `⌈3τ/Δt⌉` samples | The samples that still weigh in the estimates |
 | Capped slack | one 5ms slice per GOMAXPROCS thread, at most a period's quota | The kernel's slice (`sched-bwc.rst`); review, L1 |

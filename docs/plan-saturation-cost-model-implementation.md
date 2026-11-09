@@ -26,7 +26,7 @@ checks is a copy.
 
 | # | PR | Main design sections | Prod / test lines | Depends on | Concurrency review |
 |---|---|---|---|---|---|
-| 1 | `costmodel`: shared parts and the CPU path, the simulation engine, the CPU cases | §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §6, §7, §10 (CPU rows) | 1,300 / 2,400 | — | no; **statistical review** |
+| 1 | `costmodel`: shared parts and the CPU path, the simulation engine, the CPU cases | §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §5.2, §6, §7, §10 (CPU rows) | 1,300 / 2,400 | — | no; **statistical review** |
 | 2 | `costmodel`: the memory path, the GC and heap model, the memory cases | §3.6, §4.4, §10 (memory rows), §16.3 | 1,200 / 2,300 | 1 | no; **statistical review** |
 | 3 | The Governor's books: slot-seconds, per-queue shares, pop times, `N±` after dispatch, closing at `t_read` | §3.2, §3.4, §8 | 250 / 600 | 2 | **yes** |
 | 4 | The sampler: `cpu.stat`, `cpu.max` every sample, PSI `total`, runtime metrics, the Go memory limit once | §2, §3.1, §3.2, §4.4, §5, §8 (L7) | 450 / 600 | 3 | light |
@@ -124,7 +124,7 @@ New `pkg/ratelimit/internal/costmodel/sim`, the simulation engine:
 - a driver that, every simulated second, closes the books at a read instant,
   builds a `Sample` and calls `costmodel`, and publishes the capacity back.
 
-**Design sections:** §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §6, §7, and §10's CPU
+**Design sections:** §3.1–§3.5, §4.1–§4.3, §4.5, §5.1, §5.2, §6, §7, and §10's CPU
 rows.
 
 **Tests.**
