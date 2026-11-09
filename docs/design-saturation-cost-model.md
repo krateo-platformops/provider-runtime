@@ -1827,6 +1827,18 @@ conditions the reviewer corrected after seeing results are the plan's §4.5.
 | False restarts | `D̂`'s per-sample test behind 5–8 false restarts an hour at 0.47s | §17.9 item 7: `D̂`'s test on `ĉ`'s windows |
 | Conditions | The reviewer's corrections after seeing results; the confirmation run on seeds 21–40 | The plan's §4.5 |
 
+**The review of §17.9, `fe08b9a`, 2026-11-09.** One High and three Medium, all
+wording, two of them correcting the reviewer's own earlier text; applied
+verbatim.
+
+| Item | Finding | Answer |
+|---|---|---|
+| High | Item 5 rewarmed `D̂` at the end of any run over the threshold, so the 30s plant's quota-throttling runs would freeze it again | §17.9 item 5: only runs in which no period was throttled |
+| Medium | Item 4's trust count would leave H1 at the floor | §17.9 item 4: the unresolvable rule doesn't apply while any sample of the last `τ` was window-capped |
+| Medium | Item 2's cumulative move had no reference point | §17.9 item 2: `S_ref`, the slots at the last rewarm or `τ` ago |
+| Medium | The confirmation run's rules | The plan's §4.5: the freezing commit, the seeds unused before it, every seed reported, a failure spends the seeds |
+| Additions | The allowance from above's start; `B̂` may fall; a `D̂` deferral blocks rises | The plan's §4.5; §17.9 items 6 and 7 |
+
 ## 16. Complexity budget
 
 Everything in the design, CPU and memory, each with the failure it prevents and
@@ -2482,8 +2494,9 @@ which `D̂` must include at the operating point (§3.4), no longer does.
 above the target, lives stretched by the cap that the window test didn't catch
 keep `D̂` high (0.78–0.87s against 0.58s), and the law's steps there are under a
 slot (0.83, then 0.38), so §17.8 item 3's per-step test never fires. The rewarm
-now fires on a **cumulative** move of the published `S` of
-`max(3σ of S's steps, 1 slot)` over the last `τ`, not on a single step. If that
+now fires on a **cumulative** move of the published `S`, not on a single step. A
+move is |S − S_ref| > max(3σ of S's steps, 1 slot), where S_ref is S at the last
+rewarm, or S τ ago if there was no rewarm within τ. A rewarm sets S_ref = S. If that
 is not enough in the gate, lives that overlapped an over-target throttled sample
 are excluded too, and the setpoint cost is stated with it (§17.1's shift, larger
 by those lives); that second step is taken only if the first fails.
@@ -2492,17 +2505,25 @@ by those lives); that second step is taken only if the first fails.
 after the change's own sample (`n_W ≥ 1`): the change sample's periods at the old
 limit break the counter test over the window.
 
-**4. The unresolvable rule needs `ĉ`'s trust count.** The unresolvable rule needs
-`ĉ`'s trust count (60 completions since its start); before that, the law holds.
-In the mix shift `ĉ < 2·SE` on three to five samples after a restart sent the
-slots from 5.00 to 24 (seed 8) and to 30.89 (seed 19).
+**4. The unresolvable rule holds while the window was recently capped.** The
+unresolvable rule doesn't apply while any sample of the last τ was window-capped;
+the law holds instead. Otherwise it is §4.2's. In the mix shift `ĉ < 2·SE` on
+three to five samples after a restart sent the slots from 5.00 to 24 (seed 8) and
+to 30.89 (seed 19). (The first version of this item required `ĉ`'s trust count,
+which would have left the H1 cases at the floor; replaced at the review of
+`fe08b9a`.)
 
-**5. The end of a pressure run rewarms `D̂`.** The end of a run over
-CPUPressureThreshold rewarms `D̂`, by the same logic as §17.2's new plant: the
-lives that ran under the contention describe a plant that is gone.
+**5. The end of a contention run rewarms `D̂`.** The end of a run of samples over
+CPUPressureThreshold in which no period was throttled (the stall item 1 counts as
+contention) rewarms D̂, by the same logic as §17.2's new plant: the lives that ran
+under the contention describe a plant that is gone. (The first version said any
+run over the threshold; the 30s plant's quota-throttling runs end every few
+seconds, and would have rewarmed `D̂` each time and frozen it again. Corrected at
+the review of `fe08b9a`.)
 
 **6. `B̂` doesn't rise by ageing (§3.3).** `B̂` never rises because samples age
-out; it keeps its value until new idle evidence arrives. In H1, seed 17, `B̂`
+out; it keeps its value until new idle evidence arrives. It may still fall: a
+lower idle sample, or the active-sample bound. In H1, seed 17, `B̂`
 jumped from 0.020 to 0.0875 cores when its idle minimum left the `3τ` window.
 
 **7. `D̂`'s change test over the same windows as `ĉ`'s.** `D̂`'s change test runs
@@ -2510,7 +2531,8 @@ on the same consecutive, non-overlapping windows as `ĉ`'s (§17.8 item 2): each
 closed window's mean lifetime is one observation for the 3σ test, its deferral
 and its two-in-a-row restart, with the sums fed by every qualifying life. The
 per-sample test is behind the 5–8 false restarts an hour at 0.47s, which it
-would otherwise have to justify.
+would otherwise have to justify. A pending D̂ deferral also blocks rises, as ĉ's
+does.
 
 **What this revision doesn't change:** the law; `ĉ`'s window test; the cap over
 `W` (beyond item 3); the floor after a cost increase; the baselines.
