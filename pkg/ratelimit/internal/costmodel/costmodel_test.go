@@ -290,3 +290,18 @@ func TestLimitChangeSample(t *testing.T) {
 	}
 	near(t, "S in the change's sample", r.Slots, 0.9*0.125*4/0.125, 1e-9)
 }
+
+// §17.9 item 8: under a quota, only stall the quota doesn't explain blocks.
+func TestBlockUnderQuota(t *testing.T) {
+	c := NewCPU(cpuCfg())
+	s := sample(time.Second, 0.2, 0.25, 4, 40)
+	s.Stall = 600 * ms
+	s.Throttled = 3
+	if r := c.Step(s, 4, 4, 16); r.Blocked {
+		t.Error("a stall the quota explains (throttled periods) blocked a rise")
+	}
+	s.Throttled = 0
+	if r := c.Step(s, 4, 4, 16); !r.Blocked {
+		t.Error("a stall with no throttled period didn't block")
+	}
+}

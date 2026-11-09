@@ -44,6 +44,15 @@ type CPUResult struct {
 	// CHold reports that the active law held after a ĉ restart with no
 	// completion its denominator counts yet (§17.8, item 5).
 	CHold bool
+	// DDeferred and DPending report D̂'s change test over the same windows
+	// (§17.9, item 7). UnresHold reports that the unresolvable rule was held
+	// because a sample of the last τ was window-capped (§17.9, item 4).
+	DDeferred, DPending, UnresHold bool
+	// ContentionEnd reports that a run of contention samples ended and
+	// rewarmed D̂ (§17.9, item 5).
+	ContentionEnd bool
+	// WindowLen is the closed window's samples when WindowClosed is set.
+	WindowLen int
 	// WindowClosed reports that a c_W test window closed in this sample;
 	// SigmaW is the window test's standard deviation of c_W (seconds).
 	WindowClosed bool
@@ -118,6 +127,21 @@ func (w *costWindow) value() (float64, bool) {
 	return w.cpu / float64(w.comp), true
 }
 
+// dWindow is D̂'s part of a test window: the qualifying lives since its start.
+type dWindow struct {
+	sum     float64
+	cnt     int
+	samples [][3]float64 // sum, count, alpha
+	side    float64
+}
+
+func (w *dWindow) value() (float64, bool) {
+	if w.cnt == 0 {
+		return 0, false
+	}
+	return w.sum / float64(w.cnt), true
+}
+
 // CPU is the CPU path's state (design §3.3–§3.5, §4.2, §17). The sampler
 // goroutine owns it.
 type CPU struct {
@@ -149,10 +173,26 @@ type CPU struct {
 	tight    []span // samples whose every period was throttled
 	hist     []histSample
 
-	// The published S's steps, for the rewarm (§17.8, item 3).
+	// The published S's steps, for the rewarm (§17.8 item 3, §17.9 item 2).
 	sPrev   float64
 	sSteps  spread
 	sRecent []timed
+	sRef    float64
+	sRefT   float64
+
+	// §17.9: the end of the window after a limit change, the last
+	// window-capped sample, a contention run in progress, B̂ held.
+	changeAfter time.Duration
+	lastCapT    float64
+	inCont      bool
+	bHat        float64
+	bHatOK      bool
+
+	// D̂'s change test over ĉ's windows (§17.9, item 7).
+	dWin      dWindow
+	dPend     *dWindow
+	dwn       int
+	dwmu, dwv float64
 
 	shares  map[string]*ratio
 	tput    float64 // smoothed completions per second, for τ
@@ -163,7 +203,7 @@ type CPU struct {
 
 // NewCPU returns the CPU path's state.
 func NewCPU(cfg CPUConfig) *CPU {
-	return &CPU{cfg: cfg, dq: map[string]*ratio{}, shares: map[string]*ratio{}, sPrev: -1}
+	return &CPU{cfg: cfg, dq: map[string]*ratio{}, shares: map[string]*ratio{}, sPrev: -1, sRefT: math.Inf(-1), lastCapT: math.Inf(-1)}
 }
 
 // tau is the estimates' time constant: ten samples, and at least 60
@@ -211,21 +251,30 @@ func (c *CPU) background() float64 {
 // window returns the index in hist where the current sample's window W
 // starts: the most recent samples spanning at least max(the longest lifetime
 // among their completions, a_oldest) + Δt (§17.1).
+//
+// After a limit change the window starts after the change's own sample, whose
+// periods at the old limit break the counter test (§17.9, item 3); it always
+// holds the current sample (n_W ≥ 1).
 func (c *CPU) window(b Interval, dt float64) int {
 	aOldest := 0.0
 	if b.Oldest >= 0 {
 		aOldest = (b.End - b.Oldest).Seconds()
 	}
 	longest := 0.0
-	i := len(c.hist) - 1
+	last := len(c.hist) - 1
+	i := last
 	for ; i > 0; i-- {
 		h := c.hist[i]
+		if h.from < c.changeAfter {
+			i++
+			break
+		}
 		longest = math.Max(longest, h.longest)
 		if (b.End - h.from).Seconds() >= math.Max(longest, aOldest)+dt {
 			break
 		}
 	}
-	return max(i, 0)
+	return min(max(i, 0), last)
 }
 
 // kind classifies the sample (§3.2, as amended by §17.8, item 1): capped
@@ -320,6 +369,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		if c.lastL != 0 || c.t > dt {
 			res.ChangeSample = true
 			c.rewarmD(books.End)
+			c.changeAfter = books.End
 		}
 	}
 	c.lastL = s.Limit
@@ -327,6 +377,10 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	tau := c.tau()
 	alpha := 1 - math.Exp(-dt/tau)
 	over := stall > c.cfg.PressureThreshold
+	// §17.9 items 1, 5 and 8: stall the quota doesn't explain, with no
+	// throttled period, is contention; with no quota every stall over the
+	// threshold is.
+	contention := over && (s.Limit == 0 || s.Throttled == 0)
 
 	// The window W and the sample's kind (§17.8, item 1).
 	longest := 0.0
@@ -338,6 +392,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	from := c.window(books, dt)
 	kind, nW := c.kind(s, from)
 	res.Kind, res.WindowSamples = kind, nW
+	if kind == Capped {
+		c.lastCapT = c.t
+	}
 	keepFrom := books.End - time.Duration((2*c.maxLife+3*tau+2*dt)*float64(time.Second))
 	for len(c.hist) > 1 && c.hist[0].to < keepFrom && from > 0 {
 		c.hist = c.hist[1:]
@@ -345,7 +402,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	}
 
 	// The samples a qualifying life may not overlap (§17.1, §17.8).
-	if kind == Capped || over || res.ChangeSample {
+	if kind == Capped || contention || res.ChangeSample {
 		c.bad = append(c.bad, span{books.Start, books.End})
 	}
 	if tightSample(s, used) && kind != Capped {
@@ -366,7 +423,21 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	case Active:
 		c.activeU = append(c.activeU, timed{c.t, used})
 	}
-	bg := c.background()
+	// §17.9 item 6: B̂ never rises because samples age out; it is recomputed
+	// from the window only with new idle evidence, and may otherwise only fall,
+	// to the active-sample bound.
+	switch {
+	case kind == Idle:
+		c.bHat, c.bHatOK = c.background(), true
+	case c.bHatOK:
+		if ma, ok := minOf(c.activeU); ok {
+			c.bHat = math.Max(math.Min(c.bHat, ma), 0)
+		}
+	}
+	bg := 0.0
+	if c.bHatOK {
+		bg = c.bHat
+	}
 	res.Background = bg
 
 	if kind != Idle {
@@ -378,19 +449,35 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	// §17.8 item 3: a move of the published S of at least max(3σ of its
 	// steps, 1 slot) restarts D̂'s warm start, which takes only the reconciles
 	// admitted since the move.
-	if c.sPrev >= 0 && c.sSteps.n >= 3 {
-		if d := prev - c.sPrev; math.Abs(d) > math.Max(changeSigma*math.Sqrt(c.sSteps.v), 1) {
-			c.rewarmD(books.Start)
-			res.DRewarmed = true
+	// §17.9 item 2: on a cumulative move, |S − S_ref| > max(3σ of S's steps,
+	// 1 slot), S_ref the slots at the last rewarm, or τ ago without one.
+	c.sRecent = prune(c.sRecent, c.t-tau)
+	if c.t-c.sRefT >= tau {
+		c.sRef = prev
+		if len(c.sRecent) > 0 {
+			c.sRef = c.sRecent[0].v
 		}
+	}
+	if c.sPrev >= 0 && c.sSteps.n >= 3 && math.Abs(prev-c.sRef) > math.Max(changeSigma*math.Sqrt(c.sSteps.v), 1) {
+		c.rewarmD(books.Start)
+		res.DRewarmed = true
+		c.sRef, c.sRefT = prev, c.t
 	}
 	c.sSteps.moved(prev, alpha)
 	c.sPrev = prev
-	c.sRecent = append(prune(c.sRecent, c.t-tau), timed{c.t, prev})
+	c.sRecent = append(c.sRecent, timed{c.t, prev})
+	// §17.9 item 5: the end of a contention run rewarms D̂.
+	if contention {
+		c.inCont = true
+	} else if c.inCont {
+		c.inCont = false
+		c.rewarmD(books.Start)
+		res.ContentionEnd, res.DRewarmed = true, true
+	}
 
 	if kind == Idle {
 		res.Slots = prev
-		res.Blocked = over
+		res.Blocked = contention
 		c.report(&res)
 		return res
 	}
@@ -418,14 +505,10 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		}
 	}
 	if cnt > 0 {
-		switch c.d.add(sum, float64(cnt), alpha, true) {
-		case heldOut:
-			stale = true
-		case restarted:
-			// A restart of D̂ holds the slots in its own sample, as ĉ's does
-			// (§3.5, §17.1).
-			res.DRestarted, res.Restarted = true, true
-		}
+		c.d.add(sum, float64(cnt), alpha, false)
+		c.dWin.sum += sum
+		c.dWin.cnt += cnt
+		c.dWin.samples = append(c.dWin.samples, [3]float64{sum, float64(cnt), alpha})
 		c.dHasLife = true
 	}
 	for q, v := range perQ {
@@ -471,9 +554,11 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	}
 	res.PaceCompletions = den
 	c.windowTest(books, cpuNum, den, alphaC, dt, tauC, &res)
-	if res.CRestarted {
+	c.dWindowTest(dt, tauC, &res)
+	if res.CRestarted || res.DRestarted {
 		res.Restarted = true
 	}
+	stale = stale || res.DPending
 
 	if books.SlotSeconds > 0 && c.shareShift(books, alpha) {
 		c.c.reset()
@@ -499,7 +584,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if limit == 0 {
 		// §5.1: with no CPU limit, the CPU law doesn't run: S_cpu is the
 		// ceiling, reached through §7's pacing, and pressure only blocks.
-		res.Slots, res.Paced, res.Blocked = float64(ceiling), true, over
+		res.Slots, res.Paced, res.Blocked = float64(ceiling), true, contention
 		c.fill(&res, ch, cok, dv, dok)
 		return res
 	}
@@ -522,6 +607,12 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			// as unresolvable).
 			res.CHold = true
 		case !cok || ch <= 0 || (c.c.n >= 3 && ch < 2*seC):
+			if c.t-c.lastCapT < tau {
+				// §17.9 item 4: not while a sample of the last τ was
+				// window-capped; the law holds instead.
+				res.UnresHold = true
+				break
+			}
 			res.Unresolvable = true
 			if used < rho*limit {
 				g = float64(ceiling)
@@ -548,7 +639,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if !res.Trusted {
 		res.Paced = true
 	}
-	res.Blocked = over
+	// §17.9 item 8: under a quota, only stall the quota doesn't explain
+	// blocks.
+	res.Blocked = contention
 	res.Slots = g
 	c.fill(&res, ch, cok, dv, dok)
 	return res
@@ -605,6 +698,7 @@ func (c *CPU) windowTest(b Interval, num float64, den int, alpha, dt, tauC float
 		return
 	}
 	res.WindowClosed = true
+	res.WindowLen = len(c.win.samples)
 	w := c.win
 	c.win = costWindow{from: b.End}
 	x, ok := w.value()
@@ -716,10 +810,93 @@ func (c *CPU) report(res *CPUResult) {
 }
 
 // rewarmD restarts D̂'s warm start at at: it takes only reconciles granted
-// since, and the law holds until one has completed (§17.2, §17.4).
+// since, and the law holds until one has completed (§17.2, §17.4). Its window
+// test restarts with it.
 func (c *CPU) rewarmD(at time.Duration) {
 	c.d.reset()
 	c.dSince, c.dSinceT, c.dHasLife = at, c.t, false
+	c.dWin, c.dPend, c.dwn, c.dwmu, c.dwv = dWindow{}, nil, 0, 0, 0
+}
+
+// dWindowTest runs D̂'s change test on the windows ĉ's test closes (§17.9,
+// item 7): each closed window's mean lifetime is one observation; a deferred
+// window, or one in progress beyond 3σ, is pending and blocks rises; the
+// second beyond 3σ on the same side restarts D̂ from the two windows' lives.
+func (c *CPU) dWindowTest(dt, tauC float64, res *CPUResult) {
+	sd := math.Sqrt(math.Max(c.dwv, 0))
+	sd = math.Max(sd, 1e-9*math.Max(math.Abs(c.dwmu), 1e-9))
+	dev := func(x float64) float64 { return (x - c.dwmu) / sd }
+	if !res.WindowClosed {
+		if x, ok := c.dWin.value(); ok && c.dwn >= 3 && math.Abs(dev(x)) > changeSigma {
+			res.DPending = true
+		}
+		if c.dPend != nil {
+			res.DPending = true
+		}
+		return
+	}
+	w := c.dWin
+	c.dWin = dWindow{}
+	x, ok := w.value()
+	if !ok {
+		if c.dPend != nil {
+			res.DPending = true
+		}
+		return
+	}
+	aw := 1 - math.Exp(-float64(res.WindowLen)*dt/tauC)
+	fold := func(v float64) {
+		c.dwn++
+		a := math.Max(aw, 1/float64(c.dwn))
+		if c.dwn == 1 {
+			c.dwmu, c.dwv = v, 0
+			return
+		}
+		d := v - c.dwmu
+		c.dwmu += a * d
+		c.dwv = (1 - a) * (c.dwv + a*d*d)
+	}
+	if c.dwn < 3 {
+		if p := c.dPend; p != nil {
+			c.dPend = nil
+			if pv, ok := p.value(); ok {
+				fold(pv)
+			}
+		}
+		fold(x)
+		return
+	}
+	z := dev(x)
+	if p := c.dPend; p != nil {
+		c.dPend = nil
+		if math.Abs(z) > changeSigma && sign(z) == p.side {
+			c.d.reset()
+			for _, win := range []*dWindow{p, &w} {
+				for _, smp := range win.samples {
+					c.d.fold(smp[0], smp[1], smp[2])
+				}
+			}
+			c.dwn, c.dwmu, c.dwv = 0, 0, 0
+			for _, win := range []*dWindow{p, &w} {
+				if v, ok := win.value(); ok {
+					fold(v)
+				}
+			}
+			res.DRestarted = true
+			return
+		}
+		if pv, ok := p.value(); ok {
+			fold(pv)
+		}
+		z = dev(x)
+	}
+	if math.Abs(z) > changeSigma {
+		w.side = sign(z)
+		c.dPend = &w
+		res.DDeferred, res.DPending = true, true
+		return
+	}
+	fold(x)
 }
 
 // windowCost is c_W: the CPU per completion over the window W (§17.1).

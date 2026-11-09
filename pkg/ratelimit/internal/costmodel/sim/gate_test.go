@@ -451,12 +451,11 @@ func gateCases() []gateCase {
 					z = pre.PerCompletion / pre.SigmaW
 				}
 				g.report("σ_W %.5f before the change; the change Δc/σ_W ≈ %.1f", pre.SigmaW, z)
-				horizon := 2*nw + 1
-				if z < 4 {
-					horizon = 3*nw + 1
-				}
+				// Corrected (a): within 2⌈W_test/Δt⌉ + 1, W_test the longer of the
+				// deferring and confirming windows, measured; 3⌈W_test/Δt⌉ + 1 for a
+				// change near 3σ_W.
 				def, rst := -1, -1
-				for i := i0; i < g.n() && i <= i0+horizon; i++ {
+				for i := i0; i < g.n() && i <= i0+60; i++ {
 					c := g.tr.Results[i].CPU
 					if c.CDeferred && def < 0 {
 						def = i
@@ -466,11 +465,23 @@ func gateCases() []gateCase {
 						break
 					}
 				}
+				wTest := nw
+				horizon := 2*nw + 1
+				if def >= 0 && rst >= 0 {
+					wTest = max(g.tr.Results[def].CPU.WindowLen, g.tr.Results[rst].CPU.WindowLen)
+					horizon = 2*wTest + 1
+					if z < 4 {
+						horizon = 3*wTest + 1
+					}
+					g.report("W_test %d samples; the restart at +%d, the horizon %d", wTest, rst-i0, horizon)
+				}
 				switch {
 				case z < 3:
 					g.report("a change under 3σ_W: the change test's mechanism isn't required")
 				case def < 0 || rst < 0:
-					g.fail("no ĉ deferral followed by a restart within %d of the change", horizon)
+					g.fail("no ĉ deferral followed by a restart after the change")
+				case rst > i0+horizon:
+					g.fail("the ĉ restart at +%d, after the horizon %d", rst-i0, horizon)
 				}
 				for i := i0; i < g.n() && i <= i0+horizon+nw; i++ {
 					c := g.tr.Results[i].CPU
@@ -772,8 +783,11 @@ func gateCases() []gateCase {
 			}
 		}},
 		{name: "no limit, pressure only blocks", cfg: func(seed uint64) Config {
-			// Plan §4.5: a share near the demand (about 1.6 cores at the
-			// ceiling), so that the stall straddles the threshold.
+			// Plan §4.5 (i): a share near the demand, so that the stall
+			// straddles the threshold. At 1.6 cores the stall was over 50 in 1
+			// of 301 samples (seeds 1–3 at 31b9509), at 0.8 in nearly all; 1.2
+			// is between them, chosen from that report: a test-configuration
+			// parameter, not a condition.
 			return Config{
 				Seed: seed, Duration: 1200 * time.Second, Procs: 4, NodeCPUs: 4, Ceiling: 32,
 				Share: func(t time.Duration) float64 {
@@ -781,7 +795,7 @@ func gateCases() []gateCase {
 					case t >= 300*time.Second && t < 600*time.Second:
 						return 0.8
 					case t >= 900*time.Second && t < 1200*time.Second:
-						return 1.6
+						return 1.2
 					}
 					return 0.4
 				},
@@ -789,6 +803,16 @@ func gateCases() []gateCase {
 				Model:  defaultModel(),
 			}
 		}, check: func(g *gctx) {
+			// Plan §4.5: for the baselines, reported, not judged (§5.1 decides
+			// no CPU control without a limit).
+			if !g.cost {
+				defer func() {
+					for _, f := range g.v.fails {
+						g.report("not judged: %s", f)
+					}
+					g.v.fails = nil
+				}()
+			}
 			over, near, nearOver := 0, 0, 0
 			for i := 1; i < g.n(); i++ {
 				r := g.tr.Results[i]
@@ -841,24 +865,25 @@ func gateCases() []gateCase {
 				r := g.tr.Results[i]
 				st := g.stall(i)
 				stalls = append(stalls, st)
-				o := st > 50
-				if r.CPU.Blocked != o {
-					g.fail("blocked %v at %v with the stall at %.1f", r.CPU.Blocked, g.tr.At[i], st)
+				// Plan §4.5, design §17.9 item 8: blocked in every sample over
+				// the threshold with no throttled period, and in no other.
+				o := st > 50 && g.tr.Samples[i].Throttled == 0
+				if g.cost && r.CPU.Blocked != o {
+					g.fail("blocked %v at %v with the stall at %.1f and %d throttled periods", r.CPU.Blocked, g.tr.At[i], st, g.tr.Samples[i].Throttled)
 				}
 				if o && g.S(i) > g.S(i-1)+1e-9 {
-					g.fail("a rise at %v with the stall over the threshold", g.tr.At[i])
+					g.fail("a rise at %v with the stall over the threshold and no throttled period", g.tr.At[i])
 				}
 			}
 			sort.Float64s(stalls)
 			if len(stalls) > 0 {
 				g.report("the dip's stall: min %.1f, median %.1f, max %.1f, over 50 in %d of %d", stalls[0], stalls[len(stalls)/2], stalls[len(stalls)-1], countOver(stalls, 50), len(stalls))
 			}
+			// Corrected (e): with design §17.9 item 5's rewarm, only §4.3's
+			// convergence from above, the frozen allowance n_above·(1 + ⌈D̂/Δt⌉).
 			sEnd := g.S(to - 1)
-			kth := 0
-			if sEnd > b.hi {
-				kth = int(math.Ceil(math.Log(sEnd/b.hi) / math.Log(1/rho)))
-			}
-			allow := max(2*kth-1, 0) + g.nW(to) - 1
+			kth := base.nAbove
+			allow := base.nAbove * (1 + ceilSec(base.dStar))
 			above, worst := 0, 0.0
 			for i := to; i < g.n(); i++ {
 				if g.S(i) > b.hi+1e-9 {
@@ -867,7 +892,7 @@ func gateCases() []gateCase {
 				}
 			}
 			if above > allow {
-				g.fail("above S*(1 + 3r̄) = %.2f in %d samples after the dip, want at most %d (k_θ %d from S %.2f)", b.hi, above, allow, kth, sEnd)
+				g.fail("above S*(1 + 3r̄) = %.2f in %d samples after the dip, want at most %d (n_above %d; S %.2f at the dip's end)", b.hi, above, allow, kth, sEnd)
 			}
 			if above > 0 {
 				g.report("the excursion above the band: %d samples, at most %.2f slots over", above, worst)
