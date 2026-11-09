@@ -19,7 +19,6 @@ package sim
 
 import (
 	"math"
-	"math/rand/v2"
 	"sort"
 	"time"
 
@@ -110,7 +109,7 @@ func (tr *Trace) Used(i int) float64 {
 
 // Run simulates one run and returns its trace.
 func Run(cfg Config) *Trace {
-	rng := rand.New(rand.NewPCG(cfg.Seed, cfg.Seed^0x9e3779b97f4a7c15))
+	rng := newRNG(cfg.Seed)
 	if cfg.Period == 0 {
 		cfg.Period = 100 * time.Millisecond
 	}
@@ -165,7 +164,7 @@ func Run(cfg Config) *Trace {
 		if j <= 0 {
 			return ms
 		}
-		return math.Max(0.1*ms, ms*(1+j*rng.NormFloat64()))
+		return math.Max(0.1*ms, ms*(1+j*rng.normFloat64()))
 	}
 	admit := func(t time.Duration) bool {
 		changed := false
@@ -336,7 +335,7 @@ func Run(cfg Config) *Trace {
 					Books:        books.Close(end),
 				}
 				if cfg.UsageNoise > 0 {
-					s.Usage = time.Duration(float64(s.Usage) * math.Max(0, 1+cfg.UsageNoise*rng.NormFloat64()))
+					s.Usage = time.Duration(float64(s.Usage) * math.Max(0, 1+cfg.UsageNoise*rng.normFloat64()))
 				}
 				last.at, last.usage, last.stall = end, usage, stall
 				last.nrPeriods, last.nrThrottle = nrPeriods, nrThr
