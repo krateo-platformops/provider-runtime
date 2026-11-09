@@ -534,9 +534,11 @@ standard errors for a sequence whose errors are correlated by the smoothing.
 
 **These are the gate's conditions.** They replace §4.4's. The statistical
 reviewer derived them from the design and from §4.4's derivations without seeing
-any result, and the user adopted them on 2026-11-09. They are recorded here as
-the reviewer derived them; this plan's author has not changed them. Where a
-condition below was not part of the reviewer's set, it says so.
+any result, and the user adopted them on 2026-11-09. The reviewer then gave the
+exact text of the counts and of the conditions §4.4 carried, and two
+corrections; where any of that was changed after the reviewer had seen results,
+the condition says so and says what the change does to the results. This
+plan's author has changed none of it.
 
 **The target, `S*`, from the engine's fixed-capacity curve.** Not a reference
 run's settled `S`, which carries the controller under test. The engine runs the
@@ -560,35 +562,84 @@ reports them beside these values.
 
 **Outside the band: at most 5% of samples, at `z = 3`.** After the band is first
 reached, `S` is outside it in at most 5% of the samples, with the edges at three
-standard errors as above.
+standard errors as above. Untrusted samples after a restart are judged with
+their own relative standard error when `n ≥ 3`; before that they are excluded,
+and their number is reported.
 
 **Monotone, attributed.** Before the band is first reached, every fall of `S` is
-attributed: either it is in a capped sample (the crossing §4.3 permits), or it
-is in an active sample whose CPU was over `ρL` by at most `3r̄` relative while
-the estimate was trusted (noise in the estimate, falling on the correct side of
-the target). A fall that is neither fails.
+attributed: either it is in a capped sample (the crossing §4.3 permits; every
+capped fall is accepted), or it is in an active sample with `U > ρL` (the sign
+guard) and, while trusted, the fall is at most `3r̄` relative,
+`Sᵢ ≥ Sᵢ₋₁(1 − 3r̄)`. While untrusted, a fall in an active sample needs `U > ρL`
+and is reported. A fall that is none of these fails. The bound is on the fall's
+size. (The acceptance of every capped fall is a correction the reviewer made
+after results, for the real caps of the H1 cases.)
 
 **Each step case asserts the mechanism it counts on.** The count of samples is
-a sum of mechanisms (§4.4: latency, the permitted crossing, the change test, the
-convergence), and each case asserts that the mechanisms happened, not only that
-the count was met. For a cost doubling: a held-out sample of `k̂`, then a
-restart; a capped sample before the crossing. For a limit change: a restart in
-the change's sample. A case that meets its count by another path fails.
+a sum of mechanisms, and each case asserts that the mechanisms happened, not
+only that the count was met. A case that meets its count by another path fails.
 
-**The counts, as derived, without a draining term:** cost doubles within
-`ℓ + 1 + 2 + c` samples; limit halves within `ℓ + 1 + 1 + c`; with `ℓ` and `c`
-as §4.4 defines them. **Limit doubles keeps the original condition**, within
-10% of the new target in 3 samples: the reviewer withdrew its blind loosening
-of it.
+**The counts.**
 
-**Carried from §4.4, not in the reviewer's set,** with §4.5's band and target in
-place of §4.4's: start from one slot (within the band in 20 samples); the mix
-shift's single crossing (a passage across the band); the dip's recovery
-(`1 + ⌈τ/Δt⌉ + R + 1` samples); the node case's stall over the threshold in
-force. The node case's onset step is referred to the engine's fixed-capacity
-`S*` at `ρL_eff` rather than to the law's value from `k̂`, which at that point had
-three untrusted samples (the review's finding, design §15); this is the plan
-author's reading, for the reviewer to confirm.
+- **Cost doubles: within `ℓ + 2 + c` samples**, 6 with `ℓ = ⌈D̂/Δt⌉ + 1 = 2`
+  and `c = 2`. The permitted crossing falls inside `ℓ`: a mixed sample caps once
+  about 7% of its CPU is at the new cost (`0.225·(1 + f) ≥ L − slack/Δt` gives
+  `f ≥ 0.07`). The 2 is §3.5's change test, a held-out sample and then a
+  restart. Mechanisms asserted: a capped sample within the first `ℓ`, then a
+  held-out `k̂` sample, then a `k̂` restart.
+- **Limit halves: within `ℓ + 1 + c` samples**, 4 with `ℓ = 1` and `c = 2`. `ℓ`
+  is the change's own sample (a restart, which can't raise); the 1 is the first
+  sample wholly at the new limit, which caps (a worst-case term, not a double
+  count). There is no unresolvable-rule step: it has no path in the code (an
+  active sample folds into `k̂` before the law reads it, and `2·SE` needs
+  `n ≥ 3`). Mechanisms asserted: a restart in the change's sample, and a capped
+  sample within `ℓ + 1`.
+- **Limit doubles keeps the original condition**, within 10% of the new target
+  in 3 samples: the reviewer withdrew its blind loosening of it.
+- §4.4's sums double-count the crossing (cost doubles) and add a step with no
+  mechanism (limit halves).
+- **Disclosure, after results:** these counts fail the cost-doubling case at
+  seeds 2, 3 and 15 and the limit-halving case at seeds 8, 9 and 12, each from
+  a missing mechanism or a late entry caused by the review's findings 1 and 2
+  not by the count.
+
+**Start from one slot: within the band by sample 5**, then the 5%-outside rule.
+That is `⌈ln S*/ln(1 + Δt/D̂)⌉ = 2`, plus 1 for a permitted capped crossing at
+`⌊S⌋ + 1`, plus `c = 2`. It doesn't wait for the review's finding 6,
+because entering the band only needs `S ≥ θ⌊S*⌋`. This
+replaces "20 samples", and it is in the reviewer's set, derived blind as 5.
+**Disclosure:** the band was entered by sample 3; 1 of 20 seeds left the band
+between samples 5 and 30, not investigated.
+
+**The mix shift, seen before: at most one crossing, and it must be downward**,
+from above `S*(1 + 3r̄)` to below `θ⌊S*⌋`, with `S*` the engine's
+fixed-capacity value for the expensive queue alone (4.73). After it, the
+attributed monotone condition applies until the band. "Out of the cap within 6
+samples" is unchanged.
+
+**The dip: within `1 + ⌈τ/Δt⌉ + R + 1` samples of the dip's end**, where
+`R = ⌈ln((ρU_pre − B̂)/(ρL_eff − B̂))/ln(1 + Δt/D̂)⌉`, from `costmodel`'s own
+values at the release, so that a mis-sized cut can't grow its own allowance. The
+level: **`U ≥ ρ·pre·(1 − 3r̄)`**. The count is an upper bound, since the clear
+window may start before the dip ends. The `3r̄` replaces the blind `2r̄`, for
+consistency with `z = 3` and 20 seeds: at `2r̄` about 37% of 20-seed runs fail on
+correlated plateaus. **Disclosure:** it rescues nothing; the dip passes even the
+original `0.9·pre` in 20 of 20 seeds.
+
+**The node case: stall over the threshold in force in at most 10% of samples at
+a steady share, and the mean CPU at a steady share at least
+`ρ(1 − 3r̄)·share`** (0.765 of the share). No upper bound is needed. The `3r̄`
+replaces `2r̄`; **disclosure:** the observed CPU was 0.93–0.97 of the share, so it
+passes either way. The stall condition fails in 20 of 20 seeds, which is the
+review's finding 3, a design issue.
+
+**The node case's onset step:** the slots **in the sample that learns the
+limit** (the cut happens there, design §5.2) are within 10% of `S*_node`, where
+the engine's fixed-capacity curve under the same node model and share, with no
+model (`Config.Fixed`), crosses `ρL_eff`, interpolated between whole capacities,
+and `L_eff` is the run's learned value. The quota curve is no substitute. The
+test as written reads the next sample and uses `k̂` from three untrusted
+samples, and both are wrong.
 
 **Unchanged:** the conditions §4.4 lists as unchanged, and the seeds: 20, all of
 which must pass.
