@@ -741,7 +741,10 @@ func NewReconciler(m manager.Manager, of resource.ManagedKind, o ...ReconcilerOp
 
 // Reconcile a managed resource with an external resource.
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (result reconcile.Result, err error) { //nolint:gocyclo // See note below.
-	log := r.log.WithValues("request", req)
+	// Bound to the incoming ctx, so every record carries the span in it (when there is one) to a
+	// handler that correlates logs with traces. It is the incoming ctx rather than the timeout one
+	// below, so a record logged after the deadline still carries a live context to the exporter.
+	log := logging.WithContext(r.log.WithValues("request", req), ctx)
 	log.Debug("Reconciling")
 
 	ctx, cancel := context.WithTimeout(ctx, r.timeout+reconcileGracePeriod)

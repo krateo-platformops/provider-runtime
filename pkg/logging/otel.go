@@ -105,9 +105,15 @@ func ServiceNameAttr(serviceName string) []slog.Attr {
 
 // NewOTelHandler returns the recommended slog.Handler for a service: it tees each record to (a) the
 // OTel-model JSON stream on w (stderr by default, for log scrapers) and (b) the OTel LoggerProvider
-// via the otelslog bridge, so records are exported over OTLP once SetupOTLPLogs has installed an
-// exporter. With no LoggerProvider installed the bridge is a no-op and only the JSON stream is
-// written, so this is always safe to use.
+// via the otelslog bridge, so records are exported over OTLP once the binary's main has installed
+// an OTLP LoggerProvider with go.opentelemetry.io/otel/log/global.SetLoggerProvider. This package
+// installs none (see the note at the end of this file). With no LoggerProvider installed the bridge
+// is a no-op and only the JSON stream is written, so this is always safe to use.
+//
+// Both sides take the trace and span ids from the record's context: the JSON stream stamps
+// trace_id/span_id, and the bridge hands the context to the LoggerProvider, whose SDK sets the OTLP
+// record's trace context from it. So log through a Logger bound with WithContext (NewSlogLogger
+// over this handler) for the records to correlate with the trace.
 func NewOTelHandler(level slog.Leveler, w io.Writer, serviceName string) slog.Handler {
 	jsonH := NewOTelJSONHandler(level, w, ServiceNameAttr(serviceName)...)
 	bridge := otelslog.NewHandler(serviceName, otelslog.WithLoggerProvider(logglobal.GetLoggerProvider()))

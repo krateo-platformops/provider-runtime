@@ -165,25 +165,25 @@ func (e *external) Observe(_ context.Context, mg resource.Managed) (reconciler.E
 	return reconciler.ExternalObservation{ResourceExists: true, ResourceUpToDate: true}, nil
 }
 
-func (e *external) Create(_ context.Context, mg resource.Managed) error {
+func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	g := mg.(*Greeting)
 	meta.SetExternalName(g, g.GetName())
 	e.store[g.GetName()] = g.Spec.Message
-	e.log.Info("created external resource", "externalName", g.GetName())
+	logging.WithContext(e.log, ctx).Info("created external resource", "externalName", g.GetName())
 	return nil
 }
 
-func (e *external) Update(_ context.Context, mg resource.Managed) error {
+func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	g := mg.(*Greeting)
 	e.store[meta.GetExternalName(g)] = g.Spec.Message
-	e.log.Info("updated external resource", "externalName", meta.GetExternalName(g))
+	logging.WithContext(e.log, ctx).Info("updated external resource", "externalName", meta.GetExternalName(g))
 	return nil
 }
 
-func (e *external) Delete(_ context.Context, mg resource.Managed) error {
+func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	g := mg.(*Greeting)
 	delete(e.store, meta.GetExternalName(g))
-	e.log.Info("deleted external resource", "externalName", meta.GetExternalName(g))
+	logging.WithContext(e.log, ctx).Info("deleted external resource", "externalName", meta.GetExternalName(g))
 	return nil
 }
 
