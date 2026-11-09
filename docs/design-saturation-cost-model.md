@@ -2331,8 +2331,11 @@ after a cut bring back the sawtooth of seed 6 (the review of `a1b144f`).
 steps. Under error diffusion `N̄` alternates between `⌊S⌋` and `⌊S⌋ + 1`, so its
 step spread is about a slot and a real cut of 1.5 slots stayed under 3σ (12 of
 20 cost-doubling seeds). The detector now runs on the **published real-valued
-`S`**, with the threshold `max(3σ of S's own steps, 1 slot)`: a move of a slot or
-more is always a move.
+`S`**, with the threshold `max(3σ of S's own steps, 1 slot)`: a move must exceed
+both, so the real-valued `S`'s own noise can't trigger it, and at steady state,
+where `S`'s steps are small, the threshold is one slot. (The first version of
+this sentence said a move of a slot or more is always a move, which is the
+minimum of the two, not the maximum; corrected with the code.)
 
 **4. Medium: the first term's floor after a cost increase.** After the CPU per
 reconcile rises, the reconciles in flight have spent CPU at the new cost and not
