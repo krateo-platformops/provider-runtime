@@ -396,9 +396,13 @@ It also breaks foreground-deletion cycles (§11.8).
   The core builds it itself, as a JSON merge patch that carries
   `metadata.resourceVersion`, sent through the metadata client. That is the
   patch controller-runtime's `client.MergeFromWithOptimisticLock` makes,
-  without depending on controller-runtime (§7.1). The returned
-  resourceVersion and annotations are copied onto the caller's object, which
-  is otherwise unchanged, because the patch touches only annotations. A conflict requeues, for any
+  without depending on controller-runtime (§7.1). The whole returned
+  `ObjectMeta` is copied onto the caller's object (L2 of the review of
+  revision 16). The patch touches only annotations, so the rest of the object
+  is unchanged, unless a mutating webhook or defaulting changed it. So if
+  the returned generation or labels differ from what the object had before
+  the patch, the caller's object may be stale beyond its metadata too, and it
+  is re-read before the pass makes its next write. A conflict requeues, for any
   holder: it is a conflict on the holder itself, and the next pass is
   immediate. The in-memory object takes the patched resourceVersion. **In
   the same pass, synchronously**, A1 drops the `observed` entries for refs it
@@ -445,7 +449,7 @@ different 403s exist (core-provider found this; verified in
 | (b) **policy denial** | 403, reason Forbidden | a policy's text (below), and not (c). Our policy sets `reason: Forbidden` on its validation (§10.6.1), so its denials are 403 | an admission policy refused the write |
 | (c) **policy config error** | 422, reason Invalid | a policy's text containing `failed to configure binding`, and **no** `metadata.finalizers` cause | a policy binding couldn't be configured, for example `cu-policy-params` missing (§10.6.1) |
 | (d) **RBAC** | 403, reason Forbidden | the authorizer's own message, `User "<name>" cannot <verb> resource "<resource>" in API group "<group>"`, followed by ` in the namespace "<ns>"` or ` at the cluster scope` (`pkg/endpoints/handlers/responsewriters/errors.go:60-80`). The exact text is pinned by an envtest | the caller lacks the permission |
-| (e) **other admission denial** | 403, reason Forbidden | neither (b) nor (d): a webhook denial, or NamespaceLifecycle refusing a create in a terminating namespace (`pkg/admission/plugin/namespace/lifecycle/admission.go:179`) | an admission plugin refused the write |
+| (e) **other admission denial** | 403, reason Forbidden | neither (b) nor (d): a webhook denial, or NamespaceLifecycle refusing a create in a terminating namespace (`pkg/admission/plugin/namespace/lifecycle/admission.go:179`). Counted in `credentialuse_admission_denied_total`, so an RBAC message the pattern no longer matches shows up | an admission plugin refused the write |
 
 **A policy's text is not a message prefix** (corrected in revision 16). The
 dispatcher wraps a denial in `admission.NewForbidden`, so the status message
@@ -462,6 +466,17 @@ revision defined it as "a 403 without a policy's text", which also caught
 webhook denials and NamespaceLifecycle's 403. PerNamePoll would have retried
 those as RBAC propagation.
 
+**The RBAC message across Kubernetes versions** (L3 of the review of
+revision 16). The format is identical in `k8s.io/apiserver` v0.31.0, v0.33.0,
+v0.35.0, v0.36.5 and v0.37.2, read from the module cache
+(`pkg/endpoints/handlers/responsewriters/errors.go`, `forbiddenMessage`); in
+v0.31.0 `Forbidden` builds the message inline, with the same `: <reason>`
+suffix. CI pins the exact text on envtest 1.37.0, and the same test runs on
+1.34, 1.35 and 1.36 locally. Neither provider-runtime nor installer states
+the oldest Kubernetes version Krateo supports (installer's chart has no
+`kubeVersion` constraint), so that is open for the user (§18). Once it is
+named, the envtest pins the text on it too.
+
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an
 established one, at once. The brief retry for RBAC propagation in PerNamePoll
@@ -476,8 +491,18 @@ which drops json-patch's text. What remains is the generic message
 "the server rejected our request due to an error in our request", and no
 causes. A `remove` at an index that has moved looks the same. Either means
 **the state changed**: the releaser goes back to R1, at most 5 times per
-batch, and then requeues the batch with backoff. A 422 with a policy's text
+batch, and then requeues the batch with backoff. Each retry rebuilds the
+patch from R1's new read. A 422 with a policy's text
 is (c) there too, and anything else is an error for the batch.
+
+**A "state changed" that didn't change is an error** (L1 of the review of
+revision 16). If R1's fresh GET returns the very resourceVersion the failed
+patch was built from, nothing changed, so the 422 isn't contention: the
+patch didn't match the state it was built from, which is a defect. The
+releaser doesn't retry it. It logs it, records a Warning event on P
+(`CredentialReleaseRejected`), counts `credentialuse_release_rejected_total`,
+and requeues the batch with backoff. The same holds for Disown's strips and
+the janitor's patch.
 
 **The releaser** works on one holder kind K and one namespace N at a time,
 for the set of protected objects pending there (R7). For each pending P:
@@ -530,6 +555,11 @@ for the set of protected objects pending there (R7). For each pending P:
     also removes K's marker label;
   - when F is the last `credential-use.` finalizer of any kind, it also
     removes the held label.
+
+  **Every value the patch removes is tested first** (L1 of the review of
+  revision 16): the epoch, the finalizer at *i*, and each label it removes,
+  with its value as R1 read it. A label that is already absent isn't
+  removed, so that its remove can't fail.
 
   If a test fails, the API server rejects the whole patch, with the 422
   described under "JSON patches are classified apart" above. The exact
@@ -1065,6 +1095,14 @@ exported for diagnostics and tests.
   guarded merge keeps every guarantee: written once, no older count over a
   newer one, and `disown-settled` only over a `held-count` of `"0"`. It also
   conflicts with unrelated CRD writes, which cost only a retry.
+  **The retries are bounded** (L4 of the review of revision 16): at most 5
+  GET-and-patch attempts per write. After that the write waits for the
+  loop's next tick (Disown's next pass, or the next start for the config and
+  the pointer). A count write that fails 3 ticks in a row is logged as
+  starved, with the CRD's name and the last conflict, and counted in
+  `credentialuse_crd_write_starved_total`. A starved `held-count` is never
+  read as written: `disown-settled` is only ever written over a `"0"` that
+  a GET read.
 
 ### 7.4 Disown
 
@@ -1213,6 +1251,23 @@ refs are needed before Connect, when there is no client yet.
   - **the write loops**: the release loop, the prober, Disown and the label
     janitor. They need leader election.
 
+  **No release batch is lost while the write loops wait for election** (M1
+  of the review of revision 16). The informers start before election, under
+  warmup and on standby replicas, so they see holder deletions and
+  `deletionTimestamp`s before any write loop runs. Two things keep them:
+  - **the (K, N) batch queue is created by `NewShared`**, before any
+    informer starts. It buffers and deduplicates from the first event, and
+    the grace's `AddAfter` timers go into it too. The release loop drains it
+    once elected;
+  - **the write loop's `Start` rescans**: it enqueues the batch of every
+    (K, N) finalizer on every object in the protected stores, and in PerName
+    and PerNamePoll modes of every line of the index (§10.6.5). That covers
+    whatever a standby's informer saw before this process's queue existed,
+    and a leader that died between `Forget` and R3. Say the leader removes
+    H's owner finalizer and record and dies before R3. The standby's holder
+    informer delivers H's deletion. Once elected, its rescan enqueues P's
+    batch, R2 finds no record naming P, and R3 releases it.
+
   One leader-elected runnable would break controller-runtime's
   `EnableWarmup` (`pkg/config/controller.go:70-78`): sources then start
   before election, and the source's `WaitForSync` would time out on
@@ -1351,7 +1406,9 @@ per key. In order:
      backoff is consumed and no worker sleeps. This is the one exception to
      "return the error so backoff applies". After a failed live consent read
      that kept its hold (§11.3), the pass proceeds to Connect, and requeues
-     at the smaller of `a.RetryAfter` and its poll interval.
+     at the smaller of `a.RetryAfter` and its poll interval. `a.RetryAfter`
+     backs off per (holder, ref), from 1s doubling to the poll interval
+     (§11.3).
    - `WithResolved(externalCtx, a)` puts the resolved chain on Connect's
      context (§9.2).
    - The gate's `pristine` copy (`:870`) is taken after Acquire, so that a
@@ -1640,7 +1697,10 @@ after the A2 too.
 **On startup**, the protected informers' initial list enqueues a release
 batch for every (K, N) of every held object. In PerName mode, the index
 does instead (§10.6). So every hold is checked again after a restart, and a
-holder delete missed while down can't strand a finalizer.
+holder delete missed while down can't strand a finalizer. **And again when
+the write loops start**, after election, from the protected stores and the
+index (§7.5, M1 of the review of revision 16), because the informers may
+have started long before, on a standby.
 
 ### 10.3 Seeing new objects: the missing-ref prober (R6)
 
@@ -2431,7 +2491,13 @@ not only before A2:
     or of a source still syncing after a restart;
   - **if the live read fails, it keeps the hold and requeues**: the ref
     stays held, so the pass proceeds to Connect, and `Acquired.RetryAfter`
-    asks for the requeue (§8 step 5, IP2). There are two exceptions:
+    asks for the requeue (§8 step 5, IP2). **The requeue backs off** (M2 of
+    the review of revision 16), per (holder, ref), in memory: 1s, then 2s,
+    4s and so on, doubling up to the holder's poll interval (1 minute by
+    default in provider-runtime), and back to 1s after a live read that
+    succeeds. So a persistent failure, such as an overloaded API server,
+    costs each cross-namespace holder at most one extra reconcile per poll
+    interval once the backoff has grown, not one per second. There are two exceptions:
     - **NotFound means the target is gone, not a failed read** (L1). If the
       object, or its Namespace, is NotFound, the ref is treated as
       **Missing** (§6.2). There is nothing left to hold, and nothing is
@@ -2783,8 +2849,12 @@ separate, and is written on the CRD (§7.4).
 `credentialuse_degraded_total{reason}` (every fail-open of §8, which earlier
 revisions counted without naming), `credentialuse_refs_not_held_total`,
 `credentialuse_consent_withdrawn_total`, `credentialuse_refs_read_denied_total`,
-`credentialuse_index_tampered_total` and
-`credentialuse_unrecorded_reads_total` (§11.9). The core defines them as a
+`credentialuse_index_tampered_total`,
+`credentialuse_unrecorded_reads_total` (§11.9),
+`credentialuse_admission_denied_total` (class (e) of §6.2),
+`credentialuse_release_rejected_total` (a release patch that failed against
+an unchanged object, §6.2) and `credentialuse_crd_write_starved_total`
+(§7.3). The core defines them as a
 `MetricsRecorder` interface, and `pkg/telemetry` implements it with
 OpenTelemetry.
 
@@ -2969,7 +3039,8 @@ on krateo-057:
   re-added finalizer resets the count; a Kind at zero replicas wakes for the
   switch; `DisownPrefix` with `DryRun`.
 - A holder informer relist resets `recordSince`, and the next passes write
-  (L2).
+  (L2). The relist is forced with a 410 both on the watch-list path and on
+  the List path it falls back to.
 - `IgnoreCredentialUseRecord` passes a record change it didn't write (L8).
 - **The index stays a superset** (§10.6.3). The reviewer's interleaving runs
   as a test, with interceptors holding each step: R2 sees no users, H2
@@ -3081,6 +3152,18 @@ on krateo-057:
   requeue loop. Five 403s over 2 minutes in PerNamePoll drop the ref, with
   the event, the metric and a `ReadDenied` entry. Start fails without
   list or watch on namespaces.
+- **Failover** (M1 of the review of revision 16): two processes, one
+  leader. The leader removes a holder's owner finalizer and record and
+  stops before R3. The standby's informers see the holder go before it is
+  elected; once elected, its rescan releases P. The same with a grace timer
+  that was pending when the leader stopped.
+- A persistent consent-read failure under API-server overload (an
+  interceptor fails every consent GET): each cross-namespace holder keeps
+  its hold, and its requeues back off from 1s to the poll interval, then
+  return to 1s after one read succeeds (M2 of the review of revision 16).
+- An R3 that fails against an unchanged resourceVersion is reported, with
+  the event and the metric, and isn't retried as contention (L1 of the
+  review of revision 16).
 - R0 stops for a deleting P with a deleting user in the cache (L1). In
   PerNamePoll, an A2 enqueues its own release batch (L2). Consent is the
   union of the two lists, and an object's list can't narrow its
@@ -3713,10 +3796,27 @@ The other items, which stay within the design:
 
 A2, A5, A9, A12 and A16 are IP1 to IP5 above.
 
+**The independent review of revision 16** found nothing High: each
+amendment keeps the merged design's safety proofs. Its findings:
+
+| Item | Resolved in |
+|---|---|
+| M1 Release batches lost before the write loops run: the informers start before election, so the startup recheck, holder deletes seen on standby and grace timers could be lost, stranding a finalizer after a failover between `Forget` and R3. The batch queue is created in `NewShared` and buffers from informer start, and the write loops' `Start` rescans the protected stores and the index; a failover test | §7.5, §10.2, §14 |
+| M2 The consent-read `RetryAfter` had no backoff: exponential per (holder, ref), from 1s doubling to the poll interval, reset on success; an overload test | §11.3, §8 step 5, §14 |
+| L1 An R3 422 against an unchanged resourceVersion is an error with an event and a metric, not contention; each retry rebuilds the patch, which tests every value it removes | §6.2, §12, §14 |
+| L2 A1 copies the whole returned `ObjectMeta`, and re-reads the object before the next write when the generation or labels changed | §6.2 A1 |
+| L3 Class (e) is counted; the RBAC message format is the same from apiserver v0.31.0 to v0.37.2; the oldest supported Kubernetes version is open | §6.2, §12, §18 |
+| L4 Guarded CRD writes are bounded to 5 attempts, and a starved count write is logged and counted | §7.3, §12 |
+
 ## 18. Open questions for the user
 
 **Decided since the last revision**: NQ1 (a 60s grace, §5), NQ2 (no cap,
 §5.2), NQ3 (the builder line, §7.5) and NQ4 (provider-runtime#46). In
 revision 16, IP1 to IP5 (§17).
+
+**Open:** the oldest Kubernetes version Krateo supports. Neither
+provider-runtime nor installer states one. The RBAC message's format is the
+same from Kubernetes 1.31 to 1.37 (§6.2), and once a minimum is named, the
+envtest that pins the message runs on it too.
 
 Nothing is open. No question needs the user.

@@ -57,7 +57,7 @@ explains the estimates.
 
 The design's ambiguities, and what I'd choose for each, are in §5. Five of them
 change an API or a rule the design states, so they need the user (§8). The
-premises are in §6. Eleven are verified in the module cache already, with their
+premises are in §6. Twelve are verified in the module cache already, with their
 consequences, and the rest are pinned by tests in the PR that needs them.
 
 ## 2. Rules for every PR
@@ -165,7 +165,8 @@ patches, R3's patch), §10.1 (labels).
     and no `metadata.finalizers` cause;
   - (d) an A2 by an impersonated ServiceAccount without `patch`: 403, with
     the authorizer's exact message pinned, for a namespaced and a
-    cluster-scoped object;
+    cluster-scoped object. CI runs it on 1.37.0, and it is run locally on
+    1.34, 1.35 and 1.36 (L3 of #52's review);
   - (e) NamespaceLifecycle's 403 on a create in a terminating namespace;
   - the classifier gives each real error its class, and Deleting comes only
     from (a), never from a 403;
@@ -185,7 +186,8 @@ patches, R3's patch), §10.1 (labels).
 
 **Reviewer attack.** Can any error other than class (a) be read as Deleting?
 Can R3's patch remove a finalizer that an A2 re-added, for example after
-another finalizer before it was removed and shifted the index? Can the
+another finalizer before it was removed and shifted the index? Does R3 test
+every value it removes, labels included (L1 of #52's review)? Can the
 strategic merge or the guarded merge drop another writer's finalizer? Is the
 escaping right, and is the marker removed only with K's last finalizer?
 
@@ -262,9 +264,11 @@ issued (clock source, leader change, away and back); R3's tests (the epoch,
 the index, the full array); the §6.1 exclusion; the order of the re-reads
 and the grace; whether anything widens the L3 window; whether
 `recordSince` and `observed` can be made earlier than the record's arrival.
-Also the model itself: does every API call yield to the scheduler, does any
-production path bypass `server` or `views`, and do the enumerator's bounds
-cover every fault.
+Also A1's copy of the returned `ObjectMeta`: a mutating webhook or
+defaulting that changes the generation or labels must force a re-read before
+the next write (L2 of #52's review). And the model itself: does every API
+call yield to the scheduler, does any production path bypass `server` or
+`views`, and do the enumerator's bounds cover every fault.
 
 **Depends on:** PR 1. **Size:** about 1,300 lines of production code and
 2,900 of tests, model included.
@@ -277,8 +281,12 @@ cover every fault.
   `Track` is idempotent per GroupKind, can be called after start (it starts
   and syncs informers before returning), and validates everything in §7.3
   except the PerName items. It publishes `credential-use.krateo.io/config` on
-  the holder CRD once (A4), and a disagreeing process refuses to start. It
-  validates `DisownPasses × DisownInterval ≥ 2 × TimeoutBound` (A6);
+  the holder CRD once (A4), with bounded retries (L4 of #52's review), and a
+  disagreeing process refuses to start. It validates
+  `DisownPasses × DisownInterval ≥ 2 × TimeoutBound` (A6). `NewShared`
+  creates the (K, N) batch queue before any informer starts, so it buffers
+  and deduplicates from the first event, grace timers included (M1 of #52's
+  review);
 - `informers.go`: the holder metadata informer with its transform and its
   index of records; the label-scoped, metadata-only protected informers with
   their transform; the Namespace metadata informer and its handler (the
@@ -329,7 +337,18 @@ unreleased and nothing imports it, so neither is visible to anyone.
   again; a label loss is delivered as a deletion through the real informer;
 - the prober: a GET with few names, one LIST with many, per-ref backoff;
 - **a forced relist of the holder informer** (the wrapped watch returns a 410)
-  resets `recordSince`, and the next passes write (L2);
+  resets `recordSince`, and the next passes write (L2). It runs on the
+  watch-list path, and again with watch-list refused so that the reflector
+  falls back to List (#52's review);
+- the write loops' `Start` rescans the protected stores and enqueues every
+  (K, N) batch; events seen before `Run` are buffered, deduplicated, and
+  drained once it runs (M1 of #52's review);
+- an R3 that fails against an unchanged resourceVersion is reported with
+  `CredentialReleaseRejected` and `credentialuse_release_rejected_total`, and
+  isn't retried as contention; a retry rebuilds the patch from R1's new read
+  (L1 of #52's review);
+- class (e) is counted in `credentialuse_admission_denied_total` (L3 of #52's
+  review);
 - the published settings: a second process with a different `deletionGrace`
   refuses to start; two `RefsFunc` versions stay safe, with the churn
   measured; both owner finalizer names accepted;
@@ -355,7 +374,9 @@ that lose the label; the prober's cap and rotation; two processes for one
 GroupKind with different version selectors (R2's list must have no
 selector); relist detection with watch-list; handlers that never block the
 informer; no lock across a call; goroutine and workqueue shutdown on context
-cancel; `Track` after start racing `Run`.
+cancel; `Track` after start racing `Run`; whether any event between informer
+start and the write loops' `Start` can be lost, and whether the rescan
+covers what the queue didn't (M1 of #52's review).
 
 **Depends on:** PR 2. **Size:** about 2,300 lines of production code and
 2,500 of tests, driver included.
@@ -438,6 +459,10 @@ their PerNamePoll and provisioner parts, which are in PR 9):
   consent during a teardown, with the Namespace informer not yet synced; a
   skipping pass just after a new hold; a deleting holder always reading live;
 - NotFound on the live confirmation gives Missing with no requeue loop;
+- **a persistent consent-read failure under API-server overload** (an
+  interceptor fails every consent GET): each holder keeps its hold, and its
+  `RetryAfter` backs off from 1s, doubling to the poll interval, then
+  returns to 1s after one read succeeds (M2 of #52's review);
 - `Resolved` with an unheld hop: up to 10s on the old chain, never an unheld
   same-namespace Secret; one read per 10s for a shared hop;
 - `unheld` written in the same patch as the record and never alone, capped at
@@ -449,7 +474,9 @@ their PerNamePoll and provisioner parts, which are in PR 9):
 unindexed finalizer? Can a stale or unsynced cache drop a hold? Can a tenant
 get a finalizer onto an object that hasn't consented by any path (a `Next`
 that returns a cross-namespace ref, `Guaranteed`, a hop's namespace)? Does the
-10s shared read ever feed a release decision?
+10s shared read ever feed a release decision? Under a persistent consent-read
+failure, does the backoff really bound the load, per (holder, ref), and does
+it reset only on a successful read (M2 of #52's review)?
 
 **Depends on:** PR 4. **Size:** about 900 lines of production code and 1,200
 of tests.
@@ -561,7 +588,14 @@ tests.
 - `AssertCredentialRefsCover` fails on an unnamed read, and on a path that
   resolves to nothing;
 - a stress run with the real reconciler (smaller than PR 3's), and a drain
-  that stops the manager in the middle of a pass.
+  that stops the manager in the middle of a pass;
+- **failover** (M1 of #52's review): two managers under leader election. The
+  leader removes a holder's owner finalizer and record, and stops before R3.
+  The standby's informers see the holder go while it is still standby, and
+  once elected it releases P. Again with a grace timer pending at the
+  failover;
+- after an A1 that a mutating webhook changed (labels or generation), the
+  pass re-reads before its next write (L2 of #52's review).
 
 **Reviewer attack** (§14): every path to `AddFinalizer`, and whether one can
 be reached without an A2 or a live miss after the pass's last A2 (§6.7);
@@ -570,7 +604,9 @@ on deletion passes, and whether it ever turns a safe state into a wedge; the
 source start check, including whether any controller-runtime path starts
 workers before a source (`EnableWarmup`, A12); the per-manager registry
 under concurrent `NewReconciler` calls; the runnables' leader-election
-order.
+order; a failover between `Forget` and R3, or with a grace timer pending,
+where a standby's informers saw the holder go before its write loops ran
+(M1 of #52's review); A1 against mutating webhooks and defaulting (L2).
 
 **Depends on:** PR 6. **Size:** about 900 lines of production code and 1,600
 of tests.
@@ -588,7 +624,8 @@ of tests.
   disagreement;
 - the `IndexNamespace` checks (it exists, and holds no holders) at `Track`
   and at acquire time; creating the index when absent;
-- the startup recheck from the index;
+- the startup recheck from the index, and the write loops' rescan of it at
+  `Start` (M1 of #52's review);
 - tamper detection, skipping lines whose R3 was seen;
 - the rebuild by merging, after a deletion;
 - field-selected per-name watches in place of the label-scoped informer;
@@ -1030,6 +1067,7 @@ it in the docs.
 | V9 | json-patch v4's `test` with `null` passes on a missing key only when the parent exists | `gopkg.in/evanphx/json-patch.v4@v4.13.0/patch.go:677-693` | A4: not relied on |
 | V10 | `GetConfig` disables client-side rate limiting when QPS is 0 | `controller-runtime@v0.25.2/pkg/client/config/config.go:101-104` | §6.6's backfill figures stand |
 | V11 | kube-controller-manager's clients are `NewClient("root-ca-cert-publisher")` and `NewClient("service-account-controller")` | `kubernetes@v1.36.2/cmd/kube-controller-manager/app/certificates.go:269`, `core.go:618` | §10.6.1's identities stand; PR 8 impersonates them |
+| V12 | The authorizer's message format is the same in `k8s.io/apiserver` v0.31.0, v0.33.0, v0.35.0, v0.36.5 and v0.37.2 | `pkg/endpoints/handlers/responsewriters/errors.go`, `forbiddenMessage`, in each version in the module cache | class (d)'s pattern holds from Kubernetes 1.31 to 1.37. The oldest version Krateo supports isn't stated anywhere found (installer's chart has no `kubeVersion`), so it is open for the user |
 
 ### To verify, in the PR that needs them
 
