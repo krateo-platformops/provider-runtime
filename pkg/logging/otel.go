@@ -165,6 +165,13 @@ func (t *teeHandler) WithGroup(name string) slog.Handler {
 
 // The OTLP LoggerProvider (SDK + exporter) is installed by the BINARY next to its trace/metric
 // setup: build the LoggerProvider with go.opentelemetry.io/otel/sdk/log + an otlplog exporter and
-// register it with go.opentelemetry.io/otel/log/global.SetLoggerProvider, BEFORE constructing the
-// log handler via NewOTelHandler (so the otelslog bridge captures the installed provider). This
-// package intentionally does not import the log SDK, keeping non-exporting consumers SDK-free.
+// register it with go.opentelemetry.io/otel/log/global.SetLoggerProvider. This package
+// intentionally does not import the log SDK, keeping non-exporting consumers SDK-free.
+//
+// The order of the first install and NewOTelHandler does not matter. Before any SetLoggerProvider,
+// the global provider is a delegating default, and the bridge's logger from it forwards nothing.
+// The first SetLoggerProvider points that default, and every logger it handed out, at the new
+// provider in place, so a handler built earlier starts exporting from then on. Records logged
+// before the install are not exported. A later SetLoggerProvider only replaces the global: a
+// handler built before it keeps the provider it already reaches, so build the handler after the
+// final install if the binary ever replaces one.
