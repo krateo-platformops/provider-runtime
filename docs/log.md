@@ -12,6 +12,24 @@ timestamp: 2026-11-09T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-09 — unreleased: the critical annotation write keeps other writers' annotations
+- **Behaviour change.** `RetryingCriticalAnnotationUpdater`, the default
+  `CriticalAnnotationUpdater`, now writes back only the runtime's own keys:
+  `krateo.io/external-name`, `krateo.io/external-create-pending`,
+  `-succeeded` and `-failed`, and the new `krateo.io/traceparent-continued`.
+- **What it did before.** It captured every annotation of the object in
+  memory, re-read the object, and wrote the captured map back. So an
+  annotation another writer set after the reconcile read the object was
+  reverted, such as a fresh `krateo.io/traceparent` stamped while `Create`
+  ran. It runs after `Create`, and when an unresolved create handshake adopts
+  the external resource.
+- **Who it affects.** A provider that sets some other annotation on its
+  managed resource in memory, and relies on this write to persist it. No
+  consumer in krateo-platformops does: the scan is in
+  [design-tracing](./design-tracing.md) §2.
+- **New constant:** `meta.AnnotationKeyTraceparentContinued`. Nothing writes
+  it yet; the reconciler's tracing will (design-tracing §6.2).
+
 ## 2026-11-09 — v1.13.0: logs can correlate with traces
 - **Additive; nothing breaks.** `logging.ContextLogger` (`WithContext(ctx)
   Logger`) is an optional interface, so a `Logger` written without it still

@@ -60,6 +60,13 @@ const (
 	// of a resource that determines what should happen to the underlying external
 	// resource when a managed resource is deleted
 	AnnotationKeyDeletionPolicy = "krateo.io/deletion-policy"
+
+	// AnnotationKeyTraceparentContinued is the key in the annotations map of a
+	// managed resource under which provider-runtime records the krateo.io/traceparent
+	// value it has continued, so a new value is the parent of one reconcile and
+	// linked from the rest (docs/design-tracing.md §6.2). Only provider-runtime
+	// writes it; never copy it onto another object.
+	AnnotationKeyTraceparentContinued = "krateo.io/traceparent-continued"
 )
 
 const (
