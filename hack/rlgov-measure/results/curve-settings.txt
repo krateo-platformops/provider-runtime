@@ -102,6 +102,27 @@ VALIDITY, checked per run and reported, never used to drop runs selectively:
     the block (results/curve-node.txt holds the first run's);
   - the PSI stall distribution recorded: avg10 every second, and the per-second share from "some total".
   A run that fails a check is re-run at the same n and position, and both the failure and the re-run are reported.
+
+AMENDMENT, 2026-11-10, after stage 1's first two runs (the reviewer's decision, relayed by the coordinator):
+  - The burn counter. Image curve1 (21e18be, sha256:9aa39cfb5b12cd557701e349378a9737a14f5ef837662f40a22d74ac9d6f60d9)
+    counted a burn's request when it started and its CPU when it ended, so the window's difference compared requests
+    started in the window with burns finished in it, off by the unfinished requests at the two ends. That rejected
+    pc-n3-r1 at -1.72% (burnacct.py). The fix (d65cb57) counts the request when the burn ends, and STAT reads the
+    request total next to the CPU total. The diff is limited to that accounting: the burn, the hold, the jitter, the
+    seeds, the schedule and the run length are unchanged, so the plant's behaviour is unchanged.
+  - The new image: curve2, built from d65cb57, sha256:b3e067afcbea48704bda92a15b9a1607eb533b3f718af8eef652900172541780
+    (results/image-curve2.txt). Every run after the first two is made with it.
+  - Both existing runs count. pc-n4-r1 and pc-n3-r1 (curve1) are validated by the idle-moment method (method A,
+    burnidle.py): at a STAT line where requested minus measured is under 300 ms, the smallest jittered request, no
+    burn is unfinished, so between two such moments both totals cover the same burns and the check is exact. pc-n4-r1
+    has 248 such moments (207 in the measured window), pc-n3-r1 549 (453); both read -0.0025% over the whole run and
+    +0.0025% between the window's first and last moments, inside 1%. The method is undefined at high n, where a burn
+    is in flight nearly every second, so it applies only to curve1's runs. Every later run is checked over the
+    measured window as above (method B), exact with the fixed counter at every n. The report states each run's
+    method.
+  - The rejected attempt of pc-n3-r1 is not a separate run: it was rejected by the faulty check, so there is no -a2.
+    The block resumes at repetition 1, position 3 (n = 7) of the pre-registered order, and never overwrites a
+    committed log: a position whose committed log passes the check is skipped, with the run names kept.
   A run prun.sh discards (the driver slept, the cluster didn't answer) is re-run the same way. A failed setup stops
   the block.
 
