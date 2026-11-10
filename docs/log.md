@@ -4,7 +4,7 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
 # Log
@@ -12,23 +12,64 @@ timestamp: 2026-11-09T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## 2026-11-09 — unreleased: the critical annotation write keeps other writers' annotations
-- **Behaviour change.** `RetryingCriticalAnnotationUpdater`, the default
-  `CriticalAnnotationUpdater`, now writes back only the runtime's own keys:
-  `krateo.io/external-name`, `krateo.io/external-create-pending`,
-  `-succeeded` and `-failed`, and the new `krateo.io/traceparent-continued`.
-- **What it did before.** It captured every annotation of the object in
-  memory, re-read the object, and wrote the captured map back. So an
-  annotation another writer set after the reconcile read the object was
-  reverted, such as a fresh `krateo.io/traceparent` stamped while `Create`
-  ran. It runs after `Create`, and when an unresolved create handshake adopts
-  the external resource.
-- **Who it affects.** A provider that sets some other annotation on its
-  managed resource in memory, and relies on this write to persist it. No
-  consumer in krateo-platformops does: the scan is in
-  [design-tracing](./design-tracing.md) §2.
-- **New constant:** `meta.AnnotationKeyTraceparentContinued`. Nothing writes
-  it yet; the reconciler's tracing will (design-tracing §6.2).
+## 2026-11-10 — v1.14.0: trace every reconcile
+- **Design:** [design-tracing](./design-tracing.md) (#60), built in #64, #65
+  and #66, each reviewed independently.
+  - `telemetry.Setup` gains a TracerProvider, and the reconciler opens a
+    `reconcile` root span with `connect`, `observe`, `create`, `update` and
+    `delete` children.
+  - A new `krateo.io/traceparent` value is continued by the first pass that
+    acts on it, within a 10-minute window (`WithTraceContinueWindow`), and is
+    linked after that.
+  - The marker is the `krateo.io/traceparent-continued` annotation
+    (`meta.AnnotationKeyTraceparentContinued`), written with an optimistic
+    lock.
+- **What's in it:**
+  - `pkg/tracing`: `Decide`, `StartReconcile`, `Inject`, `InjectHeader` and
+    the event and step names.
+  - `telemetry.Setup`'s tracing (`Config.TracingEnabled`, `ConfigFromEnv`,
+    the shared resource, the protocol check following OTel's precedence).
+  - httpsignal's propagation of the active span.
+  - The reconciler's wiring:
+    - the root span and its children, the events and the status mapping;
+    - the memo, keyed by NamespacedName with the UID;
+    - the locked marker write before the first act, or when the window closes,
+      with a requeue before acting on a conflict;
+    - `WithTracerProvider` and `WithTraceContinueWindow`.
+- **Changes to existing behaviour:**
+  - **The critical write carries only the runtime's own keys** (#64).
+    `RetryingCriticalAnnotationUpdater`, the default
+    `CriticalAnnotationUpdater`, writes back only `krateo.io/external-name`,
+    the `krateo.io/external-create-*` markers and
+    `krateo.io/traceparent-continued`. Before, it captured every annotation,
+    re-read the object and wrote the captured map back, reverting a fresh
+    `krateo.io/traceparent`, and any other writer's annotations, set while
+    `Create` ran. It affects a provider that sets some other annotation on its
+    managed resource in memory and relies on this write to persist it. No
+    consumer in krateo-platformops does: the scan is in design-tracing §2.
+  - **`telemetry.Setup` sets the global propagator** (W3C TraceContext and
+    Baggage) on every call, tracing on or off. OTel's default is a no-op, so a
+    provider's own `otelhttp` starts honouring and forwarding W3C context and
+    baggage. core-provider and oasgen-provider already set the same
+    propagator themselves.
+  - **httpsignal sets `traceparent`** on outbound requests when tracing is
+    on. With tracing off, it sends nothing.
+  - **"Reconciling" is logged after the Get.** The per-reconcile Logger is
+    bound once the root span starts, which needs the object, so the
+    "Reconciling" debug record now follows the Get. A pass whose object is
+    gone (NotFound) logs no "Reconciling" record.
+  - **With tracing on, a concurrent write requeues before acting.** A write
+    to the object between the pass's Get and the locked marker patch makes the
+    update and delete paths requeue before they act, backing off from 1 s to
+    60 s. Before, the act ran and the status Update failed instead. An object
+    written more often than one Connect and Observe can see its act slip until
+    the 10-minute window closes. That's bounded, and it's what the create path
+    already does with its create-pending Update.
+- **New dependency:**
+  `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` v1.45.0.
+- **Adoption:** design-tracing §11. core-provider and oasgen-provider delete
+  their own `SetupTracing` when they bump; observability adds each provider's
+  `OTEL_SERVICE_NAME` to the tail sampler before its chart turns tracing on.
 
 ## 2026-11-09 — v1.13.0: logs can correlate with traces
 - **Additive; nothing breaks.** `logging.ContextLogger` (`WithContext(ctx)
@@ -76,56 +117,6 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 - **Not handled, by decision:** a downstream that slows without rate-limit
   signals raises concurrency up to the ceiling; provider-runtime#50 is the
   follow-up.
-
-## 2026-11-09 — unreleased, designed, being built: trace every reconcile
-- **Design:** [design-tracing](./design-tracing.md), in review on #60.
-  - `telemetry.Setup` gains a TracerProvider, and the reconciler opens a
-    `reconcile` root span with `connect`, `observe`, `create`, `update` and
-    `delete` children.
-  - A new `krateo.io/traceparent` value is continued by the first pass that
-    acts on it, within a 10-minute window, and is linked after that.
-  - The marker is the `krateo.io/traceparent-continued` annotation, written
-    with an optimistic lock.
-- **Built so far:**
-  - `pkg/tracing`: `Decide`, `StartReconcile`, `Inject`, `InjectHeader` and
-    the event and step names.
-  - `telemetry.Setup`'s tracing (`Config.TracingEnabled`, `ConfigFromEnv`,
-    the shared resource, the protocol check).
-  - httpsignal's propagation of the active span.
-  - The new dependency `otlptracehttp` v1.45.0.
-  - The reconciler's wiring:
-    - the root span and its children, the events and the status mapping;
-    - the memo, keyed by NamespacedName with the UID;
-    - the locked marker write before the first act, or when the window closes,
-      with a requeue before acting on a conflict;
-    - `WithTracerProvider` and `WithTraceContinueWindow`.
-- **Changes to existing behaviour, when it is built:**
-  - **The critical write carries only the runtime's own keys.**
-    `RetryingCriticalAnnotationUpdater` writes back only
-    `krateo.io/external-name`, the `krateo.io/external-create-*` markers and
-    `krateo.io/traceparent-continued`. Today it writes back every annotation
-    it captured, which reverts a fresh `krateo.io/traceparent`, and any other
-    writer's annotations, set while `Create` ran.
-  - **`telemetry.Setup` sets the global propagator** (W3C TraceContext and
-    Baggage) on every call, tracing on or off. OTel's default is a no-op, so a
-    provider's own `otelhttp` starts honouring and forwarding W3C context and
-    baggage. core-provider and oasgen-provider already set the same
-    propagator themselves.
-  - **httpsignal sets `traceparent`** on outbound requests when tracing is
-    on. With tracing off, it sends nothing.
-  - **"Reconciling" is logged after the Get.** The per-reconcile Logger is
-    bound once the root span starts, which needs the object, so the
-    "Reconciling" debug record now follows the Get. A pass whose object is
-    gone (NotFound) logs no "Reconciling" record.
-  - **With tracing on, a concurrent write requeues before acting.** A write
-    to the object between the pass's Get and the locked marker patch makes the
-    update and delete paths requeue before they act, backing off from 1 s to
-    60 s. Today the act runs, and the status Update fails instead. An object
-    written more often than one Connect and Observe can see its act slip until
-    the 10-minute window closes. That's bounded, and it's what the create path
-    already does with its create-pending Update.
-- **New dependency, when it is built:**
-  `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` v1.45.0.
 
 ## 2026-11-08 — v1.12.0: the local slot is taken before the pop
 - **With saturation on, each controller's queue takes the local slot before it
