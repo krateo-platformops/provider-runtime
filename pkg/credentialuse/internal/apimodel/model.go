@@ -82,6 +82,10 @@ type Model struct {
 	uid  int64
 	log  []Event
 	now  func() time.Time
+
+	// OnEvent, if set, runs on every change the model makes, after it is
+	// stored: the harness's monitors follow the model through it.
+	OnEvent func(Event)
 }
 
 // New returns an empty model whose timestamps come from now.
@@ -106,7 +110,18 @@ func (m *Model) bump(meta *metav1.ObjectMeta) {
 }
 
 func (m *Model) emit(t watch.EventType, k Key, meta *metav1.ObjectMeta) {
-	m.log = append(m.log, Event{Seq: len(m.log) + 1, Type: t, Key: k, Obj: m.partial(k, meta)})
+	ev := Event{Seq: len(m.log) + 1, Type: t, Key: k, Obj: m.partial(k, meta)}
+	m.log = append(m.log, ev)
+	if m.OnEvent != nil {
+		m.OnEvent(ev)
+	}
+}
+
+// Objects returns every object, sorted by key: a snapshot for the state
+// hash.
+func (m *Model) Objects() []Event {
+	snap, _ := m.Snapshot()
+	return snap
 }
 
 // Create creates an object with the given metadata (name and namespace come

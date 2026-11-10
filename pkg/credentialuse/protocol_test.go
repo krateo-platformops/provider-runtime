@@ -552,8 +552,8 @@ func TestReleaseRows(t *testing.T) {
 			if released != tc.want.released {
 				t.Errorf("released = %v, want %v; decisions %+v", released, tc.want.released, res.Decisions)
 			}
-			if (res.RequeueAfter > 0) != tc.want.requeue {
-				t.Errorf("requeue after %s, want a requeue: %v", res.RequeueAfter, tc.want.requeue)
+			if !res.RequeueAt.IsZero() != tc.want.requeue {
+				t.Errorf("requeue at %s, want a requeue: %v", res.RequeueAt, tc.want.requeue)
 			}
 			if released && gerr == nil {
 				if _, ok := s.Labels[LabelHeld]; ok {
@@ -582,8 +582,8 @@ func TestReleaseGraceFromFirstSight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RequeueAfter < 59*time.Second || res.RequeueAfter > time.Minute {
-		t.Errorf("requeue after %s, want the full grace from first sight", res.RequeueAfter)
+	if d := res.RequeueAt.Sub(r.now); d < 59*time.Second || d > time.Minute {
+		t.Errorf("requeue %s from now, want the full grace from first sight", d)
 	}
 }
 
@@ -591,7 +591,7 @@ func TestReleaseRestoresAMissingEpoch(t *testing.T) {
 	r := newRig(t)
 	must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{Finalizers: []string{fNS}}))
 	res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()})
-	if err != nil || res.RequeueAfter == 0 {
+	if err != nil || res.RequeueAt.IsZero() {
 		t.Fatalf("release = %+v, %v", res, err)
 	}
 	if s := r.get(t, secretKey("ns", "s")); s.Annotations[fNS] == "" || !hasFinalizer(s, fNS) {

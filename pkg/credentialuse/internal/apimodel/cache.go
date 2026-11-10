@@ -20,6 +20,10 @@ type Cache struct {
 	match func(Key, *metav1.PartialObjectMetadata) bool
 	seq   int
 	objs  map[Key]*metav1.PartialObjectMetadata
+
+	// OnAccess, if set, runs on every read and every change of the cache:
+	// the harness's check that no lost unit of work touches it.
+	OnAccess func()
 }
 
 // A Change is what one delivery did to the cache: Old is the version it had,
@@ -41,6 +45,7 @@ func NewCache(m *Model, match func(Key, *metav1.PartialObjectMetadata) bool) *Ca
 // and its watch resumes after it, skipping every event in between. It returns
 // the changes, as a relist delivers them: only the final state of each object.
 func (c *Cache) List() []Change {
+	c.access()
 	snap, seq := c.m.Snapshot()
 	next := map[Key]*metav1.PartialObjectMetadata{}
 	for i := range snap {
@@ -64,11 +69,18 @@ func (c *Cache) List() []Change {
 }
 
 // Pending reports whether the model has an event the cache hasn't delivered.
-func (c *Cache) Pending() bool { return c.m.LastSeq() > c.seq }
+func (c *Cache) Pending() bool { c.access(); return c.m.LastSeq() > c.seq }
+
+func (c *Cache) access() {
+	if c.OnAccess != nil {
+		c.OnAccess()
+	}
+}
 
 // Next delivers the next event. ok is false when the event changed nothing
 // the cache holds.
 func (c *Cache) Next() (Change, bool) {
+	c.access()
 	evs := c.m.EventsAfter(c.seq)
 	if len(evs) == 0 {
 		return Change{}, false
@@ -88,14 +100,28 @@ func (c *Cache) Next() (Change, bool) {
 	return Change{Key: ev.Key, Old: old, New: &obj}, true
 }
 
+// Objects returns the cached objects, sorted by key, and the log position
+// the cache stands at: for the state hash, without the access hook.
+func (c *Cache) Objects() ([]Event, int) {
+	keys := slices.Collect(maps.Keys(c.objs))
+	slices.SortFunc(keys, func(a, b Key) int { return strings.Compare(a.String(), b.String()) })
+	out := make([]Event, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, Event{Key: k, Obj: *c.objs[k]})
+	}
+	return out, c.seq
+}
+
 // Get returns the cached version of k.
 func (c *Cache) Get(k Key) (*metav1.PartialObjectMetadata, bool) {
+	c.access()
 	o, ok := c.objs[k]
 	return o, ok
 }
 
 // In returns the cached objects of gk in namespace, sorted by name.
 func (c *Cache) In(gk schema.GroupKind, namespace string) []*metav1.PartialObjectMetadata {
+	c.access()
 	var out []*metav1.PartialObjectMetadata
 	for k, o := range c.objs {
 		if k.GK == gk && k.Namespace == namespace {

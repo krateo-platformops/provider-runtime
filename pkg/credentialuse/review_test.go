@@ -244,13 +244,16 @@ func TestReleaseMeasuresTheGraceBeforeTheReads(t *testing.T) {
 	pr := newProtocol(srv, noViews{}, newVerified(widgetGK), seen, stepClock{clk}, 60*time.Second)
 	res, _ := pr.release(context.Background(), "n", []ID{p})
 	t.Logf("first batch: %+v", res.Decisions)
-	o, _ := m.Get(keyOf(p))
+	o, err := m.Get(keyOf(p))
+	if err != nil {
+		t.Fatalf("the first batch, inside the grace, released P: %+v", res)
+	}
 	graceEnd := GraceEnd(o.DeletionTimestamp.Time, seen.see(o.UID, time.Time{}), 60*time.Second)
 	*clk = graceEnd.Add(-3 * time.Millisecond)
 	var nsDel time.Time
 	hook := listHook{server: srv, before: func() { nsDel = *clk; must(m.Delete(nsKey("n"))) }}
 	pr = newProtocol(hook, noViews{}, newVerified(widgetGK), seen, stepClock{clk}, 60*time.Second)
-	res, err := pr.release(context.Background(), "n", []ID{p})
+	res, err = pr.release(context.Background(), "n", []ID{p})
 	t.Logf("second batch: released=%v decisions=%+v err=%v", res.Released, res.Decisions, err)
 	if len(res.Released) == 1 && nsDel.Before(graceEnd) {
 		t.Errorf("RELEASED with the namespace deleted at %s, before the grace ended at %s (namespace GET at %s)",

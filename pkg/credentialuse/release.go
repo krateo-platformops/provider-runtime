@@ -43,18 +43,20 @@ type ReleaseResult struct {
 	Released []ID
 	// Decisions are §5's decisions, one per object that reached R2.
 	Decisions []ReleaseDecision
-	// RequeueAfter, when non-zero, is when the batch must run again: the end
-	// of a grace, or a restored epoch.
-	RequeueAfter time.Duration
+	// RequeueAt, when set, is when the batch must run again: the end of a
+	// grace, or a restored epoch's recheck. It is absolute, the deadline
+	// itself rather than a duration from some reading of the clock, so the
+	// requeue lands exactly on it (docs/credential-use-model-reduction.md
+	// §10.2). A time already past means at once: it is the batch's now.
+	RequeueAt time.Time
 }
 
 func (r *ReleaseResult) requeueAt(now, at time.Time) {
-	d := at.Sub(now)
-	if d <= 0 {
-		d = time.Millisecond
+	if at.Before(now) {
+		at = now
 	}
-	if r.RequeueAfter == 0 || d < r.RequeueAfter {
-		r.RequeueAfter = d
+	if r.RequeueAt.IsZero() || at.Before(r.RequeueAt) {
+		r.RequeueAt = at
 	}
 }
 
@@ -121,7 +123,8 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				if err := p.restoreEpoch(ctx, id, m, n); err != nil {
 					errs = append(errs, err)
 				}
-				res.requeueAt(p.clock.Now(), p.clock.Now().Add(restoredEpochRequeue))
+				now := p.clock.Now()
+				res.requeueAt(now, now.Add(restoredEpochRequeue))
 				continue
 			}
 			r := r1Read{id: id, meta: m}

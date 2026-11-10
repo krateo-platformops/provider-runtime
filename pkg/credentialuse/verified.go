@@ -50,6 +50,27 @@ type verified struct {
 	// A relist delivers only the final state, so every t_obs is at least this
 	// (§6.5 L2, revision 16).
 	lastList time.Time
+
+	// onAccess, nil in production, runs on every read and every change: the
+	// model's check that a unit of work lost to a crash touches nothing
+	// (docs/credential-use-model-reduction.md §3.2).
+	onAccess func()
+	// onRead, nil in production, receives what a read returned: in the
+	// model, the reading actor's input (docs/credential-use-model-reduction.md
+	// §10.1).
+	onRead func(any)
+}
+
+func (v *verified) read(r any) {
+	if v.onRead != nil {
+		v.onRead(r)
+	}
+}
+
+func (v *verified) access() {
+	if v.onAccess != nil {
+		v.onAccess()
+	}
 }
 
 func newVerified(holder schema.GroupKind) *verified {
@@ -72,20 +93,25 @@ func newVerified(holder schema.GroupKind) *verified {
 //   - t_obs, the later of the run's first delivery, the A1 that added p and
 //     the last list, is before that write was issued.
 func (v *verified) canSkip(h types.UID, hRV string, p ID, pUID types.UID, n string) bool {
+	v.access()
 	if pUID == "" || hRV == "" {
+		v.read(false)
 		return false
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.delivered[h] != hRV {
+		v.read(false)
 		return false
 	}
 	since, named := v.recordSince[h][p]
 	if !named {
+		v.read(false)
 		return false // the delivered version doesn't name p
 	}
 	issued, ok := v.written[pUID][n]
 	if !ok {
+		v.read(false)
 		return false
 	}
 	obs := since
@@ -95,12 +121,17 @@ func (v *verified) canSkip(h types.UID, hRV string, p ID, pUID types.UID, n stri
 	if v.lastList.After(obs) {
 		obs = v.lastList
 	}
-	return obs.Before(issued)
+	skip := obs.Before(issued)
+	if v.onRead != nil {
+		v.onRead(skip)
+	}
+	return skip
 }
 
 // wrote records a successful A2 for P's incarnation pUID and namespace n,
 // issued at t.
 func (v *verified) wrote(pUID types.UID, n string, issued time.Time) {
+	v.access()
 	if pUID == "" {
 		return
 	}
@@ -115,6 +146,7 @@ func (v *verified) wrote(pUID types.UID, n string, issued time.Time) {
 // hasWritten reports whether this process holds a written entry for P's
 // incarnation pUID and holder namespace n.
 func (v *verified) hasWritten(pUID types.UID, n string) bool {
+	v.access()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	_, ok := v.written[pUID][n]
@@ -126,6 +158,7 @@ func (v *verified) hasWritten(pUID types.UID, n string) bool {
 // finalizer for n (§6.2 R3). Entries for other namespaces stand on their own
 // finalizers, which that R3 tested and left in place.
 func (v *verified) released(pUID types.UID, n string) {
+	v.access()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.written[pUID], n)
@@ -138,6 +171,7 @@ func (v *verified) released(pUID types.UID, n string) {
 // added get the time A1's response returned, overwriting any earlier value,
 // and refs it removed lose theirs.
 func (v *verified) announced(h types.UID, added, removed []ID, at time.Time) {
+	v.access()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(added) > 0 && v.observed[h] == nil {
@@ -153,6 +187,7 @@ func (v *verified) announced(h types.UID, added, removed []ID, at time.Time) {
 
 // forgot drops a holder's observed entries, when its record is removed.
 func (v *verified) forgot(h types.UID) {
+	v.access()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.observed, h)
@@ -165,6 +200,7 @@ func (v *verified) forgot(h types.UID) {
 // observed for P too. An unparseable record names nothing: no skip rests on
 // it, and the next A1 rewrites it. A nil h is a deletion.
 func (v *verified) holderEvent(uid types.UID, h metav1.Object, at time.Time) {
+	v.access()
 	names := map[ID]bool{}
 	if h != nil {
 		if r := ReadRecord(h); !r.Unparseable {
@@ -203,6 +239,7 @@ func (v *verified) holderEvent(uid types.UID, h metav1.Object, at time.Time) {
 // listCompleted records that the holder informer's list or relist completed
 // at at (§6.5 L2).
 func (v *verified) listCompleted(at time.Time) {
+	v.access()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if at.After(v.lastList) {
@@ -216,6 +253,7 @@ func (v *verified) listCompleted(at time.Time) {
 // deleted or left the label-scoped cache. An entry goes when P's incarnation
 // changed or went, or when P lost the finalizer of K for that entry's N.
 func (v *verified) protectedEvent(old, current metav1.Object) {
+	v.access()
 	if old == nil {
 		return
 	}

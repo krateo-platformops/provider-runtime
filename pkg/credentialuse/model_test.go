@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,7 +56,14 @@ import (
 //   - firstSight is pruned without a cache, from what R1 and R3 see; that is
 //     memory hygiene only, and no decision depends on it.
 
-const testGrace = 5 * time.Millisecond
+// testGrace is long next to the 1ms a call ticks, so that only a jump
+// crosses a grace end (docs/credential-use-model-reduction.md §3.1). The
+// scheduler panics if a tick would cross a pending deadline.
+const testGrace = time.Hour
+
+// testJumps is how many times a schedule may jump to a deadline (§3.1, the
+// user's T).
+const testJumps = 2
 
 // A profile is one search of a scenario's schedules: exhaustive within
 // bounds, or a seeded random walk of n schedules.
@@ -119,8 +127,13 @@ func profiles(t *testing.T, flags scenarioFlags) []profile {
 	if v := os.Getenv("CREDENTIALUSE_MODEL_BOUNDS"); v != "" {
 		var out []profile
 		for _, part := range strings.Split(v, ";") {
-			var b apimodel.Bounds
-			if _, err := fmt.Sscanf(part, "%d,%d,%d", &b.Preemptions, &b.Faults, &b.MaxRuns); err != nil {
+			b := apimodel.Bounds{Jumps: testJumps}
+			fields := strings.Split(part, ",")
+			if len(fields) == 4 {
+				if _, err := fmt.Sscanf(part, "%d,%d,%d,%d", &b.Preemptions, &b.Faults, &b.MaxRuns, &b.Jumps); err != nil {
+					t.Fatalf("CREDENTIALUSE_MODEL_BOUNDS=%q: %v", v, err)
+				}
+			} else if _, err := fmt.Sscanf(part, "%d,%d,%d", &b.Preemptions, &b.Faults, &b.MaxRuns); err != nil {
 				t.Fatalf("CREDENTIALUSE_MODEL_BOUNDS=%q: %v", v, err)
 			}
 			out = append(out, profile{name: fmt.Sprintf("%d preemptions, %d faults", b.Preemptions, b.Faults), bounds: b})
@@ -129,25 +142,25 @@ func profiles(t *testing.T, flags scenarioFlags) []profile {
 	}
 	if os.Getenv("CREDENTIALUSE_MODEL_DEEP") != "" {
 		return []profile{
-			{name: "1 preemption, 1 fault", bounds: apimodel.Bounds{Preemptions: 1, Faults: 1, MaxRuns: 5_000_000}},
-			{name: "2 preemptions", bounds: apimodel.Bounds{Preemptions: 2, MaxRuns: 5_000_000}},
-			{name: "random: 3 preemptions, 2 faults", bounds: apimodel.Bounds{Preemptions: 3, Faults: 2}, walk: 50_000},
+			{name: "1 preemption, 1 fault", bounds: apimodel.Bounds{Preemptions: 1, Faults: 1, Jumps: testJumps, MaxRuns: 5_000_000}},
+			{name: "2 preemptions", bounds: apimodel.Bounds{Preemptions: 2, Jumps: testJumps, MaxRuns: 5_000_000}},
+			{name: "random: 3 preemptions, 2 faults", bounds: apimodel.Bounds{Preemptions: 3, Faults: 2, Jumps: testJumps}, walk: 50_000},
 		}
 	}
 	if raceEnabled || flags&deepOnly != 0 {
 		return []profile{
-			{name: "random: 1 fault", bounds: apimodel.Bounds{Faults: 1}, walk: 300},
-			{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1}, walk: 300},
+			{name: "random: 1 fault", bounds: apimodel.Bounds{Faults: 1, Jumps: testJumps}, walk: 300},
+			{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1, Jumps: testJumps}, walk: 300},
 		}
 	}
 	out := []profile{
-		{name: "1 fault", bounds: apimodel.Bounds{Faults: 1, MaxRuns: 200_000}},
-		{name: "1 preemption", bounds: apimodel.Bounds{Preemptions: 1, MaxRuns: 200_000}},
+		{name: "1 fault", bounds: apimodel.Bounds{Faults: 1, Jumps: testJumps, MaxRuns: 200_000}},
+		{name: "1 preemption", bounds: apimodel.Bounds{Preemptions: 1, Jumps: testJumps, MaxRuns: 200_000}},
 	}
 	if flags&bothBounds != 0 {
-		out = append(out, profile{name: "1 preemption, 1 fault", bounds: apimodel.Bounds{Preemptions: 1, Faults: 1, MaxRuns: 5_000_000}})
+		out = append(out, profile{name: "1 preemption, 1 fault", bounds: apimodel.Bounds{Preemptions: 1, Faults: 1, Jumps: testJumps, MaxRuns: 5_000_000}})
 	}
-	return append(out, profile{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1}, walk: 400})
+	return append(out, profile{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1, Jumps: testJumps}, walk: 400})
 }
 
 var walkSeed = sync.OnceValue(func() int64 {
@@ -166,10 +179,14 @@ type world struct {
 	ns string
 	p  ID // the protected Secret
 
-	reads     []connectRead
-	released  []timedDecision
-	nsDeleted time.Time
-	errs      []error
+	// The monitors (docs/credential-use-model-reduction.md §10.1): the checks
+	// run on the fly, at the events they are about, and keep only this.
+	releasedAny, u5Any, deletingRead bool
+	// lastAllowed is the latest release after which the safety invariant
+	// allows a deleting holder to read P as NotFound: U5's.
+	lastAllowed *timedDecision
+	nsDeleted   time.Time
+	errs        []error
 	// l6 counts passes inside §6.5's L6 window.
 	l6 int
 	// h1 counts live passes that start in needsH1's state.
@@ -190,22 +207,20 @@ type world struct {
 	// holder, or found it gone (M3 of #59's review).
 	deletionPhase map[string]bool
 	procs         map[**process]*apimodel.Proc
+	// thresholds are deadlines a scenario declares (§3.1).
+	thresholds []time.Time
+	// procOrder is the processes in the order they joined, for the state
+	// hash; pinned are names a scenario's closures captured, which the
+	// state's renaming must cover (§10.1).
+	procOrder []**process
+	pinned    []any
 }
 
-// hold is a live pass's hold of P: when, and the model's last event then.
+// hold is a live pass's hold of P, from when it began. The model's event
+// hook ends it at the first version of the holder whose record drops P
+// (onModelEvent).
 type hold struct {
-	at  time.Time
-	seq int
-}
-
-// connectRead is a holder's Connect reading P.
-type connectRead struct {
-	holder   string
-	at       time.Time
-	notFound bool
-	// held: an earlier pass of this holder held P before its deletion
-	// began, and this pass is a deletion pass with the owner finalizer.
-	held bool
+	at time.Time
 }
 
 type timedDecision struct {
@@ -218,7 +233,92 @@ func newWorld(s *apimodel.Sched) *world {
 		deletionPhase: map[string]bool{}, procs: map[**process]*apimodel.Proc{}}
 	w.m = apimodel.New(s.Clock.Now)
 	w.p = SecretRef(w.ns, "probe-dummy-creds").ID()
+	s.Deadlines = w.deadlines
+	s.Terms = w.timeTerms
+	w.m.OnEvent = w.onModelEvent
 	return w
+}
+
+// onModelEvent is the hold monitor (§10.1): every version of a holder, by
+// any actor, whose record no longer names P ends that holder's hold on P.
+// The protection lives in the record, so a hold lasts only while every
+// version since names the ref; neither a lost A1 nor another process's
+// write can leave a stale one (M1 of #59's review).
+func (w *world) onModelEvent(ev apimodel.Event) {
+	if ev.Key.GK != widgetGK {
+		return
+	}
+	holds := w.holds[ev.Key.Name]
+	for id := range holds {
+		if ev.Type == watch.Deleted || !ReadRecord(&ev.Obj).Names(id) {
+			delete(holds, id)
+		}
+	}
+}
+
+// onRead is the read monitor: a deleting holder that held P before its
+// deletion began must not read P as NotFound, unless U5's release came
+// first, and that release read the namespace live before any deletion of it
+// (§6.4, L3).
+func (w *world) onRead(holder string, at time.Time, notFound, held bool) {
+	if !held {
+		return
+	}
+	w.deletingRead = true
+	if !notFound {
+		return
+	}
+	d := w.lastAllowed
+	if d == nil {
+		w.fail("SAFETY: deleting holder %s read %s as NotFound at %s, after holding it, with no U5 release before",
+			holder, w.p, at.Format(time.TimeOnly))
+		return
+	}
+	if !w.nsDeleted.IsZero() && !w.nsDeleted.After(d.NamespaceReadAt) && !d.NamespaceReadAt.IsZero() {
+		w.fail("SAFETY: a release read namespace %s as live at %s, after its deletion at %s",
+			w.ns, d.NamespaceReadAt.Format(time.TimeOnly), w.nsDeleted.Format(time.TimeOnly))
+	}
+}
+
+// onRelease is the release monitor. A release over a live user after the
+// grace (U5) that follows a namespace deletion begun inside the grace is a
+// violation (§6.4, M4 of #59's review); and an allowed release becomes the
+// one later reads are judged against.
+func (w *world) onRelease(d ReleaseDecision, at time.Time) {
+	w.releasedAny = true
+	in := d.Input
+	if isU5(in) {
+		w.u5Any = true
+		if !w.nsDeleted.IsZero() && !w.nsDeleted.After(at) && w.nsDeleted.Before(d.GraceEnd) {
+			w.fail("SAFETY: %s was released over a live user at %s, with its namespace deleted at %s, inside the grace that ended at %s",
+				d.P, at.Format(time.TimeOnly), w.nsDeleted.Format(time.TimeOnly), d.GraceEnd.Format(time.TimeOnly))
+		}
+	}
+	if in.Deleting && !in.NamespaceDeleting && in.GraceOver && in.DeletingUsers == 0 {
+		w.lastAllowed = &timedDecision{d, at}
+	}
+}
+
+// deadlines are the scenario's pending deadlines besides the actors' own
+// notBefores (§3.1): for every protected object being deleted, the end of
+// its grace in each process, from that process's first sight, and from the
+// deletion itself for a process that hasn't seen it; and the thresholds the
+// scenario declares. It reads first sights directly, as instrumentation.
+func (w *world) deadlines() []time.Time {
+	ds := slices.Clone(w.thresholds)
+	for _, o := range w.m.List(secretGroupKind, w.ns) {
+		if o.DeletionTimestamp == nil {
+			continue
+		}
+		dt := o.DeletionTimestamp.Time
+		ds = append(ds, GraceEnd(dt, dt, testGrace))
+		for p := range w.procs {
+			if seen, ok := (*p).seen.at[o.UID]; ok {
+				ds = append(ds, GraceEnd(dt, seen, testGrace))
+			}
+		}
+	}
+	return ds
 }
 
 func (w *world) fail(format string, args ...any) {
@@ -232,26 +332,30 @@ func (w *world) proc(p **process) *apimodel.Proc {
 	if pr, ok := w.procs[p]; ok {
 		return pr
 	}
-	pr := w.s.Proc((*p).name, func(now time.Time) { *p = newProcess((*p).name, w.m, now) })
+	pr := w.s.Proc((*p).name, func(now time.Time) { (*p).restart(now) })
 	w.procs[p] = pr
-	return pr
-}
-
-// namedSince reports whether every version of holder since event seq has a
-// record naming id: the run of versions that held it hasn't broken, whoever
-// wrote them. It reads the model's event log, as instrumentation, outside
-// the schedule.
-func (w *world) namedSince(holder string, id ID, seq int) bool {
-	k := widgetKey(w.ns, holder)
-	for _, ev := range w.m.EventsAfter(seq) {
-		if ev.Key != k {
-			continue
-		}
-		if ev.Type == watch.Deleted || !ReadRecord(&ev.Obj).Names(id) {
-			return false
+	// A unit of work lost to a crash must not touch the process's memory,
+	// not even to read it (§3.2).
+	guard := func() {
+		if a := w.s.Running(); a != nil && a.Stale() {
+			panic(fmt.Sprintf("model: %s, a unit of work lost to a crash, touched process %s's memory\nschedule: %s", a.Name, (*p).name, w.s.Trace()))
 		}
 	}
-	return true
+	(*p).ver.onAccess = guard
+	(*p).seen.onAccess = guard
+	(*p).cache.OnAccess = guard
+	// What a read of the process's memory returns is an input of the
+	// reading actor (§10.1).
+	read := func(v any) {
+		if a := w.s.Running(); a != nil {
+			a.RecordInput(v)
+		}
+	}
+	(*p).ver.onRead = read
+	(*p).seen.onRead = read
+	(*p).sched = w.s
+	w.procOrder = append(w.procOrder, p)
+	return pr
 }
 
 // A process that only runs a releaser has no caches at all (releaser with
@@ -322,7 +426,8 @@ func (w *world) holder(spec holderSpec, p **process) {
 	w.deletionPhase[actor] = false
 	w.s.GoIn(w.proc(p), actor, apimodel.Faulty, func(a *apimodel.Actor) {
 		ctx := context.Background()
-		pass := 0
+		pass, liveIdx, delIdx := 0, 0, 0
+		a.Locals = func() []any { return []any{pass, liveIdx, delIdx} }
 		run := func() (gone bool) {
 			a.Restart()
 			pr := newProtocol(modelServer{w.m, a}, cacheViews{p}, (*p).ver, (*p).seen, a.Clock(), testGrace)
@@ -362,16 +467,15 @@ func (w *world) holder(spec holderSpec, p **process) {
 			// model's log, so neither a lost A1 nor another process's write
 			// can leave a stale hold (M1 of #59's review).
 			if !deleting {
-				seq := w.m.LastSeq()
 				if live, err := w.m.Get(widgetKey(w.ns, spec.name)); err == nil {
 					rec := ReadRecord(live)
 					for _, r := range acq.Held {
 						id := r.ID()
-						if h, ok := holds[id]; ok && w.namedSince(spec.name, id, h.seq) {
-							continue
+						if _, ok := holds[id]; ok {
+							continue // the earliest unbroken hold stays
 						}
 						if rec.Names(id) {
-							holds[id] = hold{at: a.Now(), seq: seq}
+							holds[id] = hold{at: w.s.Now()}
 						}
 					}
 				}
@@ -384,12 +488,8 @@ func (w *world) holder(spec holderSpec, p **process) {
 					return false
 				}
 				h, ok := holds[r.ID()]
-				w.reads = append(w.reads, connectRead{
-					holder:   spec.name,
-					at:       a.Now(),
-					notFound: Classify(err) == ClassNotFound,
-					held:     deleting && ok && h.at.Before(obj.DeletionTimestamp.Time) && w.namedSince(spec.name, r.ID(), h.seq),
-				})
+				w.onRead(spec.name, w.s.Now(), Classify(err) == ClassNotFound,
+					deleting && ok && h.at.Before(obj.DeletionTimestamp.Time))
 			}
 			switch {
 			case deleting:
@@ -404,6 +504,7 @@ func (w *world) holder(spec holderSpec, p **process) {
 			return false
 		}
 		for i := range spec.livePasses {
+			liveIdx = i
 			if spec.before != nil {
 				if c := spec.before(i); c != nil {
 					a.Wait("await", time.Time{}, c)
@@ -420,7 +521,8 @@ func (w *world) holder(spec holderSpec, p **process) {
 			o, err := w.m.Get(widgetKey(w.ns, spec.name))
 			return err != nil || o.DeletionTimestamp != nil
 		})
-		for range spec.deletionPasses {
+		for i := range spec.deletionPasses {
+			delIdx = i + 1
 			if run() {
 				return
 			}
@@ -437,7 +539,10 @@ func (w *world) releaser(name string, p **process, n int, cacheless bool, after 
 		if after != nil {
 			a.Wait("await trigger", time.Time{}, after)
 		}
-		for range n {
+		batch := 0
+		a.Locals = func() []any { return []any{batch} }
+		for i := range n {
+			batch = i
 			a.Restart()
 			var v views = cacheViews{p}
 			if cacheless {
@@ -447,19 +552,19 @@ func (w *world) releaser(name string, p **process, n int, cacheless bool, after 
 			w.batchesStarted[name]++
 			res, err := pr.release(context.Background(), w.ns, []ID{w.p})
 			w.batches[name]++
-			at := a.Now()
+			at := w.s.Now()
 			for _, d := range res.Decisions {
 				for _, r := range res.Released {
 					if r == d.P && d.Decision == Release {
-						w.released = append(w.released, timedDecision{d, at})
+						w.onRelease(d, at)
 					}
 				}
 			}
 			if errors.Is(err, ErrReleaseRejected) {
 				w.fail("%s: %v", name, err)
 			}
-			if res.RequeueAfter > 0 {
-				a.Wait("requeue", at.Add(res.RequeueAfter), nil)
+			if !res.RequeueAt.IsZero() {
+				a.Wait("requeue", res.RequeueAt, nil)
 			}
 		}
 	})
@@ -484,7 +589,10 @@ func (w *world) call(a *apimodel.Actor, label string, op func() error) {
 // records when the namespace got its deletionTimestamp.
 func (w *world) deleter(name string, keys ...apimodel.Key) {
 	w.s.Go(name, 0, func(a *apimodel.Actor) {
-		for _, k := range keys {
+		idx := 0
+		a.Locals = func() []any { return []any{idx} }
+		for i, k := range keys {
+			idx = i
 			w.call(a, "delete "+k.Name, func() error {
 				err := w.m.Delete(k)
 				if err == nil && k.GK == apimodel.NamespaceKind && w.nsDeleted.IsZero() {
@@ -542,47 +650,10 @@ func (w *world) checkHeld(holder string, acq Acquired, p *process) {
 	}
 }
 
-// check is the safety invariant, then convergence.
+// check is what remains for the end of a schedule: the monitors have
+// checked safety on the fly, so here every holder must have run its
+// deletion phase, and convergence must hold.
 func (w *world) check() error {
-	for _, r := range w.reads {
-		if !r.notFound || !r.held {
-			continue
-		}
-		var allowed *timedDecision
-		for i, d := range w.released {
-			in := d.Input
-			if d.at.After(r.at) {
-				continue
-			}
-			if in.Deleting && !in.NamespaceDeleting && in.GraceOver && in.DeletingUsers == 0 {
-				allowed = &w.released[i]
-			}
-		}
-		if allowed == nil {
-			w.fail("SAFETY: deleting holder %s read %s as NotFound at %s, after holding it, with no U5 release before (releases: %+v)",
-				r.holder, w.p, r.at.Format("05.000"), w.released)
-			continue
-		}
-		// U5's release read the Namespace live; a deletionTimestamp it got
-		// must have come after that read (§6.4, L3).
-		if !w.nsDeleted.IsZero() && !w.nsDeleted.After(allowed.NamespaceReadAt) && !allowed.NamespaceReadAt.IsZero() {
-			w.fail("SAFETY: a release read namespace %s as live at %s, after its deletion at %s",
-				w.ns, allowed.NamespaceReadAt.Format("05.000"), w.nsDeleted.Format("05.000"))
-		}
-	}
-	// A release over a live user after the grace: a namespace deletion
-	// that began before it returned must have begun at or after the
-	// grace's end (§6.4, M4 of #59's review). One that began inside the
-	// grace is the holders' to see.
-	for _, d := range w.released {
-		if !isU5(d.Input) || w.nsDeleted.IsZero() || w.nsDeleted.After(d.at) {
-			continue
-		}
-		if w.nsDeleted.Before(d.GraceEnd) {
-			w.fail("SAFETY: %s was released over a live user at %s, with its namespace deleted at %s, inside the grace that ended at %s",
-				d.P, d.at.Format("05.000"), w.nsDeleted.Format("05.000"), d.GraceEnd.Format("05.000"))
-		}
-	}
 	for actor, ran := range w.deletionPhase {
 		if !ran {
 			w.fail("DELETION PHASE: %s never ran a pass on its deleting holder", actor)
@@ -597,7 +668,7 @@ func (w *world) check() error {
 // converge runs release batches with no caches and the grace long past,
 // until nothing changes; then, with no user left, the finalizer must be gone.
 func (w *world) converge() error {
-	later := clockAt(w.s.Clock.Now().Add(time.Hour))
+	later := clockAt(w.s.Clock.Now().Add(3 * testGrace))
 	pr := newProtocol(modelServer{m: w.m}, noViews{}, newVerified(widgetGK), newFirstSight(), later, testGrace)
 	for range 3 {
 		if _, err := pr.release(context.Background(), w.ns, []ID{w.p}); err != nil {
@@ -641,23 +712,42 @@ func isU5(in ReleaseInput) bool {
 func explore(t *testing.T, name string, flags scenarioFlags, scenario func(w *world)) {
 	t.Helper()
 	var releasing, deletingReads, u5, l6, h1 int
+	// A stateful search (docs/credential-use-model-reduction.md §10) counts
+	// distinct abstract states, per reach flag, not schedules.
+	// It is the default for the exhaustive searches; CREDENTIALUSE_MODEL_STATELESS
+	// turns it off, for comparison.
+	stateful := os.Getenv("CREDENTIALUSE_MODEL_STATELESS") == ""
+	var flagged [5]map[string]struct{}
 	run := func(s *apimodel.Sched) error {
 		w := newWorld(s)
 		scenario(w)
+		if stateful {
+			s.Key = func() string {
+				k := w.stateKey()
+				for i, f := range []bool{w.releasedAny, w.u5Any, w.l6 > 0, w.h1 > 0, w.deletingRead} {
+					if f && flagged[i] != nil {
+						flagged[i][k] = struct{}{}
+					}
+				}
+				return k
+			}
+		}
 		if err := s.Run(); err != nil {
+			if errors.Is(err, apimodel.ErrPruned) {
+				// The violations found on the way stand; the rest of the
+				// run was searched from the visited state.
+				return errors.Join(w.errs...)
+			}
 			return err
 		}
 		if w.onDone != nil {
 			w.onDone()
 		}
-		if len(w.released) > 0 {
+		if w.releasedAny {
 			releasing++
 		}
-		for _, d := range w.released {
-			if isU5(d.Input) {
-				u5++
-				break
-			}
+		if w.u5Any {
+			u5++
 		}
 		if w.l6 > 0 {
 			l6++
@@ -665,11 +755,8 @@ func explore(t *testing.T, name string, flags scenarioFlags, scenario func(w *wo
 		if w.h1 > 0 {
 			h1++
 		}
-		for _, r := range w.reads {
-			if r.held {
-				deletingReads++
-				break
-			}
+		if w.deletingRead {
+			deletingReads++
 		}
 		return w.check()
 	}
@@ -678,11 +765,22 @@ func explore(t *testing.T, name string, flags scenarioFlags, scenario func(w *wo
 		releasing, deletingReads, u5, l6, h1 = 0, 0, 0, 0, 0
 		start := time.Now()
 		var res apimodel.Result
-		if p.walk > 0 {
+		switch {
+		case p.walk > 0:
 			seed := walkSeed()
 			t.Logf("%s, %s: seed %d (CREDENTIALUSE_MODEL_SEED=%d replays it)", name, p.name, seed, seed)
 			res = apimodel.Walk(p.bounds, p.walk, seed, run)
-		} else {
+		case stateful:
+			for i := range flagged {
+				flagged[i] = map[string]struct{}{}
+			}
+			res = apimodel.ExploreStateful(p.bounds, run)
+			releasing, u5, l6, h1, deletingReads = len(flagged[0]), len(flagged[1]), len(flagged[2]), len(flagged[3]), len(flagged[4])
+			for i := range flagged {
+				flagged[i] = nil
+			}
+			t.Logf("%s, %s: stateful: %d distinct states, %d runs, %d pruned; the counts below are distinct states", name, p.name, res.States, res.Runs, res.Pruned)
+		default:
 			res = apimodel.Explore(p.bounds, run)
 		}
 		report(t, name+", "+p.name, res)
@@ -938,7 +1036,22 @@ func TestModelDeletionsAroundTheGrace(t *testing.T) {
 		w.deleter("secret", keyOf(w.p))
 		w.s.Go("late deletions", 0, func(a *apimodel.Actor) {
 			// Wait into the grace, then delete the holder and the namespace.
-			a.Wait("into the grace", a.Now().Add(testGrace-time.Millisecond), nil)
+			// "Into the grace" is half of it after the Secret's deletion: a
+			// deadline (§3.1), reached by a jump, or after the grace by a
+			// jump to its end first.
+			var dt time.Time
+			a.Locals = func() []any { return []any{dt} }
+			a.Wait("secret deleting", time.Time{}, func() bool {
+				o, err := w.m.Get(keyOf(w.p))
+				if err == nil && o.DeletionTimestamp != nil {
+					dt = o.DeletionTimestamp.Time
+				}
+				return err != nil || o.DeletionTimestamp != nil
+			})
+			if dt.IsZero() {
+				dt = a.Now()
+			}
+			a.Wait("into the grace", dt.Add(testGrace/2), nil)
 			w.call(a, "delete ns", func() error {
 				err := w.m.Delete(nsKey(w.ns))
 				if err == nil {
@@ -969,6 +1082,7 @@ func TestModelRecreateBehindACachedUID(t *testing.T) {
 		var first types.UID
 		if o, err := w.m.Get(keyOf(w.p)); err == nil {
 			first = o.UID
+			w.pinned = append(w.pinned, first)
 		}
 		w.holder(holderSpec{name: "h1", livePasses: 3, deletionPasses: 2, before: func(n int) func() bool {
 			if n != 2 {

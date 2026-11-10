@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sync/atomic"
@@ -52,6 +53,33 @@ func (s modelServer) call(label string, op func() error) error {
 	return s.a.Call(label, op)
 }
 
+// record adds a call's result to the calling actor's inputs (docs/
+// credential-use-model-reduction.md §10.1).
+func (s modelServer) record(out any, err error) {
+	if s.a != nil {
+		s.a.RecordInput(resultInput{out, errClass(err)})
+	}
+}
+
+// resultInput is a call's result, among an actor's inputs.
+type resultInput struct {
+	out any
+	err string
+}
+
+func errClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, apimodel.ErrCrashed) {
+		return "crashed"
+	}
+	if errors.Is(err, apimodel.ErrLost) {
+		return "lost"
+	}
+	return Classify(err).String()
+}
+
 func (s modelServer) Get(_ context.Context, gk schema.GroupKind, namespace, name string) (*metav1.PartialObjectMetadata, error) {
 	var out *metav1.PartialObjectMetadata
 	err := s.call("get "+gk.Kind+"/"+name, func() error {
@@ -59,6 +87,7 @@ func (s modelServer) Get(_ context.Context, gk schema.GroupKind, namespace, name
 		out, err = s.m.Get(apimodel.Key{GK: gk, Namespace: namespace, Name: name})
 		return err
 	})
+	s.record(out, err)
 	return out, err
 }
 
@@ -69,6 +98,7 @@ func (s modelServer) Patch(_ context.Context, gk schema.GroupKind, namespace, na
 		out, err = s.m.Patch(apimodel.Key{GK: gk, Namespace: namespace, Name: name}, pt, data)
 		return err
 	})
+	s.record(out, err)
 	return out, err
 }
 
@@ -78,6 +108,7 @@ func (s modelServer) List(_ context.Context, gk schema.GroupKind, namespace stri
 		out = s.m.List(gk, namespace)
 		return nil
 	})
+	s.record(out, err)
 	return out, err
 }
 
@@ -85,6 +116,8 @@ func (s modelServer) List(_ context.Context, gk schema.GroupKind, namespace stri
 // loses.
 type process struct {
 	name  string
+	m     *apimodel.Model
+	sched *apimodel.Sched // set when the process joins a schedule
 	cache *apimodel.Cache
 	ver   *verified
 	seen  *firstSight
@@ -101,9 +134,23 @@ func heldOnly(k apimodel.Key, o *metav1.PartialObjectMetadata) bool {
 
 // newProcess starts a process: its caches list the model at now.
 func newProcess(name string, m *apimodel.Model, now time.Time) *process {
-	p := &process{name: name, cache: apimodel.NewCache(m, heldOnly), ver: newVerified(widgetGK), seen: newFirstSight()}
+	p := &process{name: name, m: m, cache: apimodel.NewCache(m, heldOnly), ver: newVerified(widgetGK), seen: newFirstSight()}
 	p.relist(now)
 	return p
+}
+
+// restart is a crash and restart of the process, at now: its memory is reset
+// in place, so that code holding the verified set, first sights or the
+// process itself sees the new process's memory (docs/
+// credential-use-model-reduction.md §3.2), and its caches list the model
+// again.
+func (p *process) restart(now time.Time) {
+	p.ver.resetForTest()
+	p.seen.resetForTest()
+	hook := p.cache.OnAccess
+	p.cache = apimodel.NewCache(p.m, heldOnly)
+	p.cache.OnAccess = hook
+	p.relist(now)
 }
 
 // deliver runs §6.3's handlers for one cache change, delivered at at.
@@ -145,8 +192,19 @@ func (p *process) relist(now time.Time) {
 // may be replaced by a restart, so the views follow a pointer to it.
 type cacheViews struct{ p **process }
 
+// read adds a view's answer to the reading actor's inputs (§10.1).
+func (v cacheViews) read(r any) {
+	if s := (*v.p).sched; s != nil {
+		if a := s.Running(); a != nil {
+			a.RecordInput(r)
+		}
+	}
+}
+
 func (v cacheViews) Protected(id ID) (*metav1.PartialObjectMetadata, bool) {
-	return (*v.p).cache.Get(keyOf(id))
+	o, ok := (*v.p).cache.Get(keyOf(id))
+	v.read(resultInput{o, fmt.Sprint(ok)})
+	return o, ok
 }
 
 func (v cacheViews) HoldersNaming(id ID, namespace string) []*metav1.PartialObjectMetadata {
@@ -156,14 +214,17 @@ func (v cacheViews) HoldersNaming(id ID, namespace string) []*metav1.PartialObje
 			out = append(out, h)
 		}
 	}
+	v.read(resultInput{out, ""})
 	return out
 }
 
 func (v cacheViews) NamespaceDeleting(namespace string) (bool, bool) {
 	o, ok := (*v.p).cache.Get(nsKey(namespace))
 	if !ok {
+		v.read("ns:unknown")
 		return false, false
 	}
+	v.read(fmt.Sprint("ns:", o.DeletionTimestamp != nil))
 	return o.DeletionTimestamp != nil, true
 }
 

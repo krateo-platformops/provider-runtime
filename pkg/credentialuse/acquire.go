@@ -90,6 +90,22 @@ type protocol struct {
 type firstSight struct {
 	mu sync.Mutex
 	at map[types.UID]time.Time
+
+	// onAccess and onRead, nil in production: as verified's.
+	onAccess func()
+	onRead   func(any)
+}
+
+func (f *firstSight) read(r any) {
+	if f.onRead != nil {
+		f.onRead(r)
+	}
+}
+
+func (f *firstSight) access() {
+	if f.onAccess != nil {
+		f.onAccess()
+	}
 }
 
 func newFirstSight() *firstSight { return &firstSight{at: map[types.UID]time.Time{}} }
@@ -97,6 +113,7 @@ func newFirstSight() *firstSight { return &firstSight{at: map[types.UID]time.Tim
 // forget drops uid, once its object is released or gone, so that the map
 // holds only objects being deleted that this process still holds.
 func (f *firstSight) forget(uid types.UID) {
+	f.access()
 	if uid == "" {
 		return
 	}
@@ -107,12 +124,15 @@ func (f *firstSight) forget(uid types.UID) {
 
 // see returns when uid's deletion was first seen, recording now if never.
 func (f *firstSight) see(uid types.UID, now time.Time) time.Time {
+	f.access()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if t, ok := f.at[uid]; ok {
+		f.read(t)
 		return t
 	}
 	f.at[uid] = now
+	f.read(now)
 	return now
 }
 
