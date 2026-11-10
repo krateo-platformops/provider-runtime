@@ -359,6 +359,18 @@ func TestAcquireOutcomes(t *testing.T) {
 			t.Errorf("record = %+v", rec)
 		}
 	})
+	t.Run("an unparseable record and no refs: the record goes", func(t *testing.T) {
+		// An unparseable record names nothing, so it "equals" no refs; it is
+		// rewritten all the same, or it would stay unparseable for good.
+		r := newRig(t)
+		must(r.m.Create(widgetKey("ns", "h"), metav1.ObjectMeta{Annotations: map[string]string{AnnotationRefs: "oops"}}))
+		if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), nil); err != nil {
+			t.Fatal(err)
+		}
+		if ReadRecord(r.get(t, widgetKey("ns", "h"))).Present {
+			t.Error("the unparseable record is still there")
+		}
+	})
 	t.Run("no refs: the record goes, and observed with it", func(t *testing.T) {
 		r := newRig(t)
 		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))

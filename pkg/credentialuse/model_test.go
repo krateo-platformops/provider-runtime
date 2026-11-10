@@ -40,10 +40,20 @@ import (
 // apimodel). CREDENTIALUSE_MODEL_DEEP=1 raises them for a longer run.
 //
 // What the model doesn't cover, by construction (PR 3's and PR 7's stress
-// tests do): there is no enqueue model, so a batch runs when its actor is
-// chosen, not when an event would enqueue it, and neither #52-M1's lost
-// batches nor the index-prune race are reachable; releasers are never
-// faulted; and a batch holds one P, of one kind, in one namespace.
+// tests do):
+//
+//   - There is no enqueue model: a batch runs when its actor is chosen, not
+//     when an event would enqueue it, so neither #52-M1's lost batches nor
+//     the index-prune race are reachable.
+//   - Releasers are never faulted, so a lost R3 response (the patch landed,
+//     the releaser saw an error) isn't searched; its next batch reads P
+//     afresh, which R1 handles like any other state.
+//   - A batch holds one P, of one kind, in one namespace.
+//   - The holder informer's handling of a holder whose UID changed under the
+//     same name (harness_test.go's deliver: a deletion of the old UID, then
+//     the new one) is the harness's; PR 3's informer must do the same.
+//   - firstSight is pruned without a cache, from what R1 and R3 see; that is
+//     memory hygiene only, and no decision depends on it.
 
 const testGrace = 5 * time.Millisecond
 
@@ -487,7 +497,9 @@ func (w *world) deleter(name string, keys ...apimodel.Key) {
 }
 
 // countH1 counts a live pass that starts in needsH1's state, as
-// instrumentation, outside the schedule.
+// instrumentation, outside the schedule. The cache must hold the same
+// incarnation of P as the model: a different or deleted one is §6.5's L6
+// window, which checkHeld counts apart.
 func (w *world) countH1(obj metav1.Object, refs []Ref, p *process) {
 	f, _ := FinalizerName(widgetGK, w.ns)
 	rec := ReadRecord(obj)
@@ -496,10 +508,12 @@ func (w *world) countH1(obj metav1.Object, refs []Ref, p *process) {
 		if !rec.Names(r.ID()) {
 			continue // this pass's A1 adds it, and never skips it
 		}
-		if live, err := w.m.Get(k); err == nil && hasFinalizer(live, f) {
-			continue
+		live, err := w.m.Get(k)
+		if err != nil || hasFinalizer(live, f) {
+			continue // gone (L6's territory, not H1's), or held
 		}
-		if cached, ok := p.cache.Get(k); ok && hasFinalizer(cached, f) && p.ver.hasWritten(cached.UID, w.ns) {
+		cached, ok := p.cache.Get(k)
+		if ok && cached.UID == live.UID && hasFinalizer(cached, f) && p.ver.hasWritten(cached.UID, w.ns) {
 			w.h1++
 		}
 	}

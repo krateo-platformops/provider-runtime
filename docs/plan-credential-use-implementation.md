@@ -301,7 +301,13 @@ call yield to the scheduler, does any production path bypass `server` or
   `deletionTimestamp` part, L5). The Namespace informer's sync gates `Run`
   (§7.5, L3);
 - `listwatch.go`: the ListerWatcher wrapper that records when each list or
-  relist completes, for both a List and a watch-list stream (A20);
+  relist completes, for both a List and a watch-list stream (A20). **An
+  obligation the exact-version skip rule rests on** (the re-review of #59):
+  on a relist, `lastList` is recorded no later than the relisted versions
+  reach the holder handler. A version delivered by a relist, with
+  `lastList` still older, could otherwise start a "run" whose earlier,
+  coalesced versions the handler never saw, and a pass from that version
+  could skip;
 - `server.go`: the client-go `server`, built on the metadata client, the
   dynamic client and the RESTMapper;
 - `releaseloop.go`: a workqueue of (K, N) batches; enqueue from holder
@@ -347,7 +353,8 @@ unreleased and nothing imports it, so neither is visible to anyone.
 - **a forced relist of the holder informer** (the wrapped watch returns a 410)
   resets `recordSince`, and the next passes write (L2). It runs on the
   watch-list path, and again with watch-list refused so that the reflector
-  falls back to List (#52's review);
+  falls back to List (#52's review). It asserts that `lastList` is recorded
+  before the handler sees any relisted version;
 - the write loops' `Start` rescans the protected stores and enqueues every
   (K, N) batch; events seen before `Run` are buffered, deduplicated, and
   drained once it runs (M1 of #52's review);

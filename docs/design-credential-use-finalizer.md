@@ -719,14 +719,15 @@ deletion that began inside the grace, after the GET, was then released over
 as if it had begun after the grace. A test reproduces it, and the model
 checks every release against it.
 
-**That leaves an unrecoverable window, a few milliseconds wide** (L3). Say
+**That leaves an unrecoverable window, about M round trips wide for M R3
+patches in a row** (L3). Say
 the namespace's deletion begins between R2's Namespace GET and R3's patch,
 after the grace, while no user is deleting. R3 then lands first, because
 the namespace controller takes far longer than that to discover and delete
 the holders. P goes, the namespace is terminating so P can't be recreated,
 and the holders wedge exactly as in §1. It needs a Secret deleted in a live
 namespace, then the grace running out with no user deleting, then the
-namespace deleted inside those milliseconds. Nothing in this design closes
+namespace deleted inside that window. Nothing in this design closes
 it. It is stated here, and tested in the model, rather than claimed
 away.
 
@@ -751,8 +752,27 @@ tA < t_obs < t_issue < tW, because the informer delivered the record after
 the API server had stored it. And the record has named P since tA, without
 a break: a break would have been a version of H that the informer delivered
 before *rv*, ending the run. So every releaser that read P before tW fails
-its test, and every releaser that reads after tW sees H. The only things that can still remove the finalizer while H's
-record names P are:
+its test, and every releaser that reads after tW sees H, **as of *rv***. The
+proof says nothing about versions after *rv*: the informer hasn't delivered
+them, and the pass doesn't see them.
+
+**The equal-lag stale pass: an accepted window** (the re-review of #59). Say
+a process's typed cache and its core informer are equally behind, both at
+version V of H, which names P, under a written entry of the process's own.
+Meanwhile another process removes P from H's record, a releaser releases P,
+which then has no user, and the other process puts P back but its A2
+fails. A pass of the first process works from V, which its informer
+delivered, so it skips, and reports P held while P has no finalizer. The
+pass is stale, but consistent with what its process has seen. The window
+lasts until the informer delivers the later versions. The next pass then
+works from the current version, which the run rule makes write. It is the
+same kind of window as L6 (§6.5): bounded by the informer's lag, closed on
+delivery, and harmful only if P is deleted inside it. The other process's
+failed A2 has left it Degraded, and its next pass writes too. A test pins
+both the window and its closing.
+
+The only things that can still remove the finalizer while H's record names
+P are:
 
 - §5's live-namespace release, which H's deletion passes guard against by
   never skipping;
@@ -3889,6 +3909,15 @@ a test or a model schedule before the fix:
 | M3 A crash in the model skipped the actor's next wait, losing the deletion phase: a crash now restarts every actor of the process, and the model asserts each deletion phase ran | §14 (the model) |
 | M4 R2 read the clock for the grace after the list, so a namespace deletion inside the grace, after the Namespace GET, could be released over: the clock is read before R2's first read, and the model requires every namespace deletion before a release to come after the grace | §6.2 R2, §6.4 |
 | Lows: the handler maps keyed by UID; first sights pruned once P is released or gone; the grace kept on the local monotonic clock against wall-clock steps; R3 drops only its own (P, N) entry | §6.2 R3, §6.3, §5 |
+
+**The re-review of revision 17** (#59 at c0d5e61) found nothing High or
+Medium. Its points:
+
+| Item | Resolved in |
+|---|---|
+| The skip proof holds as of the delivered version *rv*; the equal-lag stale pass (a process whose typed cache and informer are equally behind) is an accepted window, like L6, pinned by a test | §6.4 |
+| The exact-version rule rests on PR 3 recording `lastList` no later than a relist's versions reach the holder handler | the plan, PR 3 |
+| L3's width is about M round trips for M R3 patches in a row, not "a few milliseconds" | §6.4 |
 
 ## 18. Open questions for the user
 

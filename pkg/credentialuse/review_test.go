@@ -284,3 +284,53 @@ func TestReleasePrunesFirstSight(t *testing.T) {
 		t.Errorf("after the release, first sights = %v, want none", seen.at)
 	}
 }
+
+// The equal-lag stale pass, the window §6.4 accepts (the re-review of #59).
+// A's typed cache and core informer are equally behind, at the steady-state
+// version V. B removes P, a releaser releases it, and B puts it back with a
+// failed A2. A's pass works from V, which A's informer delivered, so the
+// exact-version rule lets it skip: it reports P held while P has no
+// finalizer. That window lasts until A's informer delivers B's versions;
+// then A's next pass works from the current version and writes.
+func TestStalePassEqualLagWindow(t *testing.T) {
+	m, clk, pa, p := setupSkipHole(t)
+	srv := modelServer{m: m}
+	vA := cacheViews{&pa}
+	ref := []Ref{SecretRef("n", "s")}
+	for range 2 {
+		if _, err := passOn(t, m, srv, vA, pa.ver, clk, ref); err != nil {
+			t.Fatal(err)
+		}
+		drain(pa, clk.Add(time.Millisecond))
+		*clk = clk.Add(2 * time.Millisecond)
+	}
+	stale, _ := m.Get(widgetKey("n", "h")) // V: what A's caches hold
+	vB := newVerified(widgetGK)
+	if _, err := passOn(t, m, srv, noViews{}, vB, clk, nil); err != nil {
+		t.Fatal(err)
+	}
+	rel := newProtocol(srv, noViews{}, newVerified(widgetGK), newFirstSight(), stepClock{clk}, testGrace)
+	if res, err := rel.release(context.Background(), "n", []ID{p}); err != nil || len(res.Released) != 1 {
+		t.Fatalf("release: %+v %v", res, err)
+	}
+	f := lossy{server: srv, fail: func(gk schema.GroupKind, _ string) bool { return gk == secretGroupKind }}
+	_, _ = passOn(t, m, f, noViews{}, vB, clk, ref)
+
+	// Inside the window: the stale pass skips.
+	pr := newProtocol(srv, vA, pa.ver, newFirstSight(), stepClock{clk}, testGrace)
+	a, err := pr.acquire(context.Background(), stale, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Held) != 1 || liveHeld(m, p) {
+		t.Fatalf("expected the accepted window (held reported, P unheld); got held=%v, P held live: %v", a.Held, liveHeld(m, p))
+	}
+
+	// The window closes on delivery: a pass from the current version writes.
+	drain(pa, clk.Add(time.Millisecond))
+	*clk = clk.Add(2 * time.Millisecond)
+	a, err = passOn(t, m, srv, vA, pa.ver, clk, ref)
+	if err != nil || len(a.Held) != 1 || !liveHeld(m, p) {
+		t.Errorf("after delivery: held=%v err=%v, P held live: %v; want it held", a.Held, err, liveHeld(m, p))
+	}
+}

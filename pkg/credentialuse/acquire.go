@@ -257,15 +257,10 @@ func (p *protocol) announce(ctx context.Context, obj metav1.Object, want []ID, a
 		}
 		delete(before, id)
 	}
+	// An unparseable record names nothing (before is empty), so every ref
+	// is new to this pass.
 	for id := range before {
 		removed = append(removed, id)
-	}
-	if rec.Unparseable {
-		// Nothing was known to be named: every ref is new to this pass.
-		for _, id := range want {
-			added[id] = true
-		}
-		addedList = want
 	}
 	p.ver.announced(obj.GetUID(), addedList, removed, at)
 	return added, nil

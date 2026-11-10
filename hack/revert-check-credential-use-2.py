@@ -30,7 +30,7 @@ MUTANTS = [
     ("A1 isn't guarded by the holder's resourceVersion", "acquire.go", [('\t\t"resourceVersion": obj.GetResourceVersion(),\n', "")]),
     ("A1 doesn't set observed for the refs it adds", "acquire.go", [("\tp.ver.announced(obj.GetUID(), addedList, removed, at)\n", "\tp.ver.announced(obj.GetUID(), nil, removed, at)\n")]),
     ("A1 doesn't drop observed for the refs it removes", "acquire.go", [("\tp.ver.announced(obj.GetUID(), addedList, removed, at)\n", "\tp.ver.announced(obj.GetUID(), addedList, nil, at)\n")]),
-    ("an unparseable record's refs aren't treated as added", "acquire.go", [("\tif rec.Unparseable {\n\t\t// Nothing was known to be named", "\tif false && rec.Unparseable {\n\t\t// Nothing was known to be named")]),
+    ("an unparseable record equal to the refs isn't rewritten", "acquire.go", [("\tif !rec.Unparseable && slices.Equal(rec.IDs, want) || !rec.Present && len(want) == 0 {\n", "\tif slices.Equal(rec.IDs, want) || !rec.Present && len(want) == 0 {\n")]),
     ("a new holder connects on a Deleting ref", "acquire.go", [("\t\t\tif !established {\n\t\t\t\treturn fail(fmt.Errorf(\"credential %s", "\t\t\tif false {\n\t\t\t\treturn fail(fmt.Errorf(\"credential %s")]),
     ("an A2 error is ignored", "acquire.go", [("\t\tdefault:\n\t\t\treturn fail(fmt.Errorf(\"credential-use: holding %s: %w\", id, err), class.String())\n", "\t\tdefault:\n\t\t\ta.Held = append(a.Held, r)\n")]),
     ("a ref in another namespace is held", "acquire.go", [("\t\tif r.Namespace != namespace {\n", "\t\tif false && r.Namespace != namespace {\n")]),
@@ -86,19 +86,14 @@ MUTANTS = [
 # equivalent. They run anyway, and are reported as EQUIVALENT only if they
 # survive; a kill is reported as a kill.
 EQUIVALENT = {
-    # Revision 17's exact-version rule (H1 of #59's review) makes these two
-    # guards defence in depth. A skip needs the informer to have delivered
-    # the very version the pass works from, and it delivers every version in
-    # order or relists (lastList bounds t_obs). So the run naming P that the
-    # version belongs to began at a delivery after the A1 that started it:
-    # either this pass's A1, whose response the informer can't deliver before
-    # it lands, or an earlier one. An entry written before that delivery
-    # can't satisfy t_obs < t_issue, and none can be written between this
-    # pass's A1 and its own A2.
+    # Defence in depth under revision 17's exact-version rule. announce sets
+    # observed[h][P] to A1's return synchronously, before the A2 loop, and
+    # canSkip needs t_obs >= observed. So any written entry with
+    # t_obs < t_issue was issued after A1 returned, when the record already
+    # named P; and canSkip also needs A1's response version itself to have
+    # been delivered. The added-ref guard only repeats that.
     "a ref this pass's A1 added may skip A2":
-        "equivalent: t_obs is at least the delivery of the run's first version, after this pass's A1",
-    "an unparseable record's refs aren't treated as added":
-        "equivalent: an unparseable record names nothing, so no delivered run names P until A1 rewrites it",
+        "equivalent: t_obs >= observed = A1's return, so a skip needs a write issued after A1 returned, and A1's response delivered",
 }
 
 
