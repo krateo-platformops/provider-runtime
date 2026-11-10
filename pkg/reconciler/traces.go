@@ -214,11 +214,12 @@ func (r *Reconciler) beginTrace(ctx context.Context, tp trace.TracerProvider, re
 	if read {
 		d = r.traces.decide(tp, req.NamespacedName, managed, time.Now(), r.traceWindow)
 	}
-	spanCtx, span := tracing.StartReconcile(ctx, tp, tracing.Object{Kind: r.objectKind, Name: req.Name, Namespace: req.Namespace}, d, started)
+	obj := tracing.Object{Kind: r.objectKind, Name: req.Name, Namespace: req.Namespace}
+	spanCtx, span := tracing.StartReconcile(ctx, tp, obj, d, started)
 	if tp == nil {
 		return spanCtx, offPass
 	}
-	return spanCtx, &tracePass{tp: tp, span: span, d: d, key: req.NamespacedName, uid: managed.GetUID(), memo: &r.traces}
+	return spanCtx, &tracePass{tp: tp, span: span, d: d, obj: obj, key: req.NamespacedName, uid: managed.GetUID(), memo: &r.traces}
 }
 
 // offPass is every pass's tracing state with tracing off. Every method returns
@@ -232,14 +233,33 @@ type tracePass struct {
 	tp     trace.TracerProvider
 	span   trace.Span
 	d      tracing.Decision
+	obj    tracing.Object // the root's object, for the joined act step
 	key    types.NamespacedName
 	uid    types.UID
 	memo   *traceMemo
 	marked bool // the marker was written, or the write failed, this pass
+	// actJoined: this pass's first act step for a new value has been parented
+	// on the upstream context (D8). Later act steps aren't.
+	actJoined bool
 }
 
 // step opens a child span under the root.
 func (p *tracePass) step(ctx context.Context, name string) (context.Context, trace.Span) {
+	return tracing.StartStep(ctx, p.tp, name)
+}
+
+// actStep opens an act step (create, update or delete). The pass's first
+// act step for a new value is parented on the upstream context, carries the
+// root's object attributes and a link back to the root, and the root links to
+// it (D8); every other is an ordinary child of the root.
+func (p *tracePass) actStep(ctx context.Context, name string) (context.Context, trace.Span) {
+	if p.tp == nil {
+		return tracing.StartStep(ctx, nil, name)
+	}
+	if p.d.Mode == tracing.Parent && !p.actJoined {
+		p.actJoined = true
+		return tracing.StartActStep(ctx, p.tp, p.obj, name, p.d.Remote)
+	}
 	return tracing.StartStep(ctx, p.tp, name)
 }
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -95,6 +96,8 @@ const (
 	tpA = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 	tpB = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01"
 	tpC = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	// tpAUnsampled is tpA with flags 00: the stamper didn't sample it.
+	tpAUnsampled = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00"
 )
 
 // apiOps is an ordered log of the writes the API server got and the provider
@@ -414,19 +417,116 @@ func mode(s sdktrace.ReadOnlySpan) (tracing.Mode, trace.SpanContext) {
 	return tracing.NoParent, trace.SpanContext{}
 }
 
+// wantMode checks a root span against D8: every reconcile is its own trace, so
+// the root never has a parent. With want Parent or Link its first link is to
+// tp; with NoParent it has none. A first-acting pass's root has a second link,
+// to its act in tp's trace, which wantAct checks; every other root has exactly
+// one. (Parent and Link differ only in whether the pass's first act step joins
+// tp's trace: see wantAct.)
 func wantMode(t *testing.T, s sdktrace.ReadOnlySpan, want tracing.Mode, tp string) {
 	t.Helper()
-	got, sc := mode(s)
-	if got != want {
-		t.Fatalf("root mode = %s, want %s", got, want)
+	if s.Parent().IsValid() {
+		t.Fatalf("root has parent %s/%s: under D8 a reconcile root is never a child", s.Parent().TraceID(), s.Parent().SpanID())
 	}
+	links := s.Links()
 	if want == tracing.NoParent {
+		if len(links) != 0 {
+			t.Fatalf("root links = %v, want none", links)
+		}
 		return
 	}
 	r := remote(t, tp)
-	if sc.TraceID() != r.TraceID() || sc.SpanID() != r.SpanID() {
-		t.Errorf("root %s = %s/%s, want %s", got, sc.TraceID(), sc.SpanID(), tp)
+	if len(links) == 0 || len(links) > 2 || links[0].SpanContext.TraceID() != r.TraceID() || links[0].SpanContext.SpanID() != r.SpanID() {
+		t.Fatalf("root links = %v, want one to %s, and at most one to its act", links, tp)
 	}
+	if len(links) == 2 && links[1].SpanContext.TraceID() != r.TraceID() {
+		t.Fatalf("root's second link %v is not to an act in %s's trace", links[1].SpanContext, tp)
+	}
+	if s.SpanContext().TraceID() == r.TraceID() {
+		t.Errorf("root is in the upstream trace %s: it must be its own trace", r.TraceID())
+	}
+}
+
+// actSpans are the ended spans named name (create, update or delete), oldest
+// first.
+func actSpans(rec interface {
+	Ended() []sdktrace.ReadOnlySpan
+}, name string) []sdktrace.ReadOnlySpan {
+	var out []sdktrace.ReadOnlySpan
+	for _, sp := range rec.Ended() {
+		if sp.Name() == name {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+// wantAct checks an act span against D8. With tp set, it is the first act for
+// a new value: its parent is tp's span, in tp's trace; it links back to root,
+// carries root's three k8s.object attributes, and root links to it. With tp
+// empty, it is an ordinary child of root, in root's trace, with no attributes,
+// and root doesn't link to it.
+func wantAct(t *testing.T, act, root sdktrace.ReadOnlySpan, tp string) {
+	t.Helper()
+	rootLinksAct := false
+	for _, l := range root.Links() {
+		if l.SpanContext.SpanID() == act.SpanContext().SpanID() && l.SpanContext.TraceID() == act.SpanContext().TraceID() {
+			rootLinksAct = true
+		}
+	}
+	if tp == "" {
+		if act.Parent().SpanID() != root.SpanContext().SpanID() || act.SpanContext().TraceID() != root.SpanContext().TraceID() {
+			t.Errorf("%s: parent %s in trace %s, want a child of its root %s", act.Name(), act.Parent().SpanID(), act.SpanContext().TraceID(), root.SpanContext().SpanID())
+		}
+		if len(act.Attributes()) != 0 || rootLinksAct {
+			t.Errorf("%s: attributes %v, root links to it %v; want neither on a plain child", act.Name(), act.Attributes(), rootLinksAct)
+		}
+		return
+	}
+	got, want := spanAttrs(act), spanAttrs(root)
+	for _, k := range []attribute.Key{tracing.AttrObjectKind, tracing.AttrObjectName, tracing.AttrObjectNamespace} {
+		if v, ok := got[k]; !ok || v != want[k] {
+			t.Errorf("%s: %s = %q (%v), want the root's %q", act.Name(), k, v, ok, want[k])
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("%s: attributes %v, want exactly the root's three", act.Name(), got)
+	}
+	if !rootLinksAct {
+		t.Errorf("%s: its root's links %v don't include it", act.Name(), root.Links())
+	}
+	r := remote(t, tp)
+	if act.Parent().TraceID() != r.TraceID() || act.Parent().SpanID() != r.SpanID() || act.SpanContext().TraceID() != r.TraceID() {
+		t.Errorf("%s: parent %s/%s, want the upstream %s", act.Name(), act.Parent().TraceID(), act.Parent().SpanID(), tp)
+	}
+	links := act.Links()
+	if len(links) != 1 || links[0].SpanContext.SpanID() != root.SpanContext().SpanID() {
+		t.Errorf("%s: links %v, want one to its reconcile root %s", act.Name(), links, root.SpanContext().SpanID())
+	}
+}
+
+// spanAttrs maps a span's attributes by key, as strings.
+func spanAttrs(s sdktrace.ReadOnlySpan) map[attribute.Key]string {
+	m := map[attribute.Key]string{}
+	for _, kv := range s.Attributes() {
+		m[kv.Key] = kv.Value.String()
+	}
+	return m
+}
+
+// spansIn counts the ended spans in trace tp's trace.
+func spansIn(t *testing.T, rec interface {
+	Ended() []sdktrace.ReadOnlySpan
+}, tp string) int {
+	t.Helper()
+	r := remote(t, tp)
+	n := 0
+	for _, sp := range rec.Ended() {
+		if sp.SpanContext().TraceID() == r.TraceID() {
+			n++
+		}
+	}
+	return n
 }
 
 // events are a span's event names.

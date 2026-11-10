@@ -81,28 +81,18 @@ func TestStartReconcileClusterScoped(t *testing.T) {
 	}
 }
 
-// Each mode gives the span its relation to Remote, and an in-process span in
-// ctx is never the root's parent (design difference 6).
+// D8: every mode gives a new root. Parent and Link carry one link to Remote,
+// NoParent none, and an in-process span in ctx is never the root's parent.
 func TestStartReconcileModes(t *testing.T) {
 	now := time.Now()
 	parent := Decide(ann(meta.AnnotationKeyTraceparent, tpA), "", time.Time{}, now, time.Minute)
 	link := Decide(ann(meta.AnnotationKeyTraceparent, tpA, meta.AnnotationKeyTraceparentContinued, tpA), "", time.Time{}, now, time.Minute)
 
-	cases := map[string]struct {
-		d          Decision
-		wantParent trace.SpanContext
-		wantLink   trace.SpanContext
-	}{
-		"Parent":   {d: parent, wantParent: parent.Remote},
-		"Link":     {d: link, wantLink: link.Remote},
-		"NoParent": {d: Decision{}},
-	}
-	for name, tc := range cases {
+	for name, d := range map[string]Decision{"Parent": parent, "Link": link, "NoParent": {}} {
 		t.Run(name, func(t *testing.T) {
 			tp, rec := recorder(t)
-			// A wrapper's span in the incoming context.
 			ctx, wrapper := tp.Tracer("wrapper").Start(context.Background(), "wrapper")
-			_, span := StartReconcile(ctx, tp, obj, tc.d, now)
+			_, span := StartReconcile(ctx, tp, obj, d, now)
 			span.End()
 			wrapper.End()
 
@@ -115,30 +105,80 @@ func TestStartReconcileModes(t *testing.T) {
 			if s == nil {
 				t.Fatal("no reconcile span")
 			}
-			if got := s.Parent(); got.SpanID() != tc.wantParent.SpanID() || got.TraceID() != tc.wantParent.TraceID() {
-				t.Errorf("parent = %s/%s, want %s/%s", got.TraceID(), got.SpanID(), tc.wantParent.TraceID(), tc.wantParent.SpanID())
-			}
-			if tc.wantParent.IsValid() && !s.Parent().IsRemote() {
-				t.Error("the parent should be the remote annotation context")
-			}
-			if tc.wantParent.IsValid() && s.SpanContext().TraceID() != tc.wantParent.TraceID() {
-				t.Error("a Parent span must be in its parent's trace")
+			if s.Parent().IsValid() {
+				t.Errorf("root has a parent %s: every reconcile is its own trace", s.Parent().SpanID())
 			}
 			links := s.Links()
-			switch {
-			case tc.wantLink.IsValid():
-				if len(links) != 1 || links[0].SpanContext.SpanID() != tc.wantLink.SpanID() || links[0].SpanContext.TraceID() != tc.wantLink.TraceID() {
-					t.Errorf("links = %v, want one to %s", links, tc.wantLink.SpanID())
-				}
-			default:
+			if d.Mode == NoParent {
 				if len(links) != 0 {
 					t.Errorf("links = %v, want none", links)
 				}
+			} else {
+				if len(links) != 1 || links[0].SpanContext.SpanID() != d.Remote.SpanID() || links[0].SpanContext.TraceID() != d.Remote.TraceID() {
+					t.Errorf("links = %v, want one to the remote", links)
+				}
+				if s.SpanContext().TraceID() == d.Remote.TraceID() {
+					t.Error("the root joined the upstream trace")
+				}
 			}
 			if s.SpanContext().TraceID() == wrapper.SpanContext().TraceID() {
-				t.Error("the reconcile span took the in-process wrapper span as its parent")
+				t.Error("the root took the in-process wrapper span as its parent")
 			}
 		})
+	}
+}
+
+// StartActStep with a valid upstream is parented on it, in its trace, with one
+// link back to the root in ctx and the root's three object attributes, and the
+// root links to it. With an invalid upstream it is an ordinary child of the
+// root, and the root gains no link; with tp nil it starts nothing.
+func TestStartActStep(t *testing.T) {
+	tp, rec := recorder(t)
+	d := Decide(ann(meta.AnnotationKeyTraceparent, tpA), "", time.Time{}, time.Now(), time.Minute)
+	ctx, root := StartReconcile(context.Background(), tp, obj, d, time.Now())
+
+	_, joined := StartActStep(ctx, tp, obj, SpanUpdate, d.Remote)
+	joined.End()
+	_, plain := StartActStep(ctx, tp, obj, SpanUpdate, trace.SpanContext{})
+	plain.End()
+	root.End()
+
+	var acts []sdktrace.ReadOnlySpan
+	var r sdktrace.ReadOnlySpan
+	for _, e := range rec.Ended() {
+		switch e.Name() {
+		case SpanUpdate:
+			acts = append(acts, e)
+		case SpanReconcile:
+			r = e
+		}
+	}
+	if len(acts) != 2 || r == nil {
+		t.Fatalf("want 2 act spans and a root, got %d and %v", len(acts), r != nil)
+	}
+	j, p := acts[0], acts[1]
+	if j.Parent().SpanID() != d.Remote.SpanID() || j.SpanContext().TraceID() != d.Remote.TraceID() {
+		t.Errorf("joined act: parent %s in trace %s, want the upstream", j.Parent().SpanID(), j.SpanContext().TraceID())
+	}
+	if l := j.Links(); len(l) != 1 || l[0].SpanContext.SpanID() != root.SpanContext().SpanID() {
+		t.Errorf("joined act links = %v, want one to the root", l)
+	}
+	if j.SpanKind() != trace.SpanKindInternal {
+		t.Errorf("joined act kind = %s, want Internal", j.SpanKind())
+	}
+	if got, want := attrs(j), attrs(r); len(got) != 3 || got[AttrObjectKind] != want[AttrObjectKind] || got[AttrObjectName] != want[AttrObjectName] || got[AttrObjectNamespace] != want[AttrObjectNamespace] {
+		t.Errorf("joined act attributes = %v, want the root's three %v", got, want)
+	}
+	if p.Parent().SpanID() != root.SpanContext().SpanID() || len(p.Links()) != 0 || len(p.Attributes()) != 0 {
+		t.Errorf("plain act: parent %s, links %v, attributes %v; want a plain child of the root", p.Parent().SpanID(), p.Links(), p.Attributes())
+	}
+	if l := r.Links(); len(l) != 2 || l[0].SpanContext.SpanID() != d.Remote.SpanID() || l[1].SpanContext.SpanID() != j.SpanContext().SpanID() || l[1].SpanContext.TraceID() != j.SpanContext().TraceID() {
+		t.Errorf("root links = %v, want the upstream, then the joined act", l)
+	}
+
+	offCtx, off := StartActStep(context.Background(), nil, obj, SpanUpdate, d.Remote)
+	if off.SpanContext().IsValid() || HasActiveSpan(offCtx) {
+		t.Error("StartActStep with tp nil must start nothing")
 	}
 }
 
@@ -197,5 +237,71 @@ func TestStartStep(t *testing.T) {
 	offCtx, off := StartStep(context.Background(), nil, SpanObserve)
 	if off.SpanContext().IsValid() || HasActiveSpan(offCtx) {
 		t.Error("StartStep with tp nil must start nothing")
+	}
+}
+
+// attrs maps a span's attributes by key, as strings.
+func attrs(s sdktrace.ReadOnlySpan) map[attribute.Key]string {
+	m := map[attribute.Key]string{}
+	for _, kv := range s.Attributes() {
+		m[kv.Key] = kv.Value.String()
+	}
+	return m
+}
+
+// Under the default sampler, ParentBased(AlwaysSample()), an unsampled
+// upstream (flags 00) leaves the joined act unrecorded: the root is recorded
+// and sampled with its link to the upstream, the act and its link back aren't,
+// and the root gains no link to an act that is never exported. Under
+// AlwaysSample the act is recorded, and both links are there.
+func TestStartActStepUnderAnUnsampledUpstream(t *testing.T) {
+	for name, tc := range map[string]struct {
+		opts     []sdktrace.TracerProviderOption
+		recorded bool
+	}{
+		"DefaultParentBased": {recorded: false},
+		"AlwaysSample":       {opts: []sdktrace.TracerProviderOption{sdktrace.WithSampler(sdktrace.AlwaysSample())}, recorded: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(append([]sdktrace.TracerProviderOption{sdktrace.WithSpanProcessor(rec)}, tc.opts...)...)
+			t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+			d := Decide(ann(meta.AnnotationKeyTraceparent, tpAUnsampled), "", time.Time{}, time.Now(), time.Minute)
+			if d.Mode != Parent || d.Remote.IsSampled() {
+				t.Fatalf("decision %v, sampled %v: want Parent on an unsampled remote", d.Mode, d.Remote.IsSampled())
+			}
+			ctx, root := StartReconcile(context.Background(), tp, obj, d, time.Now())
+			_, act := StartActStep(ctx, tp, obj, SpanUpdate, d.Remote)
+			if act.IsRecording() != tc.recorded || act.SpanContext().IsSampled() != tc.recorded {
+				t.Errorf("act recording %v, sampled %v; want %v", act.IsRecording(), act.SpanContext().IsSampled(), tc.recorded)
+			}
+			act.End()
+			root.End()
+
+			var r sdktrace.ReadOnlySpan
+			var acts int
+			for _, e := range rec.Ended() {
+				switch e.Name() {
+				case SpanReconcile:
+					r = e
+				case SpanUpdate:
+					acts++
+				}
+			}
+			if r == nil || !r.SpanContext().IsSampled() {
+				t.Fatal("the root must be recorded and sampled")
+			}
+			want := 1
+			if tc.recorded {
+				want = 2
+			}
+			if acts != want-1 {
+				t.Errorf("%d act spans recorded, want %d", acts, want-1)
+			}
+			l := r.Links()
+			if len(l) != want || l[0].SpanContext.SpanID() != d.Remote.SpanID() {
+				t.Errorf("root links = %v, want the upstream%s", l, map[bool]string{true: " and the act", false: " only"}[tc.recorded])
+			}
+		})
 	}
 }

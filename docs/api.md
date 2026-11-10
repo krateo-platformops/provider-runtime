@@ -4,7 +4,7 @@ title: provider-runtime — api
 description: The exported Go API surface of provider-runtime, package by package, plus the OTLP metric instruments it emits.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-api, reconciler, metrics]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
 # API
@@ -82,14 +82,15 @@ The API-only half of reconcile tracing ([design-tracing](./design-tracing.md)): 
 
 - `SetTracerProvider(tp)` / `TracerProvider()` — the provider the reconcilers use; `telemetry.Setup` sets it with tracing on, and nil means off. A provider with its own SDK pipeline sets it too. `ScopeName` is the instrumentation scope.
 - `Decide(annotations, remembered, firstSeen, now, window) Decision` — the parent-or-link rule of design §6.2, pure; it allocates nothing when the object has no `krateo.io/traceparent`. `Decision` holds `Mode` (`NoParent`, `Parent`, `Link`), `Remote` (the annotation's span context), `Marker` and `WriteMarker` (`Never`, `BeforeFirstAction`, `Now`). `Canonical(sc)` is a span context's traceparent as the marker records it.
-- `StartReconcile(ctx, tp, obj Object, d Decision, start) (ctx, trace.Span)` — the `reconcile` root span: `SpanKindServer`, exactly `k8s.object.kind`, `k8s.object.name` and `k8s.object.namespace`, and never an in-process parent. With `tp` nil it starts nothing and carries `d.Remote` for `Inject` only. `StartStep(ctx, tp, name)` opens a child (`SpanConnect`, `SpanObserve`, `SpanCreate`, `SpanUpdate`, `SpanDelete`).
+- `StartReconcile(ctx, tp, obj Object, d Decision, start) (ctx, trace.Span)` — the `reconcile` root span: `SpanKindServer`, exactly `k8s.object.kind`, `k8s.object.name` and `k8s.object.namespace`. It's always a new root, never a child of `d.Remote` or of an in-process span (design §13, D8); in modes `Parent` and `Link` it carries one link to `d.Remote`, plus one to its act on the first acting pass (`StartActStep`). With `tp` nil it starts nothing and carries `d.Remote` for `Inject` only. `StartStep(ctx, tp, name)` opens a child (`SpanConnect`, `SpanObserve`, `SpanCreate`, `SpanUpdate`, `SpanDelete`).
+- Unreleased (v1.14.1): `StartActStep(ctx, tp, obj Object, step, upstream) (ctx, trace.Span)` — the first act step for a new value: an Internal span whose parent is `upstream`, so it's in the upstream trace, with one link back to the root in `ctx` and `obj`'s three `k8s.object.*` attributes. The root gains a link to it when it's sampled. With `upstream` invalid it's `StartStep`; with `tp` nil it starts nothing.
 - `Inject(ctx, obj)` / `InjectAnnotations(ctx, annotations)` — write `krateo.io/traceparent`, and `krateo.io/tracestate` or its removal, onto an object another Krateo controller reconciles. They overwrite, and they never write the marker. The rules for callers are in the package documentation and in [usage](./usage.md).
 - `InjectHeader(ctx, h)` / `HasActiveSpan(ctx)` — the HTTP side: the active span only, never overwriting, never baggage.
 - `RecordError(span, err)`, `Truncate(s)` — the exception event and Error status, with the text cut to `MaxErrorText` (4 KiB).
 - Names: `EventRateLimitDeferred`, `EventReconcilePaused`, `EventConflict`, `EventMarkerFailed`; the `Attr…` keys; `Step` with `StepConnect`, `StepObserve`, `StepHandshake`, `StepFinalizer`, `StepCreatePending`, `StepCreate`, `StepLateInit`, `StepMarker`, listed by `Steps()`.
 - `pkg/meta` gains `AnnotationKeyTraceparent` and `AnnotationKeyTracestate`, the same keys as unstructured-runtime's.
 
-Unreleased, in `pkg/reconciler`: with a TracerProvider (`tracing.TracerProvider()`, or `WithTracerProvider`), `Reconcile` opens the root span after its Get, start-stamped at the top of `Reconcile`, and binds its Logger to the span's context. It opens the `connect`, `observe`, `create`, `update` and `delete` children around the provider's calls. It records the events and the status of design §7. It writes `krateo.io/traceparent-continued` with an optimistic lock, just before the pass's first Create, Update or Delete, or when the window (`WithTraceContinueWindow`, default 10 minutes) closes, and requeues before acting on a conflict. With tracing off it starts nothing, writes nothing and keeps no memo.
+Unreleased, in `pkg/reconciler`: with a TracerProvider (`tracing.TracerProvider()`, or `WithTracerProvider`), `Reconcile` opens the root span after its Get, start-stamped at the top of `Reconcile`, and binds its Logger to the span's context. It opens the `connect`, `observe`, `create`, `update` and `delete` children around the provider's calls. It records the events and the status of design §7. It writes `krateo.io/traceparent-continued` with an optimistic lock, just before the pass's first Create, Update or Delete, or when the window (`WithTraceContinueWindow`, default 10 minutes) closes, and requeues before acting on a conflict. From v1.14.1 (D8) every root is its own trace, linked to the object's `krateo.io/traceparent`; only the first act step for a new value is that value's child. With tracing off it starts nothing, writes nothing and keeps no memo.
 
 ## `pkg/scaletozero` (unreleased)
 

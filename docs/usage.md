@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
 # Usage
@@ -259,13 +259,15 @@ For Krateo, that's core-provider#310.
     that has ended.
   - *What the reconciler does with it.* With a TracerProvider, every
     `Reconcile` is a `reconcile` span with `connect`, `observe`, `create`,
-    `update` and `delete` children. A new `krateo.io/traceparent` on your
-    managed resource is the parent of passes until the first one that calls
-    your `Create`, `Update` or `Delete`, or until the window closes
+    `update` and `delete` children, in a trace of its own that links to your
+    managed resource's `krateo.io/traceparent`. For a new value, the first
+    `create`, `update` or `delete` span is the value's child, so your
+    `Create`, `Update` or `Delete`, and what it does with its `ctx`, joins the
+    upstream trace. Later acts don't. If no pass acts within the window
     (`reconciler.WithTraceContinueWindow`, default 10 minutes; raise it if you
-    poll much more slowly). Later passes link to it. The reconciler records
-    that in `krateo.io/traceparent-continued`, which needs `patch` on your
-    kind. Work your Observe does by itself doesn't count as acting. Add your
+    poll much more slowly), the value is continued without joining. The
+    reconciler records that in `krateo.io/traceparent-continued`, which needs
+    `patch` on your kind. Work your Observe does by itself never joins. Add your
     own attributes to the child spans with
     `trace.SpanFromContext(ctx).SetAttributes(...)`.
 - **Rate limiting** — `ratelimiter.NewController()` for per-controller

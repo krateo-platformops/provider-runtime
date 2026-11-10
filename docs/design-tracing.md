@@ -1,20 +1,22 @@
 ---
 type: Architecture
 title: provider-runtime — trace every reconcile
-description: Design, not built, for OpenTelemetry tracing in provider-runtime. telemetry.Setup gains a TracerProvider, the reconciler opens a reconcile root span with connect, observe, create, update and delete children, and the krateo.io/traceparent contract gets a parent-or-link rule for long-lived objects. Trace context is propagated on outbound HTTP calls and onto Kubernetes objects that other Krateo controllers reconcile.
+description: Design, built in v1.14.0 with D8 in v1.14.1, for OpenTelemetry tracing in provider-runtime. telemetry.Setup gains a TracerProvider, the reconciler opens a reconcile root span with connect, observe, create, update and delete children, and the krateo.io/traceparent contract gets a parent-or-link rule for long-lived objects. Trace context is propagated on outbound HTTP calls and onto Kubernetes objects that other Krateo controllers reconcile.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, tracing, opentelemetry, reconciler, propagation]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-10T00:00:00Z
 ---
 
 # Trace every reconcile
 
-**Status:** design, for review. Nothing is built. It builds on
-[#58](https://github.com/krateo-platformops/provider-runtime/pull/58)
+**Status:** built in v1.14.0 (#64, #65, #66); D8 changes it in v1.14.1. It
+builds on [#58](https://github.com/krateo-platformops/provider-runtime/pull/58)
 (`logging.ContextLogger`, `logging.WithContext`). That's merged, and it
 shipped in v1.13.0 (`3ab2917`). The user decided its open questions on
-2026-11-09, and §13 records the decisions (D1 to D7). D6 came from the review
-on #60, and D7, the OTLP endpoint, from core-provider's review of it.
+2026-11-09, and §13 records the decisions (D1 to D8). D6 came from the review
+on #60, and D7, the OTLP endpoint, from core-provider's review of it. D8, on
+2026-11-10, came from krateo-057's first day under v1.14.0: every reconcile is
+its own trace, and only the first act for a new value joins the upstream.
 
 **The goal** (the user's decision). Every provider built on provider-runtime
 (git-provider, incident-provider, alert-provider and the others) gets
@@ -89,9 +91,9 @@ Where provider-runtime differs on purpose:
    keeps that rule and applies it to every key it adds.
 2. **A long-lived object doesn't grow one trace forever.** UR extracts the
    annotation on every reconcile and makes it the parent each time
-   (`tracing.go:68-76`). provider-runtime makes a new value the parent until the
-   first pass that acts on it, or until a window closes, and links to it after
-   that (§6.2, D6).
+   (`tracing.go:68-76`). In provider-runtime every reconcile is its own trace,
+   linked to the annotation's value. Only the first act step for a new value,
+   the `create`, `update` or `delete` span, is its child (§6.2, D6 and D8).
 3. **A deferral is not an error.** UR's `deferPass` returns a `DeferredError`
    (`worker.go:843,863`), which `RecordSpanError` marks as Error. provider-runtime's
    deferral returns a nil error (`pkg/reconciler/ratelimit.go:180-199`), and its
@@ -108,10 +110,10 @@ Where provider-runtime differs on purpose:
    baggage carries a portal session (observability's
    `ops/audit-reconcile-join/README.md`, the `session_id` column), and it
    shouldn't reach a third-party API.
-6. **The root never takes an in-process parent.** If something wrapped the
-   reconciler in its own span, the `reconcile` span would still be a root, or a
-   child of the annotation's remote parent. That keeps the parent-or-link rule
-   exact (§6.2) and the audit join's assumption true (§11.3).
+6. **The root never takes a parent.** If something wrapped the reconciler in
+   its own span, the `reconcile` span would still be a root. It's never a child
+   of the annotation's remote span either (D8). That keeps the parent-or-link
+   rule exact (§6.2) and the audit join's assumption true (§11.3).
 
 **Changes to code that exists today.** Besides the new code, four things
 behave differently. Each goes in `docs/log.md` when it ships; the entry is
@@ -475,6 +477,12 @@ named in lower case:
 - **No attributes.** They inherit the root's object by being its children.
   A provider can add its own with `trace.SpanFromContext(ctx).SetAttributes(...)`
   in its method (§11.3).
+- **The exception: the joined act (D8).** The first act step for a new value
+  isn't the root's child: its parent is the upstream span (§6.2). Its root is
+  in another trace, and under `sample-5pct` usually isn't stored. So it carries
+  the root's three attributes itself: `k8s.object.kind`, `k8s.object.name` and
+  `k8s.object.namespace`. The root's own contract, exactly those three, is
+  unchanged.
 - **Errors.** A child is marked Error (`RecordError`, `SetStatus`) exactly
   when its call returns a non-nil error, a conflict included. What that
   means for the pass is decided on the root (§7).
@@ -573,7 +581,9 @@ value is *continued* when M, or `remembered`, has R's trace ID and span ID.
 3. R isn't continued and `window` is 0: **Parent**, with `WriteMarker` set to
    `Now`. That's the earlier first-sight rule, kept as an option.
 4. R isn't continued, and `firstSeen` is zero or `now - firstSeen < window`:
-   **Parent.** The root's parent is R (`trace.ContextWithRemoteSpanContext`),
+   **Parent.** The root is a new root with one link to R, as in Link mode.
+   What differs is that the pass's first act step is R's child, and the root
+   links to it too (below).
    `Marker` is `canonical(R)`, and `WriteMarker` is `BeforeFirstAction`.
 5. R isn't continued, and `now - firstSeen >= window`: **Link,** with
    `WriteMarker` set to `Now` (decision D6, §13).
@@ -582,18 +592,50 @@ The reconciler computes the Decision before it starts the span, from its memo
 and `Decide`, and passes it to `StartReconcile` (§3.2). So the mode a test
 asserts is the mode the span gets.
 
-**Which pass is the child.** The pass that **first acts** on a new value is
-its child, not the pass that first sees it (D6).
+**Every reconcile is its own trace (D8).** In every mode, `StartReconcile`
+starts the root with `trace.WithNewRoot()`. When R is valid (Parent and Link),
+the root carries one link, `trace.Link{SpanContext: R}`, plus one to its act on
+the first acting pass; with NoParent it has none. The root is never R's child.
+In a Parent pass, the first act step is started by `tracing.StartActStep`:
+- its parent is R (`trace.ContextWithRemoteSpanContext`), so it's in R's
+  trace;
+- it carries one link back to its `reconcile` root;
+- it carries the root's three `k8s.object.*` attributes (§4.4);
+- the root adds a link to it (`Span.AddLink`), so the link goes both ways. The
+  root adds it only when the act is sampled: an act that isn't is never
+  exported (§8);
+- it's `SpanKindInternal`, named `create`, `update` or `delete`, as before.
+
+What the provider does under it with the method's `ctx` (its own spans,
+httpsignal's `traceparent`) is in R's trace too. Every other span of the pass,
+`connect`, `observe` and any later act step, is a child of the root. So a
+pass's spans are in two traces only when the pass is the first to act on a new
+value:
+
+```
+new trace                                 R's trace (krateo.io/traceparent)
+reconcile  Server                         R  (the stamper's span, remote)
+  links -> R, -> update                   `-- update  Internal, link -> reconcile
+|-- connect  Internal                         k8s.object.kind/name/namespace
+`-- observe  Internal                         `-- what the provider's Update does with ctx
+```
+
+Every other pass is one trace: the root, with exactly one link to R when R is
+valid, and all its children under it.
+
+**Which span is the child.** The first act step of the pass that **first
+acts** on a new value is R's child: not the pass that first sees the value
+(D6), and not the pass's root (D8).
 - **What "acts" means.** A pass acts when the runtime calls the provider's
   `Create`, `Update` or `Delete`. That's the runtime's calls only: it can't see
   what a provider does inside Observe. alert-provider starts incident firings
   from Observe (`internal/controllers/alert/alert.go:442-473`), and those don't
-  count. Observe-time work like that joins the upstream trace for as long as
-  the window keeps passes Parent, and no longer.
-- **A pass that only connects and observes** stays a child of R and writes
-  nothing, so the next pass is still a Parent pass. That's what lets a change
-  that arrives in two writes, the context first and the trigger after, put the
-  work in the context's trace (§11.3, step 5).
+  count. Under D8, Observe-time work like that never joins the upstream
+  trace: it's in the pass's own root, which links to R.
+- **A pass that only connects and observes** is its own trace, linked to R,
+  and writes nothing, so the next pass is still a Parent pass. That's what lets
+  a change that arrives in two writes, the context first and the trigger after,
+  put the work in the context's trace (§11.3, step 5).
 
 Only a new traceparent value makes a Parent pass (decision D3, §13). The
 marker is keyed on the value, not on whether an annotation is present. So when
@@ -649,7 +691,7 @@ if the object has changed since.
   alert-provider's reanalysis `Status().Patch`es new scripts between
   incident-provider's Get and its marker patch. incident-provider's
   `Status().Update(managed)` would then silently overwrite them. A pass that
-  read a stale cache would also parent and act a second time.
+  read a stale cache would also act a second time, with its act in R's trace.
 - **On a conflict:** `rateLimitedRequeue()`, before the pass acts, with
   `k8s.conflict` and step `marker`. The memo entry stays as it was, so the next
   pass reads the object afresh and, if the value is still new, is a Parent pass
@@ -657,8 +699,9 @@ if the object has changed since.
 
 **When each write happens.**
 - **`BeforeFirstAction`:** just before the first `Create`, `Update` or
-  `Delete` call, after that call's `gate` lets it through, and before its child
-  span starts. A pass the governor defers doesn't act and doesn't write.
+  `Delete` call, after that call's `gate` lets it through, and before its act
+  step, R's child, starts. A pass the governor defers doesn't act and doesn't
+  write.
   - **On the create path,** it's a separate locked patch, just before the
     `krateo.io/external-create-pending` Update (`reconciler.go:1189-1200`).
     That's one more write per Parent create. Folding the marker into the
@@ -673,12 +716,12 @@ if the object has changed since.
   would be the runtime acting on it.
 
 Writing before the acting call bounds the trace. If the call fails and the
-pass is retried with backoff, the retries link and don't parent. With the
-marker written at the end, a permanently failing object would parent every
-retry onto the upstream trace, forever.
+pass is retried with backoff, the retries link, and their acts are children of
+their own roots. With the marker written at the end, a permanently failing
+object would put every retry's act into the upstream trace, forever.
 
-**A crash between the marker write and the act** loses the parent. The next
-pass sees the marker, links, and does the work in a linked root. That's the
+**A crash between the marker write and the act** loses the join. The next
+pass sees the marker, links, and does the work in its own trace. That's the
 accepted cost of writing first, and it only happens when the process dies
 inside that gap.
 
@@ -719,9 +762,9 @@ map keyed by `types.NamespacedName` and holding the object's UID:
   it records `trace.marker_failed`, logs once per object, and acts without
   the marker. On the create path, it writes create-pending without the marker
   and creates. Later passes in this process link through `remembered`.
-  Without it, an object whose marker can never be written would parent every
-  pass. After a restart, such an object parents again until its next acting
-  pass or the end of the window.
+  Without it, an object whose marker can never be written would put every
+  pass's act into the upstream trace. After a restart, such an object's next
+  act joins again, once, unless the window closes first.
 - **Dropped** on NotFound, when the finalizer is removed, when the annotation
   goes away or stops parsing, and as above.
 - **Locking.** One `sync.Mutex` per Reconciler guards the map. It's held only
@@ -734,9 +777,11 @@ map keyed by `types.NamespacedName` and holding the object's UID:
   entries last while the object lives. NotFound and finalizer removal drop
   them, so the memo never outgrows the set of live annotated objects.
 
-**The window: when a new value stops parenting without an action.** A value
-that never leads to an action would otherwise make every pass a Parent pass,
-forever.
+**The window: the fallback that writes the marker when no pass acts.** Under
+D8 it parents nothing: the passes inside it are their own traces. It exists so
+that a value that never leads to an action is continued anyway. Without it,
+every pass would stay a Parent pass, forever, and an act much later, for an
+unrelated reason, would join a stale trace.
 - **How it's measured.** From the memo's `firstSeen`, this process's first
   sight of the value, by the monotonic clock. It closes when
   `now - firstSeen >= window`. The next pass then links and writes the marker
@@ -760,10 +805,13 @@ Why 10 minutes:
 
 It's an option, not a constant, because a provider polling much more slowly
 (say every 30 minutes) needs a window longer than its poll. Only then does a
-change that waits for the next poll still parent.
+change that waits for the next poll still join.
 
-**How many passes join one upstream trace,** for each new value, before the
-window closes. These are upper bounds, from arithmetic:
+**What joins one upstream trace,** for each new value: one act step, the
+first, and what runs under it. The passes inside the window don't (D8). In
+v1.14.0, under D6 as first built, every pass inside the window was R's child.
+These were the upper bounds then, from arithmetic, and they're what D8
+removes:
 
 | What the passes are | How many in 10 minutes | Why |
 |---|---|---|
@@ -771,35 +819,36 @@ window closes. These are upper bounds, from arithmetic:
 | Failing retries | about 15 | backoff 1, 2, 4 … 32 s, then 60 s each |
 | At-capacity deferrals | about 40 | each requeues after a random 1 s to `RecoveryInterval` (default 30 s), with no backoff (`pkg/ratelimit/governor.go:21,72-75,554`) |
 
-Each deferred pass is a Parent root with a `ratelimit.deferred` event and no
-children. The deferral row is the bound that matters.
+Under D8, each deferred pass is its own trace: a root with one link to R, a
+`ratelimit.deferred` event and no children.
 
 **Across a restart before the first action.** The first-sight time is in
 memory, so a restart, a failover or a new replica starts the window again from
-its own first sight. At worst, a pass after the restart still parents. That's
-bounded by one more window per restart, and nothing grows without bound. The
-marker is the durable part: once a pass has acted, every process links.
+its own first sight. At worst, an act after the restart still joins: one act
+step per restart, and nothing grows without bound. The marker is the durable
+part: once a pass has acted, every process links.
 
 **What the rule guarantees, and what it doesn't.**
-- **What it doesn't guarantee.** It raises the chance that the pass that does
+- **What it doesn't guarantee.** It raises the chance that the act that does
   the work is the child of the context that caused it. It doesn't make it
   certain:
   - Another pass may act first, for an unrelated reason.
   - The window may close first.
   - A throttled hold lasts until the server's deadline, cut to `MaxHold`
     (default 1 hour, `governor.go:27`). That can outlast the window, so the
-    acting pass after a long hold links.
-  - A crash between the write and the act loses the parent (above).
+    act after a long hold isn't R's child.
+  - A crash between the write and the act loses the join (above).
 
-  A pass that misses still links to the context, so a reader can get from it
-  to the upstream trace.
-- **Bounded growth.** For each new value, the trace gains at most the passes
-  in the table, plus one acting pass, plus one more window per restart. It's
+  Every pass's root links to the context, so a reader can get from it to the
+  upstream trace.
+- **Bounded growth.** For each new value, the upstream trace gains one act
+  step and what runs under it, plus one more per restart while the marker
+  isn't on the object. Polls, retries and deferrals add nothing to it. It's
   never the open-ended growth of parenting every pass (UR today).
 - **D3 still holds.** Only a new traceparent value opens a window and makes
   Parent passes. A generation change, a spec edit or a deletion with the same
-  value is a Link pass, as decided. D6 changes only which pass consumes a new
-  value, not what counts as new.
+  value is a Link pass, as decided. D6 and D8 change only which span consumes
+  a new value, not what counts as new.
 
 **Why the marker survives restarts.** The marker lives on the object, so a
 restart, a leader failover or a new replica decides exactly as the old process
@@ -828,15 +877,23 @@ dropped.
 - **Writes.** At most one marker write per new traceparent value, only on
   objects that carry `krateo.io/traceparent`, and only with tracing on. A
   value that never leads to an action costs its write when the window closes.
-  The composition-dynamic-controller stamps a child only when its release
-  really changes: the per-reconcile traceparent is stripped before the release
-  digest
-  (`go/composition-dynamic-controller/internal/tools/processor/processor.go:39-44,92-117`).
-  So stamps arrive as often as upstream changes do.
-- **The passes inside the window.** Up to the bounds in §6.2's table join the
-  upstream trace for each new value. The at-capacity deferrals are the
-  largest. For an object that acts on its first pass, the usual case for a
-  composition's child, it's none.
+  - **How often the composition-dynamic-controller stamps.** It strips the
+    per-reconcile traceparent from the manifest before computing the release
+    digest, so a composition reconcile with no content change doesn't upgrade
+    the release
+    (`go/composition-dynamic-controller/internal/tools/processor/processor.go:39-44,92-117`).
+    The objects themselves keep it, though: each apply stamps every object in
+    the release with that reconcile's traceparent, whether the object changed
+    or not. On krateo-057, observability saw every object's value come from
+    the 07:36:11Z roll (a cluster fact, as observability reports it).
+  - **So every chart upgrade gives every child a new value.** Each child then
+    costs one marker write and one extra reconcile, within the window.
+- **What joins the upstream trace.** One act step per new value, and only if a
+  pass acts on it (D8). Observe-only polls, failing retries and deferrals
+  inside the window don't. Under D6 as v1.14.0 built it, they did, and on
+  krateo-057 that was the cost that mattered: each chart upgrade put about 260
+  observe-only reconciles into the upgrade's trace, which the tail sampler
+  kept whole (§13, D8).
 - **One extra reconcile per write.** The patch changes the resourceVersion,
   and a watch event follows. The extra pass sees the marker match and runs in
   Link mode. That's one more Observe against the external API. A provider whose
@@ -845,12 +902,12 @@ dropped.
 - **Turning tracing on is a burst.** No marker is written while tracing is
   off. So when it turns on, every annotated object's existing value is new at
   once. For each object:
-  - up to a window of Parent passes, onto an upstream trace that may be days
-    old, such as the composition controller's last apply;
-  - then one marker write and one extra reconcile.
+  - if a pass acts within the window, its act step joins an upstream trace
+    that may be days old, such as the composition controller's last apply;
+  - one marker write and one extra reconcile.
 
   All of it lands across the fleet within the first window after the rollout.
-  The backend shows those spans as late additions to old traces. The
+  The backend shows those act steps as late additions to old traces. The
   adoption steps (§11.5) say to expect it.
 - **The platform's "nothing stamped" rule.** The audit join was built so that
   nothing is stamped on the user's object (observability's
@@ -911,9 +968,10 @@ The rules on the caller, in its doc comment:
 - **Stamp before the change that triggers the work.** When the context and
   the change that makes the downstream controller act are two writes, write
   the annotation **first**. The downstream pass that sees only the annotation
-  doesn't act, so it stays a child and writes no marker (§6.2). The pass that
-  sees the change acts and is a child too. In the other order, the acting pass
-  sees the old value, which may already be continued, so it links. alert-provider's
+  doesn't act, so it writes no marker and adds nothing to the upstream trace
+  (§6.2). The pass that sees the change acts, and its act step is the child.
+  In the other order, the acting pass sees the old value, which may already be
+  continued, so it only links. alert-provider's
   Open transition is the case (§11.3, step 5).
 - **Never copy `krateo.io/traceparent-continued`.** It belongs to the object
   it's written on.
@@ -1014,14 +1072,25 @@ The root's status follows how the pass ended:
   `OTEL_TRACES_SAMPLER_ARG` (`SDK/trace/sampler_env.go`) before it applies
   options (`provider.go:106-117,495-512`), so a `WithSampler` in code would
   override the env. With nothing set, it defaults to `ParentBased(AlwaysSample())`
-  (`provider.go:518-521`). That's `parentbased_always_on`: a Parent pass follows
-  the upstream's decision, and a NoParent or Link pass is a sampled root.
+  (`provider.go:518-521`), and `ParentBased` drops a span whose remote parent
+  isn't sampled (`sampling.go:182,200`).
+  - **Under `parentbased_always_on`** every reconcile root is sampled, and the
+    joined act span follows the stamp's sampled flag. A `00` stamp drops the
+    act, what the provider does under it, and its link back to the root, and
+    the root's own trace has no act either.
+  - **Krateo's own stamps are sampled** (`01`): observability checked them on
+    krateo-057.
+  - **A ratio sampler** would drop roots at random, and with them any act
+    under a stamp it dropped upstream.
 - **core-provider** sets no sampler in code (`tracing.go:42-45`). No
   `OTEL_TRACES_SAMPLER` appears anywhere in its repo outside tests, charts
   included. So it runs the SDK default, which is `parentbased_always_on`.
   alert-provider sets `OTEL_TRACES_SAMPLER=parentbased_always_on` explicitly
-  (`helm/alert-provider/values.yaml:65-67`). Provider charts should set it
-  explicitly too, so the value is visible.
+  (`helm/alert-provider/values.yaml:65-67`).
+- **The rule for charts.** Charts set `OTEL_TRACES_SAMPLER` to
+  `parentbased_always_on`, or leave it unset, which is the same. `always_on` is
+  allowed and also records a first act under an unsampled stamp. Never a ratio
+  sampler. Setting it explicitly keeps the value visible.
 - **The endpoint: `http://$(HOST_IP):4318` by default** (decision D7, §13).
   `HOST_IP` comes from the downward API (`fieldRef: status.hostIP`,
   `k8s.io/api@v0.37.2/core/v1/types.go:2671-2672`), in the provider
@@ -1073,8 +1142,8 @@ The root's status follows how the pass ended:
   attributes are constant for the process.
 - **Limits.** provider-runtime doesn't change the SDK's span limits
   (`SDK/trace/span_limits.go:9-31`: 128 attributes, events and links), and
-  `OTEL_SPAN_*_LIMIT` still applies (`:94-115`). A root has at most one link
-  and a few events. The 4 KiB cut on error text is §7's.
+  `OTEL_SPAN_*_LIMIT` still applies (`:94-115`). A root has at most two
+  links, to R and to its joined act (D8), and a few events. The 4 KiB cut on error text is §7's.
 - **Volume** is arithmetic, not a measurement. One pass makes 3 or 4 spans:
   the root, `connect`, `observe`, and one of `create`, `update` or `delete` when
   the pass acts. An object polled every P seconds makes about
@@ -1103,12 +1172,14 @@ on envtest, so the API server's own conflict handling is what's tested.
    root, and the root has exactly the three attributes, with the Kind alone.
    A cluster-scoped object gets `k8s.object.namespace = ""`. The root's start
    is no later than the Get (§4.1).
-2. **Each rule of §6.2.** Each case asserts the span's **mode**: its parent,
-   whether it's a new root, and its links. Each also asserts the Decision's
+2. **Each rule of §6.2.** Each case asserts the span's **mode**: the root
+   has no parent in any mode (D8), and it has one link to R in Parent and Link
+   mode (plus one to its act on the first acting pass) and none with
+   NoParent. Each also asserts the Decision's
    `WriteMarker`, and the writes the fake client saw.
    - **Rule 1:** no annotation is NoParent, with no link and no patch.
-   - **Rule 4:** a valid annotation and no marker give a remote parent equal
-     to R.
+   - **Rule 4:** a valid annotation and no marker give a Parent pass: a new
+     root linked to R.
    - **Observe-only:** a Parent pass whose Observe reports up to date writes no
      marker. The next pass is a Parent pass again.
    - **The first action:** a Parent pass that updates writes exactly the
@@ -1146,19 +1217,20 @@ on envtest, so the API server's own conflict handling is what's tested.
    `checkDue` does:
    1. Create with traceparent A, in Analyzing: an acting pass, which writes
       marker A.
-   2. Write a fresh traceparent B (a metadata patch): the pass is a child of
-      B and doesn't act, so there's no marker.
-   3. Set Open with a script (a status write): the pass is a child of B, acts,
-      and writes marker B before `Update`.
-   4. The next poll links to B.
+   2. Write a fresh traceparent B (a metadata patch): the pass is a Parent
+      pass, its own trace linked to B, and doesn't act, so there's no marker
+      and nothing in B's trace.
+   3. Set Open with a script (a status write): the pass is a Parent pass,
+      writes marker B, then acts. Its `update` span is B's child (D8).
+   4. The next poll links to B, and nothing more joins B's trace.
 
    The same sequence with the status write first: the Open pass links (to A)
    and acts. The test pins that the order in §6.5 is what makes the
    difference.
 7. **A failed marker write.** The patch is forbidden: the pass completes,
    records `trace.marker_failed`, and the entry becomes `failed`, so the next
-   pass in the same process links. A new process parents again until its next
-   acting pass or the end of the window.
+   pass in the same process links. In a new process, the next act joins
+   again, once, unless the window closes first.
 8. **A failed pass after acting.** Update fails after the marker is written,
    so the retry links. Observe failing before any action leaves the retry a
    Parent pass, until the window closes.
@@ -1211,8 +1283,8 @@ on envtest, so the API server's own conflict handling is what's tested.
     - An object recreated under the same name, with a new UID, starts with no
       entry and is decided afresh.
 17. **A deferral storm** (reviewer's 7). With the governor at capacity, the
-    deferred passes inside the window are Parent roots with
-    `ratelimit.deferred` and no marker. Their number is within §6.2's bound,
+    deferred passes inside the window are Parent passes, each its own trace,
+    with `ratelimit.deferred` and no marker. Their number is within §6.2's bound,
     and the first pass after the window links and writes the marker.
 18. **A paused object past the window** (reviewer's 8): no marker write while
     it's paused, and the pass after it's unpaused writes it.
@@ -1248,6 +1320,35 @@ on envtest, so the API server's own conflict handling is what's tested.
     distinct objects at once under `-race`. Every span's parent and link
     belong to its own object. The memo stays consistent while objects are
     deleted, recreated and restamped.
+26. **D8: one reconcile, one trace** (`tracing_d8_test.go`).
+    - In every mode in which the pass doesn't act (NoParent, a new value
+      observed only, Link, window 0, paused, deferred, a marker conflict),
+      the root has no parent, every span of the pass is in the root's trace,
+      and nothing is in R's.
+    - The first act for a new value, on the update, create and delete paths,
+      is R's child with one link to its root, after the marker. It carries the
+      root's three `k8s.object.*` attributes, and the root links to it. `connect`
+      and `observe` stay in the root's trace. Every other pass's root has
+      exactly one link.
+    - An unsampled stamp (`00`) under the default sampler: the root is
+      recorded and sampled with its link to R, and the act isn't recorded, so
+      there's no link either way and nothing in R's trace. Under `AlwaysSample`
+      the act is recorded, with both links.
+    - A second act, after the marker, is a child of its root. So is the act
+      after the window's fallback write. Within one pass, only the first act
+      step joins.
+    - Observe-only passes inside the window put nothing in R's trace, and each
+      is its own trace.
+    - Window 0 writes the marker before Connect, and the pass's act still
+      joins. A failed (Forbidden) marker write still lets the first act join,
+      and the next act doesn't.
+    - Test 6's sequence: the Open pass's `update` is B's child, and the
+      Analyzing pass and the poll after Open add nothing to B's trace.
+    - **The real path,** on envtest: a client that reads through an informer
+      cache, the default finalizer and the default critical updater. The
+      marker reaches the API server, once written before the first act and
+      once by the window's fallback. That's regression coverage for the
+      krateo-057 report, which wasn't a marker bug (§13, D8).
 
 ## 11. Adoption
 
@@ -1297,9 +1398,9 @@ What each consumer sets. The changes belong to each consumer's own session.
 - **Before `OTEL_TRACING_ENABLED=true`:** observability lists its `service.name`
   in the tail sampler (§11.5).
 - **Expect a burst when it turns on** (§6.3). For every git-provider object
-  that carries a `krateo.io/traceparent`, there's up to a window of Parent
-  passes onto the last stamper's trace, then a marker write and an extra
-  reconcile, all within the first 10 minutes.
+  that carries a `krateo.io/traceparent`, there's a marker write and an extra
+  reconcile within the first 10 minutes, and, if a pass acts in that time, one
+  act step in the last stamper's trace.
 - **RBAC.** It already has `patch` on its kinds
   (`templates/clusterrole.yaml:13-23`), which the marker needs.
 - **Outbound.** Propagation comes with the bump, through httpsignal (§6.6).
@@ -1323,10 +1424,12 @@ What each consumer sets. The changes belong to each consumer's own session.
 - **Outbound.** It makes no HTTP calls to propagate on.
 - **Its place in the plan.** alert-provider creates the `Incident` objects
   that incident-provider reconciles (§11.3). With alert-provider's `Inject`,
-  incident-provider's first acting pass on a new `Incident` is a child of
-  alert-provider's `incident.fire`. The fresh traceparent stamped before Open
-  makes the remediation pass a child of `incident.analyze` (§11.3, step 5).
-  Later passes link. That's the alert → RCA → remediation trace.
+  the first act on a new `Incident` is a child of alert-provider's
+  `incident.fire`. The fresh traceparent stamped before Open makes the
+  remediation's act, the `update` that starts the check Pod, a child of
+  `incident.analyze` (§11.3, step 5). Every pass is its own trace, linked to
+  the Incident's current value (D8). That's the alert → RCA → remediation
+  trace.
 
 ### 11.3 alert-provider: migrating without double spans
 
@@ -1365,11 +1468,12 @@ provider-runtime now makes. All in one PR, with the bump:
 
    The three injections:
    - **(a) At create:** `prtracing.InjectAnnotations` in `kube.Create`
-     (`internal/incident/kube.go:100-113`). incident-provider's first pass, on
-     the Analyzing Incident, is a child of `incident.fire`.
+     (`internal/incident/kube.go:100-113`). The act of incident-provider's
+     first acting pass on the Analyzing Incident is a child of
+     `incident.fire`.
    - **(b) At Open:** a **fresh** traceparent from the current
      `incident.analyze` span, which overwrites (a)'s (§6.5). Because the marker
-     is keyed on the value (§6.2), it's new, and the next pass parents on it.
+     is keyed on the value (§6.2), it's new, and the next act joins it.
    - **(c) At reanalysis:** the same as (b), from the `incident.analyze` that
      `incident.reanalyze` starts (`reanalysis.go:37-40`), when it writes the
      new scripts. That's acmp's decision, recorded in its session.
@@ -1386,14 +1490,16 @@ provider-runtime now makes. All in one PR, with the bump:
      `prtracing.InjectAnnotations` from the `incident.analyze` span, written
      **before** the status write that sets Open and the scripts (§6.5's
      writer rule).
-   - **What incident-provider does with it, under D6:**
+   - **What incident-provider does with it, under D6 and D8:**
      - **The patch's pass** sees the fresh value, B, while the Incident is still Analyzing. It
        has no current script, so no check is due (`machine.go:175-177`). It
-       doesn't act, it's a child of B, and it writes no marker.
+       doesn't act, so it's its own trace with one link to B, it adds nothing
+       to B's trace, and it writes no marker.
      - **The Open pass** sees B still not continued. It marks a check due,
-       writes the marker, then calls `Update`, which starts the check Pod. So
-       the remediation is a child of `incident.analyze`, in the trace that the
-       `^incident\.` rule keeps whole.
+       writes the marker, then calls `Update`, which starts the check Pod. Its
+       `update` span is the first act on B, so it's a child of
+       `incident.analyze`, in the trace that the `^incident\.` rule keeps
+       whole, with a link back to the pass's root.
      - **If both events land before a worker takes the key,** one pass sees
        both and is the same Parent pass.
    - **The window.** It doesn't come into play: the patch and the status write
@@ -1458,25 +1564,29 @@ When a provider's chart turns tracing on, observability adds that provider's
 `outside-sampled-services` condition of the tail sampler, in
 `charts/otel-collector-tailsampling/values.yaml` (decision D4).
 - **Effect.** The routine loop then falls to the `sample-5pct` rule. The
-  `error-status` rule still keeps every failed reconcile, and a Parent pass
-  inside a kept trace stays whole with it.
-- **No sampler in code.** Providers set no sampler in code, and their charts
-  keep `OTEL_TRACES_SAMPLER=parentbased_always_on` (§8). Without this step,
-  every trace from a provider not on the list is kept at 100% (§9).
+  `error-status` rule still keeps every failed reconcile, and a first act
+  inside a kept upstream trace stays with it (D8).
+- **No sampler in code.** Providers set no sampler in code. Charts set
+  `OTEL_TRACES_SAMPLER` to `parentbased_always_on`, or leave it unset, which is
+  the same. `always_on` is allowed and also records a first act under an
+  unsampled stamp. Never a ratio sampler (§8). Without this step, every trace
+  from a provider not on the list is kept at 100% (§9).
 - **Order.** The sampler entry ships first. The provider's chart change that
   sets `OTEL_TRACING_ENABLED=true` ships after it.
 - **The burst at rollout** (§6.3). When the chart turns tracing on, every
   annotated object of that provider has a new value. observability sees:
-  - Parent passes onto possibly days-old upstream traces, for up to a window;
-  - then one marker write and one extra reconcile per object.
+  - one act step, for each object that acts within the window, onto a
+    possibly days-old upstream trace (D8);
+  - one marker write and one extra reconcile per object.
 
-  They're spread over the first window. Under `sample-5pct` most of those
-  passes aren't stored, and the ones that fail are.
+  They're spread over the first window. Under `sample-5pct` most of the
+  reconciles' own traces aren't stored, and the ones that fail are.
 - **What the audit join then finds.** With a provider under `sample-5pct`,
   observability#127's join finds a provider object's reconcile after a write
   about 1 time in 20 when that reconcile succeeded, and every time when it
-  failed, because `error-status` keeps it. A reconcile that is a Parent pass
-  under a stored portal trace is kept with that trace. So **a successful
+  failed, because `error-status` keeps it. A first act that joins a stored
+  upstream trace is kept with that trace, but its root, a trace of its own
+  (D8), isn't kept by it. So **a successful
   provider reconcile missing from the join doesn't mean it never ran.**
   Composition controllers are different: their reconcile traces are kept whole
   on purpose, because the reconcile widgets read them (observability's review
@@ -1515,8 +1625,12 @@ names only composition controllers (§13, D5).
 - **Parent on every pass (UR today).** One trace per object, growing for the
   object's whole life. The tail sampler keeps traces whole, so it would keep
   that one too.
-- **Link on every pass.** It loses the one causal edge worth keeping: the
-  first reconcile after an upstream change.
+- **Link on every pass, act steps included.** It loses the one causal edge
+  worth keeping: the first act after an upstream change.
+- **Parenting every pass inside the window (D6 as v1.14.0 built it).** A
+  creator that stamps every object it writes, and restamps on every release
+  apply, pulls every observe-only poll of every object into its trace for the
+  window. D8 replaces it (§13).
 - **First sight from an in-memory memo.** No writes, but a restart or a
   failover forgets it. Linking an unknown context would demote the real first
   sight after every restart, and parenting it would grow the trace on every
@@ -1561,7 +1675,8 @@ names only composition controllers (§13, D5).
 ## 13. Decided by the user, 2026-11-09
 
 The questions this design left open, and what was decided. Every premise was
-checked in source, except where it's marked as a cluster fact.
+checked in source, except where it's marked as a cluster fact. D8 was decided
+on 2026-11-10, after v1.14.0 shipped.
 
 **D1. `OTEL_TRACING_ENABLED` unset means off, on its own.** This was option (a).
 `ConfigFromEnv` reads it on its own, defaulting to false, and `OTEL_ENABLED`
@@ -1578,8 +1693,9 @@ one extra reconcile, per new traceparent value, only on annotated objects and
 only with tracing on (§6.3). The review on #60 added two things:
 - **A burst at rollout.** Because no marker is written while off, turning
   tracing on makes every annotated object's value new at once. That's a
-  fleet-wide burst of marker writes and extra reconciles, plus Parent passes
-  onto possibly days-old traces, within the first window (§6.3).
+  fleet-wide burst of marker writes and extra reconciles, plus, under D8,
+  one act step per acting object onto possibly days-old traces, within the
+  first window (§6.3).
 - **The patch is locked.** Every marker write uses an optimistic lock, and a
   conflict requeues before acting (§6.2). Rejected:
 - (b) An in-memory memo, which loses the first sight after a restart or a
@@ -1653,6 +1769,9 @@ Incident's remediation joins the RCA's trace.
     carries both. That's an API change in two other repos.
   - (c) Accepting a link. The remediation's own root is kept only 5% of the
     time when healthy (D4), so it would usually not be stored.
+- **Changed by D8.** D6's window made every pass inside it a child of the
+  value. D8 keeps D6's rule for which pass consumes a value, the first that
+  acts, but makes only that pass's act step the child.
 
 **D7. The OTLP endpoint is `http://$(HOST_IP):4318` by default.** Decided by
 the user, the same standard as core-provider's cdc.
@@ -1674,6 +1793,76 @@ the user, the same standard as core-provider's cdc.
     that forgot it would export to the SDK's default `localhost:4318`, which
     is wrong in a pod. That's otlptracehttp's default when no endpoint is set
     (`HTTP/internal/otlpconfig/options.go:84`).
+
+**D8. Every reconcile is its own trace; only the first act for a new value
+joins it** (2026-11-10, for v1.14.1). Decided by the user after krateo-057's
+first day under v1.14.0, and re-confirmed once the facts below were
+corrected.
+- **What D6 got wrong.** D6 made every pass inside the window a child of a new
+  value, so that the pass that acts would be. That's right for a value stamped
+  just before the change that triggers the work, like an Incident's B. It's
+  wrong for a value that its creator stamps on every object it writes, whether
+  or not the object has anything to do. Then every observe-only poll of every
+  such object joins the creator's trace for up to 10 minutes.
+- **The evidence on krateo-057.** These are cluster facts, as acmp and
+  observability report them; I don't touch clusters.
+  - The composition-dynamic-controller stamps `krateo.io/traceparent` on every
+    object it creates. With alert-provider 0.2.71, the reconciles of all 28
+    Alerts joined their creating composition's trace: at least 3,204 spans.
+    The tail sampler kept that trace at 100%, because it holds a cdc span.
+    That was about 13 times the volume.
+  - The cdc also re-stamps. Each release apply stamps every object in the
+    release, changed or not (§6.3; the traceparent is stripped only from the
+    digest, `processor.go:39-44,92-117`). Today's values came from the
+    07:36:11Z roll. So under v1.14.0, every chart upgrade reopens a 10-minute
+    window for every object, and about 260 observe-only reconciles merge into
+    the upgrade's trace each time, kept at 100% for the same reason.
+  - **It wasn't a marker bug.** 28 of 28 markers were written by 08:11Z, with
+    no write errors. The creator trace stopped growing after 08:10, and since
+    about 08:09Z every reconcile has been a new root with one link. v1.14.0
+    did what D6 specified: a 10-minute window, not a trace that never ends.
+    D8 changes the design, not a defect. The real-path envtest test (§10,
+    test 26) keeps the marker write covered.
+- **The decision.**
+  - Every reconcile is its own trace: a `reconcile` root (Server, the same
+    three attributes) with one link to the object's `krateo.io/traceparent`
+    when it's present and valid, plus one to its act on the first acting
+    pass. It's never that value's child.
+  - Only the first act step for a new value, the `create`, `update` or
+    `delete` span, is started with the upstream traceparent as its parent,
+    plus one link back to its `reconcile` root. It carries the root's three
+    `k8s.object.*` attributes, because it isn't the root's child.
+  - **Link both ways** (the user's decision on the review of #70): when that
+    act starts, the root adds a link to it (`Span.AddLink`), if the act is
+    sampled.
+  - The marker is written before that step, as in D6: with the optimistic
+    lock, and with a requeue before acting on a conflict.
+  - Later passes, and observe-only, deferred, paused and conflict passes, get
+    the root and the link only.
+  - The window stays only as the fallback that writes the marker when no pass
+    acts within it. It no longer parents anything.
+- **D6's remediation still joins.** The Open pass's `Update`, which starts
+  the check Pod, is the first act on B. So its `update` span is a child of the
+  traceparent stamped from `incident.analyze`, in the trace the `^incident\.`
+  rule keeps whole (§11.3, step 5). The Analyzing pass that only observes B
+  is its own trace.
+- **D3 still holds:** only a new value opens a window (§6.2).
+- **What it costs.**
+  - The upstream trace shows the act, not the reconcile around it: no
+    `connect` or `observe` before it. The act's link leads to its root.
+  - Work a provider does in Observe without acting, like alert-provider's
+    incident firings (§6.2), never joins the upstream trace. It's in the
+    pass's own root, which links to it.
+  - **An unsampled stamp.** Under `parentbased_always_on` every reconcile
+    root is sampled, and the joined act span follows the stamp's sampled flag.
+    A `00` stamp drops the act, what the provider does under it, and its link
+    back to the root, and the root's own trace has no act either. Krateo's
+    stamps are `01` (observability checked krateo-057).
+  - **The rule for charts.** Charts set `OTEL_TRACES_SAMPLER` to
+    `parentbased_always_on`, or leave it unset, which is the same. `always_on`
+    is allowed and also records a first act under an unsampled stamp. Never a
+    ratio sampler (§8, §11.5).
+- §2, §4.4, §6.2, §6.3, §8, §10 (test 26), §11.2, §11.3 and §11.5 specify it.
 
 ## 14. Checked, and not
 
@@ -1717,11 +1906,20 @@ Checked in source:
   checks the resourceVersion (`store.go:807-808`).
 - **The consumers:** every consumer file cited in §11, observability's join,
   Service and tail-sampler files, and #58 as merged in v1.13.0.
+- **For D8:** OTel SDK v1.45.0's `ParentBased` defaults
+  (`SDK/trace/sampling.go:182,200`) and `AddLink`, which a non-recording span
+  ignores (`SDK/trace/span.go:678-690`). The cdc's `processor.go` on
+  core-provider's `main`, read through the API on 2026-11-10. The digest is computed from the manifest with the
+  traceparent lines stripped, and the objects are decoded from the original
+  manifest, so they keep it.
 
 Not checked:
 
 - **What krateo-057 runs**, checked by me: the env values, the object counts,
-  and which endpoint each Deployment uses. I don't touch clusters. The brief
+  and which endpoint each Deployment uses. I don't touch clusters. D8's
+  numbers (28 Alerts, at least 3,204 spans, about 13 times the volume, about 260
+  reconciles per upgrade, 28 of 28 markers by 08:11Z, Krateo's stamps
+  sampled `01`) are acmp's and observability's. The brief
   reports the env convention as verified on 057. observability verified, in
   its reviews on #60: the `-local` Service on 057 (release
   `otel-collector-daemonset`, 4 of 4 node endpoints); hostPort 4318 on 0.1.19
