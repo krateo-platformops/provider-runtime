@@ -17,7 +17,11 @@ pkg/ratelimit/saturation.go: the cgroup v2 saturation sampler (local capacity)
 pkg/ratelimit/queue.go: the gated queue: the local slot is taken before the pop and given back in Done
 docs/design-local-slot-before-pop.md: design (implemented) for taking the local slot before the pop
 docs/design-saturation-cost-model.md: design (decided, not built) for sizing local capacity from what reconciles cost against the container's CPU and memory limits
-pkg/ratelimit/httpsignal/httpsignal.go: http.RoundTripper reporting GitHub and Azure DevOps rate-limit headers
+pkg/ratelimit/httpsignal/httpsignal.go: http.RoundTripper reporting GitHub and Azure DevOps rate-limit headers, and propagating the active span's traceparent
+pkg/tracing/decide.go: Decide, the krateo.io/traceparent parent-or-link rule, and Canonical
+pkg/tracing/start.go: StartReconcile (the reconcile root span) and StartStep (its children)
+pkg/tracing/inject.go: Inject, InjectAnnotations and InjectHeader, with the rules for callers
+pkg/telemetry/setup.go: Config, ConfigFromEnv and Setup, the OTLP metrics and trace pipelines over one resource
 pkg/reconciler/ratelimit.go: RateLimitKeyer, RateLimitKeysProvider, WithRateLimitGovernor and the deferral path
 pkg/reconciler/reconcilertest/ratelimit.go: AssertReportsRateLimits, the conformance helper for providers
 examples/greeting-controller/README.md: minimal compilable provider (Greeting CRD + fake external system)

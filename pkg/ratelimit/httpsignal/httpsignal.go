@@ -8,6 +8,17 @@
 //
 // The runtime core never parses HTTP; this package is optional (design §6).
 //
+// # Trace propagation
+//
+// When the request's context holds an active span, which is the reconcile's
+// connect, observe, create, update or delete span with tracing on, RoundTrip
+// sets the W3C traceparent header, and tracestate when there is one, on a clone
+// of the request (docs/design-tracing.md §6.6). It never sets baggage, never
+// overwrites a traceparent the request already carries (an otelhttp transport
+// wrapped outside it, for example), and never uses an inbound context the
+// reconciler carries with tracing off: with tracing off it sends no trace
+// header. Set Transport.NoTracePropagation for a host that must not receive one.
+//
 // # Headers
 //
 // Verified against the vendors' documentation on 2026-11-05:
@@ -60,6 +71,7 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
+	"github.com/krateo-platformops/provider-runtime/pkg/tracing"
 )
 
 // Header names, canonicalised.
@@ -104,6 +116,10 @@ type Transport struct {
 	// Base makes the request. Nil means http.DefaultTransport.
 	Base http.RoundTripper
 
+	// NoTracePropagation turns off the traceparent header, for a provider whose
+	// external host must not receive one.
+	NoTracePropagation bool
+
 	// now is replaced in tests.
 	now func() time.Time
 }
@@ -114,11 +130,17 @@ func NewTransport(base http.RoundTripper) *Transport {
 }
 
 // RoundTrip makes the request with Base, reports the response's signal, and
-// returns the response and error unchanged.
+// returns the response and error unchanged. With an active span in the
+// request's context it first sets traceparent on a clone of the request (see
+// the package documentation); the caller's request is never changed.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	base := t.Base
 	if base == nil {
 		base = http.DefaultTransport
+	}
+	if !t.NoTracePropagation && tracing.HasActiveSpan(req.Context()) && req.Header.Get("traceparent") == "" {
+		req = req.Clone(req.Context())
+		tracing.InjectHeader(req.Context(), req.Header)
 	}
 	resp, err := base.RoundTrip(req)
 	if err != nil || resp == nil {
