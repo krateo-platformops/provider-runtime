@@ -88,6 +88,26 @@ The user decided the choices below.
 - **When nothing is enabled**, the clock still jumps to the earliest
   notBefore, as today. That jump is forced, and doesn't count against T.
 
+**Ticks must be negligible next to every deadline** (the reviewer's
+Medium). The argument below fails if call ticks can cross a deadline. With
+today's 5ms test grace and 1ms per call, any five calls end the grace with
+no jump, so "many calls, still inside the grace" can't be represented, and
+time would move through uncounted ticks as well as through the jumps the
+user decided. So:
+- **The test grace is 1h**, against 1ms per call. A schedule makes at most a
+  few hundred calls, so ticks never come near a deadline.
+- **Every "into the grace" moment a scenario needs is a declared
+  deadline**, reached by a jump, not by counting calls.
+- **A run-time check panics if a call's tick would cross a pending
+  deadline**, from below it to at or past it. Only jumps (and the forced
+  jump when nothing is enabled) cross deadlines.
+
+Decoupled time reaches everything today's base reaches: each place where a
+tick crossed a deadline becomes a jump at the same point. The reach
+counters then show whether T = 2 is enough. The case to watch is Teardown
+interleaving A's 8 U5 schedules at one preemption. If T = 2 loses any of
+them, the work stops and is reported; T is not raised to make it pass.
+
 **Why deadlines are enough.** Every time-dependent decision compares the
 clock with a deadline:
 - GraceOver is "now ≥ grace end";
@@ -116,14 +136,19 @@ show which.
   unit. A unit with no call yet is unaffected: it becomes the new process's
   work, as in a real restart, where the reconcile runs again.
 - **The obligation (the reviewer's): a unit whose generation is stale
-  doesn't mutate process memory.**
-  - In tests, `verified` and `firstSight` get an unexported mutation hook,
-    which is nil in production. The harness's cache gets the same hook.
+  doesn't touch process memory, neither mutating nor reading it.** Reads
+  matter too: a stale unit's acquire could take the skip path, which makes
+  no call, read the new process's memory, and report Held.
+  - In tests, `verified` and `firstSight` get an unexported access hook,
+    called on every read and every mutation, and nil in production. The
+    harness's cache gets the same hook.
   - The harness sets it to panic if the running actor's unit generation is
     stale.
-  - Today's protocol code mutates the verified set only after a successful
-    call, so a stale unit, whose calls all fail, mutates nothing. The hook
-    makes that a checked property.
+  - Today's protocol code reads and mutates process memory only in the same
+    step as a successful call, or before the unit's first call. A stale
+    unit's calls all fail, and acquire and release return at the first
+    failure. So the hook should never fire, and it makes that a checked
+    property.
 - **The pass budget changes.** Under the old base, a crash between a pass's
   segment and its first call lost the pass, and the lost pass counted
   against the holder's live or deletion passes. Under (ii), the pass goes on
@@ -138,17 +163,29 @@ show which.
 
 ### 3.3 The gate before the reduction goes in (M-b, the user's)
 
-Before any reduction, on the new base, unreduced:
-- **The revert check must kill the same mutants.** That is the 44 killed on
-  the old base, now 45 with mutant 2 replaced ("an unparseable record equal
-  to the refs isn't rewritten"), with 1 equivalent.
-- **The reach counters may not drop.** For each scenario and each
-  exhaustive profile, the counts of schedules reaching U5, L6, H1's state
-  and a deleting read must be no lower than the old base's. Both are
-  reported side by side.
+In this order:
+1. **The old base, first.** Rerun the revert check on the old base to
+   establish its result: 45 killed and 1 equivalent, with mutant 2
+   replaced. The run also produces a **per-mutant matrix**: for each mutant,
+   every test and model scenario it is killed in, found without `-failfast`
+   so that every scenario runs. Its output replaces the stale one from
+   6f22bd6.
+2. **Then the new base, unreduced, with the same two runs.** The results go
+   side by side:
+   - **the revert check must kill the same mutants**, and the matrix shows,
+     per mutant, the scenarios that kill it on each base;
+   - **the reach counters may not drop:** for each scenario and each
+     exhaustive profile, the number of schedules reaching U5, L6, H1's state
+     and a deleting read must be no lower than the old base's.
 
 If any count is lower, the work stops and is reported. It is not adjusted
 to pass.
+
+**What the gate does not show.**
+- Schedule counts aren't a behaviour-inclusion check: the two bases'
+  schedules aren't comparable one to one.
+- The reach counters cover only U5, L6, H1's state and deleting reads.
+  Other states are compared only through the mutants each base kills.
 
 ## 4. The reduction
 

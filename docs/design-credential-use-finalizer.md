@@ -763,13 +763,19 @@ Meanwhile another process removes P from H's record, a releaser releases P,
 which then has no user, and the other process puts P back but its A2
 fails. A pass of the first process works from V, which its informer
 delivered, so it skips, and reports P held while P has no finalizer. The
-pass is stale, but consistent with what its process has seen. The window
-lasts until the informer delivers the later versions. The next pass then
-works from the current version, which the run rule makes write. It is the
-same kind of window as L6 (§6.5): bounded by the informer's lag, closed on
-delivery, and harmful only if P is deleted inside it. The other process's
-failed A2 has left it Degraded, and its next pass writes too. A test pins
-both the window and its closing.
+pass is stale, but consistent with what its process has seen. Delivery of
+the later versions ends the *permission* to skip, but P stays unheld until
+a pass of that holder actually runs from a current version and writes:
+- B's re-add is a record-only update, which the predicate filters out (§7.5);
+- B is Degraded and doesn't requeue;
+- a pass that P's label loss triggers can skip too, while it works from V.
+
+So the window is bounded by the informer's lag **plus the time to the
+holder's next pass**, at worst the poll interval. It is the same accepted
+fail-open as B's failed A2, which it follows from: the holder runs on a P
+that a later pass will hold again, and the damage needs P deleted inside the
+window. A test pins both the window and the write of the pass that closes
+it.
 
 The only things that can still remove the finalizer while H's record names
 P are:
@@ -832,11 +838,15 @@ only come after the write it reports.
   its `written` entries for the old UID only when its informer delivers
   the old P's deletion. Until then, that process's fast path may find the
   old P, with the finalizer, in its cache, and skip A2, while Connect reads
-  the new, unheld P. **The window runs from the old P's final removal to
-  that delivery**, which is watch latency. It can't open while the old P
-  is held, because the recreate fails with AlreadyExists until P is gone.
-  It can't open in the releasing process, which drops its entries when R3
-  succeeds. It matters only if the new P is deleted inside the window.
+  the new, unheld P. **The permission to skip lasts from the old P's final
+  removal to that delivery**, which is watch latency. The new P is unheld
+  until a pass of each holder then runs and writes, so the window is that
+  latency **plus the time to the holder's next pass**, at worst the poll
+  interval. It is an accepted fail-open, like a failed A2 (§8). It can't
+  open while the old P is held, because the recreate fails with
+  AlreadyExists until P is gone. It can't open in the releasing process,
+  which drops its entries when R3 succeeds. It matters only if the new P is
+  deleted inside the window.
 
 ### 6.6 Cost
 
