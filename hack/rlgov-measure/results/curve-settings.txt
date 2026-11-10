@@ -17,7 +17,7 @@ BUDGET: TWO STAGES, Stein's procedure for a fixed-width CI with a futility stop 
   β̂'s own error isn't covered by Stein's procedure, so k* is approximate. The decision uses the bootstrap's realized
     width, not k*.
   Estimated cost, at list prices as I know them, not checked against the live price list: e2-standard-4 on demand in
-  us-central1 about $0.134/h, a 100 GB balanced boot disk about $0.014/h, the GKE Standard cluster fee $0.10/h (waived
+  us-central1 about $0.134/h (the cluster is in europe-west3, priced somewhat higher), a 100 GB balanced boot disk about $0.014/h, the GKE Standard cluster fee $0.10/h (waived
   by the free-tier credit for one zonal cluster, if the billing account has it): $0.15-0.25 per hour. Stage 1 alone:
   about $1.70-2.80; both stages at most: about $3.70-6.20. Plus creation, deletion and the image's storage.
   The driver (this Mac) must stay awake for the whole block, lid open (memory: the Mac slept with caffeinate on); a run
@@ -66,7 +66,8 @@ WORKLOAD, and how faithful it is to the engine's drain plant (sim, drainHeavy: 3
   the registry set up with the cluster; its digest is recorded in results/image-<tag>.txt.
 
 CLUSTER (the coordinator creates and deletes it; this harness never does): one node, e2-standard-4, GKE Standard,
-  us-central1-d, project operations-dev-krateo-io, a dedicated single-node pool with nothing else on it but GKE's own
+  europe-west3-a (us-central1 is refused by the project's location policy; written as us-central1-d before the
+  cluster was created), project operations-dev-krateo-io, a dedicated single-node pool with nothing else on it but GKE's own
   system pods, created with auto-repair and auto-upgrade disabled. The kubeconfig is only in hack/rlgov-measure (gitignored), with env.local. Every run records the node's
   kernel, cgroup version, CPU model and GOMAXPROCS (main.go's LOG node line) and the node's load every second.
 
