@@ -1,0 +1,1 @@
+node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz
