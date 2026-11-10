@@ -890,6 +890,26 @@ text; the long drain by the user's decision of 2026-11-10):
   §17.10 (D)) and in no other; at least one run begins and ends in each pair of
   stretches".
 
+**Corrected after seeing results, at the review of `b681ff7`** (the reviewer's
+text; the controller unchanged):
+
+- **(a) Long drain, the band:** "From ĉ's first restart after the change (or, if ĉ
+  never restarts, from entry), S is outside the band in at most 5% of samples,
+  untrusted samples judged at max(own SE, r̄)×3 or excluded and counted, as in the
+  outside rule. The rise rule stays absolute (no rise with U_W > ρL, nor while ĉ's
+  test is pending), and so does the restart-edge floor." With no entry, the band
+  rule doesn't apply. (This also removes the failure at the change sample, where
+  the restart-edge window began at the change when there was no restart.)
+- **(c) Long drain, the path:** the either-path assertion is dropped, and the path
+  is reported: "ĉ restart / first term / EWMA only".
+- **(f) Mix shift seen:** "out of the cap within min(⌈ln(32/S*)/ln(1/θ)⌉,
+  ⌈(D_out + |W|)/Δt⌉ + 1) + (n_W − 1) samples, D_out the longest lifetime among
+  the outgoing queue's completions after the shift, measured: a property of that
+  queue's work, not of the controller."
+- **No-limit validity guard:** "the case is INVALID unless at least 25% of its
+  samples are over the threshold and at least 25% under, and a run begins and
+  ends in every pair of stretches."
+
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
 modelled on Temporal's tuner at its defaults (design §17.8, item 6): inside the
