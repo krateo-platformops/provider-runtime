@@ -2,6 +2,8 @@
 
 package sim
 
+import "time"
+
 // frozenPlants are each case plant's S*, D(S*) and n_iter from its fixed-
 // capacity curve (plan §4.5). nStart counts from one slot to θ⌊S*⌋; nFrom
 // from the base plant's S* into this plant's band; nAbove from
@@ -28,6 +30,13 @@ var frozenXCap = map[string]float64{
 	"drain":    0.0860,
 }
 
-// frozenNoLimitShare is the share at which the engine's fixed-capacity stall
-// at the demand (the ceiling, 32) crosses CPUPressureThreshold (plan §4.5).
-const frozenNoLimitShare = 0.7742
+// The no-limit case's alternation (plan §4.5, the review of 0ce649f), from
+// the node curve at the demand (32 slots fixed, no limit): s_over, the largest
+// share whose mean stall is at least T + 3σ_s; s_under, the smallest whose mean
+// stall is at most T − 3σ_s (σ_s the per-sample stall's standard deviation in
+// the same run); switching every 3·|W|, |W| = ⌈D/Δt⌉ + 1 at s_over.
+const (
+	frozenAltOver    = 0.75
+	frozenAltUnder   = 0.80
+	frozenAltStretch = 6 * time.Second
+)

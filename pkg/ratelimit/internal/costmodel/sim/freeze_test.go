@@ -135,26 +135,41 @@ func iterateDown(pts []curvePoint, limit, sStar, hi float64) int {
 	return -1
 }
 
-// noLimitShare finds the share at which the no-limit case's fixed-capacity
-// stall at the demand crosses 50: the node model with no quota, the ceiling's
-// 32 slots held fixed, the share swept in steps of 0.05 core.
-func noLimitShare(t *testing.T) float64 {
-	stallAt := func(share float64) float64 {
+// alternation sweeps the no-limit node curve at the demand: the node model
+// with no quota, the ceiling's 32 slots held fixed, the share in steps of 0.05
+// core; per share, the per-sample stall's mean and standard deviation and the
+// mean lifetime.
+func alternation(t *testing.T) (over, under float64, stretch int) {
+	over, under = math.NaN(), math.NaN()
+	var dOver float64
+	for sh := 0.2; sh <= 4.0+1e-9; sh += 0.05 {
 		cfg := Config{Seed: 9001, Duration: 180 * time.Second, Procs: 4, NodeCPUs: 4, Ceiling: 32, Fixed: 32,
-			Share:  func(time.Duration) float64 { return share },
+			Share:  func(time.Duration) float64 { return sh },
 			Queues: []Queue{{Name: "q", Class: fixedClass(baseClass), Active: always}}}
-		return 100 * summarize(Run(cfg), 60*time.Second).stall
-	}
-	prevS, prevV := 0.2, stallAt(0.2)
-	for sh := 0.25; sh <= 4.0+1e-9; sh += 0.05 {
-		v := stallAt(sh)
-		t.Logf("no-limit share %.2f: stall %.1f", sh, v)
-		if prevV > 50 && v <= 50 {
-			return prevS + (prevV-50)/(prevV-v)*(sh-prevS)
+		tr := Run(cfg)
+		var sum, sq, a float64
+		var n, comp int
+		for i, at := range tr.At {
+			if at < 60*time.Second {
+				continue
+			}
+			x := 100 * tr.Samples[i].Stall.Seconds() / tr.Samples[i].Dt.Seconds()
+			sum, sq, n = sum+x, sq+x*x, n+1
+			a += tr.Samples[i].Books.SlotSeconds
+			comp += tr.Samples[i].Books.Completions
 		}
-		prevS, prevV = sh, v
+		m := sum / float64(n)
+		sd := math.Sqrt(math.Max(sq/float64(n)-m*m, 0))
+		t.Logf("no-limit share %.2f: stall mean %.1f, sd %.1f, D %.3f", sh, m, sd, a/float64(comp))
+		if m >= 50+3*sd {
+			over, dOver = sh, a/float64(comp)
+		}
+		if math.IsNaN(under) && m <= 50-3*sd {
+			under = sh
+		}
 	}
-	return math.NaN()
+	w := math.Ceil(dOver) + 1
+	return over, under, int(3 * w)
 }
 
 // TestFreeze prints frozen_test.go's constants when SIM_FREEZE is set.
@@ -199,7 +214,7 @@ func TestFreeze(t *testing.T) {
 		fmt.Fprintf(&b, "\t%q: %.4f,\n", p.name, xcaps[p.name])
 	}
 	b.WriteString("}\n\n")
-	share := noLimitShare(t)
-	fmt.Fprintf(&b, "// frozenNoLimitShare is the share at which the engine's fixed-capacity stall\n// at the demand (the ceiling, 32) crosses CPUPressureThreshold (plan §4.5).\nconst frozenNoLimitShare = %.4f\n", share)
+	over, under, stretch := alternation(t)
+	fmt.Fprintf(&b, "// The no-limit case's alternation (plan §4.5, the review of 0ce649f), from\n// the node curve at the demand (32 slots fixed, no limit): s_over, the largest\n// share whose mean stall is at least T + 3σ_s; s_under, the smallest whose mean\n// stall is at most T − 3σ_s (σ_s the per-sample stall's standard deviation in\n// the same run); switching every 3·|W|, |W| = ⌈D/Δt⌉ + 1 at s_over.\nconst (\n\tfrozenAltOver    = %.2f\n\tfrozenAltUnder   = %.2f\n\tfrozenAltStretch = %d * time.Second\n)\n", over, under, stretch)
 	t.Log("\n" + b.String())
 }

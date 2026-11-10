@@ -24,6 +24,13 @@ func floorAfterCostIncrease() float64 {
 	return p.sStar * (b.dStar / p.dStar) * cw / (cw + n0)
 }
 
+// restartEdge is D'_cap + |W'| in samples, the life and the window at the cap
+// (plan §4.5's restart-edge floor): D'_cap = N₀/X'_cap, |W'| = ⌈D'_cap/Δt⌉ + 1.
+func restartEdge(n0, xcap float64) int {
+	dcap := n0 / xcap
+	return int(math.Ceil(dcap + math.Ceil(dcap) + 1))
+}
+
 // drainN0 is the long drain's N₀ = ⌈S_pre⌉, frozen from the 30s plant's S*.
 func drainN0() float64 { return math.Ceil(frozenPlants["drain0"].sStar) }
 
