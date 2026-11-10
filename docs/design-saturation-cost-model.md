@@ -1868,6 +1868,16 @@ from contended lives, and an unblocked rise. §17.10 (D); the plan's §4.5 updat
 for contention, no limit and the long drain. With them nothing High or Medium
 remains.
 
+**The review of `0ce649f`, 2026-11-10.** §17.10 (A)–(D) implemented as written.
+One correction of the reviewer's own design text, and conditions corrected after
+seeing results (the plan's §4.5); a user decision on the long drain.
+
+| Item | Finding | Answer |
+|---|---|---|
+| High, the reviewer's own text | §17.10 (C)'s fallback by recency dropped `D̂_q`'s memory: mix shift seen seed 11 lost its first term, cost doubles held at `θN̄` | §17.10 (C): `D̂` only when the queue's `D̂_q` has had no qualifying life since its start |
+| Conditions, after results | Attribution by one sample's `U` while the guard reads `U_W`; cost doubles' entry and mechanisms; the no-limit share barely straddling the threshold | The plan's §4.5: attribution by `U_W`; cost doubles' max of the two paths; an alternation of shares frozen from the node curve |
+| The long drain, decided by the user | Its entry count doesn't hold in the regime of long CPU-first reconciles | Safety judged, entry time reported; the regime documented in §17.10; a defensible entry bound a tracked follow-up, due before the GKE re-measure |
+
 **Decided by the user, 2026-11-09, on §6's block.** Under a quota, increases are
 blocked only on samples over `CPUPressureThreshold` in which no period was
 throttled; stall the quota doesn't explain always blocks; without a quota
@@ -2603,10 +2613,22 @@ since `c_W` was 0.
 
 **(C) `D̂_q` excludes lives that overlapped a per-sample tight sample** (every
 period throttled, usage within the slack, §3.2's per-sample test), and when a
-queue's `D̂_q` has no qualifying life within `τ`, `D_mix` uses `D̂` for it. In the
-mix shift `D_mix` read 0.879s against 0.47s, from cap-stretched lives of the
-expensive queue; excluding them from `D̂_q` alone, and falling back to `D̂`, fixes
-that without starving the long drain, whose `D̂` keeps them (§17.9 item 1).
+queue's D̂_q has had no qualifying life since its start, D_mix uses D̂ for it.
+There is no recency test: an old `D̂_q` is the intended memory. In the mix shift
+`D_mix` read 0.879s against 0.47s, from cap-stretched lives of the expensive
+queue; excluding them from `D̂_q` alone, and falling back to `D̂`, fixes that
+without starving the long drain, whose `D̂` keeps them (§17.9 item 1). (The first
+version of this clause fell back when `D̂_q` had no qualifying life within `τ`,
+which dropped the memory the capped rule needs: mix shift seen, seed 11, lost its
+first term, and cost doubles held at `θN̄`. The reviewer's correction of its own
+text, at the review of `0ce649f`.)
+
+**The regime of long CPU-first reconciles.** With reconciles of tens of seconds
+and CPU-first bursts above the quota, a cost change is followed in lifetimes,
+through ĉ's restart, with an undershoot for about one lifetime. The long drain
+is that regime. Its safety is judged and its entry time reported, not judged
+(decided by the user, 2026-11-10); deriving a defensible entry bound for it is a
+tracked follow-up, due before the GKE re-measure (the plan's §6, item 13).
 
 **(D) A contention run, and what holds through it** (the review of `caebca3`, which
 traced the contention case's six failures: in seed 1 one dip sample with the

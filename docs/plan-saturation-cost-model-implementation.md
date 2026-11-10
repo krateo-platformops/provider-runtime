@@ -857,6 +857,39 @@ at `d4083a4`.** Each is labelled so; the conditions are the reviewer's.
 - **False restarts at 0.47s** are reported (2–9 an hour, from autocorrelated
   window means): they cost holds, never rises.
 
+**Corrected after seeing results, at the review of `0ce649f`** (the reviewer's
+text; the long drain by the user's decision of 2026-11-10):
+
+- **Attribution by `U_W`** (replacing the monotone condition's second
+  alternative): "... or it is in an active sample with U_W > ρL (the sign guard
+  reads the window, design §17.10 (A)) and, while trusted, the fall is at most 3r̄
+  relative. While untrusted, a fall needs U_W > ρL and is reported." The level PI
+  is attributed by its `Ū`, the reservation gate by its reading.
+- **The restart-edge floor:** "after ĉ's restart, until D'_cap + |W'| has passed
+  (frozen: the life and the window at the cap), the lower edge is design §17.8
+  item 4's frozen floor".
+- **Long drain, the user's decision: safety judged, entry time reported, not
+  judged.** The safety conditions:
+  - from the change to entry, no rise in a sample with `U_W > ρL`, nor while ĉ's
+    test is pending;
+  - `S` never above `S*'(1 + 3r̄)` once ĉ has restarted;
+  - no sample below the restart-edge floor;
+  - either path before entry: a ĉ restart, or a capped sample at its first term
+    with no completion of its own.
+  The regime is documented in design §17.10. Deriving a defensible entry bound for
+  it is a tracked follow-up, due before the GKE re-measure (§6, item 13).
+- **Cost doubles:**
+  - into the band within `max(ℓ + 2n_W − 1, 2⌈W_test/Δt⌉ + 1)`;
+  - either path: a window-capped sample within `ℓ + n_W − 1`, or a ĉ restart
+    within `2⌈W_test/Δt⌉ + 1`;
+  - the rewarm check extends to entry + 2.
+- **No limit:** the third share is replaced by an **alternation**, frozen from the
+  node curve: `s_over` with mean stall at least `T + 3σ_s` and `s_under` with mean
+  stall at most `T − 3σ_s` (`σ_s` from the same fixed-capacity runs), switching
+  every `3·W`. The condition: "blocked in every sample of a contention run (design
+  §17.10 (D)) and in no other; at least one run begins and ends in each pair of
+  stretches".
+
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
 modelled on Temporal's tuner at its defaults (design §17.8, item 6): inside the
@@ -925,6 +958,13 @@ without it.
 12. **The memory input on a cgroup v1 node.** The design disables inputs whose
     files are missing. Choice: with no `memory.max` and no Go limit, the memory
     input is disabled with its reason, and CPU still applies.
+13. **Open, tracked: an entry bound for long CPU-first reconciles.** In the long
+    drain (reconciles of tens of seconds with CPU-first bursts above the quota) a
+    cost change is followed in lifetimes, through ĉ's restart, with an undershoot
+    for about one lifetime (design §17.10). The gate judges its safety and reports
+    its entry time without judging it (the user's decision, 2026-11-10). Deriving
+    a defensible entry bound for this regime is a follow-up, **due before the GKE
+    re-measure** (PR M).
 
 ## 7. Premises
 
