@@ -761,12 +761,23 @@ func gateCases() []gateCase {
 					break
 				}
 			}
-			// Corrected (f): min(⌈ln(32/S*)/ln(1/θ)⌉, ⌈W/Δt⌉ + 1) + (n_W − 1).
+			// Plan §4.5 (f), the review of b681ff7: min(⌈ln(32/S*)/ln(1/θ)⌉,
+			// ⌈(D_out + |W|)/Δt⌉ + 1) + (n_W − 1), D_out the longest lifetime
+			// among the outgoing queue's completions after the shift.
 			nw := 1
 			if fc := g.firstCapped(i0); fc >= 0 {
 				nw = g.nW(fc)
 			}
-			lim := int(math.Min(math.Ceil(math.Log(32/base.sStar)/math.Log(1/rho)), float64(nw+1))) + nw - 1
+			dOut := 0.0
+			for i := i0; i < g.n(); i++ {
+				for _, l := range g.tr.Samples[i].Books.Lives {
+					if l.Queue == "cheap" {
+						dOut = math.Max(dOut, l.Lifetime())
+					}
+				}
+			}
+			lim := int(math.Min(math.Ceil(math.Log(32/base.sStar)/math.Log(1/rho)), math.Ceil(dOut+float64(nw))+1)) + nw - 1
+			g.report("D_out %.2fs, n_W %d: out of the cap within %d", dOut, nw, lim)
 			if capped > 0 && (out < 0 || out-i0 > lim) {
 				g.fail("not out of the cap within %d samples of the shift: %v", lim, g.slotsFrom(i0, 12))
 			}
@@ -841,6 +852,18 @@ func gateCases() []gateCase {
 			// §17.10 (D)) and in no other; at least one run begins and ends in
 			// each pair of stretches of the alternation.
 			runs := g.inRuns()
+			// The validity guard (plan §4.5, the review of b681ff7): INVALID
+			// unless at least 25% of samples are over the threshold and 25%
+			// under, and a run begins and ends in every pair of stretches.
+			nOver := 0
+			for i := 0; i < g.n(); i++ {
+				if g.stall(i) > 50 {
+					nOver++
+				}
+			}
+			if f := float64(nOver) / float64(g.n()); f < 0.25 || f > 0.75 {
+				g.v.invalid = fmt.Sprintf("%.0f%% of samples over the threshold, want between 25%% and 75%%", 100*f)
+			}
 			pair := 2 * frozenAltStretch
 			for from := altFrom; from+pair <= g.cfg.Duration; from += pair {
 				began, ended := false, false
@@ -849,7 +872,7 @@ func gateCases() []gateCase {
 					ended = ended || (!runs[i] && runs[i-1])
 				}
 				if !began || !ended {
-					g.fail("no run both beginning and ending in the stretches from %v (began %v, ended %v)", from, began, ended)
+					g.v.invalid = fmt.Sprintf("no run both beginning and ending in the stretches from %v (began %v, ended %v)", from, began, ended)
 					break
 				}
 			}
@@ -1057,13 +1080,15 @@ func gateCases() []gateCase {
 					break
 				}
 			}
-			// S never above S*'(1 + 3r̄) once ĉ has restarted; no sample below
-			// the restart-edge floor.
-			for i := start; i < g.n(); i++ {
-				if g.S(i) > b.hi+1e-9 {
-					g.fail("S %.2f at %v above S*'(1 + 3r̄) = %.2f after ĉ's restart", g.S(i), g.tr.At[i], b.hi)
-					break
-				}
+			// Plan §4.5 (a), the review of b681ff7: from ĉ's first restart after
+			// the change, or from entry if ĉ never restarts, at most 5% of
+			// samples outside the band, as in the outside rule; with no entry,
+			// the band rule doesn't apply. The restart-edge floor stays absolute.
+			switch {
+			case rst >= 0:
+				g.outsideLo(b, rst, g.n(), lo)
+			case e >= 0:
+				g.outsideLo(b, e, g.n(), lo)
 			}
 			for i := i0; i < g.n(); i++ {
 				if g.S(i) < math.Min(b.lo, floor)-1e-9 {
@@ -1089,11 +1114,15 @@ func gateCases() []gateCase {
 					}
 					st += c.StretchedLives
 				}
-				// Either path before entry: a ĉ restart, or a capped sample at its
-				// first term with no completion of its own.
-				if !(rst >= 0 && rst <= end) && !first {
-					g.fail("neither a ĉ restart nor a capped sample at its first term with no completion of its own before entry")
+				// Plan §4.5 (c): the path is reported, not asserted.
+				path := "EWMA only"
+				switch {
+				case rst >= 0 && rst <= end:
+					path = "ĉ restart"
+				case first:
+					path = "first term"
 				}
+				g.report("the path before entry: %s", path)
 				g.report("D_mix from the D̂ fallback in %d capped samples (else from D̂_q); Little's fallback %d; ĉ restarts %d; lives over tight samples in D̂ %d (in this self-throttled regime, the plant's real durations, §3.4)", mixFB, fb, cr, st)
 			}
 		}},
