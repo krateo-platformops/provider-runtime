@@ -97,25 +97,35 @@ EQUIVALENT = {
 }
 
 
-# The tests that exercise the protocol: its unit tests first, and only if they
-# pass the model's schedules, searched exhaustively with one fault and with one
-# preemption, as CI's model step does (its random walk is left out, to keep
-# runs reproducible). -failfast ends a run at its first failure. The envtest
-# premise tests pin the API facts and don't run the protocol, so they are
-# left out. So is TestModelTwoProcessesAcquireOneHolder: its one-fault search
-# alone is 2.6 million schedules, about 45 minutes of CPU, per mutant.
-UNIT = "^(TestCanSkip.*|TestHolderEvent.*|TestProtectedEvent|TestSkip.*|TestAcquire.*|TestRelease.*)$"
+# The tests that exercise the protocol: its unit tests, and the model's
+# schedules, searched exhaustively with one fault and with one preemption, as
+# CI's model step does (its random walk is left out, to keep runs
+# reproducible). Both always run, without -failfast, so that each mutant's
+# line lists every test and model scenario that kills it: the per-mutant
+# matrix the gate between the model's two bases compares (docs/
+# credential-use-model-reduction.md §3.3). The envtest premise tests pin the
+# API facts and don't run the protocol, so they are left out. So is
+# TestModelTwoProcessesAcquireOneHolder, until the scheduler's reduction:
+# its one-fault search alone is 2.6 million schedules, per mutant.
+UNIT = "^(TestCanSkip.*|TestHolderEvent.*|TestProtectedEvent|TestSkip.*|TestStalePass.*|TestAcquire.*|TestRelease.*)$"
 MODEL = "^TestModel(Teardown|AcquireAgainstRelease|TwoReleasers|AwayAndBack|DeletionsAroundTheGrace|RecreateBehindACachedUID|BoundsAreExhausted)$"
 
 
+class Run:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
 def go_test():
-    env = dict(os.environ, CI="1", CREDENTIALUSE_MODEL_BOUNDS="0,1,200000;1,0,200000")
+    env = dict(os.environ, CI="1", CREDENTIALUSE_MODEL_BOUNDS=os.environ.get("REVERT_MODEL_BOUNDS", "0,1,200000;1,0,200000"))
+    code, out, err = 0, "", ""
     for tests in (UNIT, MODEL):
-        r = subprocess.run(["go", "test", "-count=1", "-failfast", "-timeout", "3000s", "-run", tests, *PKGS],
+        r = subprocess.run(["go", "test", "-count=1", "-timeout", "3000s", "-run", tests, *PKGS],
                            cwd=ROOT, env=env, capture_output=True, text=True, timeout=3600)
-        if r.returncode != 0:
-            return r
-    return r
+        code = code or r.returncode
+        out += r.stdout
+        err += r.stderr
+    return Run(code, out, err)
 
 
 def digest():
@@ -136,7 +146,14 @@ def classify(r):
     if re.search(r"^panic:|\[recovered\]", out, re.M):
         m = re.search(r"panic: .*", out)
         return "PANIC", m.group(0)[:90] if m else ""
-    return "KILLED", ",".join(sorted(set(re.findall(r"^\s*--- FAIL: (\S+)", out, re.M))))[:220]
+    return "KILLED", "killed in: " + ", ".join(killers(out))
+
+
+def killers(out):
+    """The failing tests, leaves only: a failing parent of a failing subtest
+    is left out."""
+    failed = set(re.findall(r"^\s*--- FAIL: (\S+)", out, re.M))
+    return sorted(t for t in failed if not any(o.startswith(t + "/") for o in failed))
 
 
 
