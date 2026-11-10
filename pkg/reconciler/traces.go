@@ -99,7 +99,8 @@ type memoEntry struct {
 // Turning tracing off while the process runs (tracing.SetTracerProvider(nil))
 // leaves the entries it holds in place: a pass with tracing off doesn't touch
 // the memo, so it costs nothing. They stay bounded by the live annotated
-// objects. They're dropped when such an object is deleted, and if tracing
+// objects. They're dropped when such an object is deleted, because the
+// NotFound pass forgets its entry whether tracing is on or off. If tracing
 // comes back on, the next pass of each object reconciles its entry with what
 // the object shows.
 type traceMemo struct {

@@ -1070,3 +1070,66 @@ func TestTracingOffBeginTraceAllocatesNothing(t *testing.T) {
 		t.Errorf("beginTrace with tracing off allocates %v times per pass, want 0", n)
 	}
 }
+
+// With tracing off, the shared offPass serves every pass at once; N workers on
+// distinct objects under -race catch a future write to it before a tp check
+// (design-tracing §10, test 25, off mode).
+func TestTracingConcurrencyOff(t *testing.T) {
+	tracing.SetTracerProvider(nil)
+	const n = 16
+	tps := []string{tpA, tpB, tpC}
+	var objs []client.Object
+	for i := range n {
+		objs = append(objs, newWidget(name(i), ann(meta.AnnotationKeyTraceparent, tps[i%3])))
+	}
+	s := newTraceServer(t, objs...)
+	p := &widgetProvider{ops: s.ops, updateErr: nil}
+	p.observeHook = func(context.Context, *Widget) {}
+	r := newTraceReconciler(s, p)
+
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			for round := range 4 {
+				if round == 2 {
+					s.annotate(name(i), ann(meta.AnnotationKeyTraceparent, tps[(i+1)%3]))
+				}
+				_, _ = r.Reconcile(context.Background(), reqFor(name(i)))
+			}
+		})
+	}
+	wg.Wait()
+	if s.ops.count("patch") != 0 {
+		t.Error("tracing off wrote a marker")
+	}
+	if r.traces.len() != 0 {
+		t.Errorf("tracing off kept %d memo entries", r.traces.len())
+	}
+	if o := offPass; o.tp != nil || o.span != nil || o.memo != nil || o.marked || o.key.Name != "" || o.uid != "" || o.d.Mode != tracing.NoParent || o.d.Marker != "" {
+		t.Errorf("offPass was written: %+v", *o)
+	}
+}
+
+// An entry kept from when tracing was on is dropped when its object is
+// deleted, even with tracing off by then: the NotFound pass forgets it either
+// way.
+func TestTracingEntryDroppedOnDeleteAfterTracingTurnsOff(t *testing.T) {
+	s := newTraceServer(t, initialized(newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA))))
+	tp, _ := tracer(t)
+	p := &widgetProvider{ops: s.ops}
+	on := newTraceReconciler(s, p, WithTracerProvider(tp))
+	mustReconcile(t, on, "w")
+	if on.traces.len() != 1 {
+		t.Fatal("no entry after a Parent pass with tracing on")
+	}
+	// Tracing turns off: the same reconciler now resolves no provider.
+	tracing.SetTracerProvider(nil)
+	on.tracerProv = nil
+	if err := s.raw.Delete(context.Background(), s.widget("w")); err != nil {
+		t.Fatal(err)
+	}
+	mustReconcile(t, on, "w")
+	if on.traces.len() != 0 {
+		t.Error("the entry outlived its object with tracing off")
+	}
+}

@@ -805,10 +805,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 
 	tp := r.tracerProvider()
 	if kerrors.IsNotFound(err) {
-		// The object is gone: no span, as in unstructured-runtime.
-		if tp != nil {
-			r.traces.forget(req.NamespacedName)
-		}
+		// The object is gone: no span, as in unstructured-runtime. The memo entry goes
+		// whether tracing is on or off: an entry kept from when tracing was on would
+		// otherwise outlive its object, and NotFound passes are rare enough that the
+		// lock costs nothing.
+		r.traces.forget(req.NamespacedName)
 		logging.WithContext(r.log.WithValues("request", req), ctx).Error(err, "Cannot get managed resource")
 		return reconcile.Result{}, errors.Wrap(resource.IgnoreNotFound(err), errGetManaged)
 	}
