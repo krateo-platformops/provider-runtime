@@ -86,6 +86,15 @@ type Model struct {
 	// OnEvent, if set, runs on every change the model makes, after it is
 	// stored: the harness's monitors follow the model through it.
 	OnEvent func(Event)
+	// Guard, if set, runs at every read and write of the model: the
+	// harness's check that no quiet segment touches it (§4, M-a).
+	Guard func()
+}
+
+func (m *Model) guard() {
+	if m.Guard != nil {
+		m.Guard()
+	}
 }
 
 // New returns an empty model whose timestamps come from now.
@@ -127,6 +136,7 @@ func (m *Model) Objects() []Event {
 // Create creates an object with the given metadata (name and namespace come
 // from k).
 func (m *Model) Create(k Key, meta metav1.ObjectMeta) error {
+	m.guard()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.objs[k]; ok {
@@ -155,6 +165,7 @@ func (m *Model) Create(k Key, meta metav1.ObjectMeta) error {
 
 // Get reads one object.
 func (m *Model) Get(k Key) (*metav1.PartialObjectMetadata, error) {
+	m.guard()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	meta, ok := m.objs[k]
@@ -167,6 +178,7 @@ func (m *Model) Get(k Key) (*metav1.PartialObjectMetadata, error) {
 
 // List reads every object of gk in namespace, sorted by name.
 func (m *Model) List(gk schema.GroupKind, namespace string) []metav1.PartialObjectMetadata {
+	m.guard()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []metav1.PartialObjectMetadata
@@ -229,6 +241,7 @@ func dataStruct(gk schema.GroupKind) (any, bool) {
 
 // Patch applies one patch, as the API server would.
 func (m *Model) Patch(k Key, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
+	m.guard()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	gr := resourceOf(k.GK)
@@ -337,6 +350,7 @@ func equalMeta(a, b *metav1.ObjectMeta) bool {
 // setting its deletionTimestamp. A Namespace always goes Terminating, and is
 // removed only by FinalizeNamespace.
 func (m *Model) Delete(k Key) error {
+	m.guard()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur, ok := m.objs[k]

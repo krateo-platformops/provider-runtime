@@ -85,6 +85,9 @@ type Clock struct {
 // Now returns the clock's time. A reading by an actor's code is one of its
 // inputs (docs/credential-use-model-reduction.md §10.1).
 func (c *Clock) Now() time.Time {
+	if c.s != nil && c.s.inQuiet {
+		panic("apimodel: a quiet segment read the clock (§4, M-a)")
+	}
 	if c.s != nil && c.s.running != nil {
 		c.s.running.RecordInput(TimeInput(c.t))
 	}
@@ -126,6 +129,9 @@ const (
 	// Faulty: the scheduler may inject faults into the actor's calls. Other
 	// actors' calls always succeed.
 	Faulty
+	// QuietStart: the actor's start is a quiet park (§4): the code from its
+	// first line to its first park is a quiet segment.
+	QuietStart
 )
 
 // A Proc is a process: actors that share its memory, so that a crash of any
@@ -166,6 +172,15 @@ type Sched struct {
 	// Key, if set, returns the scenario's abstract state, for a stateful
 	// search (§10): everything but the scheduler's own part, which Run adds.
 	Key func() string
+	// NoQuiet turns rule R off (§4): quiet parks are ordinary ones, each
+	// resume a step. The differential test compares the two.
+	NoQuiet bool
+	// QuietInvisible makes a quiet resume, rule R off, invisible to the
+	// preemption bound: never a preemption, never the last actor. The
+	// reduction is sound only against that counting (issue 1, under review);
+	// the differential test sets it on its unreduced searches.
+	QuietInvisible bool
+	inQuiet        bool
 	// Terms, if set, returns every live time term of the state (§10.2), for
 	// tick's invariant.
 	Terms func() []time.Time
@@ -179,6 +194,9 @@ type Sched struct {
 	recordKeys bool
 	keys       []string
 	maxSteps   int
+	// labelPlan, when set, is the labelled trace a replay follows
+	// (ReplayLabels); unmatched collects the entries no option matched.
+	labelPlan, unmatched []string
 	// lastOption makes a replay past its prefix take the last option every
 	// time: jumps, then faults, come last.
 	lastOption bool
@@ -186,6 +204,42 @@ type Sched struct {
 	// the prefix replays under the original bounds, so that its choice
 	// indices mean what they meant.
 	left *Budget
+}
+
+// ReplayLabels runs one schedule that follows a labelled trace (each step's
+// "actor:label!fault" or "jump:+d", as Trace writes them), not choice
+// indices: the declared mappings of the gate (§10.4) and debugging use it.
+// Trace entries that match no option (a quiet resume the run took silently)
+// are skipped. It returns the steps it couldn't follow.
+func ReplayLabels(b Bounds, labels []string, scenario func(s *Sched) error) ([]string, error) {
+	s := newSched(b, nil, nil, nil)
+	s.labelPlan = labels
+	err := scenario(s)
+	return s.unmatched, err
+}
+
+func (s *Sched) planned(opts []option, now time.Time) option {
+	for len(s.labelPlan) > 0 {
+		want := s.labelPlan[0]
+		s.labelPlan = s.labelPlan[1:]
+		for i, o := range opts {
+			var got string
+			if !o.jump.IsZero() {
+				got = "jump:+" + o.jump.Sub(now).String()
+			} else {
+				got = o.actor.Name + ":" + o.actor.label + o.fault.String()
+			}
+			if got == want {
+				s.choices = append(s.choices, i)
+				s.options = append(s.options, len(opts))
+				return o
+			}
+		}
+		s.unmatched = append(s.unmatched, want)
+	}
+	s.choices = append(s.choices, 0)
+	s.options = append(s.options, len(opts))
+	return opts[0]
 }
 
 // ErrCapped ends an audit replay at its step cap.
@@ -277,6 +331,10 @@ type Actor struct {
 	// unit of work, or 0 before it.
 	unitGen int
 
+	// quiet: the actor is parked at a quiet park (§4); nextQuiet: the park
+	// it is about to make is one.
+	quiet, nextQuiet bool
+
 	// inputs are what the actor's code received in its current unit: call
 	// results, values it read from shared state, times it read (§10.1).
 	inputs []any
@@ -353,7 +411,7 @@ func (s *Sched) GoIn(p *Proc, name string, flags Flags, f func(a *Actor)) {
 	if p == nil {
 		p = &Proc{Name: name}
 	}
-	a := &Actor{Name: name, s: s, proc: p, daemon: flags&Daemon != 0, faulty: flags&Faulty != 0, label: "start"}
+	a := &Actor{Name: name, s: s, proc: p, daemon: flags&Daemon != 0, faulty: flags&Faulty != 0, label: "start", quiet: flags&QuietStart != 0}
 	a.next, a.stop = iter.Pull(func(yield func(struct{}) bool) {
 		defer func() {
 			if r := recover(); r != nil && r != errStopped { //nolint:errorlint // the sentinel itself
@@ -370,6 +428,7 @@ func (s *Sched) GoIn(p *Proc, name string, flags Flags, f func(a *Actor)) {
 // when it resumes the actor.
 func (a *Actor) park(label string, faultable bool, notBefore time.Time, cond func() bool) Fault {
 	a.label, a.faultable, a.notBefore, a.cond = label, faultable, notBefore, cond
+	a.quiet, a.nextQuiet = a.nextQuiet, false
 	if !a.yield(struct{}{}) {
 		panic(errStopped)
 	}
@@ -448,6 +507,43 @@ func CallInput(v any) (label string, fault Fault, ok bool) {
 	return c.Label, c.Fault, ok
 }
 
+// WaitQuiet is a Wait whose resume is silent (§4): the code after it, up to
+// the next park, is a quiet segment. It reads only the actor's own variables,
+// immutable values and the process pointer, writes only the actor's own
+// variables, and makes no call; and cond, once true, stays true. The
+// scheduler runs it the moment the wait is ready, outside any choice. The
+// harness's guard (M-a) panics on any read or write of shared state inside
+// it.
+func (a *Actor) WaitQuiet(label string, notBefore time.Time, cond func() bool) {
+	a.nextQuiet = true
+	a.Wait(label, notBefore, cond)
+}
+
+// Settle is rule R (§4): every actor at a ready quiet park resumes now,
+// silently (no choice, no tick, no preemption, no change to last), in the
+// order the actors were added, until none is left. Run applies it before
+// every choice; the differential test applies it to an unreduced search's
+// terminal state, to compare it with a reduced one's.
+func (s *Sched) Settle() {
+	for again := true; again; {
+		again = false
+		for _, a := range s.actors {
+			if a.quiet && a.enabled(s.Clock.t) {
+				a.quiet = false
+				last := s.last
+				s.inQuiet = true
+				a.resume(FaultNone)
+				s.inQuiet = false
+				s.last = last
+				again = true
+			}
+		}
+	}
+}
+
+// InQuiet reports whether a quiet segment is running: the guard of §4 (M-a).
+func (s *Sched) InQuiet() bool { return s.inQuiet }
+
 // Crashed reports whether the actor's current unit of work is lost to a
 // crash (Stale).
 func (a *Actor) Crashed() bool { return a.Stale() }
@@ -520,6 +616,9 @@ func (s *Sched) Run() error {
 		}
 	}()
 	for {
+		if !s.NoQuiet {
+			s.Settle()
+		}
 		if s.left != nil && len(s.choices) == len(s.prefix) {
 			s.bounds.Preemptions = s.preemptions + s.left.Preemptions
 			s.bounds.Faults = s.faults + s.left.Faults
@@ -532,7 +631,9 @@ func (s *Sched) Run() error {
 			if !a.enabled(now) {
 				continue
 			}
-			if s.last != nil && s.last != a && s.last.enabled(now) && s.preemptions >= s.bounds.Preemptions {
+			// A quiet resume (rule R off) is invisible: it is never a
+			// preemption, and doesn't become the last actor (§5, C-bounds).
+			if (!a.quiet || !s.QuietInvisible) && s.last != nil && s.last != a && s.last.enabled(now) && s.preemptions >= s.bounds.Preemptions {
 				continue // no preemption left: the last actor must go on
 			}
 			opts = append(opts, option{actor: a, fault: FaultNone})
@@ -595,20 +696,28 @@ func (s *Sched) Run() error {
 				return ErrCapped
 			}
 		}
-		o := opts[s.choose(len(opts))]
+		var o option
+		if s.labelPlan != nil {
+			o = s.planned(opts, now)
+		} else {
+			o = opts[s.choose(len(opts))]
+		}
 		if !o.jump.IsZero() {
 			s.jumps++
 			s.trace = append(s.trace, "jump:+"+o.jump.Sub(now).String())
 			s.Clock.t = o.jump
 			continue
 		}
-		if s.last != nil && s.last != o.actor && s.last.enabled(now) {
+		quiet := o.actor.quiet && s.QuietInvisible
+		if !quiet && s.last != nil && s.last != o.actor && s.last.enabled(now) {
 			s.preemptions++
 		}
 		if o.fault != FaultNone {
 			s.faults++
 		}
-		s.last = o.actor
+		if !quiet {
+			s.last = o.actor
+		}
 		s.trace = append(s.trace, o.actor.Name+":"+o.actor.label+o.fault.String())
 		if o.actor.faultable {
 			s.Clock.t = now.Add(s.tick(now))
@@ -714,6 +823,9 @@ func (s *Sched) choose(n int) int {
 	s.options = append(s.options, n)
 	return i
 }
+
+// Steps is the schedule that ran, one entry per step, as Trace writes them.
+func (s *Sched) Steps() []string { return slices.Clone(s.trace) }
 
 // Trace is the schedule that ran, one step per entry: actor:label, with any
 // fault.

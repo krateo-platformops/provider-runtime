@@ -112,6 +112,40 @@ func (s modelServer) List(_ context.Context, gk schema.GroupKind, namespace stri
 	return out, err
 }
 
+// firstCall runs began once, right after the first call made through it
+// returns: a unit's "began" counter lives in its first call's step, not in
+// the quiet segment before it (§5, C-invisible).
+type firstCall struct {
+	server
+	done  *bool
+	began func()
+}
+
+func (c firstCall) hit() {
+	if !*c.done {
+		*c.done = true
+		c.began()
+	}
+}
+
+func (c firstCall) Get(ctx context.Context, gk schema.GroupKind, namespace, name string) (*metav1.PartialObjectMetadata, error) {
+	o, err := c.server.Get(ctx, gk, namespace, name)
+	c.hit()
+	return o, err
+}
+
+func (c firstCall) Patch(ctx context.Context, gk schema.GroupKind, namespace, name string, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
+	o, err := c.server.Patch(ctx, gk, namespace, name, pt, data)
+	c.hit()
+	return o, err
+}
+
+func (c firstCall) List(ctx context.Context, gk schema.GroupKind, namespace string) ([]metav1.PartialObjectMetadata, error) {
+	o, err := c.server.List(ctx, gk, namespace)
+	c.hit()
+	return o, err
+}
+
 // process is one controller process: what a restart or a leader change
 // loses.
 type process struct {

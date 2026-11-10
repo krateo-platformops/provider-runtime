@@ -248,7 +248,15 @@ func newWorld(s *apimodel.Sched) *world {
 	w.p = SecretRef(w.ns, "probe-dummy-creds").ID()
 	s.Deadlines = w.deadlines
 	s.Terms = w.timeTerms
+	// The quiet-segment reduction (§4) is work in progress, not reviewed, and
+	// off by default: CREDENTIALUSE_MODEL_QUIET turns it on.
+	s.NoQuiet = defaultQuiet().off
 	w.m.OnEvent = w.onModelEvent
+	w.m.Guard = func() {
+		if s.InQuiet() {
+			panic(fmt.Sprintf("model: a quiet segment touched the API model (§4, M-a)\n%s", debug.Stack()))
+		}
+	}
 	return w
 }
 
@@ -350,6 +358,9 @@ func (w *world) proc(p **process) *apimodel.Proc {
 	// A unit of work lost to a crash must not touch the process's memory,
 	// not even to read it (§3.2).
 	guard := func() {
+		if w.s.InQuiet() {
+			panic(fmt.Sprintf("model: a quiet segment touched process %s's memory (§4, M-a)\n%s", (*p).name, debug.Stack()))
+		}
 		if a := w.s.Running(); a != nil && a.Stale() {
 			panic(fmt.Sprintf("model: %s, a unit of work lost to a crash, touched process %s's memory\nschedule: %s\n%s", a.Name, (*p).name, w.s.Trace(), debug.Stack()))
 		}
@@ -384,7 +395,7 @@ func (w *world) proc(p **process) *apimodel.Proc {
 // The process may be replaced by a restart.
 func (w *world) informer(name string, p **process) {
 	oneByOne := os.Getenv("CREDENTIALUSE_MODEL_DEEP") != ""
-	w.s.GoIn(w.proc(p), name, apimodel.Daemon, func(a *apimodel.Actor) {
+	w.s.GoIn(w.proc(p), name, apimodel.Daemon|apimodel.QuietStart, func(a *apimodel.Actor) {
 		for {
 			a.Wait("watch", time.Time{}, func() bool { return (*p).cache.Pending() })
 			for (*p).cache.Pending() {
@@ -401,7 +412,7 @@ func (w *world) informer(name string, p **process) {
 
 // relister relists a process's caches once, at any point (§6.5 L2).
 func (w *world) relister(name string, p **process) {
-	w.s.GoIn(w.proc(p), name, 0, func(a *apimodel.Actor) {
+	w.s.GoIn(w.proc(p), name, apimodel.QuietStart, func(a *apimodel.Actor) {
 		a.Wait("relist", time.Time{}, nil)
 		(*p).relist(a.Now())
 	})
@@ -437,15 +448,19 @@ func (w *world) holder(spec holderSpec, p **process) {
 	}
 	holds := w.holds[spec.name]
 	w.deletionPhase[actor] = false
-	w.s.GoIn(w.proc(p), actor, apimodel.Faulty, func(a *apimodel.Actor) {
+	w.s.GoIn(w.proc(p), actor, apimodel.Faulty|apimodel.QuietStart, func(a *apimodel.Actor) {
 		ctx := context.Background()
 		pass, liveIdx, delIdx := 0, 0, 0
-		a.Locals = func() []any { return []any{pass, liveIdx, delIdx} }
+		deletionPhaseLoop := false
+		a.Locals = func() []any { return []any{pass, liveIdx, delIdx, deletionPhaseLoop} }
 		run := func() (gone bool) {
 			a.Restart()
 			pr := newProtocol(modelServer{w.m, a}, cacheViews{p}, (*p).ver, (*p).seen, a.Clock(), testGrace)
 			srv := modelServer{w.m, a}
 			obj, err := srv.Get(ctx, widgetGK, w.ns, spec.name)
+			if !deletionPhaseLoop {
+				w.inc(w.started, actor) // the pass began: its first call ran
+			}
 			if Classify(err) == ClassNotFound {
 				w.deletionPhase[actor] = true // gone: nothing left to do
 				return true
@@ -526,20 +541,20 @@ func (w *world) holder(spec holderSpec, p **process) {
 			liveIdx = i
 			if spec.before != nil {
 				if c := spec.before(i); c != nil {
-					a.Wait("await", time.Time{}, c)
+					a.WaitQuiet("await", time.Time{}, c)
 				}
 			}
-			w.started[actor]++
 			gone := run()
-			w.livePasses[actor]++ // run, however it ended
+			w.inc(w.livePasses, actor) // run, however it ended
 			if gone {
 				return
 			}
 		}
-		a.Wait("await deletion", time.Time{}, func() bool {
+		a.WaitQuiet("await deletion", time.Time{}, func() bool {
 			o, err := w.m.Get(widgetKey(w.ns, spec.name))
 			return err != nil || o.DeletionTimestamp != nil
 		})
+		deletionPhaseLoop = true
 		for i := range spec.deletionPasses {
 			delIdx = i + 1
 			if run() {
@@ -554,9 +569,21 @@ func (w *world) holder(spec holderSpec, p **process) {
 // after, the first batch waits until it holds, as a batch is enqueued by the
 // event it waits for.
 func (w *world) releaser(name string, p **process, n int, cacheless bool, after func() bool) {
-	w.s.GoIn(w.proc(p), name, 0, func(a *apimodel.Actor) {
+	// A releaser with caches is never quiet: its segment can run a whole R0
+	// batch against the cache without a call (§5, C-invisible). A cacheless
+	// one's waits are quiet when their condition is stable (C-stable).
+	var flags apimodel.Flags
+	if cacheless {
+		flags = apimodel.QuietStart
+	}
+	_, stable := any(after).(stableCond)
+	w.s.GoIn(w.proc(p), name, flags, func(a *apimodel.Actor) {
 		if after != nil {
-			a.Wait("await trigger", time.Time{}, after)
+			if cacheless && stable {
+				a.WaitQuiet("await trigger", time.Time{}, after)
+			} else {
+				a.Wait("await trigger", time.Time{}, after)
+			}
 		}
 		batch := 0
 		a.Locals = func() []any { return []any{batch} }
@@ -567,10 +594,11 @@ func (w *world) releaser(name string, p **process, n int, cacheless bool, after 
 			if cacheless {
 				v = noViews{}
 			}
-			pr := newProtocol(modelServer{w.m, a}, v, (*p).ver, (*p).seen, a.Clock(), testGrace)
-			w.batchesStarted[name]++
+			began := false
+			srv := firstCall{modelServer{w.m, a}, &began, func() { w.inc(w.batchesStarted, name) }}
+			pr := newProtocol(srv, v, (*p).ver, (*p).seen, a.Clock(), testGrace)
 			res, err := pr.release(context.Background(), w.ns, []ID{w.p})
-			w.batches[name]++
+			w.inc(w.batches, name)
 			at := w.s.Now()
 			for _, d := range res.Decisions {
 				for _, r := range res.Released {
@@ -583,7 +611,11 @@ func (w *world) releaser(name string, p **process, n int, cacheless bool, after 
 				w.fail("%s: %v", name, err)
 			}
 			if !res.RequeueAt.IsZero() {
-				a.Wait("requeue", res.RequeueAt, nil)
+				if cacheless {
+					a.WaitQuiet("requeue", res.RequeueAt, nil)
+				} else {
+					a.Wait("requeue", res.RequeueAt, nil)
+				}
 			}
 		}
 	})
@@ -609,7 +641,7 @@ func (w *world) call(a *apimodel.Actor, label string, op func() error) {
 // deleter deletes keys in order, each when it is chosen; nsFirst also
 // records when the namespace got its deletionTimestamp.
 func (w *world) deleter(name string, keys ...apimodel.Key) {
-	w.s.Go(name, 0, func(a *apimodel.Actor) {
+	w.s.Go(name, apimodel.QuietStart, func(a *apimodel.Actor) {
 		idx := 0
 		a.Locals = func() []any { return []any{idx} }
 		for i, k := range keys {
@@ -807,7 +839,7 @@ func explore(t *testing.T, name string, flags scenarioFlags, scenario func(w *wo
 					return
 				}
 				audits++
-				if msg := auditPrune(p.bounds, scenario, pruned, witness, seed); msg != "" {
+				if msg := auditPrune(p.bounds, scenario, pruned, witness, seed, defaultQuiet()); msg != "" {
 					divergences++
 					if divergences <= 3 {
 						t.Errorf("%s, %s: merge audit: %s\npruned: %v\nwitness: %v", name, p.name, msg, pruned.Choices, witness.Choices)
@@ -1052,9 +1084,9 @@ func TestModelTwoProcessesAcquireOneHolder(t *testing.T) {
 				return nil
 			},
 		}, &pb)
-		w.releaser("releaserC", &pc, 1, true, func() bool { return w.livePasses["h1@B"] >= 1 }) // (2)
-		w.s.Go("teardown", 0, func(a *apimodel.Actor) {
-			a.Wait("live passes done", time.Time{}, func() bool {
+		w.releaser("releaserC", &pc, 1, true, stableCond(func() bool { return w.livePasses["h1@B"] >= 1 })) // (2)
+		w.s.Go("teardown", apimodel.QuietStart, func(a *apimodel.Actor) {
+			a.WaitQuiet("live passes done", time.Time{}, func() bool {
 				return w.livePasses["h1@A"] >= 2 && w.livePasses["h1@B"] >= 2
 			})
 			w.call(a, "delete secret", func() error { return w.m.Delete(keyOf(w.p)) })
@@ -1076,7 +1108,7 @@ func TestModelDeletionsAroundTheGrace(t *testing.T) {
 		w.holder(holderSpec{name: "h1", livePasses: 1, deletionPasses: 3}, &pa)
 		w.releaser("releaserA", &pa, 3, false, nil)
 		w.deleter("secret", keyOf(w.p))
-		w.s.Go("late deletions", 0, func(a *apimodel.Actor) {
+		w.s.Go("late deletions", apimodel.QuietStart, func(a *apimodel.Actor) {
 			// Wait into the grace, then delete the holder and the namespace.
 			// "Into the grace" is half of it after the Secret's deletion: a
 			// deadline (§3.1), reached by a jump, or after the grace by a
@@ -1093,7 +1125,7 @@ func TestModelDeletionsAroundTheGrace(t *testing.T) {
 			if dt.IsZero() {
 				dt = a.Now()
 			}
-			a.Wait("into the grace", dt.Add(testGrace/2), nil)
+			a.WaitQuiet("into the grace", dt.Add(testGrace/2), nil)
 			w.call(a, "delete ns", func() error {
 				err := w.m.Delete(nsKey(w.ns))
 				if err == nil {
@@ -1138,12 +1170,13 @@ func TestModelRecreateBehindACachedUID(t *testing.T) {
 			o, err := w.m.Get(keyOf(w.p))
 			return err != nil || o.DeletionTimestamp != nil
 		})
-		w.s.Go("rotation", 0, func(a *apimodel.Actor) {
+		w.s.Go("rotation", apimodel.QuietStart, func(a *apimodel.Actor) {
 			w.call(a, "delete secret", func() error { return w.m.Delete(keyOf(w.p)) })
-			a.Wait("gone", time.Time{}, func() bool { _, err := w.m.Get(keyOf(w.p)); return err != nil })
+			// Stable while waited on: only this actor recreates the Secret.
+			a.WaitQuiet("gone", time.Time{}, func() bool { _, err := w.m.Get(keyOf(w.p)); return err != nil })
 			w.call(a, "recreate secret", func() error { return w.m.Create(keyOf(w.p), metav1.ObjectMeta{}) })
 			// The holder is deleted after its last live pass.
-			a.Wait("last live pass", time.Time{}, func() bool { return w.livePasses["h1"] >= 3 })
+			a.WaitQuiet("last live pass", time.Time{}, func() bool { return w.livePasses["h1"] >= 3 })
 			w.call(a, "delete h1", func() error { return w.m.Delete(widgetKey(w.ns, "h1")) })
 		})
 		w.onDone = func() { windows += w.l6 }
@@ -1186,3 +1219,16 @@ func peekWritten(p *process, uid types.UID, ns string) bool {
 	_, ok := p.ver.written[uid][ns]
 	return ok
 }
+
+// inc counts in one of the scenario's counters, which Wait conditions read:
+// never from a quiet segment (§4, M-a).
+func (w *world) inc(m map[string]int, k string) {
+	if w.s.InQuiet() {
+		panic("model: a quiet segment wrote a scenario counter (§4, M-a)")
+	}
+	m[k]++
+}
+
+// stableCond marks a releaser's trigger whose condition stays true once true
+// (§5, C-stable), so that a cacheless releaser's wait for it can be quiet.
+type stableCond func() bool
