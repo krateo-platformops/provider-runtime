@@ -75,8 +75,8 @@ The user decided the choices below.
 
 ### 3.1 Event-driven time
 
-- **Only calls move time.** Each call step ticks the clock 1ms, and no other
-  step does: not resumes, not informer deliveries, not relists. A delivery
+- **Only calls move time.** Each call step ticks the clock, by at most 1µs
+  (§10.2), and no other step does: not resumes, not informer deliveries, not relists. A delivery
   carries the time of the last call before it. Equal times can only stop a
   skip, since `canSkip` needs `t_obs < t_issue` strictly.
 - **Up to T = 2 jumps per schedule.** Any pending deadline later than the
@@ -98,16 +98,16 @@ today's 5ms test grace and 1ms per call, any five calls end the grace with
 no jump, so "many calls, still inside the grace" can't be represented, and
 time would move through uncounted ticks as well as through the jumps the
 user decided. So:
-- **The test grace is 1h**, against 1ms per call. A schedule makes at most a
-  few hundred calls, so ticks never come near a deadline.
+- **The test grace is 1h**, against at most 1µs per call. A schedule makes
+  at most a few thousand calls, so ticks never come near a deadline.
 - **Every "into the grace" moment a scenario needs is a declared
   deadline**, reached by a jump, not by counting calls.
 - **A call's tick never reaches a pending deadline.** Deadlines built from
   event times lie only a few ticks apart: a deletion and its first sight, or
-  two processes' first sights. So after a jump to one, a 1ms tick would
+  two processes' first sights. So after a jump to one, a fixed tick would
   cross the next within a few calls. The tick is therefore at most 1/1024
-  of the time left to the next pending deadline, which leaves room for
-  hundreds of calls. **A run-time check panics if a tick can't fit**, that
+  of the time left to the next pending deadline, and at most 1µs, which
+  leaves room for hundreds of calls. **A run-time check panics if a tick can't fit**, that
   is, if a call would have to cross a deadline. Only jumps (and the forced
   jump when nothing is enabled) cross deadlines.
 
@@ -189,6 +189,11 @@ In this order:
 
 If any count is lower, the work stops and is reported. It is not adjusted
 to pass.
+
+**Superseded by the user's decision (§10.4).** With the stateful search,
+counts from the two bases aren't comparable. The gate is inclusion of
+terminal states, S_old ⊆ S_new, together with the per-mutant matrix and
+equal violation messages under each killed mutant.
 
 **What the gate does not show.**
 - Schedule counts aren't a behaviour-inclusion check: the two bases'
@@ -383,203 +388,260 @@ the differential test passing.
 
 ## 10. Stateful search with a time-abstract state hash (the user's decision, under review)
 
+*Revision 2: answers the soundness review of 87f333b (M1 to M3, and the Lows)
+and records the user's decision on the gate.*
+
 **Why.** The new base (§3) is what the user decided, but T = 2 jumps multiply
 every search by 70 to 110. AwayAndBack with 3 live passes goes from 19,555
 to 1,538,761 schedules with one fault, and from 29,833 to 3,307,693 with one
 preemption. Its search with one preemption and one fault would be about 100
 million. Each step offers a jump to each pending deadline, and two jumps can
-sit at any two positions. Most of those positions are equivalent: nothing
-between them reads the clock except to compare it with a deadline. The user
-chose the timed-model-checking answer: region equivalence (Alur and Dill;
-UPPAAL's zones) and a stateful search that remembers visited states (SPIN,
-TLC). Two paths that reach the same abstract state are searched once.
+sit at any two positions, most of them equivalent. The user chose the
+timed-model-checking answer: region equivalence (Alur and Dill; UPPAAL's
+zones) and a stateful search that remembers visited states (SPIN, TLC). Two
+paths that reach the same abstract state are searched once.
 
 ### 10.1 What a state is
 
 An abstract state has seven parts. Each is hashed canonically.
 
 1. **Every actor's control point and local memory.** A Go coroutine's stack
-   can't be inspected. So an actor's state is made of:
-   - **its declared persistent locals:** the variables it keeps across units
-     of work, which it registers explicitly. For example, a holder's pass
-     number, a releaser's batch number, a deleter's next key;
-   - **a digest of its inputs in the current unit:** every call's label,
+   can't be inspected. So an actor's state is made of three things:
+   - **Its declared persistent locals:** the variables it keeps across units
+     of work, registered explicitly. Examples: a holder's pass number, a
+     releaser's batch number, a deleter's next key. **Names captured in a
+     closure count as locals.** Recreate's wait condition captures the
+     first Secret's UID, so that UID is declared and renamed like any other
+     name (point 2).
+   - **A digest of its inputs in the current unit:** every call's label,
      fault and result, and every value its own code reads from shared state
-     (views, the verified set, first sights, the clock, the world's
-     counters). The digest is reset when a unit ends (Restart, Wait).
+     through a hooked accessor (views, the verified set, first sights, the
+     clock, the world's counters). The digest resets when a unit ends
+     (Restart, Wait).
+   - **The time values it holds, as live time terms** (§10.2), not frozen
+     ranks. R2's now is held across the Namespace GET and the list. An A2's
+     issue time is held across the call. Their relation to the clock and to
+     deadlines changes while they are held, so they take part in the time
+     abstraction like any stored time. The digest refers to them by term.
 
-   Times in the digest are recorded by their place in the order of §10.2,
-   not by value.
-
-   An actor is deterministic given its code and inputs. So two actors with
-   equal declared locals and equal unit inputs have equal stacks, and merging
-   them is sound. The representation can miss merges (it is finer than the
-   stack), which costs search time, never soundness.
-
-   *Obligation:* everything an actor's code reads from shared state goes
-   through a hooked accessor that feeds the digest. These are the access
-   hooks of §3.2, extended with the value read: the harness views, the
-   verified set, first sights and the clock. A read that bypasses them would
-   be invisible to the hash. M-a's quiet-segment guard (§4) already forbids
-   such reads in quiet segments, and a check in §10.2 catches the rest.
+   An actor is deterministic given its code and its inputs. So two actors
+   with equal locals, equal digests and equal held terms have stacks that
+   behave alike, and merging them is sound. The representation is finer
+   than the stack, so it can miss merges, which costs search time and never
+   soundness. *Obligation:* every read of shared state goes through a hooked
+   accessor. The merge audit (§10.5) is the check on this.
 2. **The API model:** every object's metadata, and the event log after the
    oldest cache's position, since the older part can no longer be delivered.
-   UIDs, resourceVersions and epochs are compared only for equality, so they
-   are **renamed canonically** in first-occurrence order. The model's
-   counters only need to allocate fresh names, which renaming keeps.
-3. **The caches:** their objects, and where each stands in the log.
+   **Names are renamed canonically:** UIDs, resourceVersions and epochs are
+   compared only for equality, so each is replaced by its index of first
+   occurrence in a canonical traversal of the state.
+   - The traversal orders objects by key (kind, namespace, name, which the
+     scenario fixes), and actors by registration. It never sorts by raw
+     UIDs, resourceVersions or epochs.
+   - Every place a name lives is renamed together: objects, caches, the
+     verified set, monitors, and actors' locals and held values.
+   - The model's counters only need to allocate fresh names, which renaming
+     keeps.
+   - Log positions (cache sequence numbers) are stored relative to the
+     retained suffix.
+3. **The caches:** their objects, and where each stands in the retained log.
 4. **Process memory:** the verified sets and first sights, with their times
-   abstracted (§10.2), and each process's generation, relative to each
-   actor's unit. What the hash needs is whether a unit is stale or hasn't
-   begun, not the counter.
-5. **The scheduler:**
-   - each actor's park (its label and whether it is done; a Wait's condition
-     is a function of the rest of the state, and its notBefore is a time
-     term);
-   - the last actor, because whether a switch costs a preemption depends on
-     it.
-6. **The checks, as monitors with small state.**
-   - Today the safety invariant is checked at the end, over the whole
-     history of reads and releases. A history would make almost every state
-     distinct.
-   - So each check becomes an **on-the-fly monitor**, evaluated at the step
-     where its event happens. A violation is recorded then, with the path
-     that reached it.
-   - What a monitor keeps is part of the state:
-     - per holder and P, the earliest unbroken hold, as a time term;
-     - whether an allowed U5 release has happened, with the time terms its
-       grace and namespace checks compare;
-     - the namespace deletion time;
-     - the deletion-phase flags;
-     - the scenario's counters.
+   as terms (§10.2), and, for each actor, whether its unit is stale or not
+   begun. That is relative to the process's generation, not the counter.
+5. **The scheduler:** each actor's park (its label and whether it's done, its
+   notBefore as a term; a Wait's condition is a function of the state), and
+   the last actor, because whether a switch costs a preemption depends on
+   it.
+6. **The checks, as monitors with small state.** Checking over the whole
+   history of reads and releases at the end would make almost every state
+   distinct. So each check runs **on the fly, at the event it is about**, and
+   records a violation then, with the path that reached it.
+   - **The hold monitor** updates on every model event of each holder, made
+     by any actor, through the model's event hook. A version whose record
+     drops P ends that holder's hold on P. It keeps the earliest unbroken
+     hold per holder and P, as a term. It no longer replays the log from an
+     old position (today's `namedSince`).
+   - **The read monitor** keeps the latest allowed U5 release's
+     `NamespaceReadAt`, `GraceEnd` and `at`, as terms, and the namespace
+     deletion's time. With them it checks each deleting holder's read as it
+     happens.
+   - **The other parts:** the deletion-phase flags, the scenario's counters,
+     and **flags for event-type reach**. A U5 release, an L6 pass, an H1
+     pass and a deleting read are events, so each sets a monitor flag
+     that becomes part of the state.
    - Convergence is checked at terminal states, as now.
-7. **Time**, abstracted as §10.2 says.
+7. **Time,** as §10.2 says.
 
 ### 10.2 Time: region equivalence for a discrete clock
 
-**Terms.** The time terms of a state are:
-- every time value stored anywhere in it: now, every actor's notBefore, the
-  model's creation and deletion timestamps, the verified set's `written`,
-  `recordSince`, `observed` and `lastList`, the first sights, and the
-  monitors' times;
-- every pending deadline (§3.1): grace ends and declared thresholds.
+**Order alone is not enough.** Code compares a term built as t + c (a grace
+end, a requeue) with another term u, which amounts to comparing u − t with c.
+Order keeps neither the integer parts nor the differences. Today's code has
+four such cases:
+- (a) R2's WaitForGrace requeue becomes a wait until `at + RequeueAfter` in
+  the harness. That is the grace end plus the ticks between R2's now and
+  `at`, not the grace end itself.
+- (b) `requeueAt` falls back to 1ms when the grace end is already past.
+- (c) a restored epoch's requeue at now + 1s, which can fall either side of a
+  pending grace end;
+- (d) the late deletions' threshold, dt + grace/2, created after dt.
 
-**The abstraction.** A state keeps **the order of its terms, ties
-included**, and drops their values. That covers which deadlines have passed
-(they are ordered before now) and the order of the pending ones. It is
-region equivalence for this clock. The constants the code adds to times
-(the grace, `restoredEpochRequeue`, a scenario's threshold offsets) appear
-only inside deadlines, which are terms themselves.
+**The representation: values relative to the earliest live term, with tick
+parts reduced to their order.**
+- **Every constant the code adds to a time is an integer multiple of a unit
+  U:** grace = 1h, grace/2 = 30min, `restoredEpochRequeue` = 1s, so U = 1s.
+- **A call's tick is at most 1µs** (`min(1µs, gap/1024)`). A schedule makes
+  at most a few thousand calls, so its total ticks stay below U/2.
+- Every time value is then a jump-built coarse part plus a fine part: an
+  earlier term plus constants, from jumps to deadlines, plus a sum of ticks.
+  Written relative to the earliest live term, a value is n·U + f with
+  |f| < U/2.
+- **A term is represented by the pair (n, the rank of f among all live
+  terms' fine parts).** Then t + c against u is decided lexicographically:
+  n_t + c/U against n_u, then f_t against f_u. Both are kept, so every
+  comparison the code can make has the same answer in two states with equal
+  representations.
+- The shift to the earliest live term is sound because every comparison is
+  a difference.
+- **Why not zones (DBMs).** Zones represent symbolic clocks and constraints
+  between them. Here the clock is concrete and discrete, the only
+  constraints are u − t ≷ c with c a multiple of U, and fine parts are
+  bounded below U/2. The integer part with fine-part order is the region
+  construction, and it is exact for this case. Zones would be needed only
+  if ticks could add up to U, which the assertion below rules out.
 
-**Why equal abstract states have equal futures.** This holds if no code uses
-a time except to compare it with another term, or to store it, or to build a
-deadline from it with a constant. Then:
-- every comparison a future step makes gives the same answer in both
-  states;
-- a new now lands in the same place in the order: a tick stays strictly
-  between now and the next pending deadline (§3.1), and a jump lands on a
-  deadline;
-- every new stored time is now, so it lands in the same place too.
+**The assertion, a run-time check.** It panics if either of these happens:
+- a tick crosses a pending deadline, or brings now from outside U of a
+  deadline to inside it, which would mean the coarse part moved by ticks;
+- a schedule's total ticks reach U/2.
+
+Only jumps move coarse parts, and only jumps cross deadlines.
+
+**Two code changes make every requeue a term** (they land with the
+implementation):
+- **Requeues become absolute.** `ReleaseResult` returns `RequeueAt`, the
+  grace end itself or now + `restoredEpochRequeue`, instead of a duration,
+  and the harness waits until exactly that time. That removes (a).
+- **The 1ms fallback becomes "now".** A grace end already past requeues at
+  once. That removes (b).
+- (c) and (d) are deadlines built as a term plus a constant, which the
+  representation handles.
 
 **Every reader of time, and what it does with the value:**
 
-| Reader | Use | How the abstraction handles it |
+| Reader | Use | How it's handled |
 |---|---|---|
-| `acquire.go` A1, `at := clock.Now()` | stored as `observed` | a stored term; compared only (t_obs order) |
-| `acquire.go` A2, `issued := clock.Now()` (×2) | stored as `written` | a stored term; compared only |
-| `release.go` R1, `now` | stored as a first sight; `GraceEnd` = max(deletionTimestamp, first sight) + grace; compared with now (`now.Before(graceEnd)`); `requeueAt(now, graceEnd)` | the first sight is a term, and the grace end a deadline. `RequeueAfter = graceEnd − now` is a duration, used only to schedule the requeue's wait at `now + RequeueAfter = graceEnd` (a deadline), and tested only for > 0 (an order fact) |
-| `release.go` R1, restored epoch: `requeueAt(now, now + restoredEpochRequeue)` | a requeue 1s later | the wait's notBefore is a deadline (term plus constant) |
-| `release.go` R2, `now` before the reads | GraceOver is now ≥ grace end | a comparison with a deadline |
-| `release.go` R2, `nsReadAt = clock.Now()` | stored in the decision, read by the monitor | a stored term |
-| `decide.go` `GraceEnd` | `deletionTimestamp.Sub(firstSeen)` clamped at 0, plus grace | equals max(dt, fs) + grace: a deadline |
-| the model: Create and Delete | creation and deletion timestamps | stored terms; never changed by patches (`Patch` keeps them from the stored object), so no truncation |
-| the harness: deliveries (`holderEvent`, `listCompleted`) | stored as `recordSince` and `lastList` | stored terms |
-| the harness: holds, `nsDeleted`, a release's `at` | the monitors' terms | stored terms |
-| the harness: waits | `dt + grace/2` (the late deletions' threshold); `at + RequeueAfter` | deadlines |
-| the harness: `converge`'s clock, `now + 3 × grace` | after the search, outside it | not part of the search |
-| the scheduler: `tick` | `min(1ms, gap/1024)` uses the gap to the next deadline as a value | the result only places the new now strictly between now and the next deadline, the same place in any state with the same order |
+| `acquire.go` A1, `at := clock.Now()` | stored as `observed` | a term, compared only |
+| `acquire.go` A2, `issued := clock.Now()` (×2) | held across the call, then stored as `written` | a held term (§10.1), then a stored term |
+| `release.go` R1, `now` | stored as a first sight; `GraceEnd` = max(dt, first sight) + grace; `now.Before(graceEnd)`; the requeue | the first sight is a term, the grace end a deadline; the requeue is absolute (`RequeueAt = graceEnd`) |
+| `release.go` R1, a restored epoch | `RequeueAt = now + restoredEpochRequeue` | case (c): a deadline, term plus 1s |
+| `release.go` R2, `now` before the reads | held across the Namespace GET and the list; GraceOver is now ≥ grace end | a held term, compared with a deadline |
+| `release.go` R2, `nsReadAt = clock.Now()` | stored in the decision, read by the read monitor | a term |
+| `release.go` `requeueAt` | the earliest requeue | an absolute minimum of terms; a past grace end gives now (case (b), removed) |
+| `decide.go` `GraceEnd` | max(dt, first sight) + grace, through a clamped `Sub` | a deadline, term plus constant |
+| the model: Create and Delete | creation and deletion timestamps | terms; `Patch` keeps them from the stored object, so no truncation |
+| the harness: deliveries (`holderEvent`, `listCompleted`) | `recordSince`, `lastList` | terms |
+| the harness: holds, `nsDeleted`, a release's `at` | the monitors | terms |
+| the harness: requeue waits | until `RequeueAt` | case (a), removed: exactly the grace end |
+| the harness: late deletions | until dt + grace/2 | case (d): a deadline, term plus constant |
+| the harness: `converge` | its clock at now + 3 × grace, after the search | outside the search |
+| the scheduler: `tick` | `min(1µs, gap/1024)` | a fine part; only its order is kept, and the assertion bounds the total |
 
-**What enforces "time is only compared, never used as a value".**
-- *M-a's guard (§4):* a quiet segment can't read the clock at all.
-- *A new check, order-preserving perturbation:* in tests, each schedule
-  (each sequence of choices) is replayed with the clock perturbed in a way
-  that preserves order:
-  - a different start;
-  - ticks scaled by a random factor that still fits under the gap rule.
-
-  The sequence of abstract states must be identical. Any code that used a
-  time as a value would see different values, and its effect would show in
-  a call, a decision or a monitor. Every schedule in the differential test
-  (§10.5) gets one perturbed replay.
-- *Review:* the table above is the list of readers. A new reader of
-  `Clock.Now()` must be added to it, and the perturbation check catches one
-  that isn't.
+**What enforces "time is used only by comparison, storage, or adding a
+constant":**
+- **M-a's guard (§4):** a quiet segment can't read the clock at all.
+- **The run-time assertion above.**
+- **The merge audit (§10.5).** It catches what a perturbation check can't:
+  behaviour that depends on differences in history between two merged
+  states.
+- **Review:** the table above is the list of readers. A new reader must be
+  added to it, and the audit catches one that isn't.
 
 ### 10.3 The bounds stay exact under caching
 
 A visited state is stored with the **budgets it was reached with**: the
 preemptions, faults and jumps it had left. A state reached again is pruned
-only if a stored budget dominates the new one, meaning it is at least as
-large in all three. Every future the new path could take within its budget
-has then already been searched from that state. Otherwise the state is
-searched again, and the new budget joins the stored set, which keeps only
-budgets no other dominates.
+only if a stored budget dominates the new one, meaning at least as large in
+all three. Every future the new path could take within its budget has then
+been searched from that state already. Otherwise the state is searched
+again, and the new budget joins the stored set, which keeps only budgets no
+other dominates. The review confirmed this dominance rule as sound.
 
-The last actor is part of the state (§10.1), so the preemption accounting is
-the same on both paths. The search stays a replay DFS: a pruned path ends at
-the visited state, and the search backtracks as at a terminal state.
+The last actor is part of the state, so the preemption accounting is the
+same on both paths. The search stays a replay DFS: a pruned path ends at the
+visited state, and the search backtracks as at a terminal state.
 
-### 10.4 What is reported
+### 10.4 What is reported, and the gate (the user's decision)
 
-- **Counts are of distinct abstract states, not schedules.** The model
-  reports:
-  - states visited;
-  - distinct terminal states;
-  - for each reach property (U5, L6, H1's state, a deleting read), the
-    number of distinct states in which it holds.
-
-  Paths merge, so the number of schedules is no longer known, and none is
-  reported.
+**Reporting.**
+- **Counts are of distinct abstract states, not schedules:** states visited,
+  distinct terminal states, and, for each reach flag (U5, L6, H1's state, a
+  deleting read), the distinct states in which it is set. Paths merge, so
+  the number of schedules is no longer known, and none is reported.
 - **A violation** is reported once per distinct violating state, with the
-  first path found to it as its witness trace.
-- **The vacuity checks** stay, on distinct-state counts: zero still means
-  never reached.
-- **The gate (§3.3) compares the two bases**, and counts from a stateful and
-  a stateless search are not comparable. Nor are counts from two different
-  abstractions: the old base's ticks carry time (its 5ms grace is crossed
-  by counting calls), so it can only be hashed with concrete times. So the
-  "no lower" comparison of reach counters becomes:
-  - for each scenario, profile and property, reached on the old base implies
-    reached on the new;
-  - the per-mutant matrix is equal or larger.
+  first path found to it as its witness.
+- **The vacuity checks** stay, on distinct-state counts.
 
-  **This changes the gate the user approved. It is flagged for the user's
-  decision, not assumed.**
+**The gate (§3.3), as the user decided: inclusion of terminal states.**
+- **The old base** is enumerated statelessly, offline, at each gate profile.
+- **Each of its terminal states is mapped through the new abstraction:**
+  times to their relative representation, names renamed canonically,
+  monitors as §10.1 defines them.
+- **The requirement is S_old ⊆ S_new**, per scenario and profile: every
+  terminal state the old base reaches, the new base reaches too.
+- **The two intended differences go through a declared mapping, or are
+  reported for triage, never silently dropped:**
+  - crash rule (ii)'s extra pass (§3.2): an old-base terminal state where
+    a pass was lost before its first call maps to the new-base state in
+    which that pass ran;
+  - the redefined thresholds: the late deletions' "into the grace" moves
+    from start + grace − 1ms to dt + grace/2.
 
-### 10.5 The differential test
+  An old terminal state that no declared mapping takes into S_new is
+  listed for triage.
+- **The per-mutant matrix is equal or larger**: every scenario that kills a
+  mutant on the old base kills it on the new.
+- **Under each killed mutant, the old and new bases report equal sets of
+  violation messages.**
 
-Two comparisons, run on scenarios small enough to search both ways (Teardown
-×3, AcquireAgainstRelease, and the smaller AwayAndBack, at (0,1) and (1,0)
-with T = 2):
-- the stateful and stateless searches give the same set of terminal abstract
-  states, and the same set of violation messages;
-- each stateless schedule's sequence of abstract states equals that of its
-  perturbed replay (§10.2).
+### 10.5 Tests of the stateful search
 
-The same comparison runs on revert-check mutants the model kills: H1's skip
-without the exact version, M4's late clock, a deletion pass that may skip,
-and R3 without the array test. Both searches must find violations, with the
-same messages.
+- **The differential test.** On scenarios small enough to search both ways,
+  stateful against stateless: the same set of terminal abstract states, and
+  the same set of violation messages. The scenarios are Teardown ×3,
+  AcquireAgainstRelease, the smaller AwayAndBack, and **the two-process
+  scenario, shrunk** (one live pass for B, one deletion pass each), at
+  (0,1) and (1,0) with T = 2. The same comparison runs on the revert-check
+  mutants the model kills: H1's skip without the exact version, M4's late
+  clock, a deletion pass that may skip, and R3 without the array test. Both
+  searches must find violations, with the same messages.
+- **The merge audit.** In a test mode, at every prune (or a sample of prunes,
+  on the big scenarios), keep the pruned path, a concrete state as a replay
+  prefix, and the stored witness path. Run both under the same sequences of
+  choices, to the end, or for k steps. The abstract traces and the
+  violations must be identical.
+  - This is the check that the abstraction loses nothing the futures depend
+    on: a read that bypasses a hook, a time used as a value, a name the
+    renaming misses.
+  - It runs on every prune in the differential test's scenarios, and on a
+    sample in the others.
 
-### 10.6 Risks, stated before the code
+### 10.6 Risks and traps, stated before the code
 
 - **How much merges is an empirical question.** Swapping two steps that both
-  store times changes the order of their terms, and so the state. Often
-  that is correct: an A2's issue time against a delivery time is exactly
-  what t_obs < t_issue compares. The gain is expected mostly from jump
-  positions and from steps that store no time. A measurement after the
-  review will show it. If the gain isn't enough for the two-process
-  scenario in CI, that will be reported, not worked around.
-- **The per-actor digest** is only as good as its hooks. A missed read is a
-  soundness bug. The perturbation check and the differential test are the
-  guards against it.
+  store times can change the state, and often should: an A2's issue time
+  against a delivery time is exactly what t_obs < t_issue compares. The
+  gain is expected from jump positions and from steps that store no time. A
+  measurement after the review will show it. If it isn't enough for the
+  two-process scenario in CI, that will be reported, not worked around.
+- **Traps the audit must catch, and the review named:**
+  - **time:** a duration computed as a difference and used later (cases (a)
+    to (d), removed or made terms); ticks adding up toward U;
+  - **actor representation:**
+    - a held time frozen as a rank instead of a live term;
+    - a name in a closure that the renaming misses;
+    - a monitor that reads from an old log position instead of updating on
+      events;
+    - a canonical traversal that sorts by raw names.
+- **The per-actor digest is only as good as its hooks.** A missed read is a
+  soundness bug, and the merge audit is the guard against it.
