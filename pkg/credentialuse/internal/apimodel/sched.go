@@ -179,6 +179,9 @@ type Sched struct {
 	recordKeys bool
 	keys       []string
 	maxSteps   int
+	// lastOption makes a replay past its prefix take the last option every
+	// time: jumps, then faults, come last.
+	lastOption bool
 	// left, when set, is the budget the replay keeps once past its prefix:
 	// the prefix replays under the original bounds, so that its choice
 	// indices mean what they meant.
@@ -618,9 +621,9 @@ func (s *Sched) Run() error {
 // is a multiple of it (docs/credential-use-model-reduction.md §10.2).
 const TimeUnit = time.Second
 
-// Fine returns t's fine part: its distance from the nearest whole U above
-// or below, measured from earliest. Two times' fine parts are compared only
-// through Sched.tick's invariant.
+// Fine returns t's fine part: its offset from the nearest whole U, counted
+// from anchor (the scheduler and the state hash use Start, itself a whole
+// U).
 func Fine(t, earliest time.Time) time.Duration {
 	d := t.Sub(earliest)
 	n := (d + TimeUnit/2) / TimeUnit
@@ -632,9 +635,11 @@ func Fine(t, earliest time.Time) time.Duration {
 // (two processes' first sights, a deletion and its first sight) lie only a
 // few ticks apart; after a jump to one, the next must still be crossed only
 // by a jump. So the tick is at most 1/1024 of the time left to the next
-// deadline, and at least 1ns, the clock's resolution, which leaves room for
-// hundreds of calls even between deadlines a microsecond apart. A tick that
-// can't fit panics: time would have to move through a call.
+// deadline (and of the gap to the next larger fine part, below), and at
+// least the clock's 1ns resolution. That leaves room for about 20,000 calls
+// at level 0 before the 1ns floor, about 14,000 after one jump, and hundreds
+// after two. A tick that can't fit panics: time would have to move through a
+// call.
 func (s *Sched) tick(now time.Time) time.Duration {
 	d := time.Millisecond
 	if ds := s.pending(now); len(ds) > 0 {
@@ -651,17 +656,10 @@ func (s *Sched) tick(now time.Time) time.Duration {
 	// only when a term is added, and now's place in it doesn't depend on
 	// tick sizes.
 	if s.Terms != nil {
-		terms := s.Terms()
-		earliest := now
-		for _, t := range terms {
-			if t.Before(earliest) {
-				earliest = t
-			}
-		}
-		fn := Fine(now, earliest)
+		fn := Fine(now, Start)
 		gap := TimeUnit/2 - fn
-		for _, t := range terms {
-			if f := Fine(t, earliest); f > fn && f-fn < gap {
+		for _, t := range s.Terms() {
+			if f := Fine(t, Start); f > fn && f-fn < gap {
 				gap = f - fn
 			}
 		}
@@ -701,6 +699,8 @@ func (s *Sched) choose(n int) int {
 	switch {
 	case len(s.choices) < len(s.prefix):
 		i = s.prefix[len(s.choices)]
+	case s.lastOption:
+		i = n - 1
 	case s.rng != nil:
 		i = s.rng.Intn(n)
 	}
@@ -756,17 +756,19 @@ func ExploreAudited(b Bounds, audit func(pruned, witness Witness), scenario func
 }
 
 // Replay runs one schedule: prefix, then each choice drawn from a generator
-// seeded with seed (seed < 0: always the first option), within b. It returns
+// seeded with seed (seed −1: always the first option; −2: always the last,
+// which favours jumps and faults), within b. It returns
 // the abstract states after the prefix, one per step, and the scenario's
 // error. maxSteps caps it (ErrCapped). scenario must set Sched.Key.
 func Replay(b Bounds, prefix []int, left Budget, seed int64, maxSteps int, scenario func(s *Sched) error) ([]string, error) {
 	var rng *rand.Rand
+	last := seed == -2
 	if seed >= 0 {
 		//nolint:gosec // reproducible schedules, not security
 		rng = rand.New(rand.NewSource(seed)) // #nosec G404 -- reproducible schedules, not security
 	}
 	s := newSched(b, prefix, rng, nil)
-	s.recordKeys, s.maxSteps, s.left = true, maxSteps, &left
+	s.recordKeys, s.maxSteps, s.left, s.lastOption = true, maxSteps, &left, last
 	err := scenario(s)
 	return s.keys, err
 }

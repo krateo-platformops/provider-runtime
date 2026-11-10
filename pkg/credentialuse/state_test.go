@@ -23,9 +23,10 @@ import (
 //   - Names compared only for equality (UIDs, resourceVersions, epochs) are
 //     renamed in first-occurrence order of a canonical traversal, which
 //     orders by object key and actor registration and never by a raw name.
-//   - Times are terms: each is written relative to the earliest live term,
-//     as whole units U plus the rank of its fine part among all terms' fine
-//     parts (§10.2). The terms include every registered deadline, passed or
+//   - Times are terms: each is written as whole units U relative to the
+//     earliest live term's, plus the rank of its fine part (its offset from
+//     a whole U, counted from apimodel.Start) among all terms' fine parts
+//     (§10.2). The terms include every registered deadline, passed or
 //     pending. The invariant this relies on is the scheduler's: a tick never
 //     moves now's fine part past any live term's (apimodel.Sched.tick), so
 //     the global order of fine parts changes only when a term is added, and
@@ -46,6 +47,11 @@ type keyEncoder struct {
 	b     strings.Builder
 	names map[string]int
 	terms []time.Time
+	// rep, in a second pass, renders a time abstractly (as finish does), so
+	// that unknown UIDs can be ordered by content canonically; ambiguous
+	// says the first pass had to order two or more unknown UIDs.
+	rep       func(time.Time) string
+	ambiguous bool
 }
 
 func newKeyEncoder() *keyEncoder { return &keyEncoder{names: map[string]int{}} }
@@ -78,6 +84,22 @@ func (e *keyEncoder) name(class, v string) {
 func (e *keyEncoder) known(class, v string) (int, bool) {
 	i, ok := e.names[class+":"+v]
 	return i, ok
+}
+
+// timeStr and nameStr render a time and a name for uidOrder's content:
+// abstractly, never by raw value.
+func (e *keyEncoder) timeStr(t time.Time) string {
+	if e.rep == nil || t.IsZero() {
+		return "T?"
+	}
+	return e.rep(t)
+}
+
+func (e *keyEncoder) nameStr(class, v string) string {
+	if i, ok := e.known(class, v); ok {
+		return class + "#" + strconv.Itoa(i)
+	}
+	return class + "?"
 }
 
 // time writes a time term; the zero time is "no time".
@@ -226,6 +248,15 @@ func (e *keyEncoder) uidOrder(keys []types.UID, content func(types.UID) string) 
 	for i, it := range items {
 		out[i] = it.uid
 	}
+	unknown := 0
+	for _, it := range items {
+		if !it.known {
+			unknown++
+		}
+	}
+	if unknown > 1 {
+		e.ambiguous = true
+	}
 	return out
 }
 
@@ -234,25 +265,7 @@ func (e *keyEncoder) uidOrder(keys []types.UID, content func(types.UID) string) 
 func (e *keyEncoder) finish() string {
 	s := e.b.String()
 	if len(e.terms) > 0 {
-		earliest := slices.MinFunc(e.terms, func(a, b time.Time) int { return a.Compare(b) })
-		type rep struct {
-			n    int64
-			fine time.Duration
-		}
-		reps := make([]rep, len(e.terms))
-		var fines []time.Duration
-		for i, t := range e.terms {
-			d := t.Sub(earliest)
-			n := (d + timeUnit/2) / timeUnit
-			f := d - n*timeUnit
-			if f >= timeUnit/2 || f < -timeUnit/2 {
-				panic(fmt.Sprintf("state: a time's fine part %s isn't below U/2", f))
-			}
-			reps[i] = rep{int64(n), f}
-			fines = append(fines, f)
-		}
-		slices.Sort(fines)
-		fines = slices.Compact(fines)
+		rep := e.timeRep()
 		var out strings.Builder
 		parts := strings.Split(s, "\x01")
 		for i, p := range parts {
@@ -261,9 +274,7 @@ func (e *keyEncoder) finish() string {
 				continue
 			}
 			k, _ := strconv.Atoi(p)
-			r := reps[k]
-			rank, _ := slices.BinarySearch(fines, r.fine)
-			out.WriteString("T" + strconv.FormatInt(r.n, 10) + "." + strconv.Itoa(rank))
+			out.WriteString(rep(e.terms[k]))
 		}
 		s = out.String()
 	}
@@ -275,14 +286,23 @@ func (e *keyEncoder) finish() string {
 }
 
 // stateKey is the scenario's part of the abstract state; the scheduler adds
-// its last actor and the budgets (apimodel.Sched.Key).
-func (w *world) stateKey() string { return w.encode().finish() }
+// its last actor and the budgets (apimodel.Sched.Key). When the state holds
+// two or more UIDs no live object carries, their order comes from their
+// content, rendered abstractly, which takes a second pass.
+func (w *world) stateKey() string {
+	e := w.encode(nil)
+	if e.ambiguous {
+		e = w.encode(e.timeRep())
+	}
+	return e.finish()
+}
 
 // timeTerms are the state's live time terms, for the scheduler's tick.
-func (w *world) timeTerms() []time.Time { return w.encode().terms }
+func (w *world) timeTerms() []time.Time { return w.encode(nil).terms }
 
-func (w *world) encode() *keyEncoder {
+func (w *world) encode(rep func(time.Time) string) *keyEncoder {
 	e := newKeyEncoder()
+	e.rep = rep
 	e.tok("now")
 	e.time(w.s.Now())
 
@@ -403,7 +423,7 @@ func (w *world) encodeProcessMemory(e *keyEncoder, p *process) {
 	timesByNS := func(m map[string]time.Time) string {
 		var b strings.Builder
 		for _, k := range sortedKeys(m) {
-			fmt.Fprintf(&b, "%s=%d;", k, m[k].UnixNano())
+			fmt.Fprintf(&b, "%s=%s;", k, e.timeStr(m[k]))
 		}
 		return b.String()
 	}
@@ -416,14 +436,14 @@ func (w *world) encodeProcessMemory(e *keyEncoder, p *process) {
 		}
 	}
 	e.tok("]delivered[")
-	for _, u := range e.uidOrder(mapKeys(v.delivered), func(u types.UID) string { return v.delivered[u] }) {
+	for _, u := range e.uidOrder(mapKeys(v.delivered), func(u types.UID) string { return e.nameStr("rv", v.delivered[u]) }) {
 		e.name("uid", string(u))
 		e.name("rv", v.delivered[u])
 	}
 	idTimes := func(m map[ID]time.Time) string {
 		var b strings.Builder
 		for _, id := range sortedIDs(m) {
-			fmt.Fprintf(&b, "%s=%d;", id, m[id].UnixNano())
+			fmt.Fprintf(&b, "%s=%s;", id, e.timeStr(m[id]))
 		}
 		return b.String()
 	}
@@ -444,7 +464,7 @@ func (w *world) encodeProcessMemory(e *keyEncoder, p *process) {
 	e.time(v.lastList)
 	e.tok("seen[")
 	at := p.seen.at
-	for _, u := range e.uidOrder(mapKeys(at), func(u types.UID) string { return strconv.FormatInt(at[u].UnixNano(), 10) }) {
+	for _, u := range e.uidOrder(mapKeys(at), func(u types.UID) string { return e.timeStr(at[u]) }) {
 		e.name("uid", string(u))
 		e.time(at[u])
 	}
@@ -457,4 +477,45 @@ func mapKeys[V any](m map[types.UID]V) []types.UID {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+// timeRep returns the abstract representation of §10.2 for the encoder's
+// terms: whole units relative to the earliest term's, and the global rank of
+// the fine part. Fine parts are anchored at apimodel.Start, a whole U, as the
+// scheduler's tick is.
+func (e *keyEncoder) timeRep() func(time.Time) string {
+	type rep struct {
+		n    int64
+		fine time.Duration
+	}
+	split := func(t time.Time) rep {
+		d := t.Sub(apimodel.Start)
+		n := (d + timeUnit/2) / timeUnit
+		f := d - n*timeUnit
+		if f >= timeUnit/2 || f < -timeUnit/2 {
+			panic(fmt.Sprintf("state: a time's fine part %s isn't below U/2", f))
+		}
+		return rep{int64(n), f}
+	}
+	minN := int64(0)
+	var fines []time.Duration
+	for i, t := range e.terms {
+		r := split(t)
+		if i == 0 || r.n < minN {
+			minN = r.n
+		}
+		fines = append(fines, r.fine)
+	}
+	slices.Sort(fines)
+	fines = slices.Compact(fines)
+	return func(t time.Time) string {
+		r := split(t)
+		rank, found := slices.BinarySearch(fines, r.fine)
+		if !found {
+			// A time that isn't a term of this state (uidOrder's content in a
+			// second pass only renders terms).
+			return "T" + strconv.FormatInt(r.n-minN, 10) + ".?"
+		}
+		return "T" + strconv.FormatInt(r.n-minN, 10) + "." + strconv.Itoa(rank)
+	}
 }

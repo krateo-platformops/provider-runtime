@@ -11,6 +11,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 )
@@ -20,8 +21,115 @@ import (
 // audit, which replays every pruned path and the witness of the state it
 // reached under the same continuations.
 
-// smallScenarios are searched both ways.
+// smallScenarios are searched both ways: every Teardown order, and variants
+// of the other scenarios small enough for a stateless search to finish.
 var smallScenarios = map[string]func(w *world){
+	"teardown, krateo-057": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		w.holder(holderSpec{name: "h1", livePasses: 1, deletionPasses: 3}, &pa)
+		w.releaser("releaserA", &pa, 3, false, nil)
+		w.deleter("teardown", nsKey(w.ns), keyOf(w.p), widgetKey(w.ns, "h1"))
+	},
+	"teardown, interleaving B": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		w.holder(holderSpec{name: "h1", livePasses: 1, deletionPasses: 3}, &pa)
+		w.releaser("releaserA", &pa, 3, false, nil)
+		w.deleter("teardown", keyOf(w.p), nsKey(w.ns), widgetKey(w.ns, "h1"))
+	},
+	"away and back, small, with a relist": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		pb := newProcess("B", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		w.relister("relistA", &pa)
+		secret := SecretRef(w.ns, w.p.Name)
+		w.holder(holderSpec{
+			name: "h1",
+			refs: func(pass int) []Ref {
+				if pass == 1 {
+					return nil
+				}
+				return []Ref{secret}
+			},
+			livePasses: 3, deletionPasses: 2,
+		}, &pa)
+		w.releaser("releaserB", &pb, 1, true, nil)
+		w.deleter("teardown", keyOf(w.p), widgetKey(w.ns, "h1"))
+	},
+	"deletions around the grace, small": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		w.holder(holderSpec{name: "h1", livePasses: 1, deletionPasses: 2}, &pa)
+		w.releaser("releaserA", &pa, 2, false, nil)
+		w.deleter("secret", keyOf(w.p))
+		w.s.Go("late deletions", 0, func(a *apimodel.Actor) {
+			var dt time.Time
+			a.Locals = func() []any { return []any{dt} }
+			a.Wait("secret deleting", time.Time{}, func() bool {
+				o, err := w.m.Get(keyOf(w.p))
+				if err == nil && o.DeletionTimestamp != nil {
+					dt = o.DeletionTimestamp.Time
+				}
+				return err != nil || o.DeletionTimestamp != nil
+			})
+			if dt.IsZero() {
+				dt = a.Now()
+			}
+			a.Wait("into the grace", dt.Add(testGrace/2), nil)
+			w.call(a, "delete ns", func() error {
+				err := w.m.Delete(nsKey(w.ns))
+				if err == nil {
+					w.nsDeleted = a.Now()
+				}
+				return err
+			})
+			w.call(a, "delete h1", func() error { return w.m.Delete(widgetKey(w.ns, "h1")) })
+		})
+	},
+	"recreate behind a cached UID, small": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		pb := newProcess("B", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		var first types.UID
+		if o, err := w.m.Get(keyOf(w.p)); err == nil {
+			first = o.UID
+			w.pinned = append(w.pinned, first)
+		}
+		w.holder(holderSpec{name: "h1", livePasses: 3, deletionPasses: 2, before: func(n int) func() bool {
+			if n != 2 {
+				return nil
+			}
+			return func() bool { o, err := w.m.Get(keyOf(w.p)); return err == nil && o.UID != first }
+		}}, &pa)
+		w.releaser("releaserB", &pb, 2, true, func() bool {
+			o, err := w.m.Get(keyOf(w.p))
+			return err != nil || o.DeletionTimestamp != nil
+		})
+		w.s.Go("rotation", 0, func(a *apimodel.Actor) {
+			w.call(a, "delete secret", func() error { return w.m.Delete(keyOf(w.p)) })
+			a.Wait("gone", time.Time{}, func() bool { _, err := w.m.Get(keyOf(w.p)); return err != nil })
+			w.call(a, "recreate secret", func() error { return w.m.Create(keyOf(w.p), metav1.ObjectMeta{}) })
+			a.Wait("last live pass", time.Time{}, func() bool { return w.livePasses["h1"] >= 3 })
+			w.call(a, "delete h1", func() error { return w.m.Delete(widgetKey(w.ns, "h1")) })
+		})
+	},
+	"two releasers": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		pb := newProcess("B", w.m, w.s.Now())
+		pc := newProcess("C", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		w.holder(holderSpec{name: "h1", livePasses: 1, deletionPasses: 2}, &pa)
+		w.releaser("releaserB", &pb, 1, true, nil)
+		w.releaser("releaserC", &pc, 1, true, nil)
+		w.deleter("teardown", keyOf(w.p), widgetKey(w.ns, "h1"))
+	},
 	"teardown, interleaving A": func(w *world) {
 		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
 		pa := newProcess("A", w.m, w.s.Now())
@@ -156,7 +264,7 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 	audits, divergences := 0, 0
 	audit := func(pruned, witness apimodel.Witness) {
 		audits++
-		if msg := auditPrune(b, sc, pruned, witness); msg != "" {
+		if msg := auditPrune(b, sc, pruned, witness, 1); msg != "" {
 			divergences++
 			if os.Getenv("CREDENTIALUSE_MODEL_AUDITSTOP") != "" {
 				t.Fatalf("merge audit (stopping at the first): %s\npruned: %v\nwitness: %v", msg, pruned.Choices, witness.Choices)
@@ -195,10 +303,11 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 }
 
 // auditPrune replays the pruned path and the witness under the same
-// continuations: the first option every time, and two seeded random ones.
+// continuations: the first option every time, the last, and a seeded random
+// one.
 // Past its prefix, each keeps the pruned path's budget, so both face the
 // same options. It returns "" when they agree.
-func auditPrune(b apimodel.Bounds, sc func(w *world), pruned, witness apimodel.Witness) string {
+func auditPrune(b apimodel.Bounds, sc func(w *world), pruned, witness apimodel.Witness, seed int64) string {
 	// First, both prefixes must replay to the state they were merged at.
 	for _, w := range []struct {
 		name string
@@ -217,7 +326,9 @@ func auditPrune(b apimodel.Bounds, sc func(w *world), pruned, witness apimodel.W
 			return fmt.Sprintf("the %s path doesn't replay to its state%s", w.name, firstDiff([]string{got}, []string{w.at.Key}))
 		}
 	}
-	for _, seed := range []int64{-1, 1, 2} {
+	// The first option every time, the last (jumps and faults), and one
+	// seeded at random.
+	for _, seed := range []int64{-1, -2, seed & (1<<62 - 1)} {
 		var pv, wv []string
 		pk, perr := apimodel.Replay(b, pruned.Choices, pruned.Left, seed, 10_000, runner(sc, func(_ string, vs []string) { pv = vs }))
 		wk, werr := apimodel.Replay(b, witness.Choices, pruned.Left, seed, 10_000, runner(sc, func(_ string, vs []string) { wv = vs }))

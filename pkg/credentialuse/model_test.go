@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -163,6 +164,18 @@ func profiles(t *testing.T, flags scenarioFlags) []profile {
 	return append(out, profile{name: "random: 2 preemptions, 1 fault", bounds: apimodel.Bounds{Preemptions: 2, Faults: 1, Jumps: testJumps}, walk: 400})
 }
 
+// auditEvery is how often a stateful search audits a prune:
+// CREDENTIALUSE_MODEL_AUDIT_EVERY, or every 100th, which keeps CI's model step
+// within its timeout.
+func auditEvery() int {
+	if v := os.Getenv("CREDENTIALUSE_MODEL_AUDIT_EVERY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 100
+}
+
 var walkSeed = sync.OnceValue(func() int64 {
 	if v := os.Getenv("CREDENTIALUSE_MODEL_SEED"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -231,7 +244,7 @@ type timedDecision struct {
 func newWorld(s *apimodel.Sched) *world {
 	w := &world{s: s, ns: "rlgov-probe", livePasses: map[string]int{}, batches: map[string]int{}, batchesStarted: map[string]int{}, started: map[string]int{}, holds: map[string]map[ID]hold{},
 		deletionPhase: map[string]bool{}, procs: map[**process]*apimodel.Proc{}}
-	w.m = apimodel.New(s.Clock.Now)
+	w.m = apimodel.New(s.Now) // the API server's clock: not an actor's read
 	w.p = SecretRef(w.ns, "probe-dummy-creds").ID()
 	s.Deadlines = w.deadlines
 	s.Terms = w.timeTerms
@@ -338,7 +351,7 @@ func (w *world) proc(p **process) *apimodel.Proc {
 	// not even to read it (§3.2).
 	guard := func() {
 		if a := w.s.Running(); a != nil && a.Stale() {
-			panic(fmt.Sprintf("model: %s, a unit of work lost to a crash, touched process %s's memory\nschedule: %s", a.Name, (*p).name, w.s.Trace()))
+			panic(fmt.Sprintf("model: %s, a unit of work lost to a crash, touched process %s's memory\nschedule: %s\n%s", a.Name, (*p).name, w.s.Trace(), debug.Stack()))
 		}
 	}
 	(*p).ver.onAccess = guard
@@ -457,6 +470,12 @@ func (w *world) holder(spec holderSpec, p **process) {
 				w.countH1(obj, refs, *p)
 			}
 			acq, err := pr.acquire(ctx, obj, refs)
+			if a.Crashed() {
+				// The process died under the pass: acquire turned the lost
+				// call into an error it fails open on, but nothing of the pass
+				// goes on in a dead process (§3.2).
+				return false
+			}
 			if err != nil || acq.MustNotConnect {
 				return false
 			}
@@ -571,7 +590,9 @@ func (w *world) releaser(name string, p **process, n int, cacheless bool, after 
 }
 
 // call is one API call by an actor, retried on an injected fault until it
-// lands (a deleter, say, is a person or a controller that tries again).
+// lands (a deleter, say, is a person or a controller that tries again). Its
+// attempt counter needs no declaration in the state: each attempt is a call
+// among the actor's inputs, so the count is part of them.
 func (w *world) call(a *apimodel.Actor, label string, op func() error) {
 	for range 3 {
 		err := a.Call(label, op)
@@ -620,8 +641,8 @@ func (w *world) countH1(obj metav1.Object, refs []Ref, p *process) {
 		if err != nil || hasFinalizer(live, f) {
 			continue // gone (L6's territory, not H1's), or held
 		}
-		cached, ok := p.cache.Get(k)
-		if ok && cached.UID == live.UID && hasFinalizer(cached, f) && p.ver.hasWritten(cached.UID, w.ns) {
+		cached, ok := peekCache(p, k)
+		if ok && cached.UID == live.UID && hasFinalizer(cached, f) && peekWritten(p, cached.UID, w.ns) {
 			w.h1++
 		}
 	}
@@ -641,8 +662,8 @@ func (w *world) checkHeld(holder string, acq Acquired, p *process) {
 		if err == nil && hasFinalizer(live, f) {
 			continue
 		}
-		cached, ok := p.cache.Get(k)
-		if ok && (err != nil || cached.UID != live.UID) && hasFinalizer(cached, f) && p.ver.hasWritten(cached.UID, w.ns) {
+		cached, ok := peekCache(p, k)
+		if ok && (err != nil || cached.UID != live.UID) && hasFinalizer(cached, f) && peekWritten(p, cached.UID, w.ns) {
 			w.l6++
 			continue
 		}
@@ -774,7 +795,28 @@ func explore(t *testing.T, name string, flags scenarioFlags, scenario func(w *wo
 			for i := range flagged {
 				flagged[i] = map[string]struct{}{}
 			}
-			res = apimodel.ExploreStateful(p.bounds, run)
+			// The sampled merge audit (§10.5): every Nth prune, from a seeded
+			// offset, replays the pruned path and its witness to the end
+			// under the same continuations.
+			every, seed := auditEvery(), walkSeed()
+			offset := int((uint64(seed) * 0x9E3779B97F4A7C15 >> 32) % uint64(every))
+			prunes, audits, divergences := 0, 0, 0
+			audit := func(pruned, witness apimodel.Witness) {
+				prunes++
+				if (prunes-1)%every != offset {
+					return
+				}
+				audits++
+				if msg := auditPrune(p.bounds, scenario, pruned, witness, seed); msg != "" {
+					divergences++
+					if divergences <= 3 {
+						t.Errorf("%s, %s: merge audit: %s\npruned: %v\nwitness: %v", name, p.name, msg, pruned.Choices, witness.Choices)
+					}
+				}
+			}
+			res = apimodel.ExploreAudited(p.bounds, audit, run)
+			t.Logf("%s, %s: merge audit: every %d prunes from offset %d (seed %d): %d audits, %d divergences",
+				name, p.name, every, offset, seed, audits, divergences)
 			releasing, u5, l6, h1, deletingReads = len(flagged[0]), len(flagged[1]), len(flagged[2]), len(flagged[3]), len(flagged[4])
 			for i := range flagged {
 				flagged[i] = nil
@@ -1123,4 +1165,24 @@ func TestModelBoundsAreExhausted(t *testing.T) {
 	if !res.Finished || res.Runs != 2 {
 		t.Errorf("two actors, one call each: %d schedules, finished=%v; want 2, true", res.Runs, res.Finished)
 	}
+}
+
+// peekCache and peekWritten read a process's memory as instrumentation:
+// outside the access hooks, which guard what the protocol's own units touch
+// (docs/credential-use-model-reduction.md §3.2), and outside any actor's
+// inputs.
+func peekCache(p *process, k apimodel.Key) (*metav1.PartialObjectMetadata, bool) {
+	objs, _ := p.cache.Objects()
+	for _, ev := range objs {
+		if ev.Key == k {
+			o := ev.Obj
+			return &o, true
+		}
+	}
+	return nil, false
+}
+
+func peekWritten(p *process, uid types.UID, ns string) bool {
+	_, ok := p.ver.written[uid][ns]
+	return ok
 }
