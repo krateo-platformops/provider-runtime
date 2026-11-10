@@ -17,6 +17,10 @@
 # and both are kept and reported. The node's name and CPU model must be the
 # same in every run: a change stops the block. A failed setup stops the block
 # with exit code 2. Results are committed after each run, by explicit path.
+#
+# A committed log is never overwritten, so the block resumes where it stopped:
+# run again with the same stage, it skips each position whose committed log
+# passes the check and keeps the run names.
 cd "$(dirname "$0")" || exit 1
 bash setup.sh || { echo "BLOCK-STOPPED: cluster setup failed"; exit 2; }
 TAG=${1:?usage: curve_block.sh <image tag> stage1|stage2 <n_a> <n_b> <m>}
@@ -83,6 +87,25 @@ for repn in $schedule; do
     while true; do
       name="pc-n$m_-$prefix$r"
       [ "$attempt" -gt 1 ] && name="$name-a$attempt"
+      # A committed log is never overwritten. On a resume, a position whose
+      # committed log passes the check is done; one whose log fails it goes on
+      # to its next attempt, as if it had just run. A log that exists but isn't
+      # committed as it is stops the block: a person decides.
+      if [ -e "results/$name.log" ]; then
+        if ! git -C "$root" ls-files --error-unmatch "$rel/results/$name.log" >/dev/null 2>&1 ||
+          ! git -C "$root" diff --quiet HEAD -- "$rel/results/$name.log"; then
+          echo "BLOCK-REFUSED: results/$name.log exists but isn't committed as it is; it is not overwritten"
+          exit 2
+        fi
+        if python3 curve_report.py --check "results/$name.log"; then
+          echo "SKIP $name: its committed log passes the check"
+          break
+        fi
+        echo "PRIOR $name failed a validity check; its next attempt follows"
+        attempt=$((attempt + 1))
+        [ "$attempt" -gt 3 ] && { echo "BLOCK-STOPPED: $name failed validity three times"; exit 2; }
+        continue
+      fi
       seed=$(printf '%s' "$name" | cksum | awk '{print $1}')
       bash prun.sh "$name" curve "$SECS" "$TAG" "WORKERS=$m_" "LOAD_SEED=$seed" || { echo "BLOCK-STOPPED at $name"; bash nodeid.sh curve-stopped; exit 2; }
       bash nodeid.sh "after-$name"
