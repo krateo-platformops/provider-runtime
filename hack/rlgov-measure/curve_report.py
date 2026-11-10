@@ -9,7 +9,8 @@ Usage:
 
 The unit is the run: per run, the mean U (cores) over the measured window
 (t >= 300 s), its completions, the CPU the burns asked for and measured,
-throttled periods per sample and the per-second stall share. Per n: the mean
+throttled periods per sample and the per-second stall share. The burn check's
+method, A (idle moments, curve1's runs) or B (window), is printed per run. Per n: the mean
 of the run means with a t interval on k - 1 degrees of freedom and the
 between-run spread. S*: where the per-n means cross rho*L = 0.225 cores,
 interpolated between the bracketing n; its CI by a bootstrap over runs
@@ -28,6 +29,15 @@ WARMUP = 300.0
 LIMIT, RHO, RBAR = 0.25, 0.9, 0.05
 TARGET = RHO * LIMIT
 BURN_TOL = 0.01      # the burn's measured CPU within 1% of what it asked for
+# The burn check's method (results/curve-settings.txt). curve1 counted a
+# burn's request when it started and its CPU when it ended, so its window
+# difference isn't comparable: its runs are checked between the window's first
+# and last idle-burn moments (method A), where no burn is unfinished, read as
+# |requested - measured| under IDLE_MS, the smallest jittered request (0.1 x
+# 3000 ms). Every later image counts both at the end, and its runs are checked
+# over the whole measured window (method B).
+METHOD_A_IMAGES = {"curve1"}
+IDLE_MS = 300.0
 KSTAR_MAX = 13       # stage 2 only if k* <= 13
 K_STAGE1 = 4         # runs at each bracketing n in stage 1's schedule
 
@@ -63,12 +73,14 @@ def parse(path):
     """One run: its n, node, whether it was discarded, and its measured window."""
     run = {"path": path, "n": None, "node": None, "model": None, "discarded": [], "u": [],
            "obs": 0, "cpu_ms": 0.0, "thr_frac": [], "stall": [], "avg10": [], "secs": 0.0,
-           "burn_first": None, "burn_last": None}
+           "burn_first": None, "burn_last": None, "image": None,
+           "idle_first": None, "idle_last": None, "idle_n": 0}
     prev = None
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
             if line.startswith("# run="):
+                run["image"] = field(line, "image")
                 m = re.search(r"WORKERS=(\d+)", line)
                 if m:
                     run["n"] = int(m.group(1))
@@ -95,6 +107,11 @@ def parse(path):
                         if run["burn_first"] is None:
                             run["burn_first"] = burn
                         run["burn_last"] = burn
+                        if abs(burn[2] - burn[1]) < IDLE_MS:
+                            if run["idle_first"] is None:
+                                run["idle_first"] = burn
+                            run["idle_last"] = burn
+                            run["idle_n"] += 1
                     a10 = num(field(line, "cpu_some"))
                     if a10 is not None:
                         run["avg10"].append(a10)
@@ -108,11 +125,25 @@ def parse(path):
     return run
 
 
+def burn_method(run):
+    return "A" if run["image"] in METHOD_A_IMAGES else "B"
+
+
 def burn_stats(run):
-    """The burns over the measured window: calls, measured and requested CPU (ms)."""
-    if run["burn_first"] is None or run["burn_last"] is None:
+    """The burns over the check's window: calls, measured and requested CPU (ms).
+
+    Method B: the measured window. Method A: from the window's first idle-burn
+    moment to its last."""
+    first, last = ("idle_first", "idle_last") if burn_method(run) == "A" else ("burn_first", "burn_last")
+    if run[first] is None or run[last] is None:
         return 0, 0.0, 0.0
-    return tuple(b - a for a, b in zip(run["burn_first"], run["burn_last"]))
+    return tuple(b - a for a, b in zip(run[first], run[last]))
+
+
+def method_text(run):
+    if burn_method(run) == "A":
+        return "burn check A (idle moments, %d in the window)" % run["idle_n"]
+    return "burn check B (window)"
 
 
 def check(run):
@@ -127,8 +158,10 @@ def check(run):
     if run["obs"] == 0:
         fails.append("no completions")
     calls, cpu, req = burn_stats(run)
-    if calls <= 0 or req <= 0:
-        fails.append("no burns in the measured window")
+    if burn_method(run) == "A" and run["idle_n"] < 2:
+        fails.append("burn check A needs two idle-burn moments in the window, found %d" % run["idle_n"])
+    elif calls <= 0 or req <= 0:
+        fails.append("no burns in the check's window")
     elif abs(cpu / req - 1) > BURN_TOL:
         fails.append("the burns measured %.2f%% off what they asked for, want within 1%%" % (100 * (cpu / req - 1)))
     return fails
@@ -190,10 +223,10 @@ def load_runs(paths, verbose=True):
             cpc = r["cpu_ms"] / r["obs"] if r["obs"] else float("nan")
             edge = 100.0 * (r["n"] or 0) / r["obs"] if r["obs"] else float("nan")
             mu = statistics.mean(r["u"]) if r["u"] else float("nan")
-            print("  %s n=%s node=%s model=%s U=%.4f completions=%d burns: %d calls, %.0f ms asked, measured %+.2f%%; "
+            print("  %s n=%s node=%s model=%s U=%.4f completions=%d %s: %d calls, %.0f ms asked, measured %+.4f%%; "
                   "cgroup CPU per completion %.0f ms (edge allowance ±%.1f%%, not judged): %s" % (
-                      r["path"], r["n"], r["node"], r["model"], mu, r["obs"], calls, req / calls if calls else float("nan"),
-                      100 * (cpu / req - 1) if req else float("nan"), cpc, edge,
+                      r["path"], r["n"], r["node"], r["model"], mu, r["obs"], method_text(r), calls,
+                      req / calls if calls else float("nan"), 100 * (cpu / req - 1) if req else float("nan"), cpc, edge,
                       "valid" if not fails else "INVALID: " + "; ".join(fails)))
         if not fails:
             by_n[r["n"]].append(r)
@@ -291,9 +324,11 @@ def main(argv):
         run = parse(argv[1])
         fails = check(run)
         for f in fails:
-            print("INVALID %s: %s" % (argv[1], f))
+            print("INVALID %s (%s): %s" % (argv[1], method_text(run), f))
         if not fails:
-            print("valid %s: n=%s U=%.4f completions=%d" % (argv[1], run["n"], statistics.mean(run["u"]), run["obs"]))
+            calls, cpu, req = burn_stats(run)
+            print("valid %s: n=%s U=%.4f completions=%d; %s: burns measured %+.4f%% of %.0f ms asked" % (
+                argv[1], run["n"], statistics.mean(run["u"]), run["obs"], method_text(run), 100 * (cpu / req - 1), req))
         return 1 if fails else 0
     if len(argv) >= 2 and argv[0] == "--node":
         run = parse(argv[1])
