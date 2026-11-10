@@ -263,8 +263,10 @@ self-write filter") lands with the filter in PR 4.
 scenario's searches are too large for CI as it stands, 2.6 million schedules
 with one fault. A sound reduction of the scheduler is specified in
 [credential-use-model-reduction](./credential-use-model-reduction.md). That
-is a spec under soundness review, not implemented: it needs changes to the
-model's base semantics, which need the user's decision.
+is a spec under soundness review, not implemented. It rests on changes to
+the model's base semantics, which the user has decided (event-driven time
+with up to two jumps to deadlines; crashes that lose only units that have
+made a call). They go in first, behind a gate against the old base.
 
 **Reviewer attack** (§14): the `written`/`observed` skip, and any way
 `t_obs < t_issue` can hold for a record that wasn't visible when the write was
