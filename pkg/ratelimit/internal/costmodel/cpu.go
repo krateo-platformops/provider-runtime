@@ -52,8 +52,8 @@ type CPUResult struct {
 	// rewarmed D̂ (§17.9, item 5); InRun that the sample is in a contention
 	// run (§17.10 (D)).
 	ContentionEnd, InRun bool
-	// DMixFallback reports that D_mix used D̂ for a queue whose D̂_q had no
-	// qualifying life within τ (§17.10 (C)); UW is the CPU over the window,
+	// DMixFallback reports that D_mix used D̂ for a queue whose D̂_q has had no
+	// qualifying life since its start (§17.10 (C)); UW is the CPU over the window,
 	// which the sign guard reads (§17.10 (A)).
 	DMixFallback bool
 	UW           float64
@@ -179,7 +179,6 @@ type CPU struct {
 	bad      []span // window-capped, pressured and change samples
 	tight    []span // samples whose every period was throttled, not window-capped
 	tightAll []span // every per-sample tight sample (§17.10 (C))
-	dqLast   map[string]float64
 	hist     []histSample
 
 	// The published S's steps, for the rewarm (§17.8 item 3, §17.9 item 2).
@@ -213,7 +212,7 @@ type CPU struct {
 
 // NewCPU returns the CPU path's state.
 func NewCPU(cfg CPUConfig) *CPU {
-	return &CPU{cfg: cfg, dq: map[string]*ratio{}, dqLast: map[string]float64{}, shares: map[string]*ratio{}, sPrev: -1, sRefT: math.Inf(-1), lastCapT: math.Inf(-1)}
+	return &CPU{cfg: cfg, dq: map[string]*ratio{}, shares: map[string]*ratio{}, sPrev: -1, sRefT: math.Inf(-1), lastCapT: math.Inf(-1)}
 }
 
 // tau is the estimates' time constant: ten samples, and at least 60
@@ -560,7 +559,6 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 			c.dq[q] = r
 		}
 		r.add(v[0], v[1], alpha, false)
-		c.dqLast[q] = c.t
 	}
 	// §17.8 item 5: Little's fallback takes every uncapped sample with work.
 	if kind != Capped && books.SlotSeconds > 0 {
@@ -642,7 +640,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		}
 	case kind == Capped:
 		// §17.10 (A): a window-capped sample never rises.
-		g = math.Min(prev, c.capped(from, limit, bg, nbar, tau, dv, dok, &res))
+		g = math.Min(prev, c.capped(from, limit, bg, nbar, dv, dok, &res))
 	default:
 		switch {
 		case c.restartC:
@@ -959,9 +957,9 @@ func (c *CPU) windowCost(from int, bg float64) (float64, bool) {
 
 // capped is the law for a capped sample (design §4.2, §17.1):
 // min((ρL − B̂)·D_mix/c_W, θN̄). D_mix is weighted by the completions over the
-// window W (§17.10 (B)); a queue whose D̂_q had no qualifying life within τ
-// uses the D̂ in force (§17.10 (C)); without either, only θN̄.
-func (c *CPU) capped(from int, limit, bg, nbar, tau, dv float64, dok bool, res *CPUResult) float64 {
+// window W (§17.10 (B)); a queue whose D̂_q has had no qualifying life since
+// its start uses the D̂ in force (§17.10 (C)); without either, only θN̄.
+func (c *CPU) capped(from int, limit, bg, nbar, dv float64, dok bool, res *CPUResult) float64 {
 	rho := c.cfg.Target
 	theta := (rho*limit - bg) / (limit - bg)
 	g := theta * nbar
@@ -990,7 +988,9 @@ func (c *CPU) capped(from int, limit, bg, nbar, tau, dv float64, dok bool, res *
 			v, vok = r.value()
 		}
 		switch {
-		case vok && c.t-c.dqLast[q] < tau:
+		case vok:
+			// A D̂_q with any qualifying life since its start is the intended
+			// memory; D̂ stands in only for a queue that has none (§17.10 (C)).
 			d = v
 		case dok:
 			d = dv

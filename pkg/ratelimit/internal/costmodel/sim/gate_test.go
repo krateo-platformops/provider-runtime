@@ -243,11 +243,13 @@ func (g *gctx) monotone(from, to int) {
 		if g.capped(i) {
 			continue
 		}
-		// The baselines' falls are attributed by the CPU they act on: the
-		// level PI's filtered Ū, the reservation gate's reading (plan §4.5).
-		u := g.tr.Used(i)
-		if !g.cost {
-			u = g.tr.Results[i].CPU.Used
+		// Falls are attributed by the CPU the controller acts on (plan §4.5,
+		// the review of 0ce649f): the cost model's window CPU U_W (design
+		// §17.10 (A)), the level PI's filtered Ū, the reservation gate's
+		// reading.
+		u := g.tr.Results[i].CPU.Used
+		if g.cost {
+			u = g.tr.Results[i].CPU.UW
 		}
 		L := g.limit(i)
 		if L > 0 && u > rho*L {
@@ -416,12 +418,11 @@ func gateCases() []gateCase {
 			c.Queues[0].Class = classAfter(stepAt, baseClass, heavyClass())
 			return c
 		}, check: func(g *gctx) {
-			// Plan §4.5, the counts under design §17.8.
+			// Plan §4.5, corrected after seeing results at the review of 0ce649f.
 			p := frozenPlants["cost46"]
 			b := bandOf(p.sStar)
 			i0 := index(g.tr, stepAt)
-			// Plan §4.5: the measured ℓ, the first per-sample tight sample
-			// after the change.
+			// The measured ℓ, the first per-sample tight sample after the change.
 			ell := 2
 			for i := i0; i < g.n() && i <= i0+30; i++ {
 				if tightPerSample(g.tr.Samples[i]) {
@@ -429,75 +430,17 @@ func gateCases() []gateCase {
 					break
 				}
 			}
-			g.report("ℓ %d (the first per-sample tight sample after the change)", ell)
 			fc := g.firstCapped(i0)
 			nw := 1
 			if fc >= 0 {
 				nw = g.nW(fc)
 			}
-			g.report("n_W %d at the first window-capped sample (+%d)", nw, fc-i0)
-			// The floor after a cost increase (design §17.8 item 4), frozen from
-			// the plant, until the window after ĉ's restart has closed.
-			floor := floorAfterCostIncrease()
-			until := i0 + 2*nw + 1
+			g.report("ℓ %d; n_W %d at the first window-capped sample (+%d)", ell, nw, fc-i0)
+			// The change test: W_test the longer of the deferring and confirming
+			// windows, measured; 2⌈W_test/Δt⌉ + 1, or 3⌈W_test/Δt⌉ + 1 for a
+			// change near 3σ_W (3σ_W ≤ Δc < 4σ_W, accepted by the reviewer).
+			def, rst := -1, -1
 			if g.cost {
-				until = -1
-				for i := i0; i < g.n(); i++ {
-					if g.tr.Results[i].CPU.CRestarted {
-						for j := i + 1; j < g.n(); j++ {
-							if g.tr.Results[j].CPU.WindowClosed {
-								until = j
-								break
-							}
-						}
-						break
-					}
-				}
-				if until < 0 {
-					until = g.n()
-				}
-			}
-			lo := func(i int) float64 {
-				if i <= until {
-					return math.Min(b.lo, floor)
-				}
-				return b.lo
-			}
-			g.report("the floor %.2f until +%d, then θ⌊S*'⌋ = %.2f", floor, until-i0, b.lo)
-			within := ell + 2*nw - 1
-			e := -1
-			for i := i0; i < g.n(); i++ {
-				if S := g.S(i); S >= lo(i)-1e-9 && S <= b.hi+1e-9 {
-					e = i
-					break
-				}
-			}
-			if e < 0 || e > i0+within {
-				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", lo(i0), b.hi, e-i0, within, g.slotsFrom(i0, 10))
-			}
-			for i := i0; e >= 0 && i < e; i++ {
-				if g.S(i) < lo(i) {
-					g.fail("entered from below at +%d, not from above", i-i0)
-					break
-				}
-			}
-			if g.cost {
-				if fc < 0 || fc > i0+ell+nw-1 {
-					g.fail("no window-capped sample within ℓ + n_W − 1 = %d of the change", ell+nw-1)
-				}
-				// The change test's mechanism applies to a change of at least
-				// 3σ_W; it has 2⌈W/Δt⌉ + 1 samples, and 3⌈W/Δt⌉ + 1 for a
-				// change near 3σ_W (the plan author's reading: 3σ_W ≤ Δc < 4σ_W).
-				pre := g.tr.Results[i0-1].CPU
-				z := 0.0
-				if pre.SigmaW > 0 {
-					z = pre.PerCompletion / pre.SigmaW
-				}
-				g.report("σ_W %.5f before the change; the change Δc/σ_W ≈ %.1f", pre.SigmaW, z)
-				// Corrected (a): within 2⌈W_test/Δt⌉ + 1, W_test the longer of the
-				// deferring and confirming windows, measured; 3⌈W_test/Δt⌉ + 1 for a
-				// change near 3σ_W.
-				def, rst := -1, -1
 				for i := i0; i < g.n() && i <= i0+60; i++ {
 					c := g.tr.Results[i].CPU
 					if c.CDeferred && def < 0 {
@@ -508,23 +451,67 @@ func gateCases() []gateCase {
 						break
 					}
 				}
-				wTest := nw
-				horizon := 2*nw + 1
-				if def >= 0 && rst >= 0 {
-					wTest = max(g.tr.Results[def].CPU.WindowLen, g.tr.Results[rst].CPU.WindowLen)
-					horizon = 2*wTest + 1
-					if z < 4 {
-						horizon = 3*wTest + 1
-					}
-					g.report("W_test %d samples; the restart at +%d, the horizon %d", wTest, rst-i0, horizon)
+			}
+			z := 0.0
+			if g.cost {
+				pre := g.tr.Results[i0-1].CPU
+				if pre.SigmaW > 0 {
+					z = pre.PerCompletion / pre.SigmaW
 				}
-				switch {
-				case z < 3:
-					g.report("a change under 3σ_W: the change test's mechanism isn't required")
-				case def < 0 || rst < 0:
-					g.fail("no ĉ deferral followed by a restart after the change")
-				case rst > i0+horizon:
-					g.fail("the ĉ restart at +%d, after the horizon %d", rst-i0, horizon)
+				g.report("σ_W %.5f before the change; the change Δc/σ_W ≈ %.1f", pre.SigmaW, z)
+			}
+			wTest := nw
+			if def >= 0 && rst >= 0 {
+				wTest = max(g.tr.Results[def].CPU.WindowLen, g.tr.Results[rst].CPU.WindowLen)
+			}
+			horizon := 2*wTest + 1
+			if g.cost && z < 4 {
+				horizon = 3*wTest + 1
+			}
+			if rst >= 0 {
+				g.report("W_test %d samples; the restart at +%d, the horizon %d", wTest, rst-i0, horizon)
+			}
+			// The restart-edge floor: after ĉ's restart, until D'_cap + |W'| has
+			// passed, the lower edge is design §17.8 item 4's frozen floor. With
+			// no restart (the baselines), from the change (the plan author's
+			// reading).
+			floor := floorAfterCostIncrease()
+			start := i0
+			if rst >= 0 {
+				start = rst
+			}
+			until := start + restartEdge(math.Ceil(frozenPlants["base"].sStar), frozenXCap["cost46"])
+			lo := func(i int) float64 {
+				if i <= until {
+					return math.Min(b.lo, floor)
+				}
+				return b.lo
+			}
+			g.report("the floor %.2f until +%d, then θ⌊S*'⌋ = %.2f", floor, until-i0, b.lo)
+			within := max(ell+2*nw-1, horizon)
+			e := -1
+			for i := i0; i < g.n(); i++ {
+				if S := g.S(i); S >= lo(i)-1e-9 && S <= b.hi+1e-9 {
+					e = i
+					break
+				}
+			}
+			if e < 0 || e > i0+within {
+				g.fail("into the band [%.2f, %.2f] at +%d samples, want within max(ℓ + 2n_W − 1, 2⌈W_test⌉ + 1) = %d: %v", lo(i0), b.hi, e-i0, within, g.slotsFrom(i0, 10))
+			}
+			for i := i0; e >= 0 && i < e; i++ {
+				if g.S(i) < lo(i) {
+					g.fail("entered from below at +%d, not from above", i-i0)
+					break
+				}
+			}
+			if g.cost {
+				// Either path: a window-capped sample within ℓ + n_W − 1, or a ĉ
+				// restart within the horizon.
+				capPath := fc >= 0 && fc <= i0+ell+nw-1
+				restartPath := def >= 0 && rst >= 0 && rst <= i0+horizon
+				if !capPath && !restartPath && z >= 3 {
+					g.fail("neither a window-capped sample within ℓ + n_W − 1 = %d nor a ĉ restart within %d", ell+nw-1, horizon)
 				}
 				for i := i0; i < g.n() && i <= i0+horizon+nw; i++ {
 					c := g.tr.Results[i].CPU
@@ -533,11 +520,15 @@ func gateCases() []gateCase {
 					}
 				}
 				rw := false
-				for i := i0; i < g.n() && i <= i0+within+1; i++ {
+				last := i0 + within + 2
+				if e >= 0 {
+					last = e + 2
+				}
+				for i := i0; i < g.n() && i <= last; i++ {
 					rw = rw || g.tr.Results[i].CPU.DRewarmed
 				}
 				if !rw {
-					g.fail("no D̂ warm-start restart at the cut")
+					g.fail("no D̂ warm-start restart from the change to entry + 2")
 				}
 			}
 			g.outsideLo(b, e, g.n(), lo)
@@ -826,20 +817,12 @@ func gateCases() []gateCase {
 			}
 		}},
 		{name: "no limit, pressure only blocks", cfg: func(seed uint64) Config {
-			// Plan §4.5: the third share is frozen with the plants, where the
-			// engine's fixed-capacity stall at the demand crosses the threshold
-			// (frozenNoLimitShare), replacing 1.2 picked from a report.
+			// Plan §4.5 (the review of 0ce649f): after 0.4 and 0.8 cores, an
+			// alternation of s_over and s_under, frozen from the node curve,
+			// switching every 3·|W| (frozenAltStretch).
 			return Config{
 				Seed: seed, Duration: 1200 * time.Second, Procs: 4, NodeCPUs: 4, Ceiling: 32,
-				Share: func(t time.Duration) float64 {
-					switch {
-					case t >= 300*time.Second && t < 600*time.Second:
-						return 0.8
-					case t >= 900*time.Second && t < 1200*time.Second:
-						return frozenNoLimitShare
-					}
-					return 0.4
-				},
+				Share:  noLimitShare,
 				Queues: []Queue{{Name: "q", Class: fixedClass(baseClass), Active: always}},
 				Model:  defaultModel(),
 			}
@@ -854,9 +837,22 @@ func gateCases() []gateCase {
 					g.v.fails = nil
 				}()
 			}
-			// Plan §4.5: blocked in every sample of a run, a run ending once W
-			// has passed with no sample over the threshold, and in no other.
+			// Plan §4.5: blocked in every sample of a contention run (design
+			// §17.10 (D)) and in no other; at least one run begins and ends in
+			// each pair of stretches of the alternation.
 			runs := g.inRuns()
+			pair := 2 * frozenAltStretch
+			for from := altFrom; from+pair <= g.cfg.Duration; from += pair {
+				began, ended := false, false
+				for i := index(g.tr, from); i < index(g.tr, from+pair) && i < g.n(); i++ {
+					began = began || (runs[i] && !runs[i-1])
+					ended = ended || (!runs[i] && runs[i-1])
+				}
+				if !began || !ended {
+					g.fail("no run both beginning and ending in the stretches from %v (began %v, ended %v)", from, began, ended)
+					break
+				}
+			}
 			over, near, nearOver := 0, 0, 0
 			onset := -1.0
 			for i := 1; i < g.n(); i++ {
@@ -866,7 +862,7 @@ func gateCases() []gateCase {
 					return
 				}
 				o := g.stall(i) > 50
-				if g.tr.At[i] >= 900*time.Second {
+				if g.tr.At[i] >= altFrom {
 					near++
 					if o {
 						nearOver++
@@ -895,7 +891,7 @@ func gateCases() []gateCase {
 					return
 				}
 			}
-			g.report("samples over the threshold: %d; at the share near demand (%.2f cores), %d of %d", over, frozenNoLimitShare, nearOver, near)
+			g.report("samples over the threshold: %d; in the alternation (%.2f/%.2f cores, every %v), %d of %d", over, frozenAltOver, frozenAltUnder, frozenAltStretch, nearOver, near)
 		}},
 		{name: "contention below the quota", cfg: func(seed uint64) Config {
 			c := measured(seed)
@@ -988,28 +984,41 @@ func gateCases() []gateCase {
 				g.v.invalid = fmt.Sprintf("not at steady state before the change: %v and %d completions since entry, want τ_ĉ %.0fs and 60", g.tr.At[i0]-g.tr.At[e0], comp, tauC)
 				return
 			}
-			// Plan §4.5 (the review of caebca3): into the band within
-			// ⌈(D'_cap + |W'|)/Δt⌉ + 1 samples of the change, frozen from the
-			// drain plant, with the floor as the lower edge in the transient.
-			within := drainCount()
+			// Plan §4.5, the user's decision of 2026-11-10: the long drain's
+			// safety is judged and its entry time reported, not judged.
+			edge := drainCount() - 1 // D'_cap + |W'|, frozen
 			floor := floorAfterDrainChange()
-			lo := func(i int) float64 {
-				if i <= i0+within {
-					return math.Min(b.lo, floor)
-				}
-				return b.lo
-			}
 			drained := 0
 			for i := i0; i < g.n(); i++ {
 				if g.tr.Samples[i].Books.NMin > g.tr.Capacity[i-1] {
 					drained++
-					if g.S(i) > g.S(i-1)+1e-9 {
-						g.fail("a rise at %v with N⁻ above the capacity", g.tr.At[i])
-					}
 				}
 			}
 			if drained == 0 {
 				g.v.invalid = "no drained sample: the case didn't exercise a drain"
+			}
+			// ĉ's first restart after the change (the cost model), from which the
+			// restart-edge floor and the upper-edge condition run; for the
+			// baselines, which have no ĉ, from the change (the plan author's
+			// reading).
+			rst := -1
+			if g.cost {
+				for i := i0; i < g.n(); i++ {
+					if g.tr.Results[i].CPU.CRestarted {
+						rst = i
+						break
+					}
+				}
+			}
+			start := i0
+			if rst >= 0 {
+				start = rst
+			}
+			lo := func(i int) float64 {
+				if i >= start && i <= start+edge {
+					return math.Min(b.lo, floor)
+				}
+				return b.lo
 			}
 			e := -1
 			for i := i0; i < g.n(); i++ {
@@ -1018,23 +1027,52 @@ func gateCases() []gateCase {
 					break
 				}
 			}
-			g.report("drained samples: %d; the count %d, the floor %.2f until +%d", drained, within, floor, within)
-			if e < 0 || e > i0+within {
-				g.fail("into the band [%.2f, %.2f] at +%d samples, want within %d: %v", lo(i0), b.hi, e-i0, within, g.slotsFrom(i0, 12))
+			if e >= 0 {
+				g.report("entry at +%d samples (reported, not judged; the frozen count was %d)", e-i0, drainCount())
+			} else {
+				g.report("no entry into the band (reported, not judged)")
 			}
-			g.outsideLo(b, e, g.n(), lo)
+			g.report("drained samples: %d; the restart-edge floor %.2f for %d samples from +%d", drained, floor, edge, start-i0)
+			end := e
+			if end < 0 {
+				end = g.n() - 1
+			}
+			// No rise from the change to entry in a sample with U_W > ρL, nor
+			// while ĉ's test is pending.
+			for i := i0 + 1; i <= end; i++ {
+				if g.S(i) <= g.S(i-1)+1e-9 {
+					continue
+				}
+				r := g.tr.Results[i].CPU
+				u := r.Used
+				if g.cost {
+					u = r.UW
+				}
+				if u > rho*g.limit(i) {
+					g.fail("a rise at %v with the window's CPU over ρL", g.tr.At[i])
+					break
+				}
+				if g.cost && (r.CPending || r.CDeferred) {
+					g.fail("a rise at %v while ĉ's test was pending", g.tr.At[i])
+					break
+				}
+			}
+			// S never above S*'(1 + 3r̄) once ĉ has restarted; no sample below
+			// the restart-edge floor.
+			for i := start; i < g.n(); i++ {
+				if g.S(i) > b.hi+1e-9 {
+					g.fail("S %.2f at %v above S*'(1 + 3r̄) = %.2f after ĉ's restart", g.S(i), g.tr.At[i], b.hi)
+					break
+				}
+			}
+			for i := i0; i < g.n(); i++ {
+				if g.S(i) < math.Min(b.lo, floor)-1e-9 {
+					g.fail("S %.2f at %v below the restart-edge floor %.2f", g.S(i), g.tr.At[i], math.Min(b.lo, floor))
+					break
+				}
+			}
 			if g.cost {
-				end := e
-				if end < 0 {
-					end = min(i0+within, g.n()-1)
-				}
 				first, fb, mixFB, cr, st := false, 0, 0, 0, 0
-				for i := i0 + 1; i <= end; i++ {
-					if g.S(i) > g.S(i-1)+1e-9 {
-						g.fail("a rise at %v between the change and entry (§17.10 (A))", g.tr.At[i])
-						break
-					}
-				}
 				for i := i0; i < g.n(); i++ {
 					c := g.tr.Results[i].CPU
 					if i <= end && c.Kind == costmodel.Capped && c.FirstTerm && g.tr.Samples[i].Books.Completions == 0 {
@@ -1051,8 +1089,10 @@ func gateCases() []gateCase {
 					}
 					st += c.StretchedLives
 				}
-				if !first {
-					g.fail("no capped sample at its first term with no completion of its own before entry (§17.10 (B))")
+				// Either path before entry: a ĉ restart, or a capped sample at its
+				// first term with no completion of its own.
+				if !(rst >= 0 && rst <= end) && !first {
+					g.fail("neither a ĉ restart nor a capped sample at its first term with no completion of its own before entry")
 				}
 				g.report("D_mix from the D̂ fallback in %d capped samples (else from D̂_q); Little's fallback %d; ĉ restarts %d; lives over tight samples in D̂ %d (in this self-throttled regime, the plant's real durations, §3.4)", mixFB, fb, cr, st)
 			}
@@ -1100,6 +1140,23 @@ func gateCases() []gateCase {
 			g.report("max S %.2f against S* %.2f (predicted excess 0.01·(S* − 1)·S* = %.2f); %d samples without a standard error excluded", top, p.sStar, 0.01*(p.sStar-1)*p.sStar, excluded)
 		}},
 	}
+}
+
+// altFrom is when the no-limit case's alternation begins.
+const altFrom = 600 * time.Second
+
+// noLimitShare is the no-limit case's share: 0.4 cores, then 0.8, then the
+// frozen alternation of s_over and s_under.
+func noLimitShare(t time.Duration) float64 {
+	switch {
+	case t < 300*time.Second:
+		return 0.4
+	case t < altFrom:
+		return 0.8
+	case int((t-altFrom)/frozenAltStretch)%2 == 0:
+		return frozenAltOver
+	}
+	return frozenAltUnder
 }
 
 func countOver(xs []float64, v float64) int {
