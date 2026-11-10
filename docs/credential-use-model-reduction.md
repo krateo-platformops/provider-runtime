@@ -388,8 +388,8 @@ the differential test passing.
 
 ## 10. Stateful search with a time-abstract state hash (the user's decision, under review)
 
-*Revision 2: answers the soundness review of 87f333b (M1 to M3, and the Lows)
-and records the user's decision on the gate.*
+*Revision 3: answers the soundness reviews of 87f333b and 5bb4446, and records
+the user's decision on the gate.*
 
 **Why.** The new base (§3) is what the user decided, but T = 2 jumps multiply
 every search by 70 to 110. AwayAndBack with 3 live passes goes from 19,555
@@ -510,12 +510,26 @@ parts reduced to their order.**
   construction, and it is exact for this case. Zones would be needed only
   if ticks could add up to U, which the assertion below rules out.
 
-**The assertion, a run-time check.** It panics if either of these happens:
+**The assertion, a run-time check.** It panics if any of these happens:
 - a tick crosses a pending deadline, or brings now from outside U of a
   deadline to inside it, which would mean the coarse part moved by ticks;
-- a schedule's total ticks reach U/2.
+- a schedule's total ticks reach U/2;
+- **(L1) a tick changes now's fine rank against a live term t with
+  n_now = n_t + c/U, for a constant c in use.** That would change the
+  answer to "now ≥ t + c" without a deadline for t + c being registered.
+  Today every such t + c is registered as a deadline, so this can't happen,
+  but the representation's exactness claim is general, so the check is
+  too.
 
 Only jumps move coarse parts, and only jumps cross deadlines.
+
+**(L2) Further obligations, each checked:**
+- **A deadline is registered with its base term, and the registration
+  panics unless it differs from that term by a multiple of U.**
+- **`Clock.Since` panics in the model.** Every duration the code needs is a
+  constant, or a difference that the absolute requeues remove.
+- **The schedule's start sits on a whole U** (16:26:00 today), so that
+  coarse parts are whole multiples from the start.
 
 **Two code changes make every requeue a term** (they land with the
 implementation):
@@ -582,23 +596,40 @@ visited state, and the search backtracks as at a terminal state.
   first path found to it as its witness.
 - **The vacuity checks** stay, on distinct-state counts.
 
-**The gate (§3.3), as the user decided: inclusion of terminal states.**
-- **The old base** is enumerated statelessly, offline, at each gate profile.
-- **Each of its terminal states is mapped through the new abstraction:**
-  times to their relative representation, names renamed canonically,
-  monitors as §10.1 defines them.
-- **The requirement is S_old ⊆ S_new**, per scenario and profile: every
-  terminal state the old base reaches, the new base reaches too.
+**The gate (§3.3), as the user decided: inclusion of terminal states, through
+a projection both bases share.**
+- **Why a projection.** The old base's constants (a 5ms grace, 1ms ticks, a
+  threshold at start + grace − 1ms) aren't multiples of U, and its ticks
+  carry time. So an old state mapped through §10.2's relative representation
+  would never land in S_new.
+- **The projection.** Both bases' terminal states are compared on a coarser
+  abstraction:
+  - names renamed canonically;
+  - monitors as §10.1 defines them;
+  - every time term, deadlines included (grace ends per P and process,
+    notBefores, thresholds), kept **only by its order, ties included**.
+- **The requirement is proj(S_old) ⊆ proj(S_new),** per scenario and
+  profile. The old base is enumerated statelessly, offline; the new base's
+  terminal states come from the stateful search.
+- **Why order alone is fine as a projection, but wasn't for merging (M1).**
+  - Merging needs equal *futures*. A future can compare t + c with u, and
+    order alone doesn't decide that.
+  - A terminal state has no future. What the checks are about there are
+    order facts: GraceOver (now against a grace end), the namespace deleted
+    before or after the Namespace GET and the grace end, a hold before the
+    holder's deletion. So the projection keeps what the gate compares, and
+    drops only values no check reads at the end.
 - **The two intended differences go through a declared mapping, or are
   reported for triage, never silently dropped:**
-  - crash rule (ii)'s extra pass (§3.2): an old-base terminal state where
-    a pass was lost before its first call maps to the new-base state in
-    which that pass ran;
+  - crash rule (ii)'s extra pass (§3.2);
   - the redefined thresholds: the late deletions' "into the grace" moves
     from start + grace − 1ms to dt + grace/2.
 
-  An old terminal state that no declared mapping takes into S_new is
-  listed for triage.
+  Both are path-based, so they are implemented by **replaying the old
+  schedule's labelled trace** (each step's actor, label and fault) on the
+  new base, not its choice indices, which mean nothing on the other base.
+  A trace that doesn't replay, or that replays to a terminal state outside
+  proj(S_new), goes to triage.
 - **The per-mutant matrix is equal or larger**: every scenario that kills a
   mutant on the old base kills it on the new.
 - **Under each killed mutant, the old and new bases report equal sets of
@@ -618,13 +649,21 @@ visited state, and the search backtracks as at a terminal state.
 - **The merge audit.** In a test mode, at every prune (or a sample of prunes,
   on the big scenarios), keep the pruned path, a concrete state as a replay
   prefix, and the stored witness path. Run both under the same sequences of
-  choices, to the end, or for k steps. The abstract traces and the
-  violations must be identical.
+  choices. The abstract traces and the violations must be identical.
   - This is the check that the abstraction loses nothing the futures depend
     on: a read that bypasses a hook, a time used as a value, a name the
     renaming misses.
-  - It runs on every prune in the differential test's scenarios, and on a
-    sample in the others.
+  - It runs on every prune in the differential test's scenarios.
+  - **On the big scenarios (L3):**
+    - audited pairs run to the end; k is only a cap, and a pair that hits it
+      is reported;
+    - several continuations are tried per audited prune: the first, and
+      seeded random ones;
+    - the sample is seeded, and the seed logged;
+    - the sample favours prunes whose two concrete states differ the most,
+      so it doesn't spend itself on identical ones.
+  - **One full offline audit** checks every prune of the two-process
+    scenario at {0,1}, about 2.6 million stateless schedules' worth.
 
 ### 10.6 Risks and traps, stated before the code
 
