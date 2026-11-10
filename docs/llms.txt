@@ -19,7 +19,7 @@ docs/design-local-slot-before-pop.md: design (implemented) for taking the local 
 docs/design-saturation-cost-model.md: design (decided, not built) for sizing local capacity from what reconciles cost against the container's CPU and memory limits
 pkg/ratelimit/httpsignal/httpsignal.go: http.RoundTripper reporting GitHub and Azure DevOps rate-limit headers, and propagating the active span's traceparent
 pkg/tracing/decide.go: Decide, the krateo.io/traceparent parent-or-link rule, and Canonical
-pkg/tracing/start.go: StartReconcile (the reconcile root span) and StartStep (its children)
+pkg/tracing/start.go: StartReconcile (the reconcile root span, always a new root), StartStep (its children) and StartActStep (the first act for a new value, in the upstream trace)
 pkg/tracing/inject.go: Inject, InjectAnnotations and InjectHeader, with the rules for callers
 pkg/telemetry/setup.go: Config, ConfigFromEnv and Setup, the OTLP metrics and trace pipelines over one resource
 pkg/reconciler/ratelimit.go: RateLimitKeyer, RateLimitKeysProvider, WithRateLimitGovernor and the deferral path
@@ -29,4 +29,4 @@ examples/greeting-controller/README.md: minimal compilable provider (Greeting CR
 examples/greeting-controller/main.go: the example source
 examples/greeting-controller/crd.yaml: the Greeting CRD
 examples/greeting-controller/greeting.yaml: a sample Greeting CR
-docs/design-tracing.md: design (for review, not built) for OpenTelemetry reconcile traces: telemetry.Setup's TracerProvider, the reconcile span and its children, the krateo.io/traceparent parent-or-link rule, and outbound propagation
+docs/design-tracing.md: design (built in v1.14.0, D8 in v1.14.1) for OpenTelemetry reconcile traces: telemetry.Setup's TracerProvider, the reconcile span and its children, the krateo.io/traceparent parent-or-link rule, and outbound propagation

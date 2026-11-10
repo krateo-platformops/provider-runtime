@@ -10,18 +10,20 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 )
 
-// Mode is how a reconcile's root span relates to the object's
-// krateo.io/traceparent (docs/design-tracing.md §6.2).
+// Mode is how a reconcile relates to the object's krateo.io/traceparent
+// (docs/design-tracing.md §6.2, D8). In every mode the reconcile root is a new
+// root; the modes differ in its link and in whether an act step joins the
+// upstream trace.
 type Mode int
 
 const (
-	// NoParent: the object carries no valid traceparent. The root is a new root
-	// with no link.
+	// NoParent: the object carries no valid traceparent. The root has no link.
 	NoParent Mode = iota
-	// Parent: the traceparent's value is new. The root is its child.
+	// Parent: the traceparent's value is new. The root links to it, and the
+	// pass's first act step (create, update or delete) is its child.
 	Parent
 	// Link: the value was already continued, or its window has closed. The root
-	// is a new root with one link to it.
+	// links to it, and nothing is its child.
 	Link
 )
 
@@ -64,7 +66,7 @@ func (w When) String() string {
 
 // A Decision is what Decide concluded for one reconcile.
 type Decision struct {
-	// Mode is how the root span relates to Remote.
+	// Mode is how the reconcile relates to Remote.
 	Mode Mode
 	// Remote is the annotation's span context. It is valid in Parent and Link.
 	Remote trace.SpanContext

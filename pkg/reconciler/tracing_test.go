@@ -392,7 +392,7 @@ func TestTracingAnalyzingToOpen(t *testing.T) {
 			t.Fatalf("marker after the first pass = %q, want %s", got, tpA)
 		}
 
-		// 2. A fresh B, in a metadata patch: the pass is a child of B and doesn't act.
+		// 2. A fresh B, in a metadata patch: the pass is Parent mode (its root links to B) and doesn't act.
 		s.annotate("inc", ann(meta.AnnotationKeyTraceparent, tpB))
 		s.ops.reset()
 		mustReconcile(t, r, "inc")
@@ -401,7 +401,7 @@ func TestTracingAnalyzingToOpen(t *testing.T) {
 			t.Errorf("ops = %v, want no marker and no act while Analyzing", s.ops.list())
 		}
 
-		// 3. Open with a script, a status write: the pass is a child of B, acts, and
+		// 3. Open with a script, a status write: the pass is Parent mode, acts (its Update is a child of B), and
 		// writes marker B before Update.
 		s.setStatus("inc", func(st *WidgetStatus) { st.State, st.Script = "Open", "fix.sh" })
 		s.ops.reset()
@@ -830,7 +830,7 @@ func TestTracingMemoLifecycle(t *testing.T) {
 }
 
 // design-tracing §10, test 17: a deferral storm. With the key at capacity, the
-// passes inside the window are Parent roots with ratelimit.deferred and no
+// passes inside the window are Parent-mode roots (linked, never children) with ratelimit.deferred and no
 // marker; the first pass after the window links and writes the marker.
 func TestTracingDeferralStorm(t *testing.T) {
 	s := newTraceServer(t, initialized(newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA))))

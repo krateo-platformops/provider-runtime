@@ -414,19 +414,79 @@ func mode(s sdktrace.ReadOnlySpan) (tracing.Mode, trace.SpanContext) {
 	return tracing.NoParent, trace.SpanContext{}
 }
 
+// wantMode checks a root span against D8: every reconcile is its own trace, so
+// the root never has a parent. With want Parent or Link it carries exactly one
+// link, to tp; with NoParent it carries none. (Parent and Link differ only in
+// whether the pass's first act step joins tp's trace: see wantAct.)
 func wantMode(t *testing.T, s sdktrace.ReadOnlySpan, want tracing.Mode, tp string) {
 	t.Helper()
-	got, sc := mode(s)
-	if got != want {
-		t.Fatalf("root mode = %s, want %s", got, want)
+	if s.Parent().IsValid() {
+		t.Fatalf("root has parent %s/%s: under D8 a reconcile root is never a child", s.Parent().TraceID(), s.Parent().SpanID())
 	}
+	links := s.Links()
 	if want == tracing.NoParent {
+		if len(links) != 0 {
+			t.Fatalf("root links = %v, want none", links)
+		}
 		return
 	}
 	r := remote(t, tp)
-	if sc.TraceID() != r.TraceID() || sc.SpanID() != r.SpanID() {
-		t.Errorf("root %s = %s/%s, want %s", got, sc.TraceID(), sc.SpanID(), tp)
+	if len(links) != 1 || links[0].SpanContext.TraceID() != r.TraceID() || links[0].SpanContext.SpanID() != r.SpanID() {
+		t.Fatalf("root links = %v, want one to %s", links, tp)
 	}
+	if s.SpanContext().TraceID() == r.TraceID() {
+		t.Errorf("root is in the upstream trace %s: it must be its own trace", r.TraceID())
+	}
+}
+
+// actSpans are the ended spans named name (create, update or delete), oldest
+// first.
+func actSpans(rec interface {
+	Ended() []sdktrace.ReadOnlySpan
+}, name string) []sdktrace.ReadOnlySpan {
+	var out []sdktrace.ReadOnlySpan
+	for _, sp := range rec.Ended() {
+		if sp.Name() == name {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+// wantAct checks an act span against D8. With tp set, it is the first act for
+// a new value: its parent is tp's span, in tp's trace, and it links back to
+// root. With tp empty, it is an ordinary child of root, in root's trace.
+func wantAct(t *testing.T, act, root sdktrace.ReadOnlySpan, tp string) {
+	t.Helper()
+	if tp == "" {
+		if act.Parent().SpanID() != root.SpanContext().SpanID() || act.SpanContext().TraceID() != root.SpanContext().TraceID() {
+			t.Errorf("%s: parent %s in trace %s, want a child of its root %s", act.Name(), act.Parent().SpanID(), act.SpanContext().TraceID(), root.SpanContext().SpanID())
+		}
+		return
+	}
+	r := remote(t, tp)
+	if act.Parent().TraceID() != r.TraceID() || act.Parent().SpanID() != r.SpanID() || act.SpanContext().TraceID() != r.TraceID() {
+		t.Errorf("%s: parent %s/%s, want the upstream %s", act.Name(), act.Parent().TraceID(), act.Parent().SpanID(), tp)
+	}
+	links := act.Links()
+	if len(links) != 1 || links[0].SpanContext.SpanID() != root.SpanContext().SpanID() {
+		t.Errorf("%s: links %v, want one to its reconcile root %s", act.Name(), links, root.SpanContext().SpanID())
+	}
+}
+
+// spansIn counts the ended spans in trace tp's trace.
+func spansIn(t *testing.T, rec interface {
+	Ended() []sdktrace.ReadOnlySpan
+}, tp string) int {
+	t.Helper()
+	r := remote(t, tp)
+	n := 0
+	for _, sp := range rec.Ended() {
+		if sp.SpanContext().TraceID() == r.TraceID() {
+			n++
+		}
+	}
+	return n
 }
 
 // events are a span's event names.

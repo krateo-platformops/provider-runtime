@@ -1171,7 +1171,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 				return res, nil
 			}
 			started = time.Now()
-			deleteCtx, deleteSpan := pass.step(externalCtx, tracing.SpanDelete)
+			deleteCtx, deleteSpan := pass.actStep(externalCtx, tracing.SpanDelete)
 			err = external.Delete(deleteCtx, managed)
 			pass.endStep(deleteSpan, err)
 			release()
@@ -1295,7 +1295,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		}
 
 		started = time.Now()
-		createCtx, createSpan := pass.step(externalCtx, tracing.SpanCreate)
+		createCtx, createSpan := pass.actStep(externalCtx, tracing.SpanCreate)
 		err = external.Create(createCtx, managed)
 		pass.endStep(createSpan, err)
 		releaseCreate()
@@ -1453,7 +1453,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		return res, nil
 	}
 	started = time.Now()
-	updateCtx, updateSpan := pass.step(externalCtx, tracing.SpanUpdate)
+	updateCtx, updateSpan := pass.actStep(externalCtx, tracing.SpanUpdate)
 	err = external.Update(updateCtx, managed)
 	pass.endStep(updateSpan, err)
 	release()

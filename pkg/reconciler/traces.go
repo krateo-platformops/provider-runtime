@@ -236,10 +236,27 @@ type tracePass struct {
 	uid    types.UID
 	memo   *traceMemo
 	marked bool // the marker was written, or the write failed, this pass
+	// actJoined: this pass's first act step for a new value has been parented
+	// on the upstream context (D8). Later act steps aren't.
+	actJoined bool
 }
 
 // step opens a child span under the root.
 func (p *tracePass) step(ctx context.Context, name string) (context.Context, trace.Span) {
+	return tracing.StartStep(ctx, p.tp, name)
+}
+
+// actStep opens an act step (create, update or delete). The pass's first
+// act step for a new value is parented on the upstream context, with a link
+// back to the root (D8); every other is an ordinary child of the root.
+func (p *tracePass) actStep(ctx context.Context, name string) (context.Context, trace.Span) {
+	if p.tp == nil {
+		return tracing.StartStep(ctx, nil, name)
+	}
+	if p.d.Mode == tracing.Parent && !p.actJoined {
+		p.actJoined = true
+		return tracing.StartActStep(ctx, p.tp, name, p.d.Remote)
+	}
 	return tracing.StartStep(ctx, p.tp, name)
 }
 

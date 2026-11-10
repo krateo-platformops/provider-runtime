@@ -1,7 +1,8 @@
 // Package tracing is the API-only half of provider-runtime's OpenTelemetry
 // tracing (docs/design-tracing.md). It holds the provider the reconcilers use,
 // the krateo.io/traceparent parent-or-link rule (Decide), the reconcile root
-// span (StartReconcile), and the functions that carry a trace context onto a
+// span (StartReconcile), the act step that joins the upstream trace
+// (StartActStep), and the functions that carry a trace context onto a
 // Kubernetes object (Inject, InjectAnnotations) or an HTTP request
 // (InjectHeader).
 //
@@ -28,7 +29,8 @@
 //     metadata write.
 //   - Stamp before the change that triggers the work. When the context and the
 //     change that makes the downstream controller act are two writes, write the
-//     annotation first, so the downstream pass that acts is the child.
+//     annotation first, so the downstream pass that acts has its act step
+//     joined to the context.
 //   - Never copy krateo.io/traceparent-continued: it belongs to the object it is
 //     written on.
 //

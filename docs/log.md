@@ -12,6 +12,37 @@ timestamp: 2026-11-10T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — v1.14.1: every reconcile is its own trace
+- **Design:** [design-tracing](./design-tracing.md) §13, D8, decided by the
+  user on 2026-11-10 after krateo-057's first day under v1.14.0.
+- **The behaviour change, with tracing on:**
+  - Every `reconcile` root is a new trace. When the object carries a valid
+    `krateo.io/traceparent`, the root has one link to it. In v1.14.0, a pass
+    inside a new value's 10-minute window was that value's child.
+  - Only the first act step for a new value, the `create`, `update` or
+    `delete` span, is the value's child. It carries a link back to its
+    `reconcile` root. What the provider does under it with the method's `ctx`
+    joins the upstream trace too; `connect`, `observe` and every other pass
+    don't.
+  - The marker is unchanged: written with the optimistic lock just before
+    that act, or when the window closes with no act. The window parents
+    nothing now.
+  - With tracing off, nothing changes.
+- **Why:** the composition-dynamic-controller stamps every object of a
+  release on every apply. Under v1.14.0, every chart upgrade put up to 10
+  minutes of every child's observe-only polls into the upgrade's trace: on
+  krateo-057, about 260 reconciles per upgrade, and the reconciles of 28 Alerts
+  in one composition's trace (at least 3,204 spans, about 13 times the
+  volume). The tail sampler kept those traces whole. It wasn't a marker bug:
+  28 of 28 markers were written, and the windows closed as designed.
+- **For tail sampling:** a trace that holds a stamper's span gains one
+  `update`, `create` or `delete` span per object that acts on the new value,
+  each linking to a `reconcile` root in a trace of its own. Observe-only
+  reconciles never join it.
+- **API:** `tracing.StartActStep(ctx, tp, step, upstream)`. `StartReconcile`
+  now always starts a new root, and links to `d.Remote` in Parent and Link
+  mode.
+
 ## 2026-11-10 — v1.14.0: trace every reconcile
 - **Design:** [design-tracing](./design-tracing.md) (#60), built in #64, #65
   and #66, each reviewed independently.
