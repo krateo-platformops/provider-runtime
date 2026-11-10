@@ -909,6 +909,16 @@ text; the controller unchanged):
 - **No-limit validity guard:** "the case is INVALID unless at least 25% of its
   samples are over the threshold and at least 25% under, and a run begins and
   ends in every pair of stretches."
+- **The guard's scope, corrected after seeing results** (the reviewer, after the
+  run at `c1acaa4`): "INVALID unless, within the alternation stretches, at least
+  25% of samples are over the threshold and at least 25% under, and a run begins
+  and ends in every pair." (The first form counted the whole case, whose 0.4- and
+  0.8-core phases are entirely over the threshold, which left it at the 75% edge.)
+- **Held until the GKE plant-curve measurement** (the user's decision,
+  2026-11-10): the determinacy rule for the long drain's target, and the long
+  drain's band. The engine's drain-plant curve gives `S*` 3.9, 4.8 and 4.3 on
+  seeds 9001–9003, non-monotone, with `U` nearly flat near the target; the real
+  curve is measured first (`hack/rlgov-measure/results/curve-settings.txt`).
 
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
