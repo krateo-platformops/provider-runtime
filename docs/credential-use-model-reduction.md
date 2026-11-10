@@ -75,7 +75,7 @@ The user decided the choices below.
 
 ### 3.1 Event-driven time
 
-- **Only calls move time.** Each call step ticks the clock, by at most 1µs
+- **Only calls move time.** Each call step ticks the clock, by at most 1ms
   (§10.2), and no other step does: not resumes, not informer deliveries, not relists. A delivery
   carries the time of the last call before it. Equal times can only stop a
   skip, since `canSkip` needs `t_obs < t_issue` strictly.
@@ -98,15 +98,15 @@ today's 5ms test grace and 1ms per call, any five calls end the grace with
 no jump, so "many calls, still inside the grace" can't be represented, and
 time would move through uncounted ticks as well as through the jumps the
 user decided. So:
-- **The test grace is 1h**, against at most 1µs per call. A schedule makes
-  at most a few thousand calls, so ticks never come near a deadline.
+- **The test grace is 1h**, against at most 1ms per call. A schedule makes
+  at most a few hundred calls, so ticks never come near a deadline.
 - **Every "into the grace" moment a scenario needs is a declared
   deadline**, reached by a jump, not by counting calls.
 - **A call's tick never reaches a pending deadline.** Deadlines built from
   event times lie only a few ticks apart: a deletion and its first sight, or
   two processes' first sights. So after a jump to one, a fixed tick would
   cross the next within a few calls. The tick is therefore at most 1/1024
-  of the time left to the next pending deadline, and at most 1µs, which
+  of the time left to the next pending deadline, and at most 1ms, which
   leaves room for hundreds of calls. **A run-time check panics if a tick can't fit**, that
   is, if a call would have to cross a deadline. Only jumps (and the forced
   jump when nothing is enabled) cross deadlines.
@@ -490,17 +490,42 @@ four such cases:
 parts reduced to their order.**
 - **Every constant the code adds to a time is an integer multiple of a unit
   U:** grace = 1h, grace/2 = 30min, `restoredEpochRequeue` = 1s, so U = 1s.
-- **A call's tick is at most 1µs** (`min(1µs, gap/1024)`). A schedule makes
-  at most a few thousand calls, so its total ticks stay below U/2.
+- **A call's tick is at most 1ms**, and less near deadlines and live terms'
+  fine parts (the invariant below). A schedule makes at most a few hundred
+  calls at level 0, so its total ticks stay below U/2.
 - Every time value is then a jump-built coarse part plus a fine part: an
   earlier term plus constants, from jumps to deadlines, plus a sum of ticks.
   Written relative to the earliest live term, a value is n·U + f with
   |f| < U/2.
 - **A term is represented by the pair (n, the rank of f among all live
-  terms' fine parts).** Then t + c against u is decided lexicographically:
-  n_t + c/U against n_u, then f_t against f_u. Both are kept, so every
-  comparison the code can make has the same answer in two states with equal
-  representations.
+  terms' fine parts).** The ranking is global, across whole levels, and the
+  terms include every registered deadline, passed or pending (grace ends,
+  notBefores, thresholds). Then t + c against u is decided
+  lexicographically: n_t + c/U against n_u, then f_t against f_u. Both are
+  kept, so every comparison the code can make has the same answer in two
+  states with equal representations.
+- **The invariant the representation relies on: a tick never moves now's
+  fine part past any live term's fine part.** The tick is
+  min(1ms, a 1024th of the gap to the next pending deadline, a 1024th of
+  the gap from now's fine part to the next larger fine part of any live
+  term), and at least the clock's 1ns resolution. A tick that can't fit
+  panics. Then:
+  - fixed terms keep a static global order of fine parts, and that order
+    changes only when a term is added;
+  - now's place in it doesn't depend on tick sizes;
+  - cross-level facts are kept. A deadline built later from an old base can
+    land at the same level as one built from a recent base, and their order
+    is then f_old against f_recent, which the global order holds.
+
+  The only thing the invariant gives up is a tick passing an unregistered
+  t + c, which the design excludes: the code compares now only with
+  registered deadlines.
+- **Why a 1ms base tick.** Fine parts of events after a jump sit between
+  fine parts already there, so each jump shrinks the room ticks have by
+  about 1024. A 1ms base leaves room for T = 2 jumps and hundreds of calls
+  after each, at the 1ns resolution. A schedule's level-0 ticks stay below
+  U/2 (a few hundred calls at 1ms), which the encoder checks: it panics on
+  a fine part at or beyond U/2.
 - The shift to the earliest live term is sound because every comparison is
   a difference.
 - **Why not zones (DBMs).** Zones represent symbolic clocks and constraints
@@ -559,7 +584,7 @@ implementation):
 | the harness: requeue waits | until `RequeueAt` | case (a), removed: exactly the grace end |
 | the harness: late deletions | until dt + grace/2 | case (d): a deadline, term plus constant |
 | the harness: `converge` | its clock at now + 3 × grace, after the search | outside the search |
-| the scheduler: `tick` | `min(1µs, gap/1024)` | a fine part; only its order is kept, and the assertion bounds the total |
+| the scheduler: `tick` | at most 1ms, and a 1024th of the gap to the next deadline or larger fine part | a fine part; only its order is kept, and the assertion bounds the total |
 
 **What enforces "time is used only by comparison, storage, or adding a
 constant":**
@@ -684,3 +709,22 @@ a projection both bases share.**
     - a canonical traversal that sorts by raw names.
 - **The per-actor digest is only as good as its hooks.** A missed read is a
   soundness bug, and the merge audit is the guard against it.
+
+**What the merge audit found while the search was built**:
+- **Fine parts ranked globally, with no tick invariant.** On Teardown at
+  {0,1}, 71 of 2,907 audited prunes diverged, and the terminal states
+  didn't match (537 stateful against 554 stateless). Tick sizes, which are
+  values, decided the order of fine parts across levels.
+- **Fine parts ranked per level, with deadlines as terms.** 0 of 2,670
+  diverged, and terminal states matched (404 = 404). But the reviewer
+  showed it isn't sound in general: two deadlines landing at one level from
+  bases at different levels are ordered by a cross-level fact that per-level
+  ranks drop.
+- **Adopted: the reviewer's (A).** A global rank with the tick invariant
+  above. One more harness fault came out first: a forced jump (nothing
+  enabled) revisited the loop top with the same number of choices, so a
+  choice prefix named two states. The audit's replays then started from the
+  wrong one. The state is now checked once per choice, after any forced
+  jump. Teardown at {1,0}: 0 of 2,577 audited prunes diverged, and terminal
+  states matched (246 = 246). The results across every scenario and both
+  bounds are reported with the code.
