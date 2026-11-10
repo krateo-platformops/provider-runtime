@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: prun.sh <name> <mode: ramp|burst|cpu|overhead> <seconds> <image-tag> KEY=VALUE...
+# Usage: prun.sh <name> <mode: ramp|burst|cpu|curve|overhead> <seconds> <image-tag> KEY=VALUE...
 #
 # One run in its own namespace (named after the run), one at a time. Every
 # kubectl goes through k(), so it uses this directory's kubeconfig and the
@@ -13,6 +13,10 @@
 #        block re-run's workload, approved 2026-11-08 (remeasure-plan.txt). The
 #        first block's LOAD_CPU_MS=3000 counted sha256 rounds, about 0.8s of CPU
 #        a call on GKE, and with no wait one call in flight saturated 250m.
+# curve: 64 Greetings, 250m, no governor (NO_GOVERNOR=true), GOMAXPROCS 2; each
+#        Observe spends 3000ms of CPU measured on its thread, then waits 28.5s:
+#        the long drain's plant at a fixed MaxConcurrentReconciles, given as
+#        WORKERS=n (results/curve-settings.txt). No liveness probe.
 #
 # Each restart's cause is recorded as it happens, because lastState keeps only
 # the latest. The node's load comes from the run's STAT lines.
@@ -51,6 +55,7 @@ case $mode in
   ramp)  cpu=2; mem=256Mi; load="WORKERS=16 LOAD_ALLOC_MIB=16 LOAD_HOLD_MS=1000 POLL_MS=500" ;;
   burst) cpu=2; mem=256Mi; load="WORKERS=16 LOAD_ALLOC_MIB=16 LOAD_HOLD_MS=300 POLL_MS=1000" ;;
   cpu)   cpu=250m; mem=512Mi; load="WORKERS=16 LOAD_CPU_MS=20 LOAD_HOLD_MS=400 POLL_MS=1000" ;;
+  curve) cpu=250m; mem=512Mi; load="LOAD_CPU_MS=3000 LOAD_HOLD_MS=28500 POLL_MS=1000 NO_GOVERNOR=true GOMAXPROCS=2" ;;
   overhead) cpu=1; mem=128Mi; load="SAMPLER_OVERHEAD=true" ;;
 esac
 started=$(date +%Y-%m-%dT%H:%M:%S)
@@ -63,7 +68,7 @@ greetings() { # first last
 for j in range($1, $2 + 1):
     print('---\napiVersion: examples.krateo.io/v1\nkind: Greeting\nmetadata: {name: g%02d, namespace: $ns}\nspec: {message: hello}' % j)" | k apply -f - >/dev/null
 }
-if [ "$mode" = burst ] || [ "$mode" = cpu ]; then
+if [ "$mode" = burst ] || [ "$mode" = cpu ] || [ "$mode" = curve ]; then
   greetings 0 63 || setup_failed "apply the backlog"
 fi
 envs=""
@@ -86,8 +91,10 @@ if [ "${RLGOV_PROBE:-}" = incident-provider ]; then
             timeoutSeconds: 1
             failureThreshold: 3'
 fi
-# Overhead mode serves no health endpoint, so the probe would kill it.
+# Overhead mode serves no health endpoint, so the probe would kill it; the curve
+# measures the plant, and a probe killed by throttling would cut runs short.
 [ "$mode" = overhead ] && probe=''
+[ "$mode" = curve ] && probe=''
 cat <<EOF | k apply -f - >/dev/null
 apiVersion: apps/v1
 kind: Deployment

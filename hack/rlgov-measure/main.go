@@ -20,6 +20,9 @@
 //	SAMPLER_OVERHEAD    "true" measures the sampler's cost and nothing else
 //	PHASE_S             length of each overhead phase (default 60)
 //	GOGC_PERCENT        GOGC (default 100)
+//	NO_GOVERNOR         "true" runs the controller with no rate-limit governor
+//	                    at all, MaxConcurrentReconciles alone bounding it: the
+//	                    fixed-capacity plant curve (results/curve-settings.txt)
 //
 // opts_new.go reads the settings the control build doesn't have.
 package main
@@ -28,6 +31,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	goruntime "runtime"
 	"runtime/debug"
 	gometrics "runtime/metrics"
 	"strconv"
@@ -248,6 +252,22 @@ func avg10(file, line string) string {
 	return "na"
 }
 
+// pressureTotal is a pressure file's cumulative "total=" for a line, in
+// microseconds: differenced per second it gives the stall share at the
+// sample's own resolution, which avg10's ten-second average hides.
+func pressureTotal(file, line string) string {
+	for _, l := range strings.Split(readFile(file), "\n") {
+		if strings.HasPrefix(l, line+" ") {
+			for _, f := range strings.Fields(l) {
+				if v, ok := strings.CutPrefix(f, "total="); ok {
+					return v
+				}
+			}
+		}
+	}
+	return "na"
+}
+
 func statValue(key string) uint64 {
 	for _, l := range strings.Split(readFile("memory.stat"), "\n") {
 		if k, v, ok := strings.Cut(l, " "); ok && k == key {
@@ -269,8 +289,20 @@ func nodeReport() {
 	}
 	_, pressureErr := os.Stat("/sys/fs/cgroup/cpu.pressure")
 	_, memPressureErr := os.Stat("/sys/fs/cgroup/memory.pressure")
-	fmt.Printf("LOG node kernel=%q cgroup_v2=%s cpu_pressure_file=%t memory_pressure_file=%t memory_max=%s cpu_max=%q\n",
-		strings.TrimSpace(string(version)), cgroupV2, pressureErr == nil, memPressureErr == nil, readFile("memory.max"), readFile("cpu.max"))
+	fmt.Printf("LOG node kernel=%q cgroup_v2=%s cpu_pressure_file=%t memory_pressure_file=%t memory_max=%s cpu_max=%q cpu_model=%q gomaxprocs=%d\n",
+		strings.TrimSpace(string(version)), cgroupV2, pressureErr == nil, memPressureErr == nil, readFile("memory.max"), readFile("cpu.max"), cpuModel(), goruntime.GOMAXPROCS(0))
+}
+
+// cpuModel is the node's CPU model, from /proc/cpuinfo, which isn't namespaced:
+// the plant curve depends on it (results/curve-settings.txt).
+func cpuModel() string {
+	b, _ := os.ReadFile("/proc/cpuinfo")
+	for _, l := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(l, ":"); ok && strings.TrimSpace(k) == "model name" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return "na"
 }
 
 // nodeLoad is the node's 1-minute load average: /proc/loadavg isn't namespaced.
@@ -325,15 +357,25 @@ func main() {
 	applyExperimental(&o.RateLimit.Saturation)
 	o.RateLimit.Metrics = rec
 	o.Logger = stdoutLogger{}
-	if err := o.SetupRateLimitGovernor(mgr); err != nil {
-		panic(err)
+	// NO_GOVERNOR: the fixed-capacity plant curve. No governor is set up or
+	// passed to the reconciler, so MaxConcurrentReconciles alone bounds the
+	// reconciles in flight.
+	noGovernor := os.Getenv("NO_GOVERNOR") == "true"
+	ropts := []reconciler.ReconcilerOption{
+		reconciler.WithExternalConnecter(&connector{s: &store{m: map[string]string{}}, l: l}),
+		reconciler.WithPollInterval(poll),
 	}
+	if !noGovernor {
+		if err := o.SetupRateLimitGovernor(mgr); err != nil {
+			panic(err)
+		}
+		ropts = append(ropts, reconciler.WithRateLimitGovernor(o.RateLimitGovernor))
+	}
+	fmt.Printf("LOG governor=%t workers=%d load=%+v\n", !noGovernor, workers, l)
 
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(GroupVersion.WithKind("Greeting")),
-		reconciler.WithExternalConnecter(&connector{s: &store{m: map[string]string{}}, l: l}),
-		reconciler.WithPollInterval(poll),
-		reconciler.WithRateLimitGovernor(o.RateLimitGovernor),
+		ropts...,
 	)
 	if err := ctrl.NewControllerManagedBy(mgr).Named("greeting").For(&Greeting{}).
 		WithOptions(o.ForControllerRuntime()).Complete(r); err != nil {
@@ -380,10 +422,11 @@ func main() {
 				}
 				sat = strings.Join(parts, ",")
 			}
-			fmt.Printf("STAT t=%.0f cpu_ms/s=%.0f obs/s=%d burn_cpu_ms/call=%s burn_wall_ms/call=%s inflight=%d local=%s cpu_some=%s mem_full=%s mem_some=%s ws_mib=%d max=%s throttled_usec=%s node_load=%s %s deferrals=%s inputs=%s\n",
+			fmt.Printf("STAT t=%.0f cpu_ms/s=%.0f obs/s=%d burn_cpu_ms/call=%s burn_wall_ms/call=%s inflight=%d local=%s cpu_some=%s mem_full=%s mem_some=%s ws_mib=%d max=%s throttled_usec=%s nr_periods=%s nr_throttled=%s some_total_us=%s node_load=%s %s deferrals=%s inputs=%s\n",
 				time.Since(start).Seconds(), cpuMs, n-last, burnCPU, burnWall, inFlight.Load(), local,
 				avg10("cpu.pressure", "some"), avg10("memory.pressure", "full"), avg10("memory.pressure", "some"),
-				ws>>20, limit, statField("cpu.stat", "throttled_usec"), nodeLoad(), goStats(), def, sat)
+				ws>>20, limit, statField("cpu.stat", "throttled_usec"), statField("cpu.stat", "nr_periods"),
+				statField("cpu.stat", "nr_throttled"), pressureTotal("cpu.pressure", "some"), nodeLoad(), goStats(), def, sat)
 			last = n
 		}
 	}()

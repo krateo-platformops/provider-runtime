@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: build.sh new|ctrl [tag] [--local]
+# Usage: build.sh new|ctrl|main [tag] [--local]
 #
 # Builds the harness for linux/amd64 against this worktree (new) or v1.10.0,
 # d0632f1 (ctrl), and makes an image with crane: no Docker daemon. The base,
@@ -35,6 +35,10 @@ if [ "$kind" = ctrl ]; then
   git -C "$root" archive --format=tar -o "$PWD/ctrl.tar" d0632f1
   tar -xf ctrl.tar -C ctrl-src
   go build -tags ctrl -modfile=ctrl/go.mod -o measure .
+elif [ "$kind" = main ]; then
+  # main: this worktree with main's option names (opts_main.go), for the
+  # fixed-capacity plant curve (results/curve-settings.txt).
+  go build -tags mainline -o measure .
 else
   go build -o measure .
 fi
