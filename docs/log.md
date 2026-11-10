@@ -93,7 +93,12 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     the shared resource, the protocol check).
   - httpsignal's propagation of the active span.
   - The new dependency `otlptracehttp` v1.45.0.
-  - The reconciler doesn't start spans yet; its wiring follows.
+  - The reconciler's wiring:
+    - the root span and its children, the events and the status mapping;
+    - the memo, keyed by NamespacedName with the UID;
+    - the locked marker write before the first act, or when the window closes,
+      with a requeue before acting on a conflict;
+    - `WithTracerProvider` and `WithTraceContinueWindow`.
 - **Changes to existing behaviour, when it is built:**
   - **The critical write carries only the runtime's own keys.**
     `RetryingCriticalAnnotationUpdater` writes back only
@@ -108,6 +113,10 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     propagator themselves.
   - **httpsignal sets `traceparent`** on outbound requests when tracing is
     on. With tracing off, it sends nothing.
+  - **"Reconciling" is logged after the Get.** The per-reconcile Logger is
+    bound once the root span starts, which needs the object, so the
+    "Reconciling" debug record now follows the Get. A pass whose object is
+    gone (NotFound) logs no "Reconciling" record.
   - **With tracing on, a concurrent write requeues before acting.** A write
     to the object between the pass's Get and the locked marker patch makes the
     update and delete paths requeue before they act, backing off from 1 s to

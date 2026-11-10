@@ -23,6 +23,7 @@ pkg/tracing/start.go: StartReconcile (the reconcile root span) and StartStep (it
 pkg/tracing/inject.go: Inject, InjectAnnotations and InjectHeader, with the rules for callers
 pkg/telemetry/setup.go: Config, ConfigFromEnv and Setup, the OTLP metrics and trace pipelines over one resource
 pkg/reconciler/ratelimit.go: RateLimitKeyer, RateLimitKeysProvider, WithRateLimitGovernor and the deferral path
+pkg/reconciler/traces.go: the reconcile's tracing: the memo, the per-pass state, the locked marker write, WithTracerProvider and WithTraceContinueWindow
 pkg/reconciler/reconcilertest/ratelimit.go: AssertReportsRateLimits, the conformance helper for providers
 examples/greeting-controller/README.md: minimal compilable provider (Greeting CRD + fake external system)
 examples/greeting-controller/main.go: the example source

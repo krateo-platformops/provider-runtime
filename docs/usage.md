@@ -198,10 +198,11 @@ For Krateo, that's core-provider#310.
     the LoggerProvider your main installs with `global.SetLoggerProvider`,
     which sets the OTLP record's trace context. A logr-backed Logger can't
     carry a context to its sink, so `WithContext` returns it unchanged.
-    `Reconcile` already binds its per-reconcile Logger to the `ctx` it is
-    given. Neither provider-runtime nor controller-runtime starts a span
-    there, so that `ctx` holds one only if you wrap the `Reconciler` in a
-    reconciler that starts it. Your `ExternalClient` methods get a `ctx`
+    `Reconcile` binds its per-reconcile Logger to the `ctx` it is given.
+    With tracing on (unreleased), it starts the reconcile span itself and binds
+    the Logger to it, and each provider method gets its child span's `ctx`.
+    With tracing off, that `ctx` holds a span only if you wrap the
+    `Reconciler` in a reconciler that starts it. Your `ExternalClient` methods get a `ctx`
     (the reconcile's, with its timeout) but not that Logger, so bind your
     own where you log:
 
@@ -256,6 +257,17 @@ For Krateo, that's core-provider#310.
   - *Each method's own `ctx`.* Use the `ctx` each method is given. A client
     that keeps the `ctx` from `Connect` would parent later calls onto a span
     that has ended.
+  - *What the reconciler does with it.* With a TracerProvider, every
+    `Reconcile` is a `reconcile` span with `connect`, `observe`, `create`,
+    `update` and `delete` children. A new `krateo.io/traceparent` on your
+    managed resource is the parent of passes until the first one that calls
+    your `Create`, `Update` or `Delete`, or until the window closes
+    (`reconciler.WithTraceContinueWindow`, default 10 minutes; raise it if you
+    poll much more slowly). Later passes link to it. The reconciler records
+    that in `krateo.io/traceparent-continued`, which needs `patch` on your
+    kind. Work your Observe does by itself doesn't count as acting. Add your
+    own attributes to the child spans with
+    `trace.SpanFromContext(ctx).SetAttributes(...)`.
 - **Rate limiting** — `ratelimiter.NewController()` for per-controller
   defaults, `ratelimiter.LimitRESTConfig(cfg, rps)` to bound client-side QPS,
   `workqueue.NewExponentialTimedFailureRateLimiter` for time-expiring

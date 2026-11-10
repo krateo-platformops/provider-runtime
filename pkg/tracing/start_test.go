@@ -86,7 +86,7 @@ func TestStartReconcileClusterScoped(t *testing.T) {
 func TestStartReconcileModes(t *testing.T) {
 	now := time.Now()
 	parent := Decide(ann(meta.AnnotationKeyTraceparent, tpA), "", time.Time{}, now, time.Minute)
-	link := Decide(ann(meta.AnnotationKeyTraceparent, tpA, markerKey, tpA), "", time.Time{}, now, time.Minute)
+	link := Decide(ann(meta.AnnotationKeyTraceparent, tpA, meta.AnnotationKeyTraceparentContinued, tpA), "", time.Time{}, now, time.Minute)
 
 	cases := map[string]struct {
 		d          Decision
