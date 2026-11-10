@@ -1571,6 +1571,12 @@ When a provider's chart turns tracing on, observability adds that provider's
   the same. `always_on` is allowed and also records a first act under an
   unsampled stamp. Never a ratio sampler (§8). Without this step, every trace
   from a provider not on the list is kept at 100% (§9).
+- **No header capture.** A chart never renders
+  `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*`. Instrumentation that reads
+  them would put request and response headers, credentials among them, into
+  spans, and the collector redacts headers only by key pattern.
+  observability refuses a chart that sets them. The same reasoning applies to
+  error text (provider-runtime#69).
 - **Order.** The sampler entry ships first. The provider's chart change that
   sets `OTEL_TRACING_ENABLED=true` ships after it.
 - **The burst at rollout** (§6.3). When the chart turns tracing on, every
