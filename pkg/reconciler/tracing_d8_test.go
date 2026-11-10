@@ -198,13 +198,16 @@ func TestD8SecondActIsNotParented(t *testing.T) {
 	if n := spansIn(t, rec, tpA); n != 1 {
 		t.Errorf("%d spans in the upstream trace, want only the first act", n)
 	}
+	if l := root.Links(); len(l) != 1 {
+		t.Errorf("a pass that isn't the first to act has root links %v, want exactly the upstream", l)
+	}
 }
 
 // D8 test 4: observe-only passes inside the window aren't parented: none of
 // them, nor any of their children, joins the upstream trace. This is the
 // krateo-057 failure D8 fixes: objects stamped by their creating composition,
-// and re-stamped on every composition reconcile, joined its trace for ten
-// minutes of polls after each stamp.
+// and re-stamped on every release apply, joined its trace for ten minutes of
+// polls after each stamp.
 func TestD8ObserveOnlyPassesInTheWindowStayOut(t *testing.T) {
 	s := newTraceServer(t, initialized(newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA))))
 	tp, rec := tracer(t)
@@ -465,8 +468,9 @@ func TestD8EnvtestMarkerIsWrittenOnTheRealPath(t *testing.T) {
 // reconcile path acts twice today; this keeps the rule if one ever does.
 func TestD8OnlyThePassesFirstActStepJoins(t *testing.T) {
 	tp, rec := tracer(t)
-	p := &tracePass{tp: tp, d: tracing.Decision{Mode: tracing.Parent, Remote: remote(t, tpA)}}
-	ctx, root := tp.Tracer("test").Start(context.Background(), tracing.SpanReconcile)
+	obj := tracing.Object{Kind: "Widget", Name: "w", Namespace: "demo"}
+	p := &tracePass{tp: tp, obj: obj, d: tracing.Decision{Mode: tracing.Parent, Remote: remote(t, tpA)}}
+	ctx, root := tracing.StartReconcile(context.Background(), tp, obj, p.d, time.Now())
 	_, first := p.actStep(ctx, tracing.SpanCreate)
 	first.End()
 	_, second := p.actStep(ctx, tracing.SpanUpdate)
@@ -475,4 +479,44 @@ func TestD8OnlyThePassesFirstActStepJoins(t *testing.T) {
 	r := lastRoot(t, rec)
 	wantAct(t, actSpans(rec, tracing.SpanCreate)[0], r, tpA)
 	wantAct(t, actSpans(rec, tracing.SpanUpdate)[0], r, "")
+	if l := r.Links(); len(l) != 2 {
+		t.Errorf("root links = %v, want the upstream and the first act only", l)
+	}
+}
+
+// D8 test 11: an unsampled stamp (flags 00) under the default sampler,
+// ParentBased(AlwaysSample()). The root is recorded and sampled, with its link
+// to the upstream; the first act isn't recorded, so nothing is in the upstream
+// trace, there's no act-to-root link, and the root doesn't link to an act that
+// is never exported. The marker is still written before the act. Krateo's own
+// stamps are sampled (01), which is why charts must not set a ratio sampler.
+func TestD8UnsampledStampDropsTheJoinedAct(t *testing.T) {
+	s := newTraceServer(t, newWidget("w", ann(meta.AnnotationKeyTraceparent, tpAUnsampled)))
+	tp, rec := tracer(t)
+	mustReconcile(t, newTraceReconciler(s, &widgetProvider{ops: s.ops}, WithTracerProvider(tp)), "w")
+	if s.ops.count("act-update") != 1 {
+		t.Fatalf("ops = %v, want the pass to act", s.ops.list())
+	}
+	if i, j := s.ops.index("patch"), s.ops.index("act-update"); i < 0 || i > j {
+		t.Errorf("ops = %v, want the marker before the act", s.ops.list())
+	}
+	root := lastRoot(t, rec)
+	if !root.SpanContext().IsSampled() || root.Parent().IsValid() {
+		t.Fatal("the root must be a sampled new root")
+	}
+	r := remote(t, tpAUnsampled)
+	if l := root.Links(); len(l) != 1 || l[0].SpanContext.SpanID() != r.SpanID() {
+		t.Errorf("root links = %v, want only the upstream", l)
+	}
+	if n := len(actSpans(rec, tracing.SpanUpdate)); n != 0 {
+		t.Errorf("%d update spans recorded, want 0 under an unsampled stamp", n)
+	}
+	if n := spansIn(t, rec, tpAUnsampled); n != 0 {
+		t.Errorf("%d spans in the upstream trace, want 0", n)
+	}
+	for _, name := range []string{tracing.SpanConnect, tracing.SpanObserve} {
+		if len(actSpans(rec, name)) != 1 {
+			t.Errorf("want one %s span in the root's trace", name)
+		}
+	}
 }

@@ -477,6 +477,12 @@ named in lower case:
 - **No attributes.** They inherit the root's object by being its children.
   A provider can add its own with `trace.SpanFromContext(ctx).SetAttributes(...)`
   in its method (§11.3).
+- **The exception: the joined act (D8).** The first act step for a new value
+  isn't the root's child: its parent is the upstream span (§6.2). Its root is
+  in another trace, and under `sample-5pct` usually isn't stored. So it carries
+  the root's three attributes itself: `k8s.object.kind`, `k8s.object.name` and
+  `k8s.object.namespace`. The root's own contract, exactly those three, is
+  unchanged.
 - **Errors.** A child is marked Error (`RecordError`, `SetStatus`) exactly
   when its call returns a non-nil error, a conflict included. What that
   means for the pass is decided on the root (§7).
@@ -576,7 +582,8 @@ value is *continued* when M, or `remembered`, has R's trace ID and span ID.
    `Now`. That's the earlier first-sight rule, kept as an option.
 4. R isn't continued, and `firstSeen` is zero or `now - firstSeen < window`:
    **Parent.** The root is a new root with one link to R, as in Link mode.
-   What differs is that the pass's first act step is R's child (below).
+   What differs is that the pass's first act step is R's child, and the root
+   links to it too (below).
    `Marker` is `canonical(R)`, and `WriteMarker` is `BeforeFirstAction`.
 5. R isn't continued, and `now - firstSeen >= window`: **Link,** with
    `WriteMarker` set to `Now` (decision D6, §13).
@@ -587,12 +594,16 @@ asserts is the mode the span gets.
 
 **Every reconcile is its own trace (D8).** In every mode, `StartReconcile`
 starts the root with `trace.WithNewRoot()`. When R is valid (Parent and Link),
-the root carries one link, `trace.Link{SpanContext: R}`; with NoParent it has
-none. The root is never R's child. In a Parent pass, the first act step is
-started by `tracing.StartActStep`:
+the root carries one link, `trace.Link{SpanContext: R}`, plus one to its act on
+the first acting pass; with NoParent it has none. The root is never R's child.
+In a Parent pass, the first act step is started by `tracing.StartActStep`:
 - its parent is R (`trace.ContextWithRemoteSpanContext`), so it's in R's
   trace;
 - it carries one link back to its `reconcile` root;
+- it carries the root's three `k8s.object.*` attributes (§4.4);
+- the root adds a link to it (`Span.AddLink`), so the link goes both ways. The
+  root adds it only when the act is sampled: an act that isn't is never
+  exported (§8);
 - it's `SpanKindInternal`, named `create`, `update` or `delete`, as before.
 
 What the provider does under it with the method's `ctx` (its own spans,
@@ -603,13 +614,14 @@ value:
 
 ```
 new trace                                 R's trace (krateo.io/traceparent)
-reconcile  Server, link -> R              R  (the stamper's span, remote)
-|-- connect  Internal                     `-- update  Internal, link -> reconcile
+reconcile  Server                         R  (the stamper's span, remote)
+  links -> R, -> update                   `-- update  Internal, link -> reconcile
+|-- connect  Internal                         k8s.object.kind/name/namespace
 `-- observe  Internal                         `-- what the provider's Update does with ctx
 ```
 
-Every other pass is one trace: the root, linked to R when R is valid, with all
-its children under it.
+Every other pass is one trace: the root, with exactly one link to R when R is
+valid, and all its children under it.
 
 **Which span is the child.** The first act step of the pass that **first
 acts** on a new value is R's child: not the pass that first sees the value
@@ -1060,14 +1072,25 @@ The root's status follows how the pass ended:
   `OTEL_TRACES_SAMPLER_ARG` (`SDK/trace/sampler_env.go`) before it applies
   options (`provider.go:106-117,495-512`), so a `WithSampler` in code would
   override the env. With nothing set, it defaults to `ParentBased(AlwaysSample())`
-  (`provider.go:518-521`). That's `parentbased_always_on`: a Parent pass follows
-  the upstream's decision, and a NoParent or Link pass is a sampled root.
+  (`provider.go:518-521`), and `ParentBased` drops a span whose remote parent
+  isn't sampled (`sampling.go:182,200`).
+  - **Under `parentbased_always_on`** every reconcile root is sampled, and the
+    joined act span follows the stamp's sampled flag. A `00` stamp drops the
+    act, what the provider does under it, and its link back to the root, and
+    the root's own trace has no act either.
+  - **Krateo's own stamps are sampled** (`01`): observability checked them on
+    krateo-057.
+  - **A ratio sampler** would drop roots at random, and with them any act
+    under a stamp it dropped upstream.
 - **core-provider** sets no sampler in code (`tracing.go:42-45`). No
   `OTEL_TRACES_SAMPLER` appears anywhere in its repo outside tests, charts
   included. So it runs the SDK default, which is `parentbased_always_on`.
   alert-provider sets `OTEL_TRACES_SAMPLER=parentbased_always_on` explicitly
-  (`helm/alert-provider/values.yaml:65-67`). Provider charts should set it
-  explicitly too, so the value is visible.
+  (`helm/alert-provider/values.yaml:65-67`).
+- **The rule for charts.** Charts set `OTEL_TRACES_SAMPLER` to
+  `parentbased_always_on`, or leave it unset, which is the same. `always_on` is
+  allowed and also records a first act under an unsampled stamp. Never a ratio
+  sampler. Setting it explicitly keeps the value visible.
 - **The endpoint: `http://$(HOST_IP):4318` by default** (decision D7, §13).
   `HOST_IP` comes from the downward API (`fieldRef: status.hostIP`,
   `k8s.io/api@v0.37.2/core/v1/types.go:2671-2672`), in the provider
@@ -1119,8 +1142,8 @@ The root's status follows how the pass ended:
   attributes are constant for the process.
 - **Limits.** provider-runtime doesn't change the SDK's span limits
   (`SDK/trace/span_limits.go:9-31`: 128 attributes, events and links), and
-  `OTEL_SPAN_*_LIMIT` still applies (`:94-115`). A root has at most one link
-  and a few events. The 4 KiB cut on error text is §7's.
+  `OTEL_SPAN_*_LIMIT` still applies (`:94-115`). A root has at most two
+  links, to R and to its joined act (D8), and a few events. The 4 KiB cut on error text is §7's.
 - **Volume** is arithmetic, not a measurement. One pass makes 3 or 4 spans:
   the root, `connect`, `observe`, and one of `create`, `update` or `delete` when
   the pass acts. An object polled every P seconds makes about
@@ -1151,7 +1174,8 @@ on envtest, so the API server's own conflict handling is what's tested.
    is no later than the Get (§4.1).
 2. **Each rule of §6.2.** Each case asserts the span's **mode**: the root
    has no parent in any mode (D8), and it has one link to R in Parent and Link
-   mode and none with NoParent. Each also asserts the Decision's
+   mode (plus one to its act on the first acting pass) and none with
+   NoParent. Each also asserts the Decision's
    `WriteMarker`, and the writes the fake client saw.
    - **Rule 1:** no annotation is NoParent, with no link and no patch.
    - **Rule 4:** a valid annotation and no marker give a Parent pass: a new
@@ -1302,8 +1326,14 @@ on envtest, so the API server's own conflict handling is what's tested.
       the root has no parent, every span of the pass is in the root's trace,
       and nothing is in R's.
     - The first act for a new value, on the update, create and delete paths,
-      is R's child with one link to its root, after the marker. `connect` and
-      `observe` stay in the root's trace.
+      is R's child with one link to its root, after the marker. It carries the
+      root's three `k8s.object.*` attributes, and the root links to it. `connect`
+      and `observe` stay in the root's trace. Every other pass's root has
+      exactly one link.
+    - An unsampled stamp (`00`) under the default sampler: the root is
+      recorded and sampled with its link to R, and the act isn't recorded, so
+      there's no link either way and nothing in R's trace. Under `AlwaysSample`
+      the act is recorded, with both links.
     - A second act, after the marker, is a child of its root. So is the act
       after the window's fallback write. Within one pass, only the first act
       step joins.
@@ -1534,25 +1564,29 @@ When a provider's chart turns tracing on, observability adds that provider's
 `outside-sampled-services` condition of the tail sampler, in
 `charts/otel-collector-tailsampling/values.yaml` (decision D4).
 - **Effect.** The routine loop then falls to the `sample-5pct` rule. The
-  `error-status` rule still keeps every failed reconcile, and a Parent pass
-  inside a kept trace stays whole with it.
-- **No sampler in code.** Providers set no sampler in code, and their charts
-  keep `OTEL_TRACES_SAMPLER=parentbased_always_on` (§8). Without this step,
-  every trace from a provider not on the list is kept at 100% (§9).
+  `error-status` rule still keeps every failed reconcile, and a first act
+  inside a kept upstream trace stays with it (D8).
+- **No sampler in code.** Providers set no sampler in code. Charts set
+  `OTEL_TRACES_SAMPLER` to `parentbased_always_on`, or leave it unset, which is
+  the same. `always_on` is allowed and also records a first act under an
+  unsampled stamp. Never a ratio sampler (§8). Without this step, every trace
+  from a provider not on the list is kept at 100% (§9).
 - **Order.** The sampler entry ships first. The provider's chart change that
   sets `OTEL_TRACING_ENABLED=true` ships after it.
 - **The burst at rollout** (§6.3). When the chart turns tracing on, every
   annotated object of that provider has a new value. observability sees:
-  - Parent passes onto possibly days-old upstream traces, for up to a window;
-  - then one marker write and one extra reconcile per object.
+  - one act step, for each object that acts within the window, onto a
+    possibly days-old upstream trace (D8);
+  - one marker write and one extra reconcile per object.
 
-  They're spread over the first window. Under `sample-5pct` most of those
-  passes aren't stored, and the ones that fail are.
+  They're spread over the first window. Under `sample-5pct` most of the
+  reconciles' own traces aren't stored, and the ones that fail are.
 - **What the audit join then finds.** With a provider under `sample-5pct`,
   observability#127's join finds a provider object's reconcile after a write
   about 1 time in 20 when that reconcile succeeded, and every time when it
-  failed, because `error-status` keeps it. A reconcile that is a Parent pass
-  under a stored portal trace is kept with that trace. So **a successful
+  failed, because `error-status` keeps it. A first act that joins a stored
+  upstream trace is kept with that trace, but its root, a trace of its own
+  (D8), isn't kept by it. So **a successful
   provider reconcile missing from the join doesn't mean it never ran.**
   Composition controllers are different: their reconcile traces are kept whole
   on purpose, because the reconcile widgets read them (observability's review
@@ -1659,8 +1693,9 @@ one extra reconcile, per new traceparent value, only on annotated objects and
 only with tracing on (§6.3). The review on #60 added two things:
 - **A burst at rollout.** Because no marker is written while off, turning
   tracing on makes every annotated object's value new at once. That's a
-  fleet-wide burst of marker writes and extra reconciles, plus Parent passes
-  onto possibly days-old traces, within the first window (§6.3).
+  fleet-wide burst of marker writes and extra reconciles, plus, under D8,
+  one act step per acting object onto possibly days-old traces, within the
+  first window (§6.3).
 - **The patch is locked.** Every marker write uses an optimistic lock, and a
   conflict requeues before acting (§6.2). Rejected:
 - (b) An in-memory memo, which loses the first sight after a restart or a
@@ -1791,10 +1826,15 @@ corrected.
 - **The decision.**
   - Every reconcile is its own trace: a `reconcile` root (Server, the same
     three attributes) with one link to the object's `krateo.io/traceparent`
-    when it's present and valid. It's never that value's child.
+    when it's present and valid, plus one to its act on the first acting
+    pass. It's never that value's child.
   - Only the first act step for a new value, the `create`, `update` or
     `delete` span, is started with the upstream traceparent as its parent,
-    plus one link back to its `reconcile` root.
+    plus one link back to its `reconcile` root. It carries the root's three
+    `k8s.object.*` attributes, because it isn't the root's child.
+  - **Link both ways** (the user's decision on the review of #70): when that
+    act starts, the root adds a link to it (`Span.AddLink`), if the act is
+    sampled.
   - The marker is written before that step, as in D6: with the optimistic
     lock, and with a requeue before acting on a conflict.
   - Later passes, and observe-only, deferred, paused and conflict passes, get
@@ -1813,7 +1853,16 @@ corrected.
   - Work a provider does in Observe without acting, like alert-provider's
     incident firings (§6.2), never joins the upstream trace. It's in the
     pass's own root, which links to it.
-- §2, §6.2, §6.3, §10 (test 26), §11.2 and §11.3 specify it.
+  - **An unsampled stamp.** Under `parentbased_always_on` every reconcile
+    root is sampled, and the joined act span follows the stamp's sampled flag.
+    A `00` stamp drops the act, what the provider does under it, and its link
+    back to the root, and the root's own trace has no act either. Krateo's
+    stamps are `01` (observability checked krateo-057).
+  - **The rule for charts.** Charts set `OTEL_TRACES_SAMPLER` to
+    `parentbased_always_on`, or leave it unset, which is the same. `always_on`
+    is allowed and also records a first act under an unsampled stamp. Never a
+    ratio sampler (§8, §11.5).
+- §2, §4.4, §6.2, §6.3, §8, §10 (test 26), §11.2, §11.3 and §11.5 specify it.
 
 ## 14. Checked, and not
 
@@ -1857,8 +1906,10 @@ Checked in source:
   checks the resourceVersion (`store.go:807-808`).
 - **The consumers:** every consumer file cited in §11, observability's join,
   Service and tail-sampler files, and #58 as merged in v1.13.0.
-- **For D8:** the cdc's `processor.go` on core-provider's `main`, read through
-  the API on 2026-11-10. The digest is computed from the manifest with the
+- **For D8:** OTel SDK v1.45.0's `ParentBased` defaults
+  (`SDK/trace/sampling.go:182,200`) and `AddLink`, which a non-recording span
+  ignores (`SDK/trace/span.go:678-690`). The cdc's `processor.go` on
+  core-provider's `main`, read through the API on 2026-11-10. The digest is computed from the manifest with the
   traceparent lines stripped, and the objects are decoded from the original
   manifest, so they keep it.
 
@@ -1867,8 +1918,8 @@ Not checked:
 - **What krateo-057 runs**, checked by me: the env values, the object counts,
   and which endpoint each Deployment uses. I don't touch clusters. D8's
   numbers (28 Alerts, at least 3,204 spans, about 13 times the volume, about 260
-  reconciles per upgrade, 28 of 28 markers by 08:11Z) are acmp's and
-  observability's. The brief
+  reconciles per upgrade, 28 of 28 markers by 08:11Z, Krateo's stamps
+  sampled `01`) are acmp's and observability's. The brief
   reports the env convention as verified on 057. observability verified, in
   its reviews on #60: the `-local` Service on 057 (release
   `otel-collector-daemonset`, 4 of 4 node endpoints); hostPort 4318 on 0.1.19

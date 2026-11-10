@@ -272,7 +272,7 @@ func TestTracingModes(t *testing.T) {
 	})
 
 	t.Run("FlagsOrTracestateAloneLink", func(t *testing.T) {
-		unsampled := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00"
+		unsampled := tpAUnsampled
 		s := newTraceServer(t, initialized(newWidget("w", ann(
 			meta.AnnotationKeyTraceparent, unsampled, meta.AnnotationKeyTracestate, "vendor=new",
 			meta.AnnotationKeyTraceparentContinued, tpA))))

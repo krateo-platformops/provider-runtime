@@ -21,9 +21,14 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     inside a new value's 10-minute window was that value's child.
   - Only the first act step for a new value, the `create`, `update` or
     `delete` span, is the value's child. It carries a link back to its
-    `reconcile` root. What the provider does under it with the method's `ctx`
-    joins the upstream trace too; `connect`, `observe` and every other pass
-    don't.
+    `reconcile` root and the root's three `k8s.object.*` attributes, and the
+    root links to it (when the act is sampled). What the provider does under it
+    with the method's `ctx` joins the upstream trace too; `connect`, `observe`
+    and every other pass don't, and every other root has exactly one link.
+  - Under `parentbased_always_on`, the joined act follows the stamp's sampled
+    flag: a `00` stamp drops it. Charts set `OTEL_TRACES_SAMPLER` to
+    `parentbased_always_on` or leave it unset; `always_on` is allowed; never a
+    ratio sampler.
   - The marker is unchanged: written with the optimistic lock just before
     that act, or when the window closes with no act. The window parents
     nothing now.
@@ -37,9 +42,10 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   28 of 28 markers were written, and the windows closed as designed.
 - **For tail sampling:** a trace that holds a stamper's span gains one
   `update`, `create` or `delete` span per object that acts on the new value,
-  each linking to a `reconcile` root in a trace of its own. Observe-only
-  reconciles never join it.
-- **API:** `tracing.StartActStep(ctx, tp, step, upstream)`. `StartReconcile`
+  each with the object's `k8s.object.*` attributes and a link to a `reconcile`
+  root in a trace of its own, which links back. Observe-only reconciles never
+  join it.
+- **API:** `tracing.StartActStep(ctx, tp, obj, step, upstream)`. `StartReconcile`
   now always starts a new root, and links to `d.Remote` in Parent and Link
   mode.
 

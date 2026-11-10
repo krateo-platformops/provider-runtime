@@ -129,27 +129,32 @@ func TestStartReconcileModes(t *testing.T) {
 }
 
 // StartActStep with a valid upstream is parented on it, in its trace, with one
-// link back to the root in ctx. With an invalid upstream it is an ordinary
-// child of the root; with tp nil it starts nothing.
+// link back to the root in ctx and the root's three object attributes, and the
+// root links to it. With an invalid upstream it is an ordinary child of the
+// root, and the root gains no link; with tp nil it starts nothing.
 func TestStartActStep(t *testing.T) {
 	tp, rec := recorder(t)
 	d := Decide(ann(meta.AnnotationKeyTraceparent, tpA), "", time.Time{}, time.Now(), time.Minute)
 	ctx, root := StartReconcile(context.Background(), tp, obj, d, time.Now())
 
-	_, joined := StartActStep(ctx, tp, SpanUpdate, d.Remote)
+	_, joined := StartActStep(ctx, tp, obj, SpanUpdate, d.Remote)
 	joined.End()
-	_, plain := StartActStep(ctx, tp, SpanUpdate, trace.SpanContext{})
+	_, plain := StartActStep(ctx, tp, obj, SpanUpdate, trace.SpanContext{})
 	plain.End()
 	root.End()
 
 	var acts []sdktrace.ReadOnlySpan
+	var r sdktrace.ReadOnlySpan
 	for _, e := range rec.Ended() {
-		if e.Name() == SpanUpdate {
+		switch e.Name() {
+		case SpanUpdate:
 			acts = append(acts, e)
+		case SpanReconcile:
+			r = e
 		}
 	}
-	if len(acts) != 2 {
-		t.Fatalf("want 2 act spans, got %d", len(acts))
+	if len(acts) != 2 || r == nil {
+		t.Fatalf("want 2 act spans and a root, got %d and %v", len(acts), r != nil)
 	}
 	j, p := acts[0], acts[1]
 	if j.Parent().SpanID() != d.Remote.SpanID() || j.SpanContext().TraceID() != d.Remote.TraceID() {
@@ -161,11 +166,17 @@ func TestStartActStep(t *testing.T) {
 	if j.SpanKind() != trace.SpanKindInternal {
 		t.Errorf("joined act kind = %s, want Internal", j.SpanKind())
 	}
-	if p.Parent().SpanID() != root.SpanContext().SpanID() || len(p.Links()) != 0 {
-		t.Errorf("plain act: parent %s, links %v; want a plain child of the root", p.Parent().SpanID(), p.Links())
+	if got, want := attrs(j), attrs(r); len(got) != 3 || got[AttrObjectKind] != want[AttrObjectKind] || got[AttrObjectName] != want[AttrObjectName] || got[AttrObjectNamespace] != want[AttrObjectNamespace] {
+		t.Errorf("joined act attributes = %v, want the root's three %v", got, want)
+	}
+	if p.Parent().SpanID() != root.SpanContext().SpanID() || len(p.Links()) != 0 || len(p.Attributes()) != 0 {
+		t.Errorf("plain act: parent %s, links %v, attributes %v; want a plain child of the root", p.Parent().SpanID(), p.Links(), p.Attributes())
+	}
+	if l := r.Links(); len(l) != 2 || l[0].SpanContext.SpanID() != d.Remote.SpanID() || l[1].SpanContext.SpanID() != j.SpanContext().SpanID() || l[1].SpanContext.TraceID() != j.SpanContext().TraceID() {
+		t.Errorf("root links = %v, want the upstream, then the joined act", l)
 	}
 
-	offCtx, off := StartActStep(context.Background(), nil, SpanUpdate, d.Remote)
+	offCtx, off := StartActStep(context.Background(), nil, obj, SpanUpdate, d.Remote)
 	if off.SpanContext().IsValid() || HasActiveSpan(offCtx) {
 		t.Error("StartActStep with tp nil must start nothing")
 	}
@@ -226,5 +237,71 @@ func TestStartStep(t *testing.T) {
 	offCtx, off := StartStep(context.Background(), nil, SpanObserve)
 	if off.SpanContext().IsValid() || HasActiveSpan(offCtx) {
 		t.Error("StartStep with tp nil must start nothing")
+	}
+}
+
+// attrs maps a span's attributes by key, as strings.
+func attrs(s sdktrace.ReadOnlySpan) map[attribute.Key]string {
+	m := map[attribute.Key]string{}
+	for _, kv := range s.Attributes() {
+		m[kv.Key] = kv.Value.String()
+	}
+	return m
+}
+
+// Under the default sampler, ParentBased(AlwaysSample()), an unsampled
+// upstream (flags 00) leaves the joined act unrecorded: the root is recorded
+// and sampled with its link to the upstream, the act and its link back aren't,
+// and the root gains no link to an act that is never exported. Under
+// AlwaysSample the act is recorded, and both links are there.
+func TestStartActStepUnderAnUnsampledUpstream(t *testing.T) {
+	for name, tc := range map[string]struct {
+		opts     []sdktrace.TracerProviderOption
+		recorded bool
+	}{
+		"DefaultParentBased": {recorded: false},
+		"AlwaysSample":       {opts: []sdktrace.TracerProviderOption{sdktrace.WithSampler(sdktrace.AlwaysSample())}, recorded: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(append([]sdktrace.TracerProviderOption{sdktrace.WithSpanProcessor(rec)}, tc.opts...)...)
+			t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+			d := Decide(ann(meta.AnnotationKeyTraceparent, tpAUnsampled), "", time.Time{}, time.Now(), time.Minute)
+			if d.Mode != Parent || d.Remote.IsSampled() {
+				t.Fatalf("decision %v, sampled %v: want Parent on an unsampled remote", d.Mode, d.Remote.IsSampled())
+			}
+			ctx, root := StartReconcile(context.Background(), tp, obj, d, time.Now())
+			_, act := StartActStep(ctx, tp, obj, SpanUpdate, d.Remote)
+			if act.IsRecording() != tc.recorded || act.SpanContext().IsSampled() != tc.recorded {
+				t.Errorf("act recording %v, sampled %v; want %v", act.IsRecording(), act.SpanContext().IsSampled(), tc.recorded)
+			}
+			act.End()
+			root.End()
+
+			var r sdktrace.ReadOnlySpan
+			var acts int
+			for _, e := range rec.Ended() {
+				switch e.Name() {
+				case SpanReconcile:
+					r = e
+				case SpanUpdate:
+					acts++
+				}
+			}
+			if r == nil || !r.SpanContext().IsSampled() {
+				t.Fatal("the root must be recorded and sampled")
+			}
+			want := 1
+			if tc.recorded {
+				want = 2
+			}
+			if acts != want-1 {
+				t.Errorf("%d act spans recorded, want %d", acts, want-1)
+			}
+			l := r.Links()
+			if len(l) != want || l[0].SpanContext.SpanID() != d.Remote.SpanID() {
+				t.Errorf("root links = %v, want the upstream%s", l, map[bool]string{true: " and the act", false: " only"}[tc.recorded])
+			}
+		})
 	}
 }
