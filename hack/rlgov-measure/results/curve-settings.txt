@@ -1,16 +1,28 @@
 Fixed-capacity plant curve of the long drain's workload, on GKE. Settings, written and committed before run 1.
 
-BUDGET, for the user's choice before the cluster exists (cluster wall time; driver attended throughout):
-  full:  48 runs (13 at each of n = 4, 5, 6; 3 at each of n = 3, 7, 8), 37 min each: about 29.6 h of cluster time.
-  small: 18 runs (4 at each of n = 4, 5, 6; 2 at each of n = 3, 7, 8), 37 min each: about 11.1 h of cluster time.
-  Each run: 5 min warm-up (discarded) + 30 min measured + about 2 min of setup and teardown (namespace, rollout, cleanup).
+BUDGET: TWO STAGES, Stein's procedure for a fixed-width CI with a futility stop (the reviewer's recommendation;
+  chosen by the user, 2026-11-10; at most about 30 h of cluster time). Each run is 37 min: a 5 min warm-up (discarded),
+  30 min measured, and about 2 min of setup and teardown.
+  Stage 1: 18 runs (4 at each of n = 4, 5, 6; 2 at each of n = 3, 7, 8): about 11.1 h. From it: Ŝ*, the bracketing
+    pair, the slope β̂ between the two bracketing means, and the pooled between-run sd ŝ at the bracketing n.
+  The required k: k* = ⌈(2·t·0.71·ŝ/(β̂·0.15·Ŝ*))²⌉, t the two-sided 95% t quantile on stage 1's pooled df at the
+    bracketing pair (curve_report.py --stage1, written to results/curve-stage1.txt and committed before stage 2).
+  If k* ≤ 13: stage 2 runs k* − 4 more at each bracketing n (k* − k at an n with k runs, if stage 1 brackets an anchor;
+    the larger of the two, so both reach k*), re-randomized (Python random.Random(20261111)), and the decision is made
+    on all runs by the rule below. If stage 1 brackets elsewhere than 4-5-6, stage 2 goes to that pair. Stage 2 adds at
+    most 2 × 11 = 22 runs, about 13.6 h; with stage 1, at most about 24.7 h.
+  If k* > 13: STOP, and report "determinacy fails (futility at stage 1)" with β̂ and ŝ. At that slope U changes by about
+    0.003 cores (1.2% of L) across ±0.3 slots, far inside the r̄ = 5% the design's guarantee is stated in. So S* being
+    undetermined is the substantive answer, since the guarantee is about U.
+  β̂'s own error isn't covered by Stein's procedure, so k* is approximate. The decision uses the bootstrap's realized
+    width, not k*.
   Estimated cost, at list prices as I know them, not checked against the live price list: e2-standard-4 on demand in
   us-central1 about $0.134/h, a 100 GB balanced boot disk about $0.014/h, the GKE Standard cluster fee $0.10/h (waived
-  by the free-tier credit for one zonal cluster, if the billing account has it): $0.15-0.25 per hour.
-  full: about $4.40-7.40. small: about $1.70-2.80. Plus a few minutes of creation and deletion, and the image's storage.
+  by the free-tier credit for one zonal cluster, if the billing account has it): $0.15-0.25 per hour. Stage 1 alone:
+  about $1.70-2.80; both stages at most: about $3.70-6.20. Plus creation, deletion and the image's storage.
   The driver (this Mac) must stay awake for the whole block, lid open (memory: the Mac slept with caffeinate on); a run
   during which it slept is discarded by prun.sh and re-run at the same position.
-chosen budget: PENDING, the user's choice, written here in a commit before run 1. The block refuses to start until it is.
+chosen budget: two-stage (user, 2026-11-10)
 
 QUESTION. Is the long drain's target S* determined? The engine's fixed-capacity curve of the drain plant gives S* of
 3.9, 4.8 and 4.3 on seeds 9001-9003, non-monotone, with U nearly flat in S near the target (the review of c1acaa4). This
@@ -21,45 +33,49 @@ above (S*·3r̄ ≈ 15%), the band is judged with the measured S*; otherwise det
 reported, not judged." Narrower means the CI's full width (upper minus lower) is under 0.15·Ŝ*, Ŝ* the point
 estimate: a resolution of about ±0.3 slots at S* ≈ 4. Both outcomes are acceptable in advance: a determined S*
 replaces the engine's frozen value in the gate's long-drain band; an undetermined one leaves the band reported.
+"Determined" means the bootstrap's 2.5-97.5% interval is finite and narrower than 0.15·Ŝ*: a resample whose curve
+doesn't cross ρ·L sorts to the end it lies at, -inf if every mean is above it and +inf if every mean is below.
 
 POWER, against the budget, stated plainly. The slope of U at the crossing is about 0.01-0.02 cores per slot (the
 reviewer), and the spread of a 30-minute run's mean U about 0.011 cores (the reviewer's estimate, from the engine).
 S* is interpolated between the two bracketing n, so its standard error is about 0.71·SE(mean U at a bracketing n)
 divided by the slope (equal weights, the slope's own error left out, so this is optimistic). With k runs at each
 bracketing n, SE(mean U) = 0.011/√k, and the CI's full width about 2·1.96·SE(S*):
-  k = 13 (full):  SE(mean U) 0.0031; width about 0.43 slots at slope 0.02 (under 0.6: determined), 0.85 at 0.01 (not).
-  k = 4 (small):  SE(mean U) 0.0055; width about 0.76 slots at slope 0.02 (not determined), 1.53 at 0.01 (not).
+  k = 13:         SE(mean U) 0.0031; width about 0.43 slots at slope 0.02 (under 0.6: determined), 0.85 at 0.01 (not).
+  k = 4 (stage 1): SE(mean U) 0.0055; width about 0.76 slots at slope 0.02 (not determined), 1.53 at 0.01 (not).
   To be determined at slope 0.01 the width must be under about 0.6 slots, which needs k of about 26 at each
   bracketing n: about 21 h for the three bracketing n alone. The plan can't afford that. The reviewer's k of about
   4-13 is the k that brings SE(mean U) to 0.003-0.006, a ±1 SE resolution of about ±0.3 slots, not a 95% CI. So:
-  the full budget determines S* only if the slope is near 0.02; the small budget will most likely end with
-  "determinacy fails", which the rule accepts in advance. The bootstrap reports the width actually reached.
+  a budget of k = 13 determines S* only if the slope is near 0.02; k = 4 will most likely end with "determinacy
+  fails", which the rule accepts in advance. Hence the two stages: stage 1 measures the slope and the spread, and
+  stage 2 runs only if they say k* ≤ 13 suffices. The bootstrap reports the width actually reached.
 
 WORKLOAD, and how faithful it is to the engine's drain plant (sim, drainHeavy: 3000 ms of CPU, then 28500 ms of wait):
   mode curve (prun.sh): 250m CPU limit (request = limit), 512Mi, 64 Greetings, poll 1s, MaxConcurrentReconciles = n.
   NO_GOVERNOR=true: no rate-limit governor is set up or passed to the reconciler, so the n workers alone bound the
-  reconciles in flight (main.go). Each Observe spends 3000 ms of CPU measured on its own locked OS thread
-  (LOAD_CPU_MS=3000, burn.go's thread CPU clock), then sleeps 28500 ms (LOAD_HOLD_MS=28500): CPU first, as the engine.
-  GOMAXPROCS=2, set explicitly, as the engine's Procs 2 (two threads running Go code at once; each burn holds one).
-  Not the same as the engine: no jitter (the engine draws both phases with a relative sd of 0.1); the controller's
-  own work per reconcile (a Get, the status update) adds a few ms; the process has a background (informers, GC,
-  the probe server, none of which the engine has); the node's other CPUs run GKE's system pods.
+  reconciles in flight (main.go). Each Observe spends a drawn CPU time measured on its own locked OS thread (burn.go's
+  thread CPU clock), then sleeps a drawn wait: CPU first, as the engine. Both are drawn as the engine draws them,
+  max(0.1·x, x·(1 + 0.1·N(0,1))), from LOAD_CPU_MS=3000 and LOAD_HOLD_MS=28500 with LOAD_JITTER=0.1, seeded per run
+  (LOAD_SEED, the cksum of the run's name): without it the plant is periodic and phase-locked, and its between-run
+  spread could be an artefact (the reviewer). GOMAXPROCS=2, set explicitly, as the engine's Procs 2 (two threads
+  running Go code at once; each burn holds one).
+  Not the same as the engine: the controller's own work per reconcile (a Get, the status update) adds a few ms; the
+  process has a background (informers, GC, none of which the engine has); the node's other CPUs run GKE's system pods.
   No liveness probe in this mode: the curve is the plant's, and a probe killed by throttling would cut runs short.
   The image: build.sh main <tag> (the harness against this worktree, main's option names, opts_main.go), pushed to
   the registry set up with the cluster; its digest is recorded in results/image-<tag>.txt.
 
 CLUSTER (the coordinator creates and deletes it; this harness never does): one node, e2-standard-4, GKE Standard,
   us-central1-d, project operations-dev-krateo-io, a dedicated single-node pool with nothing else on it but GKE's own
-  system pods. The kubeconfig is only in hack/rlgov-measure (gitignored), with env.local. Every run records the node's
+  system pods, created with auto-repair and auto-upgrade disabled. The kubeconfig is only in hack/rlgov-measure (gitignored), with env.local. Every run records the node's
   kernel, cgroup version, CPU model and GOMAXPROCS (main.go's LOG node line) and the node's load every second.
 
 POINTS AND ORDER. n in {3, 4, 5, 6, 7, 8}: runs concentrated at the n bracketing the expected crossing (4, 5, 6), fewer at
   the anchors 3, 7, 8. Within each repetition the order is randomized (Python random.Random(20261110), shuffled per
   repetition), and repetitions are interleaved, never blocked by n:
-  small: rep 1: 4 3 7 5 6; rep 2: 8 4 5 6; rep 3: 3 5 4 6 7; rep 4: 5 4 6 8
-  full:  rep 1: 5 4 3 6; rep 2: 4 5 6 7; rep 3: 8 5 4 6; rep 4: 4 6 3 5; rep 5: 4 6 7 5; rep 6: 5 4 6 8;
-         rep 7: 4 3 6 5; rep 8: 7 6 4 5; rep 9: 6 4 8 5; rep 10: 6 5 4; rep 11: 6 4 5; rep 12: 5 6 4; rep 13: 4 5 6
-  Runs are named pc-n<n>-r<rep>.
+  stage 1: rep 1: 4 3 7 5 6; rep 2: 8 4 5 6; rep 3: 3 5 4 6 7; rep 4: 5 4 6 8
+  stage 2: the bracketing pair, re-randomized per repetition with random.Random(20261111) (curve_block.sh stage2).
+  Runs are named pc-n<n>-r<rep> in stage 1 and pc-n<n>-s2-r<rep> in stage 2; a re-run adds -a<attempt>.
 
 LENGTH. 2100 s per run: the first 300 s discarded as warm-up (at least 3 lifetimes at the cap: the drain plant's
   life at the cap is about 81 s at n = 7, from its frozen curve, and shorter at fewer slots), then 1800 s measured.
@@ -70,17 +86,19 @@ THE UNIT IS THE RUN. Per n: the mean U (cgroup usage per second, cores) of each 
   cross ρ·L = 0.9 × 0.25 = 0.225 cores, interpolated linearly between the two bracketing n (the first crossing; any
   other crossings are reported, and a non-monotone curve is reported as such). Its CI: a bootstrap over runs (10,000
   resamples, runs resampled within each n, the curve re-interpolated each time; the percentile interval), with the
-  delta method on the bracketing means as a check. Resamples with no crossing are counted and reported.
+  delta method on the bracketing means as a check. Resamples with no crossing are counted, reported and sorted to
+  ±inf as above.
 
 VALIDITY, checked per run and reported, never used to drop runs selectively:
-  - the measured CPU per completion, the cgroup's usage over the measured window divided by its completions
-    (Observes), within 3.0 s ±5%. For the reviewer: over a 1800 s window this ratio carries an edge error of up to
-    about n completions' CPU (the reconciles in flight at the window's two ends), against about 160-250 completions,
-    so 2-5% at n = 3-8 before any real deviation; the check may fail on that alone at the larger n. The per-call CPU
-    measured on each burn's thread (STAT's burn_cpu_ms/call) is reported beside it;
+  - the CPU measured on each burn's own locked thread against what it asked for, over the measured window
+    (STAT's burn_cpu_total_ms against burn_req_total_ms), within 1%. The reviewer's form was "the per-call CPU ...
+    within 3000 ms ±1%"; with the jitter each call asks for a drawn amount, so the check is the measured against the
+    requested, and the mean request (about 3000 ms) is reported. The cgroup's CPU per completion is reported beside
+    it with its edge allowance, ±n/C (the reconciles in flight at the window's two ends), not judged;
   - completions counted;
   - throttled periods per sample (Δnr_throttled/Δnr_periods per second) reported;
-  - the node: a dedicated single-node pool, its CPU model recorded;
+  - the node: a dedicated single-node pool; its name and CPU model are identical across all runs, and a change stops
+    the block (results/curve-node.txt holds the first run's);
   - the PSI stall distribution recorded: avg10 every second, and the per-second share from "some total".
   A run that fails a check is re-run at the same n and position, and both the failure and the re-run are reported.
   A run prun.sh discards (the driver slept, the cluster didn't answer) is re-run the same way. A failed setup stops

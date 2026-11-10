@@ -2,17 +2,20 @@
 """The fixed-capacity plant curve's report (results/curve-settings.txt).
 
 Usage:
-  curve_report.py results/pc-*.log      the report
-  curve_report.py --check <log>         one run's validity; exit 1 if it fails
+  curve_report.py results/pc-*.log           the report and the decision
+  curve_report.py --stage1 results/pc-*.log  stage 1's k* and what follows
+  curve_report.py --check <log>              one run's validity; exit 1 if it fails
+  curve_report.py --node <log>               the run's node name and CPU model
 
 The unit is the run: per run, the mean U (cores) over the measured window
-(t >= 300 s), its completions, the CPU per completion, throttled periods per
-sample and the per-second stall share. Per n: the mean of the run means with
-a t interval on k - 1 degrees of freedom and the between-run spread. S*: where
-the per-n means cross rho*L = 0.225 cores, interpolated between the bracketing
-n; its CI by a bootstrap over runs (resampled within each n, re-interpolated)
-and, as a check, the delta method on the bracketing means. Then the decision
-under the pre-registered rule.
+(t >= 300 s), its completions, the CPU the burns asked for and measured,
+throttled periods per sample and the per-second stall share. Per n: the mean
+of the run means with a t interval on k - 1 degrees of freedom and the
+between-run spread. S*: where the per-n means cross rho*L = 0.225 cores,
+interpolated between the bracketing n; its CI by a bootstrap over runs
+(resampled within each n, re-interpolated; a resample with no crossing sorts to
+the end it lies at, -inf or +inf), with the delta method as a check. Then the
+decision under the pre-registered rule.
 """
 import math
 import random
@@ -24,18 +27,22 @@ from collections import defaultdict
 WARMUP = 300.0
 LIMIT, RHO, RBAR = 0.25, 0.9, 0.05
 TARGET = RHO * LIMIT
-CPU_PER_COMPLETION_MS = 3000.0
+BURN_TOL = 0.01      # the burn's measured CPU within 1% of what it asked for
+KSTAR_MAX = 13       # stage 2 only if k* <= 13
+K_STAGE1 = 4         # runs at each bracketing n in stage 1's schedule
 
 # Two-sided 95% t quantiles by degrees of freedom.
 T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306,
        9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
-       20: 2.086, 30: 2.042}
+       20: 2.086, 24: 2.064, 30: 2.042}
 
 
 def t95(df):
+    if df <= 0:
+        return float("nan")
     if df in T95:
         return T95[df]
-    return T95[max(k for k in T95 if k <= df)] if df > 0 else float("nan")
+    return T95[max(k for k in T95 if k <= df)]
 
 
 def field(line, key):
@@ -53,9 +60,10 @@ def num(v):
 
 
 def parse(path):
-    """One run: its n, whether it was discarded, and its measured window."""
-    run = {"path": path, "n": None, "discarded": [], "model": None, "u": [], "obs": 0,
-           "cpu_ms": 0.0, "thr_frac": [], "stall": [], "avg10": [], "secs": 0.0, "burn": []}
+    """One run: its n, node, whether it was discarded, and its measured window."""
+    run = {"path": path, "n": None, "node": None, "model": None, "discarded": [], "u": [],
+           "obs": 0, "cpu_ms": 0.0, "thr_frac": [], "stall": [], "avg10": [], "secs": 0.0,
+           "burn_first": None, "burn_last": None}
     prev = None
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -64,6 +72,8 @@ def parse(path):
                 m = re.search(r"WORKERS=(\d+)", line)
                 if m:
                     run["n"] = int(m.group(1))
+            elif line.startswith("# node="):
+                run["node"] = line[len("# node="):].strip()
             elif line.startswith("# DISCARDED"):
                 run["discarded"].append(line)
             elif line.startswith("LOG node"):
@@ -71,6 +81,7 @@ def parse(path):
             elif line.startswith("STAT "):
                 t = num(field(line, "t"))
                 cur = {k: num(field(line, k)) for k in ("nr_periods", "nr_throttled", "some_total_us")}
+                burn = tuple(num(field(line, k)) for k in ("burns_total", "burn_cpu_total_ms", "burn_req_total_ms"))
                 if t is not None and t >= WARMUP:
                     cpu = num(field(line, "cpu_ms/s"))
                     obs = num(field(line, "obs/s"))
@@ -80,9 +91,10 @@ def parse(path):
                         run["secs"] += 1
                     if obs is not None:
                         run["obs"] += int(obs)
-                    bc = num(field(line, "burn_cpu_ms/call"))
-                    if bc is not None:
-                        run["burn"].append(bc)
+                    if None not in burn:
+                        if run["burn_first"] is None:
+                            run["burn_first"] = burn
+                        run["burn_last"] = burn
                     a10 = num(field(line, "cpu_some"))
                     if a10 is not None:
                         run["avg10"].append(a10)
@@ -91,10 +103,16 @@ def parse(path):
                         dt = cur["nr_throttled"] - prev["nr_throttled"]
                         if dp > 0:
                             run["thr_frac"].append(dt / dp)
-                        ds = cur["some_total_us"] - prev["some_total_us"]
-                        run["stall"].append(100.0 * ds / 1e6)
+                        run["stall"].append(100.0 * (cur["some_total_us"] - prev["some_total_us"]) / 1e6)
                 prev = cur
     return run
+
+
+def burn_stats(run):
+    """The burns over the measured window: calls, measured and requested CPU (ms)."""
+    if run["burn_first"] is None or run["burn_last"] is None:
+        return 0, 0.0, 0.0
+    return tuple(b - a for a, b in zip(run["burn_first"], run["burn_last"]))
 
 
 def check(run):
@@ -108,10 +126,11 @@ def check(run):
         fails.append("only %.0f s measured, want 1800" % run["secs"])
     if run["obs"] == 0:
         fails.append("no completions")
-    else:
-        cpc = run["cpu_ms"] / run["obs"]
-        if abs(cpc - CPU_PER_COMPLETION_MS) > 0.05 * CPU_PER_COMPLETION_MS:
-            fails.append("CPU per completion %.0f ms, want 3000 ±5%%" % cpc)
+    calls, cpu, req = burn_stats(run)
+    if calls <= 0 or req <= 0:
+        fails.append("no burns in the measured window")
+    elif abs(cpu / req - 1) > BURN_TOL:
+        fails.append("the burns measured %.2f%% off what they asked for, want within 1%%" % (100 * (cpu / req - 1)))
     return fails
 
 
@@ -123,8 +142,9 @@ def quantiles(xs, qs=(0.1, 0.5, 0.9)):
 
 
 def crossing(ns, means):
-    """The first n where the curve crosses TARGET, interpolated, and the
-    number of crossings."""
+    """The first n where the curve crosses TARGET, interpolated, with its
+    bracketing pair and the number of crossings; with no crossing, -inf when
+    every mean is above TARGET and +inf when every mean is below it."""
     found, count = None, 0
     for a, b in zip(ns, ns[1:]):
         ua, ub = means[a], means[b]
@@ -132,7 +152,138 @@ def crossing(ns, means):
             count += 1
             if found is None:
                 found = (a + (TARGET - ua) / (ub - ua) * (b - a), a, b)
+    if found is None:
+        side = math.inf if all(means[n] < TARGET for n in ns) else -math.inf
+        return (side, None, None), 0
     return found, count
+
+
+def run_means(by_n):
+    return {n: [statistics.mean(r["u"]) for r in rs] for n, rs in by_n.items()}
+
+
+def per_n(by_n):
+    rm = run_means(by_n)
+    means = {n: statistics.mean(v) for n, v in rm.items()}
+    sds = {n: (statistics.stdev(v) if len(v) > 1 else float("nan")) for n, v in rm.items()}
+    return rm, means, sds
+
+
+def bootstrap(ns, rm, seed=20261110, b=10000):
+    rng = random.Random(seed)
+    out = []
+    for _ in range(b):
+        bm = {n: statistics.mean(rng.choice(rm[n]) for _ in rm[n]) for n in ns}
+        (s, _, _), _ = crossing(ns, bm)
+        out.append(s)
+    out.sort()
+    return out[int(0.025 * b)], out[int(0.975 * b) - 1], sum(1 for x in out if math.isinf(x))
+
+
+def load_runs(paths, verbose=True):
+    runs = [parse(p) for p in paths]
+    by_n = defaultdict(list)
+    for r in runs:
+        fails = check(r)
+        if verbose:
+            calls, cpu, req = burn_stats(r)
+            cpc = r["cpu_ms"] / r["obs"] if r["obs"] else float("nan")
+            edge = 100.0 * (r["n"] or 0) / r["obs"] if r["obs"] else float("nan")
+            mu = statistics.mean(r["u"]) if r["u"] else float("nan")
+            print("  %s n=%s node=%s model=%s U=%.4f completions=%d burns: %d calls, %.0f ms asked, measured %+.2f%%; "
+                  "cgroup CPU per completion %.0f ms (edge allowance ±%.1f%%, not judged): %s" % (
+                      r["path"], r["n"], r["node"], r["model"], mu, r["obs"], calls, req / calls if calls else float("nan"),
+                      100 * (cpu / req - 1) if req else float("nan"), cpc, edge,
+                      "valid" if not fails else "INVALID: " + "; ".join(fails)))
+        if not fails:
+            by_n[r["n"]].append(r)
+    return runs, by_n
+
+
+def stage1(paths):
+    print("stage 1 runs:")
+    _, by_n = load_runs(paths)
+    ns = sorted(by_n)
+    rm, means, sds = per_n(by_n)
+    (s, a, b), count = crossing(ns, means)
+    if a is None:
+        print("stage 1: the per-n means don't cross %.3f cores" % TARGET)
+        print("stage 2: STOP, determinacy fails (futility at stage 1): no crossing")
+        return 0
+    beta = (means[b] - means[a]) / (b - a)
+    ka, kb = len(rm[a]), len(rm[b])
+    df = ka + kb - 2
+    pooled = math.sqrt(((ka - 1) * sds[a] ** 2 + (kb - 1) * sds[b] ** 2) / df) if df > 0 else float("nan")
+    t = t95(df)
+    print("Ŝ* = %.2f slots between n=%d (k=%d) and n=%d (k=%d); %d crossing(s)" % (s, a, ka, b, kb, count))
+    print("β̂ = %.4f cores per slot; pooled between-run sd ŝ = %.4f cores on %d df; t = %.3f" % (beta, pooled, df, t))
+    if not beta > 0 or math.isnan(pooled):
+        print("stage 2: STOP, determinacy fails (futility at stage 1): the slope between the bracketing n is not positive")
+        return 0
+    kstar = math.ceil((2 * t * 0.71 * pooled / (beta * 0.15 * s)) ** 2)
+    print("k* = ⌈(2·t·0.71·ŝ/(β̂·0.15·Ŝ*))²⌉ = %d (approximate: β̂'s own error isn't covered)" % kstar)
+    if kstar > KSTAR_MAX:
+        du = beta * 0.3
+        print("stage 2: STOP, determinacy fails (futility at stage 1): k* = %d > %d, β̂ = %.4f, ŝ = %.4f" % (kstar, KSTAR_MAX, beta, pooled))
+        print("At that slope U changes by about %.4f cores (%.1f%% of L) across ±0.3 slots, far inside the r̄ = 5%% the design's "
+              "guarantee is stated in: S* being undetermined is the substantive answer, since the guarantee is about U." % (du, 100 * du / LIMIT))
+        return 0
+    m = max(kstar - ka, kstar - kb)
+    if m <= 0:
+        print("stage 2: none needed (k* = %d); decide on stage 1's runs" % kstar)
+        return 0
+    print("stage 2: continue with n=%d and n=%d, %d more runs each" % (a, b, m))
+    return 0
+
+
+def report(paths):
+    print("runs:")
+    _, by_n = load_runs(paths)
+    ns = sorted(by_n)
+    if len(ns) < 2:
+        print("S*: fewer than two n with valid runs")
+        return 0
+    rm, means, sds = per_n(by_n)
+    print("\nper n (valid runs; the unit is the run):")
+    for n in ns:
+        k = len(rm[n])
+        half = t95(k - 1) * sds[n] / math.sqrt(k) if k > 1 else float("nan")
+        thr = [x for r in by_n[n] for x in r["thr_frac"]]
+        st = [x for r in by_n[n] for x in r["stall"]]
+        a10 = [x for r in by_n[n] for x in r["avg10"]]
+        print("  n=%d k=%d mean U %.4f cores, 95%% CI ±%.4f, between-run sd %.4f" % (n, k, means[n], half, sds[n]))
+        print("       throttled periods per sample: mean %.2f, all throttled in %.0f%% of samples" % (
+            statistics.mean(thr) if thr else float("nan"), 100.0 * sum(1 for x in thr if x >= 0.999) / max(len(thr), 1)))
+        print("       per-second stall share: p10/p50/p90 %s, over 50 in %.0f%% of samples; avg10 p50 %s" % (
+            "/".join(quantiles(st)), 100.0 * sum(1 for x in st if x > 50) / max(len(st), 1), quantiles(a10, (0.5,))[0]))
+    (s, a, b), count = crossing(ns, means)
+    if a is None:
+        print("\nS*: the per-n means don't cross %.3f cores" % TARGET)
+        print("decision: determinacy fails; the long drain's band is reported, not judged.")
+        return 0
+    if count > 1:
+        print("\nthe curve crosses %.3f cores %d times: non-monotone; S* is the first crossing" % (TARGET, count))
+    print("\nS* = %.2f slots (between n=%d and n=%d)" % (s, a, b))
+    if len(rm[a]) < 2 or len(rm[b]) < 2:
+        print("a bracketing n has fewer than two valid runs: no CI")
+        print("decision: determinacy fails; the long drain's band is reported, not judged.")
+        return 0
+    lo, hi, inf = bootstrap(ns, rm)
+    width = hi - lo
+    print("  bootstrap 95%% interval [%s, %s], width %s; %d of 10000 resamples with no crossing (sorted to ±inf)" % (
+        "%.2f" % lo, "%.2f" % hi, "%.2f" % width, inf))
+    ua, ub = means[a], means[b]
+    d = ub - ua
+    se = math.sqrt(((b - a) * (TARGET - ub) / d ** 2 * sds[a] / math.sqrt(len(rm[a]))) ** 2 +
+                   ((b - a) * (TARGET - ua) / d ** 2 * sds[b] / math.sqrt(len(rm[b]))) ** 2)
+    print("  delta method: SE %.2f, 95%% CI ±%.2f (width %.2f)" % (se, 1.96 * se, 2 * 1.96 * se))
+    allowed = 3 * RBAR * s
+    print("\ndecision (pre-registered): the interval's width against the band's half-width above, S*·3r̄ = %.2f" % allowed)
+    if math.isfinite(lo) and math.isfinite(hi) and width < allowed:
+        print("  The 95%% CI of S* is narrower than the band's half-width above: the band is judged with the measured S* = %.2f." % s)
+    else:
+        print("  The 95% CI of S* is not narrower than the band's half-width above: determinacy fails, and the long drain's band is reported, not judged.")
+    return 0
 
 
 def main(argv):
@@ -142,90 +293,15 @@ def main(argv):
         for f in fails:
             print("INVALID %s: %s" % (argv[1], f))
         if not fails:
-            print("valid %s: n=%s U=%.4f completions=%d CPU/completion=%.0f ms" % (
-                argv[1], run["n"], statistics.mean(run["u"]), run["obs"], run["cpu_ms"] / run["obs"]))
+            print("valid %s: n=%s U=%.4f completions=%d" % (argv[1], run["n"], statistics.mean(run["u"]), run["obs"]))
         return 1 if fails else 0
-
-    runs = [parse(p) for p in argv]
-    print("runs: %d" % len(runs))
-    by_n = defaultdict(list)
-    for r in runs:
-        fails = check(r)
-        state = "valid" if not fails else "INVALID: " + "; ".join(fails)
-        cpc = r["cpu_ms"] / r["obs"] if r["obs"] else float("nan")
-        mu = statistics.mean(r["u"]) if r["u"] else float("nan")
-        burn = statistics.median(r["burn"]) if r["burn"] else float("nan")
-        print("  %s n=%s U=%.4f completions=%d CPU/completion=%.0f ms (burn per call %.0f ms) model=%s: %s" % (
-            r["path"], r["n"], mu, r["obs"], cpc, burn, r["model"], state))
-        if not fails:
-            by_n[r["n"]].append(r)
-
-    print("\nper n (valid runs; the unit is the run):")
-    ns = sorted(by_n)
-    means, ses = {}, {}
-    for n in ns:
-        rm = [statistics.mean(r["u"]) for r in by_n[n]]
-        k = len(rm)
-        m = statistics.mean(rm)
-        sd = statistics.stdev(rm) if k > 1 else float("nan")
-        half = t95(k - 1) * sd / math.sqrt(k) if k > 1 else float("nan")
-        means[n], ses[n] = m, (sd / math.sqrt(k) if k > 1 else float("nan"))
-        thr = [x for r in by_n[n] for x in r["thr_frac"]]
-        st = [x for r in by_n[n] for x in r["stall"]]
-        a10 = [x for r in by_n[n] for x in r["avg10"]]
-        print("  n=%d k=%d mean U %.4f cores, 95%% CI ±%.4f, between-run sd %.4f" % (n, k, m, half, sd))
-        print("       throttled periods per sample: mean %.2f, all throttled in %.0f%% of samples" % (
-            statistics.mean(thr) if thr else float("nan"), 100.0 * sum(1 for x in thr if x >= 0.999) / max(len(thr), 1)))
-        print("       per-second stall share: p10/p50/p90 %s, over 50 in %.0f%% of samples; avg10 p50 %s" % (
-            "/".join(quantiles(st)), 100.0 * sum(1 for x in st if x > 50) / max(len(st), 1), quantiles(a10, (0.5,))[0]))
-
-    if len(ns) < 2:
-        print("\nS*: fewer than two n with valid runs")
+    if len(argv) >= 2 and argv[0] == "--node":
+        run = parse(argv[1])
+        print("node=%s model=%s" % (run["node"], run["model"]))
         return 0
-    found, count = crossing(ns, means)
-    if found is None:
-        print("\nS*: the per-n means don't cross %.3f cores" % TARGET)
-        print("decision: determinacy fails; the long drain's band is reported, not judged.")
-        return 0
-    s, a, b = found
-    if len(by_n[a]) < 2 or len(by_n[b]) < 2:
-        print("\nS* = %.2f slots (between n=%d and n=%d), but a bracketing n has fewer than two valid runs: no CI" % (s, a, b))
-        print("decision: determinacy fails; the long drain's band is reported, not judged.")
-        return 0
-    if count > 1:
-        print("\nthe curve crosses %.3f cores %d times: non-monotone; S* is the first crossing" % (TARGET, count))
-    # Bootstrap over runs.
-    rng = random.Random(20261110)
-    boots, none = [], 0
-    for _ in range(10000):
-        bm = {}
-        for n in ns:
-            rm = [statistics.mean(r["u"]) for r in by_n[n]]
-            bm[n] = statistics.mean(rng.choice(rm) for _ in rm)
-        f, _ = crossing(ns, bm)
-        if f is None:
-            none += 1
-        else:
-            boots.append(f[0])
-    boots.sort()
-    lo = boots[int(0.025 * len(boots))] if boots else float("nan")
-    hi = boots[int(0.975 * len(boots)) - 1] if boots else float("nan")
-    # The delta method on the bracketing means.
-    ua, ub = means[a], means[b]
-    d = ub - ua
-    ds_dua = (b - a) * (TARGET - ub) / d ** 2
-    ds_dub = -(b - a) * (TARGET - ua) / d ** 2
-    se = math.sqrt((ds_dua * ses[a]) ** 2 + (ds_dub * ses[b]) ** 2)
-    print("\nS* = %.2f slots (between n=%d and n=%d)" % (s, a, b))
-    print("  bootstrap 95%% CI [%.2f, %.2f], width %.2f; %d of 10000 resamples with no crossing" % (lo, hi, hi - lo, none))
-    print("  delta method: SE %.2f, 95%% CI ±%.2f (width %.2f)" % (se, 1.96 * se, 2 * 1.96 * se))
-    width, allowed = hi - lo, 3 * RBAR * s
-    print("\ndecision (pre-registered): the CI's width %.2f against the band's half-width above, S*·3r̄ = %.2f" % (width, allowed))
-    if none == 0 and width < allowed:
-        print("  The 95%% CI of S* is narrower than the band's half-width above: the band is judged with the measured S* = %.2f." % s)
-    else:
-        print("  The 95% CI of S* is not narrower than the band's half-width above: determinacy fails, and the long drain's band is reported, not judged.")
-    return 0
+    if argv and argv[0] == "--stage1":
+        return stage1(argv[1:])
+    return report(argv)
 
 
 if __name__ == "__main__":

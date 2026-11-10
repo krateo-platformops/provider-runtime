@@ -14,9 +14,11 @@
 #        first block's LOAD_CPU_MS=3000 counted sha256 rounds, about 0.8s of CPU
 #        a call on GKE, and with no wait one call in flight saturated 250m.
 # curve: 64 Greetings, 250m, no governor (NO_GOVERNOR=true), GOMAXPROCS 2; each
-#        Observe spends 3000ms of CPU measured on its thread, then waits 28.5s:
-#        the long drain's plant at a fixed MaxConcurrentReconciles, given as
-#        WORKERS=n (results/curve-settings.txt). No liveness probe.
+#        Observe spends 3000ms of CPU measured on its thread, then waits 28.5s,
+#        each drawn with a relative sd of 0.1 as the engine draws them (the
+#        run's LOAD_SEED seeds it): the long drain's plant at a fixed
+#        MaxConcurrentReconciles, given as WORKERS=n
+#        (results/curve-settings.txt). No liveness probe.
 #
 # Each restart's cause is recorded as it happens, because lastState keeps only
 # the latest. The node's load comes from the run's STAT lines.
@@ -55,7 +57,7 @@ case $mode in
   ramp)  cpu=2; mem=256Mi; load="WORKERS=16 LOAD_ALLOC_MIB=16 LOAD_HOLD_MS=1000 POLL_MS=500" ;;
   burst) cpu=2; mem=256Mi; load="WORKERS=16 LOAD_ALLOC_MIB=16 LOAD_HOLD_MS=300 POLL_MS=1000" ;;
   cpu)   cpu=250m; mem=512Mi; load="WORKERS=16 LOAD_CPU_MS=20 LOAD_HOLD_MS=400 POLL_MS=1000" ;;
-  curve) cpu=250m; mem=512Mi; load="LOAD_CPU_MS=3000 LOAD_HOLD_MS=28500 POLL_MS=1000 NO_GOVERNOR=true GOMAXPROCS=2" ;;
+  curve) cpu=250m; mem=512Mi; load="LOAD_CPU_MS=3000 LOAD_HOLD_MS=28500 LOAD_JITTER=0.1 POLL_MS=1000 NO_GOVERNOR=true GOMAXPROCS=2" ;;
   overhead) cpu=1; mem=128Mi; load="SAMPLER_OVERHEAD=true" ;;
 esac
 started=$(date +%Y-%m-%dT%H:%M:%S)
@@ -161,6 +163,7 @@ slept=$(pmset -g log | awk -v a="$window_start" -v b="$window_end" '/Entering Sl
   echo "# run=$name mode=$mode image=$tag cpu=$cpu mem=$mem env=$* seconds=$secs started=$started ended=$(date +%Y-%m-%dT%H:%M:%S)"
   sed 's/^/# DISCARDED /' "$discard"
   echo "# rollout=$rollout"
+  echo "# node=$(k -n "$ns" get pod "$pod" -o jsonpath='{.spec.nodeName}')"
   echo "# probe=$(k -n "$ns" get deploy measure -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}')"
   echo "# driver_load_end=$(uptime)"
   awk '!seen[$0]++' "$R/$name.stream"

@@ -1,25 +1,31 @@
 #!/bin/bash
-# Usage: curve_block.sh <image tag> <full|small>
+# Usage: curve_block.sh <image tag> stage1
+#        curve_block.sh <image tag> stage2 <n_a> <n_b> <m>
 #
-# The fixed-capacity plant curve of the long drain's workload (results/
-# curve-settings.txt, committed before run 1). One run at a time, in the
-# settings' randomized order, each at MaxConcurrentReconciles = n with no
-# governor. After each run its validity is checked (curve_report.py --check);
-# a run that fails a check, or that prun.sh discards, is re-run at the same n
-# and position, and both are kept and reported. A failed setup stops the block
+# The fixed-capacity plant curve of the long drain's workload, in the two
+# stages of results/curve-settings.txt (committed before run 1). One run at a
+# time, each at MaxConcurrentReconciles = n with no governor.
+#
+# stage1 runs the settings' 18-run randomized schedule. Then
+#   python3 curve_report.py --stage1 results/pc-n*-r*.log > results/curve-stage1.txt
+# computes k* and the decision, which is committed. stage2 runs m = k* − 4 more
+# at each of the bracketing pair n_a and n_b, re-randomized, and refuses unless
+# results/curve-stage1.txt is committed and says to continue with that pair and m.
+#
+# After each run its validity is checked (curve_report.py --check); a run that
+# fails a check, or that prun.sh discards, is re-run at the same n and position,
+# and both are kept and reported. The node's name and CPU model must be the
+# same in every run: a change stops the block. A failed setup stops the block
 # with exit code 2. Results are committed after each run, by explicit path.
-#
-# It refuses to start unless the settings name the chosen budget, and unless
-# the source matches what the image was built from.
 cd "$(dirname "$0")" || exit 1
 bash setup.sh || { echo "BLOCK-STOPPED: cluster setup failed"; exit 2; }
-TAG=${1:?usage: curve_block.sh <image tag> <full|small>}
-BUDGET=${2:?usage: curve_block.sh <image tag> <full|small>}
+TAG=${1:?usage: curve_block.sh <image tag> stage1|stage2 <n_a> <n_b> <m>}
+STAGE=${2:?usage: curve_block.sh <image tag> stage1|stage2 <n_a> <n_b> <m>}
 SECS=2100
 root=$(git rev-parse --show-toplevel)
 rel=hack/rlgov-measure
 
-grep -q "^chosen budget: $BUDGET\$" results/curve-settings.txt || { echo "BLOCK-REFUSED: results/curve-settings.txt doesn't name '$BUDGET' as the chosen budget"; exit 2; }
+grep -q "^chosen budget: two-stage" results/curve-settings.txt || { echo "BLOCK-REFUSED: results/curve-settings.txt doesn't name the two-stage budget"; exit 2; }
 git -C "$root" diff --quiet HEAD -- "$rel/results/curve-settings.txt" || { echo "BLOCK-REFUSED: results/curve-settings.txt has uncommitted changes"; exit 2; }
 [ -s "results/image-$TAG.txt" ] || { echo "BLOCK-REFUSED: no results/image-$TAG.txt"; exit 2; }
 built=$(awk '{print $2}' "results/image-$TAG.txt")
@@ -43,32 +49,60 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01NSM9VXZsNd3K23XxTSQGo6" || echo "COMMIT-FAILED commit: $msg"
 }
 
-case $BUDGET in
-  small) schedule="1:4,3,7,5,6 2:8,4,5,6 3:3,5,4,6,7 4:5,4,6,8" ;;
-  full)  schedule="1:5,4,3,6 2:4,5,6,7 3:8,5,4,6 4:4,6,3,5 5:4,6,7,5 6:5,4,6,8 7:4,3,6,5 8:7,6,4,5 9:6,4,8,5 10:6,5,4 11:6,4,5 12:5,6,4 13:4,5,6" ;;
-  *) echo "BLOCK-REFUSED: budget is full or small"; exit 2 ;;
+case $STAGE in
+  stage1)
+    prefix=r
+    schedule="1:4,3,7,5,6 2:8,4,5,6 3:3,5,4,6,7 4:5,4,6,8"
+    ;;
+  stage2)
+    na=${3:?stage2 needs n_a}; nb=${4:?stage2 needs n_b}; m=${5:?stage2 needs m}
+    git -C "$root" diff --quiet HEAD -- "$rel/results/curve-stage1.txt" && [ -s results/curve-stage1.txt ] || { echo "BLOCK-REFUSED: results/curve-stage1.txt is missing or uncommitted"; exit 2; }
+    grep -q "^stage 2: continue with n=$na and n=$nb, $m more runs each\$" results/curve-stage1.txt || { echo "BLOCK-REFUSED: results/curve-stage1.txt doesn't say to continue with n=$na and n=$nb, $m more each"; exit 2; }
+    prefix=s2-r
+    # Re-randomized: each repetition holds n_a and n_b in an order drawn with
+    # the settings' second seed.
+    schedule=$(python3 -c "
+import random
+r = random.Random(20261111)
+reps = []
+for i in range($m):
+    ns = [$na, $nb]
+    r.shuffle(ns)
+    reps.append('%d:%s' % (i + 1, ','.join(map(str, ns))))
+print(' '.join(reps))")
+    ;;
+  *) echo "BLOCK-REFUSED: the stage is stage1 or stage2"; exit 2 ;;
 esac
+echo "schedule ($STAGE): $schedule"
 
 for repn in $schedule; do
   r=${repn%%:*}
-  for n in ${repn#*:}; do
-    n=${n//,/ }
-    for m in $n; do
-      attempt=1
-      while true; do
-        name="pc-n$m-r$r"
-        [ "$attempt" -gt 1 ] && name="pc-n$m-r$r-a$attempt"
-        bash prun.sh "$name" curve "$SECS" "$TAG" "WORKERS=$m" || { echo "BLOCK-STOPPED at $name"; bash nodeid.sh curve-stopped; exit 2; }
-        bash nodeid.sh "after-$name"
-        commit_results "results(rlgov): plant curve run $name" "$rel/results/$name.log"
-        if python3 curve_report.py --check "results/$name.log"; then
-          break
-        fi
-        echo "RE-RUN $name failed a validity check; re-running at n=$m, repetition $r"
-        attempt=$((attempt + 1))
-        [ "$attempt" -gt 3 ] && { echo "BLOCK-STOPPED: $name failed validity three times"; exit 2; }
-      done
+  list=${repn#*:}
+  for m_ in ${list//,/ }; do
+    attempt=1
+    while true; do
+      name="pc-n$m_-$prefix$r"
+      [ "$attempt" -gt 1 ] && name="$name-a$attempt"
+      seed=$(printf '%s' "$name" | cksum | awk '{print $1}')
+      bash prun.sh "$name" curve "$SECS" "$TAG" "WORKERS=$m_" "LOAD_SEED=$seed" || { echo "BLOCK-STOPPED at $name"; bash nodeid.sh curve-stopped; exit 2; }
+      bash nodeid.sh "after-$name"
+      commit_results "results(rlgov): plant curve run $name" "$rel/results/$name.log"
+      # The node must be the same in every run.
+      node=$(python3 curve_report.py --node "results/$name.log")
+      if [ ! -s results/curve-node.txt ]; then
+        echo "$node" > results/curve-node.txt
+        commit_results "results(rlgov): the plant curve's node" "$rel/results/curve-node.txt"
+      elif [ "$node" != "$(cat results/curve-node.txt)" ]; then
+        echo "BLOCK-STOPPED: the node changed at $name: '$node', not '$(cat results/curve-node.txt)'"
+        exit 2
+      fi
+      if python3 curve_report.py --check "results/$name.log"; then
+        break
+      fi
+      echo "RE-RUN $name failed a validity check; re-running at n=$m_, repetition $r"
+      attempt=$((attempt + 1))
+      [ "$attempt" -gt 3 ] && { echo "BLOCK-STOPPED: $name failed validity three times"; exit 2; }
     done
   done
 done
-echo "BLOCK-DONE: python3 curve_report.py results/pc-*.log"
+echo "BLOCK-DONE ($STAGE)"

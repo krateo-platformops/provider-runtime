@@ -20,6 +20,10 @@
 //	SAMPLER_OVERHEAD    "true" measures the sampler's cost and nothing else
 //	PHASE_S             length of each overhead phase (default 60)
 //	GOGC_PERCENT        GOGC (default 100)
+//	LOAD_JITTER         relative sd of each Observe's CPU and wait, each drawn as
+//	                    max(0.1·x, x·(1 + LOAD_JITTER·N(0,1))), the engine's
+//	                    draw (default 0)
+//	LOAD_SEED           the jitter's seed (default 1)
 //	NO_GOVERNOR         "true" runs the controller with no rate-limit governor
 //	                    at all, MaxConcurrentReconciles alone bounding it: the
 //	                    fixed-capacity plant curve (results/curve-settings.txt)
@@ -30,6 +34,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	goruntime "runtime"
 	"runtime/debug"
@@ -107,7 +112,41 @@ type store struct {
 	m  map[string]string
 }
 
-type load struct{ allocMiB, holdMS, cpuMS int }
+type load struct {
+	allocMiB, holdMS, cpuMS int
+	jitter                  float64
+}
+
+// jitterRNG draws each Observe's CPU and wait when LOAD_JITTER is set: a
+// seeded SplitMix64, as the simulation's (no math/rand, so gosec has nothing to
+// flag), shared by the workers under a mutex.
+var jitterRNG struct {
+	mu    sync.Mutex
+	state uint64
+}
+
+func jitterNorm() float64 {
+	jitterRNG.mu.Lock()
+	defer jitterRNG.mu.Unlock()
+	next := func() float64 {
+		jitterRNG.state += 0x9e3779b97f4a7c15
+		z := jitterRNG.state
+		z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+		z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+		z ^= z >> 31
+		return (float64(z>>11) + 0.5) / (1 << 53)
+	}
+	// Box-Muller.
+	return math.Sqrt(-2*math.Log(next())) * math.Cos(2*math.Pi*next())
+}
+
+// draw is the engine's: max(0.1·ms, ms·(1 + j·N(0,1))).
+func draw(ms int, j float64) int {
+	if j <= 0 || ms <= 0 {
+		return ms
+	}
+	return int(math.Max(0.1*float64(ms), float64(ms)*(1+j*jitterNorm())))
+}
 
 var (
 	observes atomic.Int64
@@ -116,6 +155,9 @@ var (
 	// burns, burnCPUNs and burnWallNs total the CPU work: calls, the CPU time
 	// they measured, and the wall time they took, which throttling stretches.
 	burns, burnCPUNs, burnWallNs atomic.Int64
+	// burnReqNs totals the CPU the calls asked for, so a jittered request can
+	// be checked against what was measured.
+	burnReqNs atomic.Int64
 )
 
 type connector struct {
@@ -135,6 +177,7 @@ type external struct {
 
 // burn spends ms of CPU time (burn.go) and adds it to the totals STAT reports.
 func burn(ms int) {
+	burnReqNs.Add(int64(ms) * int64(time.Millisecond))
 	start := time.Now()
 	used := burnCPU(time.Duration(ms) * time.Millisecond)
 	burnWallNs.Add(int64(time.Since(start)))
@@ -152,15 +195,15 @@ func (e *external) Observe(_ context.Context, mg resource.Managed) (reconciler.E
 			b[i] = 1
 		}
 		if e.l.cpuMS > 0 {
-			burn(e.l.cpuMS)
+			burn(draw(e.l.cpuMS, e.l.jitter))
 		}
-		time.Sleep(time.Duration(e.l.holdMS) * time.Millisecond)
+		time.Sleep(time.Duration(draw(e.l.holdMS, e.l.jitter)) * time.Millisecond)
 		sink = b[:1]
 	} else {
 		if e.l.cpuMS > 0 {
-			burn(e.l.cpuMS)
+			burn(draw(e.l.cpuMS, e.l.jitter))
 		}
-		time.Sleep(time.Duration(e.l.holdMS) * time.Millisecond)
+		time.Sleep(time.Duration(draw(e.l.holdMS, e.l.jitter)) * time.Millisecond)
 	}
 	g := mg.(*Greeting)
 	name := meta.GetExternalName(g)
@@ -323,7 +366,8 @@ func main() {
 	}
 	workers := envInt("WORKERS", 16)
 	poll := time.Duration(envInt("POLL_MS", 2000)) * time.Millisecond
-	l := load{allocMiB: envInt("LOAD_ALLOC_MIB", 0), holdMS: envInt("LOAD_HOLD_MS", 0), cpuMS: envInt("LOAD_CPU_MS", 0)}
+	l := load{allocMiB: envInt("LOAD_ALLOC_MIB", 0), holdMS: envInt("LOAD_HOLD_MS", 0), cpuMS: envInt("LOAD_CPU_MS", 0), jitter: envFloat("LOAD_JITTER")}
+	jitterRNG.state = uint64(envInt("LOAD_SEED", 1))
 
 	scheme := runtime.NewScheme()
 	scheme.AddKnownTypes(GroupVersion, &Greeting{}, &GreetingList{})
@@ -422,11 +466,12 @@ func main() {
 				}
 				sat = strings.Join(parts, ",")
 			}
-			fmt.Printf("STAT t=%.0f cpu_ms/s=%.0f obs/s=%d burn_cpu_ms/call=%s burn_wall_ms/call=%s inflight=%d local=%s cpu_some=%s mem_full=%s mem_some=%s ws_mib=%d max=%s throttled_usec=%s nr_periods=%s nr_throttled=%s some_total_us=%s node_load=%s %s deferrals=%s inputs=%s\n",
+			fmt.Printf("STAT t=%.0f cpu_ms/s=%.0f obs/s=%d burn_cpu_ms/call=%s burn_wall_ms/call=%s inflight=%d local=%s cpu_some=%s mem_full=%s mem_some=%s ws_mib=%d max=%s throttled_usec=%s nr_periods=%s nr_throttled=%s some_total_us=%s burns_total=%d burn_cpu_total_ms=%.1f burn_req_total_ms=%.1f node_load=%s %s deferrals=%s inputs=%s\n",
 				time.Since(start).Seconds(), cpuMs, n-last, burnCPU, burnWall, inFlight.Load(), local,
 				avg10("cpu.pressure", "some"), avg10("memory.pressure", "full"), avg10("memory.pressure", "some"),
 				ws>>20, limit, statField("cpu.stat", "throttled_usec"), statField("cpu.stat", "nr_periods"),
-				statField("cpu.stat", "nr_throttled"), pressureTotal("cpu.pressure", "some"), nodeLoad(), goStats(), def, sat)
+				statField("cpu.stat", "nr_throttled"), pressureTotal("cpu.pressure", "some"),
+				nb, float64(bc)/1e6, float64(burnReqNs.Load())/1e6, nodeLoad(), goStats(), def, sat)
 			last = n
 		}
 	}()
