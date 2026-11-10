@@ -156,7 +156,9 @@ var (
 	// they measured, and the wall time they took, which throttling stretches.
 	burns, burnCPUNs, burnWallNs atomic.Int64
 	// burnReqNs totals the CPU the calls asked for, so a jittered request can
-	// be checked against what was measured.
+	// be checked against what was measured. It is counted when the call ends,
+	// as burnCPUNs is: counted at the start, a window's difference compared
+	// requests started in it with calls finished in it (curve1's check).
 	burnReqNs atomic.Int64
 )
 
@@ -177,11 +179,11 @@ type external struct {
 
 // burn spends ms of CPU time (burn.go) and adds it to the totals STAT reports.
 func burn(ms int) {
-	burnReqNs.Add(int64(ms) * int64(time.Millisecond))
 	start := time.Now()
 	used := burnCPU(time.Duration(ms) * time.Millisecond)
 	burnWallNs.Add(int64(time.Since(start)))
 	burnCPUNs.Add(int64(used))
+	burnReqNs.Add(int64(ms) * int64(time.Millisecond))
 	burns.Add(1)
 }
 
@@ -435,7 +437,10 @@ func main() {
 			n := observes.Load()
 			// The CPU work of the calls that finished in this second, per call:
 			// the CPU time measured on their threads, and the wall time it took.
-			nb, bc, bw := burns.Load(), burnCPUNs.Load(), burnWallNs.Load()
+			// br is read next to bc, not at the print after the cgroup reads:
+			// a call that ends between the two reads is in one and not the
+			// other, and that gap is now nanoseconds, not milliseconds.
+			nb, bc, br, bw := burns.Load(), burnCPUNs.Load(), burnReqNs.Load(), burnWallNs.Load()
 			burnCPU, burnWall := "na", "na"
 			if d := nb - lastBurns; d > 0 {
 				burnCPU = fmt.Sprintf("%.1f", float64(bc-lastBurnCPU)/float64(d)/1e6)
@@ -471,7 +476,7 @@ func main() {
 				avg10("cpu.pressure", "some"), avg10("memory.pressure", "full"), avg10("memory.pressure", "some"),
 				ws>>20, limit, statField("cpu.stat", "throttled_usec"), statField("cpu.stat", "nr_periods"),
 				statField("cpu.stat", "nr_throttled"), pressureTotal("cpu.pressure", "some"),
-				nb, float64(bc)/1e6, float64(burnReqNs.Load())/1e6, nodeLoad(), goStats(), def, sat)
+				nb, float64(bc)/1e6, float64(br)/1e6, nodeLoad(), goStats(), def, sat)
 			last = n
 		}
 	}()
