@@ -12,7 +12,7 @@ timestamp: 2026-11-10T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.14.1: every reconcile is its own trace
+## 2026-11-10 — v1.14.1: every reconcile is its own trace
 - **Design:** [design-tracing](./design-tracing.md) §13, D8, decided by the
   user on 2026-11-10 after krateo-057's first day under v1.14.0.
 - **The behaviour change, with tracing on:**
