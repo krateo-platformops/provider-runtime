@@ -1084,7 +1084,11 @@ func gateCases() []gateCase {
 			// the change, or from entry if ĉ never restarts, at most 5% of
 			// samples outside the band, as in the outside rule; with no entry,
 			// the band rule doesn't apply. The restart-edge floor stays absolute.
+			// Plan §4.5, the GKE plant curve: the band is judged only when the
+			// drain plant's S* is determined, and reported otherwise.
 			switch {
+			case !p.determined:
+				g.report("the band is reported, not judged: the drain plant's S* %.2f is undetermined", p.sStar)
 			case rst >= 0:
 				g.outsideLo(b, rst, g.n(), lo)
 			case e >= 0:

@@ -4,10 +4,12 @@ import "math"
 
 // frozen is one case plant's values from its fixed-capacity curve (plan
 // §4.5): S*, the duration at S*, and n_iter from one slot (nStart), from the
-// case's starting point (nFrom), and down from above the band (nAbove).
+// case's starting point (nFrom), and down from above the band (nAbove);
+// determined is the plan's determinacy rule for S*.
 type frozen struct {
 	sStar, dStar          float64
 	nStart, nFrom, nAbove int
+	determined            bool
 }
 
 // floorAfterCostIncrease is design §17.8 item 4's lower edge after the cost

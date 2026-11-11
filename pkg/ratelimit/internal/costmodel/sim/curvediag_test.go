@@ -12,8 +12,8 @@ import (
 // TestCurveDiag is a development aid for the plan §4.5 change on the measured
 // S*: the engine's fixed-capacity curves on several seeds, by the freeze's
 // method, and the drain plant under the GKE protocol, with each drain seed's
-// curve and every crossing of ρL. Its output is
-// testdata/curve-engine-b2e5757.txt. Skipped unless SIM_CURVEDIAG is set.
+// curve and every crossing of ρL. Its output at b2e5757, before the drain
+// plants' calibration, is testdata/curve-engine-b2e5757.txt. Skipped unless SIM_CURVEDIAG is set.
 // Seeds 9001+ only (21–40 are reserved).
 func TestCurveDiag(t *testing.T) {
 	if os.Getenv("SIM_CURVEDIAG") == "" {
@@ -105,27 +105,6 @@ func TestCurveDiag(t *testing.T) {
 		}
 	}
 	t.Log("\n" + b.String())
-}
-
-// curveAt is measureCurve at a given seed, warm-up and length.
-func curveAt(p plant, seed uint64, warmup, length time.Duration) []curvePoint {
-	var pts []curvePoint
-	for n := 1; n <= p.maxN; n++ {
-		cfg := p.cfg(seed)
-		cfg.Fixed, cfg.Duration = n, length
-		tr := Run(cfg)
-		w := summarize(tr, warmup)
-		var a float64
-		var comp int
-		for i, at := range tr.At {
-			if at >= warmup {
-				a += tr.Samples[i].Books.SlotSeconds
-				comp += tr.Samples[i].Books.Completions
-			}
-		}
-		pts = append(pts, curvePoint{float64(n), w.used, w.tput, a / float64(comp)})
-	}
-	return pts
 }
 
 // crossings is every point where the curve crosses ρL, up or down, linear
