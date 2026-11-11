@@ -22,6 +22,9 @@ REVERT_TIMEOUT_S sets go test's timeout per run (default 3000).
 """
 import hashlib, os, re, signal, subprocess, sys
 
+# Every line reaches the output file as it is printed, not when the run ends.
+sys.stdout.reconfigure(line_buffering=True)
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG = "pkg/credentialuse/"
 PKGS = ["./" + PKG]

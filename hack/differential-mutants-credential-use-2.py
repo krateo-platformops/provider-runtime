@@ -26,6 +26,9 @@ full go test output there.
 """
 import hashlib, os, re, signal, subprocess, sys, time
 
+# Every line reaches the output file as it is printed, not when the run ends.
+sys.stdout.reconfigure(line_buffering=True)
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG = "pkg/credentialuse/"
 FILES = ["acquire.go", "release.go", "verified.go", "patch.go"]
@@ -64,13 +67,23 @@ def go_test(part):
         args += ["-parallel", PARALLEL]
     start = time.time()
     print(f"  load at the start: {uptime()}", flush=True)
-    r = subprocess.run(args + ["./" + PKG], cwd=ROOT, env=env, capture_output=True, text=True, timeout=TIMEOUT + 300)
-    print(f"  load at the end:   {uptime()}", flush=True)
-    out = r.stdout + r.stderr
+    # go test's output streams to the part's log as it comes, so that each
+    # subtest shows when it finishes, not when the whole run does.
+    log = None
     if LOG_DIR:
         os.makedirs(LOG_DIR, exist_ok=True)
-        open(os.path.join(LOG_DIR, f"differential-{part}.log"), "w").write(out)
-    return r.returncode, out, time.time() - start
+        log = open(os.path.join(LOG_DIR, f"differential-{part}.log"), "w", buffering=1)
+    lines = []
+    p = subprocess.Popen(args + ["./" + PKG], cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in p.stdout:
+        lines.append(line)
+        if log:
+            log.write(line)
+    code = p.wait()
+    if log:
+        log.close()
+    print(f"  load at the end:   {uptime()}", flush=True)
+    return code, "".join(lines), time.time() - start
 
 
 def digest():
