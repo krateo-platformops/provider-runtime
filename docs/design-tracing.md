@@ -612,11 +612,18 @@ the first acting pass; with NoParent it has none. The root is never R's child.
 In a Parent pass, the first act step is started by `tracing.StartActStep`:
 - its parent is R (`trace.ContextWithRemoteSpanContext`), so it's in R's
   trace;
-- it carries one link back to its `reconcile` root;
+- it carries one link back to its `reconcile` root, when the root is sampled;
 - it carries the root's three `k8s.object.*` attributes (§4.4);
 - the root adds a link to it (`Span.AddLink`), so the link goes both ways. The
   root adds it only when the act is sampled: an act that isn't is never
   exported (§8);
+- so the two links follow one rule: each is added only when its target is
+  sampled (provider-runtime#74, the user's decision of 2026-11-11, plumbing
+  v1.48.0). "Sampled" is the SDK's head decision. Whether a target is stored is
+  the collector's tail decision, so neither link is guaranteed to resolve in a
+  backend; the rule only stops this process from writing a link it already
+  knows points at nothing. Up to v1.14.3 the act linked to its root
+  unconditionally;
 - it's `SpanKindInternal`, named `create`, `update` or `delete`, as before.
 
 What the provider does under it with the method's `ctx` (its own spans,
@@ -1031,6 +1038,45 @@ wraps `otelhttp.NewTransport` outside httpsignal, as alert-provider does in its
 own transport (`internal/tracing/transport.go:19-30`). The rule above keeps
 otelhttp's header. httpsignal stays a package a provider can choose not to use
 (its package comment: "this package is optional").
+
+### 6.7 Marking passes that act: `provider_runtime.acted`
+
+The root of every pass that starts an act step (create, update or delete)
+carries `provider_runtime.acted=true` (`tracing.AttrActed`, plumbing's
+`tracecontext.AttrActed`). It doesn't matter whether the act joined the
+upstream trace (§6.2) or is an ordinary child of the root. A failed act counts:
+the pass started a change. A pass that only observes carries no such attribute
+at all. It's never set to false, so a sampler rule on `== true` can't match it.
+
+**Why.** The collector's tail sampler keeps only about 5% of a sampled
+provider's routine reconcile traces. A change is rare and is exactly the trace
+worth keeping. Without the mark, most joined acts would link back to a root
+the collector dropped (§6.2), and a non-joined act's own trace, the record of
+the change, would be dropped with the routine ones. observability keeps
+traces whose `reconcile` root carries the attribute, for the services in §8's
+`service.name` table (the user's decision of 2026-11-11; the rule is
+otel-collector-tailsampling 0.1.11, observability#159, widened to all four
+services). The rule shipped first and was inert until a runtime emitted the
+attribute.
+
+**Where.** `tracecontext.MarkActed(ctx)` is the one setter: it marks the span
+active in ctx, which must be the pass's root, and does nothing without a
+recording span. `StartActStep` calls it in both of its branches. In
+provider-runtime only the first joined act goes through `StartActStep`; every
+other act step is a `StartStep` child. So `tracePass.actStep`
+(`pkg/reconciler/traces.go`) calls `tracing.MarkActed` before it opens a
+non-joined act. Its ctx is the pass's `externalCtx`, derived from the root's
+ctx, so the active span is the root. unstructured-runtime calls `MarkActed` at
+every act too, including the acts that open no span.
+
+**Tests** (`pkg/reconciler/tracing_acted_test.go`):
+- joined and non-joined create, update and delete each mark the root, and so
+  does a failed act;
+- the second act for a value, in a Link pass, marks its root;
+- an observe-only pass carries no attribute, with or without an upstream.
+
+Two mutants are killed: dropping the mark on non-joined acts, and marking
+every pass.
 
 ## 7. Errors and status
 
@@ -1942,8 +1988,10 @@ Checked in source:
     They include `TestStartActStepRecordOnlyActGetsNoRootLink`, which closes
     provider-runtime#72. `pkg/tracing` keeps a copy of it, so a plumbing bump
     that broke the guard fails here too. They also include
-    `TestStartActStepLinksToAnUnsampledRootAsInV1141`, which pins
-    provider-runtime#74 as v1.14.1 has it. #74 stays open for its decision.
+    `TestStartActStepLinksToAnUnsampledRootAsInV1141`, which pinned
+    provider-runtime#74 as v1.14.1 has it. #74 was decided on 2026-11-11 (the
+    links are symmetric, §6.2) and shipped in plumbing v1.48.0, which replaces
+    that test with a three-row table.
   - The bump from v1.13.0 to v1.44.0 changes no other module in the build
     graph (`go list -m all`, before and after). The other plumbing packages
     provider-runtime links, `env` and `kubeutil/event`, are byte-identical in

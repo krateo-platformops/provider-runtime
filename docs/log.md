@@ -12,6 +12,29 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — v1.15.0: symmetric act links, and acting passes are marked
+- **A minor release: two tracing behaviours change.** Both are the user's
+  decisions of 2026-11-11. Nothing changes with tracing off.
+- **The act links to its root only when the root is sampled** (#74). Before,
+  the act's link to its root was unconditional, while the root's link to the
+  act needed the act sampled. Now both directions follow one rule: link only to
+  a sampled target. Under `parentbased_always_on`, which every adopting chart
+  uses, every root is sampled, so nothing visible changes today.
+  "Sampled" is the head decision; the collector's tail sampler still decides
+  what's stored (design-tracing §6.2).
+- **`provider_runtime.acted=true` on the root of every pass that starts an act
+  step** (create, update or delete), joined upstream or not, failed or not
+  (design-tracing §6.7). An observe-only pass carries no such attribute, and
+  it's never set to false. observability's tail sampler keeps traces with it
+  (otel-collector-tailsampling 0.1.11), so a change keeps its reconcile even
+  for a provider sampled at 5%. New exports: `tracing.AttrActed` and
+  `tracing.MarkActed`.
+- **Plumbing floor: v1.48.0** (up from v1.45.0), which carries both changes
+  (plumbing#130). Consumers bumping plumbing for unstructured-runtime should
+  go to v1.48.0 if they also adopt this release.
+- **Also since v1.14.3:** a test pins that the default TracerProvider is read
+  on every pass, not once at construction (#79).
+
 ## 2026-11-11 — v1.14.3: shared event names
 - **A patch release. Behaviour is unchanged:** every span, event and
   attribute carries the same bytes as in v1.14.2.

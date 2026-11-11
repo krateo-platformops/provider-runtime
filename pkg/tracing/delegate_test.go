@@ -23,6 +23,7 @@ func TestAliasedNamesAreTheirStrings(t *testing.T) {
 		{"EventConflict", EventConflict, "k8s.conflict"},
 		{"EventMarkerFailed", EventMarkerFailed, "trace.marker_failed"},
 		{"AttrStep", string(AttrStep), "provider_runtime.step"},
+		{"AttrActed", string(AttrActed), "provider_runtime.acted"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)

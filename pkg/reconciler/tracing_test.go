@@ -58,7 +58,8 @@ func mustReconcile(t *testing.T, r *Reconciler, name string) {
 
 // design-tracing §10, test 1. A pass that observes and updates makes exactly
 // reconcile (Server) with connect, observe and update (Internal) under it. The
-// root has exactly the three attributes, with the Kind alone, and starts no
+// root has exactly the three object attributes, with the Kind alone, plus
+// provider_runtime.acted=true because the pass updates (#74), and starts no
 // later than the Get.
 func TestTracingShape(t *testing.T) {
 	s := newTraceServer(t, newWidget("w1", nil))
@@ -76,10 +77,16 @@ func TestTracingShape(t *testing.T) {
 		t.Error("root starts before Reconcile was called")
 	}
 	want := map[attribute.Key]string{"k8s.object.kind": "Widget", "k8s.object.name": "w1", "k8s.object.namespace": "demo"}
-	if len(root.Attributes()) != 3 {
-		t.Errorf("root attributes = %v, want exactly the three", root.Attributes())
+	if len(root.Attributes()) != 4 {
+		t.Errorf("root attributes = %v, want exactly the three object attributes and acted", root.Attributes())
 	}
 	for _, kv := range root.Attributes() {
+		if kv.Key == tracing.AttrActed {
+			if !kv.Value.AsBool() {
+				t.Errorf("%s = %v, want true", kv.Key, kv.Value.AsBool())
+			}
+			continue
+		}
 		if want[kv.Key] != kv.Value.AsString() {
 			t.Errorf("%s = %q, want %q", kv.Key, kv.Value.AsString(), want[kv.Key])
 		}

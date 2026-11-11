@@ -72,3 +72,11 @@ func StartActStep(ctx context.Context, tp trace.TracerProvider, obj Object, step
 func StartStep(ctx context.Context, tp trace.TracerProvider, step string) (context.Context, trace.Span) {
 	return tracecontext.StartStep(ctx, tracer(tp), step)
 }
+
+// MarkActed sets AttrActed on the span active in ctx, which must be the pass's
+// reconcile root. StartActStep marks the root itself, so a caller needs
+// MarkActed only for an act it opens with StartStep. Without a recording span
+// in ctx it does nothing.
+func MarkActed(ctx context.Context) {
+	tracecontext.MarkActed(ctx)
+}
