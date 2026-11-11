@@ -994,8 +994,10 @@ difference's 90% interval is Welch's.
    bootstrap's 95% interval must be narrower than `0.15·S*`. If the rule doesn't
    determine it, the band is reported, not judged. This holds whether or not the
    fidelity tests below pass. **The GKE measurement only reports the engine
-   plant's fidelity**; 4.14 enters no condition. On the uncalibrated plant the
-   interval is 0.59 wide against 0.70 at ten seeds, so determined.
+   plant's fidelity**; 4.14 enters no condition. The rule uses the forty-seed
+   bootstrap width of the calibrated plant (item 3). The earlier ten-seed outputs
+   of the uncalibrated plant (`curve-engine-b2e5757.txt`; there the interval is
+   0.59 wide against 0.70) decide nothing.
 2. **Both drain plants get the same absolute per-reconcile excess**, the
    controller's own work, which doesn't scale with the burn.
 3. **The drain plants' freeze uses forty seeds, 9001–9040** (the re-check's M5,
@@ -1003,7 +1005,11 @@ difference's 90% interval is Welch's.
    This replaces ten seeds; nothing else changes. Seeds 1–40 stay the gate's,
    21–40 reserved for the confirmation. The predicted seed-bootstrap width at
    forty seeds is about 0.27 slots (the auditor's estimate; 0.59·√(10/40) ≈ 0.30),
-   with a standard error of about 0.07, against `0.15·S*` ≈ 0.67.
+   with a standard error of about 0.07, against `0.15·S*` ≈ 0.67. A freeze run
+   at `f45adb6` was started and then stopped when the auditor's last items
+   arrived, before they were pre-registered. Its only output was the test's
+   start line (21 bytes, no plant's result), and it was deleted unread. The
+   one-shot run is the next one, at the commit that carries these items.
 
 **The calibration, from directly measured quantities, not fitted to `U`:**
 
@@ -1056,10 +1062,15 @@ values, the determinacy decision and these tests.
   - Disclosed: on the uncalibrated plant it passes at 3, 6 and 7 and fails at 4
     and 5 (the table).
   - **It is reported, not judged** (the re-check's L8). GKE has two runs at
-    `n` = 3, so if it fails there the report says "not shown; at n = 3 the test
-    can only pass if |Δ| < 0.0032", gives the 90% intervals, and states that a
-    failure isn't evidence that the plants differ. At 6–7 it is near-automatic,
-    so (i) is weak at both ends.
+    `n` = 3, so if it fails there the report says "not shown; at n=3 the test
+    can only pass if |Δ| < 0.0037", gives the 90% intervals, and states that a
+    failure isn't evidence that the plants differ. The limit 0.0037 is
+    pre-registered: `δ − t·se` at forty seeds, with the engine sd at `n` = 3 taken
+    from the uncalibrated plant's ten seeds (0.0068) and GKE's pooled sd at
+    `n` = 3–5 (0.0058 on 11 df), giving 0.00366. At ten seeds the same
+    computation gives 0.0031 (L8 quoted 0.0032, from rounded inputs). The report
+    also prints the limit with the run's own engine sd, beside the fixed one. At
+    6–7 the test is near-automatic, so (i) is weak at both ends.
 - **(ii) The engine against MVA at the same `c`** (3157 ms, think time 28.5 s),
   which needs no measurement, **the informative test**. Per `n`, engine − MVA with
   its `t(39)` interval,
@@ -1083,8 +1094,9 @@ drain that means:
 
 From `drain0`:
 
-- `S*₀` falls from 6.95 to about 6.65 (MVA 7.11 → 6.65 at 1500 → 1657 ms), so
-  `N₀ = ⌈S*₀⌉` stays 7, to be confirmed at the freeze;
+- `S*₀`, on the ten-seed basis, falls from about 7.13 to about 6.67 (MVA 7.11 →
+  6.65 at 1500 → 1657 ms; the frozen 6.95 is seed 9001's alone), so `N₀ = ⌈S*₀⌉`
+  is 7 either way, to be confirmed at the freeze;
 - `D*₀` rises from 46.4 s to about 49.0 s (Little, `S*₀/X*₀`), and with it
   `τ_ĉ = D*₀/r̄`, the long drain's precondition, from 928 s to about 980 s;
 - `nStart` and `nFrom` (62 now) and `X_cap,0` (0.162/s, to about 0.147/s);
@@ -1112,8 +1124,9 @@ engine at `b2e5757`:
 | drain | 3.905 / 4.822 / 4.492 | 0.917 | 0.59 | no |
 
 The drain plants are frozen from forty-seed mean curves instead, so for them the
-rule is the measurement's (decision 1): the seed bootstrap's 95% interval
-narrower than `0.15·S*`. Every other case's band is judged as now. The rule is
+rule is the measurement's (decision 1): the seed bootstrap's 95% interval at
+forty seeds narrower than `0.15·S*`. That applies to `drain0` as well as `drain`,
+each with its own bootstrap, and the freeze still stops if `N₀` isn't 7. Every other case's band is judged as now. The rule is
 re-applied whenever a plant is re-frozen, the calibrated drain plants included.
 In the code, `TestFreeze` applies the rule to every plant. If a short plant is
 undetermined, or `N₀` isn't 7, it stops for review and writes nothing. Each drain
