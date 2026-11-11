@@ -19,8 +19,15 @@ hack/revert-check-credential-use-2.txt is the old base's run (7ba9d76);
 hack/revert-check-credential-use-2.new-base.txt is the new base's, side by
 side with it for the gate (docs/credential-use-model-reduction.md §3.3).
 REVERT_TIMEOUT_S sets go test's timeout per run (default 3000).
+
+Mutants can be split across clones that run side by side: name them by
+number, from 1 in MUTANTS' order, or as ranges ("3-6 9"). A clone that runs
+only mutants may leave the baseline to another clone of the same commit with
+--no-baseline, which says so in its output; every mutant's line gives its
+start and end (UTC) either way:
+  python3 hack/revert-check-credential-use-2.py --no-baseline 3-6
 """
-import hashlib, os, re, signal, subprocess, sys
+import hashlib, os, re, signal, subprocess, sys, time
 
 # Every line reaches the output file as it is printed, not when the run ends.
 sys.stdout.reconfigure(line_buffering=True)
@@ -168,13 +175,43 @@ def killers(out):
 
 
 
+def selected(args):
+    """The mutants' numbers the arguments name (all, with none)."""
+    nums = set()
+    for a in args:
+        lo, _, hi = a.partition("-")
+        nums |= set(range(int(lo), int(hi or lo) + 1))
+    if not nums:
+        return set(range(1, len(MUTANTS) + 1))
+    if not nums <= set(range(1, len(MUTANTS) + 1)):
+        sys.exit(f"mutants are numbered 1 to {len(MUTANTS)}: {sorted(nums)}")
+    return nums
+
+
+def utc():
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+
+
+def commit():
+    return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+
+
+def load():
+    return subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
+
+
+args = sys.argv[1:]
+no_baseline = "--no-baseline" in args
+chosen = selected([a for a in args if a != "--no-baseline"])
 start = digest()
-base = go_test()
-if base.returncode != 0:
-    print("BASELINE FAILED: the run is invalid\n" + (base.stdout + base.stderr)[-3000:])
-    sys.exit(1)
-print("baseline passed, commit " + subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
-      + ", load " + subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip() + "\n")
+if no_baseline:
+    print(f"baseline left to another clone of commit {commit()} (--no-baseline); mutants {sorted(chosen)}; load {load()}\n")
+else:
+    base = go_test()
+    if base.returncode != 0:
+        print("BASELINE FAILED: the run is invalid\n" + (base.stdout + base.stderr)[-3000:])
+        sys.exit(1)
+    print(f"baseline passed, commit {commit()}, mutants {sorted(chosen)}, load {load()}\n")
 
 # A run stopped by a signal restores the file it is mutating before it exits:
 # a terminated process skips finally blocks.
@@ -191,7 +228,9 @@ signal.signal(signal.SIGTERM, on_signal)
 signal.signal(signal.SIGINT, on_signal)
 
 counts = {}
-for name, f, edits in MUTANTS:
+for num, (name, f, edits) in enumerate(MUTANTS, 1):
+    if num not in chosen:
+        continue
     full = os.path.join(ROOT, PKG, f)
     src = open(full).read()
     bad = [old for old, _ in edits if src.count(old) != 1]
@@ -203,15 +242,18 @@ for name, f, edits in MUTANTS:
     for old, new in edits:
         mutated = mutated.replace(old, new)
     restore = (full, src)
+    began = utc()
+    print(f"          mutant {num} started {began}", flush=True)
     try:
         open(full, "w").write(mutated)
         state, detail = classify(go_test())
     finally:
         open(full, "w").write(src)
+        restore = None
     if state == "SURVIVED" and name in EQUIVALENT:
         state, detail = "EQUIVALENT", EQUIVALENT[name]
     counts[state] = counts.get(state, 0) + 1
-    print(f"{state:9} {name}\n          {detail}", flush=True)
+    print(f"{state:9} {name}\n          {detail}\n          mutant {num}: {began} to {utc()}", flush=True)
 
-print("\n" + " ".join(f"{k}={v}" for k, v in sorted(counts.items())) + f" of {len(MUTANTS)}")
+print("\n" + " ".join(f"{k}={v}" for k, v in sorted(counts.items())) + f" of {len(chosen)} run here, of {len(MUTANTS)}")
 print("tree restored" if digest() == start else "TREE DIFFERS FROM THE START")
