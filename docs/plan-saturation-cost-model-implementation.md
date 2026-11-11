@@ -1003,8 +1003,12 @@ difference's 90% interval is Welch's.
   CPU per completion, which reproduces what GKE produced. Its expected value with
   the design's 3000 ms draws is 3134 ms; at MVA's slope the difference is about
   0.02 slots (MVA 4.325 against 4.347).
-- **`drainBase` (`drain0`) becomes 1634 ms**: 1500 + 134, the same absolute
-  excess, so the long drain's cost change is ×1.93 (1634 → 3157 ms).
+- **`drainBase` (`drain0`) becomes 1657 ms**: 1500 + 157, the same absolute
+  excess as the drain plant's, so the long drain's cost change is ×1.905
+  (1657 → 3157 ms). Disclosed: the pair with the expected-value excess of
+  134 ms, 1634 and 3134 ms, differs by about 0.02 slots in the drain plant's `S*`
+  (MVA 4.325 against 4.347) and about 0.06 in `drain0`'s (MVA 6.65 against
+  6.71); neither changes `N₀`.
 - **Nothing else changes**: the waits (28,500 ms), the jitter (0.1), the limit
   and `Procs` stay.
 - **Disclosed:** `c` comes from the same 22 runs the fidelity test compares
@@ -1055,11 +1059,11 @@ drain that means:
 
 From `drain0`:
 
-- `S*₀` falls from 6.95 to about 6.7 (MVA 7.11 → 6.71 at 1500 → 1634 ms), so
+- `S*₀` falls from 6.95 to about 6.65 (MVA 7.11 → 6.65 at 1500 → 1657 ms), so
   `N₀ = ⌈S*₀⌉` stays 7, to be confirmed at the freeze;
-- `D*₀` rises from 46.4 s to about 48.7 s (Little, `S*₀/X*₀`), and with it
-  `τ_ĉ = D*₀/r̄`, the long drain's precondition, from 928 s to about 974 s;
-- `nStart` and `nFrom` (62 now) and `X_cap,0` (0.162/s, to about 0.149/s);
+- `D*₀` rises from 46.4 s to about 49.0 s (Little, `S*₀/X*₀`), and with it
+  `τ_ĉ = D*₀/r̄`, the long drain's precondition, from 928 s to about 980 s;
+- `nStart` and `nFrom` (62 now) and `X_cap,0` (0.162/s, to about 0.147/s);
 - the "false restarts, 30s" case, whose plant is `drain0` itself, and its band.
 
 Each moved value is reported old against new. If `N₀` isn't 7, the freeze stops
