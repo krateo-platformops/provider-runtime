@@ -346,8 +346,13 @@ Three things follow:
   whose status is the pass's read plus `mutate`. If another writer changed
   status between the runtime's Get and oasgen's re-read, `cur` carries that
   change and `cr` doesn't. The runtime's next write is then version-current
-  and reverts it. That's harmless while nothing else writes RestDefinition
-  status (I found no other writer, but didn't search the cluster). It's the
+  and reverts it. No other code writes RestDefinition status today:
+  oasgen-provider's session confirmed (2026-11-11) that `persistStatusWithRetry`
+  is the only path, and that `prune.go:201`'s `Status().Update` writes a CRD,
+  not a RestDefinition. The residual risk is outside any code: an operator's
+  `kubectl patch --subresource=status`, for example to clear a stuck
+  condition, would be reverted the same way. That's a property of the
+  re-read pattern, so it belongs in the contract's caveats. It's the
   case design-tracing §6.2's lock exists for: a version may be copied back only
   when the write was locked on the version `mg` carries. git-provider's
   conflict branch has the same hazard in another form: it keeps the pass's
@@ -447,6 +452,16 @@ gains a rule that applies to all four methods:
 > another writer's change. A write that leaves `mg` stale makes the runtime's
 > next write of the object fail with a conflict. After Observe, that includes
 > the finalizer, create-pending and marker writes as well as status.
+> Copy the new resourceVersion onto `mg` only after a write succeeded: an
+> attempt that read and then failed to write must leave `mg` untouched.
+> A re-read-then-write still reverts a change someone else made between the
+> runtime's read and yours, including a human's status patch; write `mg`
+> itself if that matters.
+
+The ordering rule is from oasgen-provider's implementation, where the version
+is assigned inside the retry closure only after `Status().Update` returns nil,
+with a test guarding it (`restdefinition.go:2122-2165`). A wrong version
+succeeds against the wrong object state; a stale one fails loudly.
 
 This replaces "(at least its resourceVersion)" in the issue's option 1, for
 the reasons in §4.
@@ -456,9 +471,10 @@ returns a message that names the likely cause and keeps the pass's own error:
 
 ```
 cannot update managed resource status: the object changed during this pass
-(read at resourceVersion V): if an ExternalClient method wrote it, the method
-must leave mg current (see ExternalClient); pass error: <the error the pass was
-returning, if any>
+(read at resourceVersion V): if an ExternalClient method writes the object
+itself, it must copy the written resourceVersion and the fields it wrote back
+onto mg (see ExternalClient); pass error: <the error the pass was returning,
+if any>
 ```
 
 `errUpdateManagedStatus` stays the prefix, so existing searches still match.
@@ -837,12 +853,19 @@ core-provider `0e8dc06`, 2026-11-11):
   once from `Setup` (`:148`), not per reconcile.
 - Observe reads `status.scaleToZero` (§8.2).
 
+**And by oasgen-provider's session** (at its origin/main, 2026-11-11): §4's
+row, all five line numbers; `persistStatusWithRetry` is the only writer of
+RestDefinition status; rest-dynamic-controller writes status only on the
+generated resources. Its message to the issue: a runtime retry would have
+hidden #579, whose exact one-conflict-per-definition ratio is what made it
+diagnosable, so it argues for option 1, with the message naming the
+handler's mirror (now in §7.1).
+
 **Not checked:**
 - **Other packages in these repos.** I didn't read them, so a writer of the
   managed object elsewhere (for example in core-provider's
   `composition-dynamic-controller`, or oasgen's `rest-dynamic-controller`) may
   exist.
-- **Whether any other writer touches RestDefinition status** (§4).
 - **Clusters.** Nothing was run against a cluster, and no tests were run;
   this note is reading only.
 - **Crossplane's issue tracker.** A search for this symptom in
