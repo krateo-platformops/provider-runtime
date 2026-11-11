@@ -133,6 +133,20 @@ func meanVar(xs []float64) (m, v float64) {
 	return m, v / float64(len(xs)-1)
 }
 
+// n3Limit is test (i)'s largest |Δ| that can pass at n = 3, pre-registered
+// (plan §4.5): δ − t·se with forty seeds, the engine sd at n = 3 taken from the
+// uncalibrated plant's ten seeds (0.0068), and GKE's pooled sd at n = 3..5.
+const n3Limit = 0.0037
+
+// welch is the standard error of engine − GKE and the one-sided 95% t quantile
+// on the Welch–Satterthwaite df nu: the engine's variance ev over k seeds,
+// GKE's pooled sd sg over gk runs on dfg df.
+func welch(ev, k, sg, gk, dfg float64) (se, t, nu float64) {
+	a, b := ev/k, sg*sg/gk
+	nu = (a + b) * (a + b) / (a*a/(k-1) + b*b/dfg)
+	return math.Sqrt(a + b), tQuantile(0.95, nu), nu
+}
+
 // gkePooled is the GKE between-run sd pooled over the n given, and its df.
 func gkePooled(ns ...int) (sd float64, df int) {
 	var ss float64
@@ -180,18 +194,15 @@ func fidelity(runs [][]curvePoint, sStar, seBoot float64, c float64) string {
 		if n >= 6 {
 			sg, dfg = gkePooled(6, 7)
 		}
-		gk := float64(len(gkeRuns[n]))
-		a, bb := ev/k, sg*sg/gk
-		se := math.Sqrt(a + bb)
-		nu := (a + bb) * (a + bb) / (a*a/(k-1) + bb*bb/float64(dfg))
-		t := tQuantile(0.95, nu)
+		se, t, nu := welch(ev, k, sg, float64(len(gkeRuns[n])), float64(dfg))
 		d := em - gm
 		pass := math.Abs(d)+t*se < fidelityDelta
 		all = all && pass
 		fmt.Fprintf(&b, "  n=%d engine %.4f GKE %.4f (k=%d, pooled sd %.4f on %d df) Δ %+.4f [%+.4f, %+.4f] ν %.1f: %s\n",
 			n, em, gm, len(gkeRuns[n]), sg, dfg, d, d-t*se, d+t*se, nu, map[bool]string{true: "equivalent", false: "not shown"}[pass])
 		if n == 3 && !pass {
-			fmt.Fprintf(&b, "    not shown; at n=3 the test can only pass if |Δ| < 0.0032. A failure isn't evidence that the plants differ.\n")
+			fmt.Fprintf(&b, "    not shown; at n=3 the test can only pass if |Δ| < %.4f. A failure isn't evidence that the plants differ.\n", n3Limit)
+			fmt.Fprintf(&b, "    (the limit with this run's own engine sd: |Δ| < %.4f)\n", fidelityDelta-t*se)
 		}
 	}
 	em8, _ := meanVar(col(8))
@@ -323,7 +334,17 @@ func TestFreezeStats(t *testing.T) {
 			t.Errorf("mvaU(%d) = %.4f, want %.4f", n, got, want)
 		}
 	}
-	if sd, df := gkePooled(3, 4, 5); df != 11 || math.Abs(sd-0.0058) > 1e-4 {
+	sd, df := gkePooled(3, 4, 5)
+	if df != 11 || math.Abs(sd-0.0058) > 1e-4 {
 		t.Errorf("pooled sd at n = 3..5 = %.4f on %d df, want 0.0058 on 11", sd, df)
+	}
+	// The n = 3 pass limit with the uncalibrated sd 0.0068: 0.0031 at ten seeds
+	// (the review's L8 quoted 0.0032, from rounded inputs), and the
+	// pre-registered n3Limit at forty (0.00366).
+	for _, c := range []struct{ k, want float64 }{{10, 0.0031}, {drainSeeds, n3Limit}} {
+		se, tq, _ := welch(0.0068*0.0068, c.k, sd, 2, float64(df))
+		if got := fidelityDelta - tq*se; math.Abs(got-c.want) > 5e-5 {
+			t.Errorf("the n = 3 limit at %v seeds = %.5f, want %.4f", c.k, got, c.want)
+		}
 	}
 }
