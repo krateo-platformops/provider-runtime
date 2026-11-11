@@ -270,8 +270,10 @@ func (fns ExternalConnectDisconnecterFns) Disconnect(ctx context.Context) error 
 //
 // The runtime does not retry or merge a status write that conflicts. It
 // returns the error, which names this rule and keeps the pass's own error.
-// reconcilertest.AssertLeavesManagedCurrent checks the rule in a provider's
-// tests.
+// Two helpers check the rule in a provider's tests:
+// reconcilertest.AssertLeavesManagedCurrent, that a method's successful write
+// leaves mg current, and reconcilertest.AssertFailedWriteLeavesManaged, that a
+// failed write leaves mg's resourceVersion untouched.
 type ExternalClient interface {
 	// Observe the external resource the supplied Managed resource
 	// represents, if any. Observe implementations must not modify the
