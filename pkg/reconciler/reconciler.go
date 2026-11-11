@@ -748,9 +748,15 @@ func WithThrottledRecorder(er event.Recorder) ReconcilerOption {
 // WithAPIReader gives the Reconciler a reader that reads the API server live,
 // such as mgr.GetAPIReader(). It's used for one thing: when a status write
 // conflicts, the Reconciler reads the object once through it and adds to the
-// error the live resourceVersion, the top-level status keys that differ from
-// the pass's read, and the newest managedFields entry, as a hint. Nothing is
-// decided from that read. A failed read gives the plain message.
+// error the live resourceVersion and generation, the top-level status keys
+// that differ from the pass's read, and the newest managedFields entry, as a
+// hint. Nothing is decided from that read. A failed read gives the plain
+// message.
+//
+// Setting it costs one in-memory deep copy of the managed object per pass (the
+// pass's read, kept for the comparison), and one uncached Get, only when a
+// status write conflicts. With a rate-limit governor too, the governor reuses
+// that copy, so a pass still takes one.
 //
 // Without it, or with a nil reader, a status conflict's error is the plain
 // message. NewReconciler can't take the reader from its manager itself: a
@@ -892,11 +898,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 // reconcile span; externalCtx is the provider calls' context, with the external
 // timeout. The pass's own spans, events and the marker go through pass.
 func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Logger, managed resource.Managed, pass *tracePass) (reconcile.Result, error) { //nolint:gocyclo // See note below.
-	// read is the object as the pass read it, kept only for a status conflict's
-	// message, which compares the live object's status with it. It's taken only
-	// when there's a live reader to compare with.
+	// read is the object as the pass read it. A status conflict's message
+	// compares the live object's status with it, and the governor's deferral
+	// reuses it as pristine (below), so a pass takes at most one deep copy. It's
+	// taken only when one of them is set.
 	var read resource.Managed
-	if r.apiReader != nil {
+	if r.apiReader != nil || r.governor != nil {
 		read, _ = managed.DeepCopyObject().(resource.Managed)
 	}
 	// writeStatus is every status write of the pass. Each is the last write of
@@ -1001,9 +1008,14 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 
 	// pristine is the object as read, so a deferral that would write it back
 	// unchanged can skip the status update. Taken only with a governor.
+	// It's read, unless the marker was written above: that write moved the
+	// version, and pristine must be the object after it.
 	var pristine resource.Managed
 	if r.governor != nil {
-		pristine, _ = managed.DeepCopyObject().(resource.Managed)
+		pristine = read
+		if pristine == nil || pristine.GetResourceVersion() != managed.GetResourceVersion() {
+			pristine, _ = managed.DeepCopyObject().(resource.Managed)
+		}
 	}
 	// deferred ends a pass whose next external call the governor deferred.
 	deferred := func(d *ratelimit.Deferral) (reconcile.Result, error) {

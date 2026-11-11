@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -18,6 +19,7 @@ import (
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 	"github.com/krateo-platformops/provider-runtime/pkg/tracing"
 )
 
@@ -57,8 +59,10 @@ func handlerWrite(t *testing.T, s *traceServer, mirror string) func(ctx context.
 type liveReader struct {
 	client.Reader
 	fields []metav1.ManagedFieldsEntry
-	err    error
-	gets   int
+	// generation, when set, is the live object's, as after a spec edit.
+	generation int64
+	err        error
+	gets       int
 }
 
 func (l *liveReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -70,6 +74,9 @@ func (l *liveReader) Get(ctx context.Context, key client.ObjectKey, obj client.O
 		return err
 	}
 	obj.SetManagedFields(l.fields)
+	if l.generation != 0 {
+		obj.SetGeneration(l.generation)
+	}
 	return nil
 }
 
@@ -86,13 +93,30 @@ func stampedFields() []metav1.ManagedFieldsEntry {
 	}
 }
 
-// plainMessage is the status conflict's message without a live read.
-func plainMessage(rv string, passErr string) string {
-	m := errUpdateManagedStatus + ": the object changed during this pass (read at resourceVersion " + rv + "): " + errStatusConflictCause
+// plainMessage is the status conflict's message without a live read, for a
+// write that carried rv and got conflict.
+func plainMessage(conflict, rv, passErr string) string {
+	m := errUpdateManagedStatus + ": " + conflict + ": the object changed since the pass's read (read at resourceVersion " + rv + "): " + errStatusConflictCause
 	if passErr != "" {
 		m += "; pass error: " + passErr
 	}
 	return m
+}
+
+// conflictText is the API server's text of the conflict err carries. It must
+// name the object, so a search for it, or for the API server's wording, finds
+// the error.
+func conflictText(t *testing.T, err error) string {
+	t.Helper()
+	var st kerrors.APIStatus
+	if !errors.As(err, &st) || st.Status().Reason != metav1.StatusReasonConflict {
+		t.Fatalf("%v carries no conflict", err)
+	}
+	text := st.Status().Message
+	if !strings.Contains(text, "Operation cannot be fulfilled on") || !strings.Contains(text, `"w"`) {
+		t.Errorf("conflict text %q isn't the API server's conflict on the object", text)
+	}
+	return text
 }
 
 func TestStatusConflictNamesItsCause(t *testing.T) {
@@ -143,7 +167,7 @@ func TestStatusConflictNamesItsCause(t *testing.T) {
 			if res != (reconcile.Result{}) {
 				t.Errorf("result = %+v, want none: the error requeues", res)
 			}
-			if want := plainMessage(rv, tc.wantMsg); err.Error() != want {
+			if want := plainMessage(conflictText(t, err), rv, tc.wantMsg); err.Error() != want {
 				t.Errorf("error:\n got %q\nwant %q", err.Error(), want)
 			}
 			if !strings.HasPrefix(err.Error(), errUpdateManagedStatus+": ") {
@@ -182,7 +206,10 @@ func TestStatusConflictKeepsTheUnresolvedCreatesError(t *testing.T) {
 
 	_, err := newTraceReconciler(s, p).Reconcile(context.Background(), reqFor("w"))
 
-	if want := plainMessage(rv, errCreateIncomplete); err == nil || err.Error() != want {
+	if err == nil {
+		t.Fatal("Reconcile returned nil; a status conflict must stay an error")
+	}
+	if want := plainMessage(conflictText(t, err), rv, errCreateIncomplete); err.Error() != want {
 		t.Errorf("error:\n got %v\nwant %q", err, want)
 	}
 }
@@ -202,7 +229,7 @@ func TestStatusConflictReadsTheLiveObject(t *testing.T) {
 
 	var reader *liveReader
 	s, res, err := updateWritesAndFails(t, errBoom, func(s *traceServer) []ReconcilerOption {
-		reader = &liveReader{Reader: s.raw, fields: stampedFields()}
+		reader = &liveReader{Reader: s.raw, fields: stampedFields(), generation: 2}
 		return []ReconcilerOption{WithAPIReader(reader)}
 	})
 	if err == nil {
@@ -212,7 +239,7 @@ func TestStatusConflictReadsTheLiveObject(t *testing.T) {
 		t.Errorf("live reads = %d, want exactly one per status conflict", reader.gets)
 	}
 
-	live := "live resourceVersion " + s.widget("w").GetResourceVersion() +
+	live := "live resourceVersion " + s.widget("w").GetResourceVersion() + " and generation 2 (the pass's generation 0)" +
 		", status keys that differ from the pass's read: [state]" +
 		`, newest managedFields entry (a hint, not proof of who wrote): manager "my-provider", Update of status, at 2026-11-11T10:00:05Z`
 	msg := err.Error()
@@ -246,7 +273,7 @@ func TestStatusConflictNoStatusKeyDiffers(t *testing.T) {
 
 	_, err := newTraceReconciler(s, p, WithAPIReader(&liveReader{Reader: s.raw})).Reconcile(context.Background(), reqFor("w"))
 
-	want := "; live resourceVersion " + s.widget("w").GetResourceVersion() + ", no status key differs from the pass's read"
+	want := "; live resourceVersion " + s.widget("w").GetResourceVersion() + " and generation 0 (the pass's generation 0), no status key differs from the pass's read"
 	if err == nil || !strings.HasSuffix(err.Error(), want) {
 		t.Errorf("error:\n got %v\nwant it to end with %q", err, want)
 	}
@@ -275,7 +302,10 @@ func TestStatusConflictWithoutALiveReader(t *testing.T) {
 
 			_, err := newTraceReconciler(s, p, opts(s)...).Reconcile(context.Background(), reqFor("w"))
 
-			if want := plainMessage(rv, ""); err == nil || err.Error() != want {
+			if err == nil {
+				t.Fatal("Reconcile returned nil; a status conflict must stay an error")
+			}
+			if want := plainMessage(conflictText(t, err), rv, ""); err.Error() != want {
 				t.Errorf("error:\n got %v\nwant %q", err, want)
 			}
 		})
@@ -411,5 +441,35 @@ func TestNewestManagedFields(t *testing.T) {
 	}
 	if _, ok := newestManagedFields([]metav1.ManagedFieldsEntry{{Manager: "no-time"}}); ok {
 		t.Error("an entry without a time must not be chosen")
+	}
+}
+
+// A status conflict's error is still an API error to the checks a plain
+// errors.Wrap of the conflict satisfied: resource.IsAPIErrorWrapped (through
+// pkg/errors.Cause, which follows only a single Unwrap), kerrors.IsConflict,
+// and a Cause method.
+func TestStatusConflictIsStillAnAPIError(t *testing.T) {
+	conflict := conflictErr()
+	errBoom := errors.New("boom")
+	err := (&Reconciler{}).statusConflict(context.Background(), newWidget("w", nil), nil, conflict, errBoom)
+
+	for name, e := range map[string]error{"Bare": err, "Wrapped": fmt.Errorf("outer: %w", err)} {
+		if !resource.IsAPIErrorWrapped(e) {
+			t.Errorf("%s: resource.IsAPIErrorWrapped = false, want true", name)
+		}
+		if !kerrors.IsConflict(e) {
+			t.Errorf("%s: kerrors.IsConflict = false, want true", name)
+		}
+		if !errors.Is(e, conflict) || !errors.Is(e, errBoom) {
+			t.Errorf("%s: errors.Is must find both the conflict and the pass error", name)
+		}
+	}
+	c, ok := err.(interface{ Cause() error })
+	if !ok || c.Cause() != conflict {
+		t.Errorf("Cause() = %v, want the conflict", c)
+	}
+	var st kerrors.APIStatus
+	if !errors.As(err, &st) || st.Status().Message != conflict.Error() {
+		t.Errorf("the API status must be the conflict's")
 	}
 }

@@ -2,12 +2,15 @@ package reconciler
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
 	"time"
 
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,8 +19,9 @@ import (
 )
 
 // errStatusConflictCause is what a status conflict's error says after the
-// errUpdateManagedStatus prefix and the version, before the live hint and the
-// pass's own error (docs/design-status-write-conflict.md §7.1).
+// errUpdateManagedStatus prefix, the conflict's own text and the version,
+// before the live hint and the pass's own error
+// (docs/design-status-write-conflict.md §7.1).
 const errStatusConflictCause = "if an ExternalClient method writes the object itself, it must copy the written " +
 	"resourceVersion and the fields it wrote back onto mg (see ExternalClient)"
 
@@ -25,6 +29,11 @@ const errStatusConflictCause = "if an ExternalClient method writes the object it
 // names the likely cause, and keeps the pass's own error, which a plain
 // wrapped conflict would have hidden. It unwraps to both the conflict and the
 // pass's error, so kerrors.IsConflict and errors.Is still see them.
+//
+// It is also a kerrors.APIStatus, the conflict's, and its Cause is the
+// conflict. pkg/errors.Cause follows only a single Unwrap, so without that
+// resource.IsAPIErrorWrapped, which a plain errors.Wrap of the conflict
+// satisfied, would turn false.
 type statusConflictError struct {
 	// version is the resourceVersion the status write carried.
 	version string
@@ -36,8 +45,10 @@ type statusConflictError struct {
 
 func (e *statusConflictError) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: the object changed during this pass (read at resourceVersion %s): %s",
-		errUpdateManagedStatus, e.version, errStatusConflictCause)
+	// The prefix and the conflict's own text come first, as errors.Wrap wrote them
+	// before, so "the object has been modified" and the object's name stay greppable.
+	fmt.Fprintf(&b, "%s: %v: the object changed since the pass's read (read at resourceVersion %s): %s",
+		errUpdateManagedStatus, e.conflict, e.version, errStatusConflictCause)
 	if e.live != "" {
 		b.WriteString("; ")
 		b.WriteString(e.live)
@@ -56,6 +67,20 @@ func (e *statusConflictError) Unwrap() []error {
 	return []error{e.conflict, e.pass}
 }
 
+// Cause is the conflict, for callers that follow a Cause method, as
+// github.com/pkg/errors does.
+func (e *statusConflictError) Cause() error { return e.conflict }
+
+// Status is the conflict's API status, so the error is a kerrors.APIStatus
+// itself.
+func (e *statusConflictError) Status() metav1.Status {
+	var st kerrors.APIStatus
+	if errors.As(e.conflict, &st) {
+		return st.Status()
+	}
+	return metav1.Status{Status: metav1.StatusFailure, Code: http.StatusConflict, Reason: metav1.StatusReasonConflict, Message: e.conflict.Error()}
+}
+
 // statusConflict is the error for a status write of managed that returned
 // conflict, on a pass that goes on to return passErr (or nil). With a live
 // reader, it reads the object once and describes it against read, the object
@@ -71,7 +96,8 @@ func (r *Reconciler) statusConflict(ctx context.Context, managed, read resource.
 }
 
 // describeLive reads managed live and says how it differs from read: its
-// resourceVersion, the top-level status keys that differ, and the newest
+// resourceVersion, its generation next to the pass's (a spec edit moves it, a
+// status write doesn't), the top-level status keys that differ, and the newest
 // managedFields entry, labelled as a hint. It returns "" when there's no live
 // reader or the read fails.
 func (r *Reconciler) describeLive(ctx context.Context, managed, read resource.Managed) string {
@@ -82,7 +108,8 @@ func (r *Reconciler) describeLive(ctx context.Context, managed, read resource.Ma
 	if err := r.apiReader.Get(ctx, client.ObjectKeyFromObject(managed), live); err != nil {
 		return ""
 	}
-	parts := []string{"live resourceVersion " + live.GetResourceVersion()}
+	parts := []string{fmt.Sprintf("live resourceVersion %s and generation %d (the pass's generation %d)",
+		live.GetResourceVersion(), live.GetGeneration(), managed.GetGeneration())}
 	if read != nil {
 		if keys, ok := statusKeysThatDiffer(read, live); ok {
 			if len(keys) == 0 {
