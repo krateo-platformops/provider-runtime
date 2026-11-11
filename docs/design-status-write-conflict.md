@@ -324,10 +324,13 @@ Three things follow:
   they write.
 - **core-provider has a real concurrent status writer,** in the same process
   and through the same client. Today the runtime's whole-status write at rows
-  17 to 20 conflicts after a `scaleToZero` patch, and the version check is
-  what stops it from reverting the hold-down state (the comment at
-  `scaletozero_reconciler.go:242-247` says why a stale `lastSeen` matters).
-  That's C3's case in production code.
+  17 to 20 conflicts after a `scaleToZero` patch, and the runtime's version
+  check is what stops it from reverting the hold-down state. The patch itself
+  carries no resourceVersion: `persist` (`scaletozero_reconciler.go:270-283`)
+  sends a JSON merge patch, and `:242-247` documents its explicit nulls (a
+  merge patch that omits a key leaves a stale `lastSeen`), not a version
+  check. That's C3's case in production code. core-provider's session
+  confirmed both claims at core-provider `0e8dc06` (2026-11-11).
 
 **Two cautions for option 1's wording,** both found in this read:
 - **Mirroring only the resourceVersion is wrong.** The issue says "(at least
@@ -585,9 +588,18 @@ is excluded explicitly (§3.1). The reconciler needs a live reader, so
   it read it, and a concurrent writer changes A. The deltas are disjoint, so
   2c writes B, and the stored object has a new A beside a B derived from the
   old A. A generic merge over an opaque status can't know that B depends on A.
-  That's exactly what the version check prevents today. core-provider's
-  `scaleToZero` and its CompositionDefinition handlers are the case to check.
-  I didn't trace whether their Observe reads `status.scaleToZero`.
+  That's exactly what the version check prevents today. core-provider is
+  such a case: its Observe reads `status.scaleToZero`. `Observe`
+  (`compositiondefinitions.go:854`) calls `controllerConditions` (`:1290`), and
+  so does `observeFollower` (`controllerowner.go:634`). That reaches
+  `controllerReadiness` (`scaletozero.go:67`), which reads `LastSeen`, `HeldBy`
+  and `Reason` to compose the Ready and ControllerActive messages. Observe
+  writes nothing to `status.scaleToZero`, but `cr.Status.ScaleToZero` is part
+  of the status the runtime writes back whole. So a retry that re-applied the
+  pass's view without a fresh read would write a stale `scaleToZero` over the
+  reconciler's patch. A rebase that kept the fresh `scaleToZero` could still
+  store conditions composed from the stale one: coupling, one pass long.
+  (Confirmed by core-provider's session, 2026-11-11.)
 - **2c, a handler that wrote a different value.** The handler sets Ready to
   Creating on a copy without mirroring, while Observe had set Ready to
   Available in `managed`. The deltas collide, so the rebase is refused and the
@@ -815,12 +827,21 @@ and relay §4's two cautions to the oasgen-provider and git-provider sessions.
 - in core-provider, every non-test file in
   `internal/controllers/compositiondefinitions` and its `helpers/status`.
 
+**Checked after the first draft, by core-provider's session** (at
+core-provider `0e8dc06`, 2026-11-11):
+- No CompositionDefinition handler writes the managed object on the reconcile
+  path. `retry.go`'s two helpers (`:28`, `:66`) have no non-test call site. The
+  handler's `Status().Update` calls (`compositiondefinitions.go:716`, `:1393`)
+  write CRDs. The one CD write outside the scale-to-zero reconciler,
+  `kube.Update(ctx, cr)` at `:315` in `cleanupObsoleteFinalizerLabels`, runs
+  once from `Setup` (`:148`), not per reconcile.
+- Observe reads `status.scaleToZero` (§8.2).
+
 **Not checked:**
 - **Other packages in these repos.** I didn't read them, so a writer of the
   managed object elsewhere (for example in core-provider's
   `composition-dynamic-controller`, or oasgen's `rest-dynamic-controller`) may
   exist.
-- **Whether core-provider's Observe reads `status.scaleToZero`** (§8.2).
 - **Whether any other writer touches RestDefinition status** (§4).
 - **Clusters.** Nothing was run against a cluster, and no tests were run;
   this note is reading only.
