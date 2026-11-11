@@ -12,7 +12,7 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.14.2: the trace rule lives in plumbing
+## 2026-11-11 — v1.14.2: the trace rule lives in plumbing
 - **A patch release. Behaviour is unchanged,** with tracing on or off.
 - **The rule's source of truth is plumbing's `tracecontext`** (plumbing
   v1.44.0, plumbing#125). provider-runtime and unstructured-runtime now apply one
