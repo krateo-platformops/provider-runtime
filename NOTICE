@@ -1,5 +1,9 @@
 provider-runtime
+Copyright 2023 The Krateo Authors.
 Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Some files are derived from crossplane-runtime (Apache License 2.0,
+Copyright The Crossplane Authors) and keep their own headers.
 
 This product includes software derived from third-party sources:
 
