@@ -981,21 +981,29 @@ difference's 90% interval is Welch's.
   3.12–3.18 s by `n`), against the engine's 3.00 s. It decomposes into 3012 ms
   drawn (the GKE runs' realized burn requests), 10 ms of edge effect, and
   134 ± 8 ms outside the burn: the controller's own per-reconcile work and the Go
-  runtime. It is flat in `n` while the throughput varies from 0.061 to 0.080/s,
-  so it is per reconcile, not a background.
+  runtime. It is consistent with a per-reconcile cost; a background of up to
+  about 0.009 cores isn't excluded, and under processor sharing the difference
+  doesn't move the stationary `U` (the review's L10).
 
 **The decisions** (the user's, 2026-11-11, on this proposal's review):
 
 1. **The long drain's band is judged with the calibrated engine's own `S*`.**
-   That is the crossing of its ten-seed mean curve under the GKE protocol,
+   That is the crossing of its forty-seed mean curve under the GKE protocol
+   (item 3),
    provided the measurement's pre-registered rule determines it: the seed
    bootstrap's 95% interval must be narrower than `0.15·S*`. If the rule doesn't
    determine it, the band is reported, not judged. This holds whether or not the
    fidelity tests below pass. **The GKE measurement only reports the engine
    plant's fidelity**; 4.14 enters no condition. On the uncalibrated plant the
-   interval is 0.59 wide against 0.70, so determined.
+   interval is 0.59 wide against 0.70 at ten seeds, so determined.
 2. **Both drain plants get the same absolute per-reconcile excess**, the
    controller's own work, which doesn't scale with the burn.
+3. **The drain plants' freeze uses forty seeds, 9001–9040** (the re-check's M5,
+   decided by the user on 2026-11-11, before any run of the calibrated plants).
+   This replaces ten seeds; nothing else changes. Seeds 1–40 stay the gate's,
+   21–40 reserved for the confirmation. The predicted seed-bootstrap width at
+   forty seeds is about 0.27 slots (the auditor's estimate; 0.59·√(10/40) ≈ 0.30),
+   with a standard error of about 0.07, against `0.15·S*` ≈ 0.67.
 
 **The calibration, from directly measured quantities, not fitted to `U`:**
 
@@ -1005,7 +1013,11 @@ difference's 90% interval is Welch's.
   0.02 slots (MVA 4.325 against 4.347).
 - **`drainBase` (`drain0`) becomes 1657 ms**: 1500 + 157, the same absolute
   excess as the drain plant's, so the long drain's cost change is ×1.905
-  (1657 → 3157 ms). Disclosed: the pair with the expected-value excess of
+  (1657 → 3157 ms). The +157 ms includes about 22 ms that is not the controller's
+  work: GKE's draw luck (its burn requests averaged 3012 ms, not 3000) and the
+  window-edge effect (about 10 ms). 1634 ms would be the expected value. 1657
+  stands, by the user's same-absolute-excess decision (the re-check's L11).
+  Disclosed: the pair with the expected-value excess of
   134 ms, 1634 and 3134 ms, differs by about 0.02 slots in the drain plant's `S*`
   (MVA 4.325 against 4.347) and about 0.06 in `drain0`'s (MVA 6.65 against
   6.71); neither changes `N₀`.
@@ -1019,7 +1031,13 @@ difference's 90% interval is Welch's.
   directly would be the model's misfit, which a fit would hide.
 
 **The fidelity tests, pre-registered here, run once at the freeze, reported and
-not judged:**
+not judged.** Each drain plant's curve is run at `n` = 1..12 on seeds 9001–9040
+under the GKE protocol; per `n`, the mean of the forty run means is the mean
+curve. The bootstrap resamples the forty seeds with replacement, 10,000 times,
+with the simulation's generator seeded 20261111. It re-interpolates the curve each
+time, and takes the 2.5% and 97.5% order statistics; a resample with no crossing
+sorts to the end it lies at, as in `curve_report.py`. One run computes the frozen
+values, the determinacy decision and these tests.
 
 - **(i) Equivalence with GKE in `U`**, at `n` = 3–7. The margin is
   `δ = r̄·ρL = 0.05 × 0.225 = 0.0113` cores at every `n`, fixed now.
@@ -1029,7 +1047,7 @@ not judged:**
     half-width. So equivalence at `δ` says the plants agree in `U` within the
     design's tolerance; it does not bound their `S*` tightly.
   - The test is two one-sided tests at α = 0.05 per `n`: the 90% Welch interval of
-    engine − GKE (engine sd on 9 df, GKE's pooled sd as in the table, df by
+    engine − GKE (engine sd on 39 df, GKE's pooled sd as in the table, df by
     Welch–Satterthwaite) must lie inside ±`δ`.
   - Equivalence is claimed only if all five `n` pass (intersection–union, so no
     multiplicity correction).
@@ -1037,8 +1055,14 @@ not judged:**
     test is nearly automatic.
   - Disclosed: on the uncalibrated plant it passes at 3, 6 and 7 and fails at 4
     and 5 (the table).
+  - **It is reported, not judged** (the re-check's L8). GKE has two runs at
+    `n` = 3, so if it fails there the report says "not shown; at n = 3 the test
+    can only pass if |Δ| < 0.0032", gives the 90% intervals, and states that a
+    failure isn't evidence that the plants differ. At 6–7 it is near-automatic,
+    so (i) is weak at both ends.
 - **(ii) The engine against MVA at the same `c`** (3157 ms, think time 28.5 s),
-  which needs no measurement. Per `n`, engine − MVA with its `t(9)` interval,
+  which needs no measurement, **the informative test**. Per `n`, engine − MVA with
+  its `t(39)` interval,
   against the same `δ`. It separates the engine's own artefacts from the plant's
   fidelity: (ii) measures engine against theory, and MVA against GKE (within
   0.004 at every `n`) measures theory against the real plant.
@@ -1048,7 +1072,7 @@ not judged:**
   4.47–4.49 (MVA's 4.33 plus the engine's offset of about 0.16).
 
 **What moves at the freeze.** Both drain plants are re-frozen from their
-ten-seed mean curves under the GKE protocol, not from seed 9001. For the long
+forty-seed mean curves under the GKE protocol, not from seed 9001. For the long
 drain that means:
 
 - `S*'` and the band: `θ⌊S*'⌋` to `S*'(1 + 3r̄)`, with the restart-edge floor's
@@ -1087,10 +1111,14 @@ engine at `b2e5757`:
 | drain0 | 6.945 / 7.158 / 7.059 | 0.213 | 1.04 | yes |
 | drain | 3.905 / 4.822 / 4.492 | 0.917 | 0.59 | no |
 
-The drain plants are frozen from ten-seed mean curves instead, so for them the
+The drain plants are frozen from forty-seed mean curves instead, so for them the
 rule is the measurement's (decision 1): the seed bootstrap's 95% interval
 narrower than `0.15·S*`. Every other case's band is judged as now. The rule is
 re-applied whenever a plant is re-frozen, the calibrated drain plants included.
+In the code, `TestFreeze` applies the rule to every plant. If a short plant is
+undetermined, or `N₀` isn't 7, it stops for review and writes nothing. Each drain
+plant's decision is frozen with its values, and the long drain reports its band
+instead of judging it when the drain plant's is false.
 
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
