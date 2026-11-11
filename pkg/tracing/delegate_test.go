@@ -5,8 +5,73 @@ import (
 	"testing"
 	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 )
+
+// The aliased names keep their bytes. Every other test reads them through the
+// same alias, so only literals catch a swap.
+func TestAliasedNamesAreTheirStrings(t *testing.T) {
+	for _, tc := range []struct{ name, got, want string }{
+		{"AttrObjectKind", string(AttrObjectKind), "k8s.object.kind"},
+		{"AttrObjectName", string(AttrObjectName), "k8s.object.name"},
+		{"AttrObjectNamespace", string(AttrObjectNamespace), "k8s.object.namespace"},
+		{"SpanReconcile", SpanReconcile, "reconcile"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// recordOnlyActs samples every span except the update act, which it records
+// without sampling: IsRecording is true and IsSampled is false.
+type recordOnlyActs struct{}
+
+func (recordOnlyActs) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
+	if p.Name == SpanUpdate {
+		return sdktrace.SamplingResult{Decision: sdktrace.RecordOnly}
+	}
+	return sdktrace.SamplingResult{Decision: sdktrace.RecordAndSample}
+}
+
+func (recordOnlyActs) Description() string { return "recordOnlyActs" }
+
+// provider-runtime#72, kept here as well as in plumbing's tracecontext, so a
+// plumbing bump that broke it fails this repo's CI too. The root links to the
+// act only when the act is sampled: a recorded but unsampled act is never
+// exported. The guard is IsSampled, not IsRecording, and this is the case that
+// tells them apart.
+func TestStartActStepRecordOnlyActGetsNoRootLink(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec), sdktrace.WithSampler(recordOnlyActs{}))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	d := Decide(ann(meta.AnnotationKeyTraceparent, tpA), "", time.Time{}, time.Now(), time.Minute)
+	ctx, root := StartReconcile(context.Background(), tp, obj, d, time.Now())
+	_, act := StartActStep(ctx, tp, obj, SpanUpdate, d.Remote)
+	if !act.IsRecording() || act.SpanContext().IsSampled() {
+		t.Fatalf("premise: act recording=%v sampled=%v, want true/false", act.IsRecording(), act.SpanContext().IsSampled())
+	}
+	act.End()
+	root.End()
+
+	var rootSpan sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == SpanReconcile {
+			rootSpan = s
+		}
+	}
+	if rootSpan == nil {
+		t.Fatal("the root was not recorded")
+	}
+	links := rootSpan.Links()
+	if len(links) != 1 || links[0].SpanContext.SpanID() != d.Remote.SpanID() {
+		t.Errorf("root links = %v, want exactly the upstream link, none to the unsampled act", links)
+	}
+}
 
 // The rule lives in plumbing's tracecontext, which takes a Tracer. A nil tp
 // must reach it as a nil Tracer, never as a non-nil Tracer that would turn

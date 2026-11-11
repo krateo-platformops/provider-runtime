@@ -15,7 +15,7 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 ## Unreleased — v1.14.2: the trace rule lives in plumbing
 - **A patch release. Behaviour is unchanged,** with tracing on or off.
 - **The rule's source of truth is plumbing's `tracecontext`** (plumbing
-  v1.44.0, #125). provider-runtime and unstructured-runtime now apply one
+  v1.44.0, plumbing#125). provider-runtime and unstructured-runtime now apply one
   identical `krateo.io/traceparent` rule, D8's (the user's decision).
   - `pkg/tracing`'s `Decide`, `Decision`, `Mode`, `When`, `Canonical`,
     `Object` and `StartReconcile`, `StartActStep` and `StartStep` are aliases
@@ -39,11 +39,12 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     versions.
   - No other module in the build graph moves.
   - plumbing's `go 1.26.0` directive matches provider-runtime's.
-- **Follow-ups, tracked in plumbing:** #72, the RecordOnly guard, is covered
-  by plumbing's `TestStartActStepRecordOnlyActGetsNoRootLink`. #74, the act's
-  link to an unsampled root, is pinned as v1.14.1 has it, by
-  `TestStartActStepLinksToAnUnsampledRootAsInV1141`. Its decision is still
-  open, and a change to it goes in `tracecontext`.
+- **Follow-ups:** provider-runtime#72 closes, covered by plumbing's
+  `TestStartActStepRecordOnlyActGetsNoRootLink`. `pkg/tracing` keeps a copy of
+  that test, so a plumbing bump that broke the guard fails here too.
+  provider-runtime#74 stays open, pinned by plumbing's
+  `TestStartActStepLinksToAnUnsampledRootAsInV1141`. A change to it goes in
+  `tracecontext`.
 
 ## 2026-11-10 — v1.14.1: every reconcile is its own trace
 - **Design:** [design-tracing](./design-tracing.md) §13, D8, decided by the

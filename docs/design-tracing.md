@@ -20,13 +20,14 @@ its own trace, and only the first act for a new value joins the upstream.
 
 **Source of truth, from v1.14.2:** the rule's code is plumbing's
 [`tracecontext`](https://github.com/krateo-platformops/plumbing/tree/v1.44.0/tracecontext)
-(plumbing v1.44.0, #125). It's ported verbatim from v1.14.1 except for two
-seams. The Start functions take the caller's `trace.Tracer`, and the inbound
-context is the exported `WithInbound` and `Inbound`. provider-runtime's
+(plumbing v1.44.0, plumbing#125). It's ported verbatim from v1.14.1 except
+for two seams. The Start functions take the caller's `trace.Tracer`, and the
+inbound context is the exported `WithInbound` and `Inbound`. provider-runtime's
 `pkg/tracing` delegates to it and keeps its own API. unstructured-runtime
 adopts the same package in its own session (unstructured-runtime#77, open on
 2026-11-11). A change to the rule (`Decide`, the root, the act step and their
-links) is made in `tracecontext`, so both runtimes change together. The memo, the marker write and the act-step choice stay here, in
+links) is made in `tracecontext`, so both runtimes change together. The memo,
+the marker write and the act-step choice stay here, in
 `pkg/reconciler/traces.go`, which `tracecontext`'s package doc names as the
 reference implementation of its contract. §14 records what was checked.
 
@@ -1939,8 +1940,10 @@ Checked in source:
   - plumbing's own `tracecontext` tests pass under provider-runtime's
     module graph (OTel v1.45.0, where plumbing's `go.mod` asks for v1.39.0).
     They include `TestStartActStepRecordOnlyActGetsNoRootLink`, which closes
-    #72. They also include `TestStartActStepLinksToAnUnsampledRootAsInV1141`,
-    which pins #74 as v1.14.1 has it. #74 stays open for its decision.
+    provider-runtime#72. `pkg/tracing` keeps a copy of it, so a plumbing bump
+    that broke the guard fails here too. They also include
+    `TestStartActStepLinksToAnUnsampledRootAsInV1141`, which pins
+    provider-runtime#74 as v1.14.1 has it. #74 stays open for its decision.
   - The bump from v1.13.0 to v1.44.0 changes no other module in the build
     graph (`go list -m all`, before and after). The other plumbing packages
     provider-runtime links, `env` and `kubeutil/event`, are byte-identical in
