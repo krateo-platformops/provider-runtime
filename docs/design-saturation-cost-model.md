@@ -2656,6 +2656,10 @@ durations (§3.4), not a bias; the reports say so.
 
 ### 17.11 `ĉ`'s restart edge, after the long drain at `348b05d`
 
+**Superseded by §17.12** where they disagree: the matched-edge estimator below is
+withdrawn (the review of `6a877bd`), and so is the claim that it keeps §17.1's
+guarantee. The corrections of §17.1 item 2 and §17.10 stand.
+
 **For review before any code** (the user's decision, 2026-11-11). The gate's band
 and its 1200 s case stay exactly as pre-registered; only the estimator changes.
 Where this section and §17.1 item 2 or §17.10 disagree, this section is right.
@@ -2813,3 +2817,306 @@ is that this estimator won't, by itself, bring the long drain into its band.
 
 The independent review that found the concurrency tests missing asked for the
 last two kinds. The gate then runs on seeds 1–20; seeds 21–40 stay untouched.
+
+### 17.12 The long drain's rise path, after the oracle and the safety diagnosis
+
+**For review before any code** (the user's decision, 2026-11-11: redesign the
+rise path; the gate stays exactly as pre-registered, the long drain's band and
+1200 s case included). This section supersedes §17.11's proposal. The matched-edge
+estimator there is withdrawn, and so is its claim to keep §17.1's guarantee: it
+doesn't (the review of `6a877bd`, H1–H4). §17.11's corrections of §17.1 item 2
+and §17.10 stand. The data is in `hack/oracle-drain/results.txt` and in the
+traces quoted below, from the long drain on seeds 1–20 at `22fc600` (the
+bit-reproducible engine).
+
+#### The data
+
+1. **Undershoot after a restart (seeds 1 and 2).** `ĉ` stays 8–13% high for the
+   whole judged span (§17.11). The cause is the CPU without a counted
+   completion: the cohort's remainder and the in-flight reconciles' spent CPU.
+2. **The oracle** (`hack/oracle-drain`). The whole case passes 2/20 as is, 7/20
+   with an exact `ĉ`, 2/20 with `D̂` at the plant's `D(S)`, and 11/20 with both.
+   - **`ĉ` binds and `D̂` doesn't.** The real `D̂` sits above `D(S)` on cap-stretched
+     lives, which helps.
+   - **With both exact, the rise rules bind.** In the seven restarted seeds that
+     still fail, every sample under the band is paced; 47–285 per seed have a
+     window test pending, 9–133 are capped and 5–161 guarded; and `S` rose only
+     once or twice in 200–460 samples.
+3. **The overshoot path (seeds 20 and 11, no `ĉ` restart).**
+   - **The change test misses the doubling.**
+     - Seed 11: the window at +190 s reads `c_W` 3.88 against a mean of 1.65 and
+       σ_W 0.32, and is deferred. The next window, +290 s, reads 2.44, under 3σ,
+       so both are folded back and σ_W grows to 0.76.
+     - Seed 20: two deferrals (+121 s, 3.11; +324 s, 4.47) are folded back the
+       same way.
+     - Afterwards the windows alternate between about 2.2 and about 5–6 as `S`
+       oscillates, σ_W reaches 1.0–1.5, and nothing can trigger.
+   - **With no restart, `ĉ` lags low.** It is the slow exponential window over
+     old-cost and new-cost samples: 1.70 → 2.85 s over the case, against 3.157 s,
+     towards more slots.
+   - **Every rise after the change is the active law, untrusted and paced, with
+     `U_W < ρL`**, and with `ĉ` at 1.7–2.7 s. Seed 20 at +234 s: `D̂` 84.6 s (a
+     cap-stretched life), law ≈ 9.7, and the pacing lets 4.50 → 6.50 through on
+     two completions.
+   - **The result.** `S` holds at 6.50 with `U` at the limit (0.2500) in several
+     bins, and later at 5.40, also at the limit. Those samples aren't
+     window-capped, since not every period throttled, and the sign guard only
+     stops rises, so nothing lowers `S`.
+   - **Seed 20's first rises, +30 s and +43 s (5.40 → 7.00), come before any
+     detection:** the law there still has the old `ĉ`, in the wait phase of a
+     CPU-first window.
+   - **The limit cycle (both seeds, about 100–150 s).** A completion gives `D̂` a
+     value, and the law with the low `ĉ` rises. The move of a slot or more
+     rewarms `D̂`, and the law holds. A window-capped sample's first term,
+     `(ρL − B̂)·D_mix/c_W`, then runs with `c_W` at about 5–6, inflated by the
+     window's in-flight CPU, and `S` crashes to 1.3–1.8, which is seed 11's floor
+     violation. Then the cycle repeats.
+
+**Why the change test misses it.** Let window `k` span `(b_{k−1}, b_k]`, with
+`C_k` completions, and let `E(b)` be the CPU already spent at instant `b` by the
+reconciles in flight then. Over a window that holds whole completed lives (§17.8
+item 1):
+
+`x_k = c + (E(b_k) − E(b_{k−1}))/C_k + ε_k`.
+
+Consecutive windows share a boundary, so their edge errors are equal and
+opposite. A window that reads high because many reconciles were in flight at its
+end hands the next window their completions without their CPU, and that window
+reads low. With a window about one lifetime long, `C_k ≈ X·D ≈ N̄` (Little's
+law), so the edge term is of the order of `c` itself. The confirming window then
+sits on the other side whenever the deferral was edge-driven, real change or
+not. §17.8 item 2's "a window holds whole lives, so its `c_W` has the phase noise
+removed" holds only when `Δt ≫ D`.
+
+#### (A) Detection: confirm a deferral on the pooled pair
+
+**The rule.** A deferred window `k` is confirmed by the next window `k+1` when the
+pooled value
+
+`x_{k,k+1} = (CPU_k + CPU_{k+1})/(C_k + C_{k+1})`
+
+is beyond `3σ_W` from the test's mean, on the deferral's side. The test's σ_W is
+unchanged: a single window's spread. Otherwise both are folded back as now.
+
+**Why.** The shared boundary cancels exactly:
+`x_{k,k+1} = c + (E(b_{k+1}) − E(b_{k−1}))/(C_k + C_{k+1}) + ε`.
+
+- **Under a real change Δ**, the pooled deviation is Δ plus the outer edges over
+  twice the completions. Today's rule needs `Δ − e_k + e′ ≥ 3σ`, which fails when
+  the deferral's own edge excess `e_k` is large.
+- **Under no change with an edge-driven deferral**, the pooled deviation is the
+  outer edges only, so it doesn't confirm.
+- **Under no change with a noise-driven deferral** (equal `C`), confirming needs
+  `x_{k+1}` itself beyond 3σ, the same as today. The false-restart rate is
+  therefore unchanged or lower.
+- **On the traces:**
+  - seed 11: (3.88·4 + 2.44·7)/11 = 2.96, z = (2.96 − 1.65)/0.32 = 4.1,
+    confirmed;
+  - seed 20: (3.11·7 + 2.38·7)/14 = 2.74, z = 4.0, confirmed; (4.47·5 + 2.94·9)/14
+    = 3.49, z = 3.5.
+- **The same pooling decides a window in progress** (§17.8 item 2's "pending"): it
+  is pending when the pooled value of the last closed window and the running one
+  is beyond 3σ_W, on either side. That stops the alternating windows from
+  holding the test pending most of the time.
+- **`D̂`'s window test** (§17.9 item 7) pools the same way: the mean lifetime over
+  the pair.
+
+**What it protects, unchanged.** No sample raises the slots while a confirmation
+is pending. That is §17.8 item 2's rule, against seed 6's sawtooth.
+
+#### (B) The estimator after a restart: the edge moved past the cohort
+
+The reviewer's M1, specified to answer H1–H3.
+
+- **The edge.**
+  - Let `t₀` be the restart's edge, the deferred window's start (§17.8 item 2).
+  - Let `t₁` be the end of the first sample at which every reconcile in flight
+    was granted at or after `t₀`. That is when the Books' `Oldest ≥ t₀`
+    (`books.go`, `Interval.Oldest`).
+  - Until `t₁`, `ĉ` is `ĉ_now`: completions of reconciles granted since `t₀`, all
+    CPU since `t₀`. It is high-biased, the safe side.
+  - At `t₁`, `ĉ` restarts its sums once more, from `t₁`. `I₁` is the set in flight
+    at `t₁`, each member's age `a_j` at `t₁` recorded.
+- **The denominator after `t₁`** counts every completion except those of `I₁`.
+  `I₁`'s completions are held aside. A held completion `j` is counted only while
+  it is matched (below) to a reconcile of the same queue, granted after `t₁` and
+  in flight now, whose age is at least `a_j`.
+- **The matching.** It is the greedy matching of the sorted ages, which is
+  maximal (review L4). It is recomputed each sample from the in-flight grant
+  instants per queue, which the Books keep and the Interval must expose (review
+  L5).
+- **The weight (H3).** A held completion that is counted contributes the weight
+  its own completion sample has now: the exponential weight, decayed with the
+  sums since. That weight is kept in the same normalized scale as the warm
+  start's `max(α, 1/n)`. As the window forgets `t₁`, the credit leaves with it.
+- **An unmatched held completion contributes nothing:** its remaining CPU is in
+  the numerator, a known excess.
+- **The cap.** The number counted is at most `⌊β·C(t)⌋`, with `C(t)` the
+  completions counted since `t₁`.
+
+**Its expectation.** Pair a counted held completion `j` with an in-flight `k`. The
+pair's contribution to the numerator's excess over `c` per counted completion is
+`c·(F_k(a_k) − F_j(a_j))`, which the weights scale by `w_recent ≥ w_j`.
+Unmatched in-flight reconciles add `c·F ≥ 0`, and unmatched held ones add
+`c·(1 − F) ≥ 0`.
+
+**The assumption (H2, stated so it can be refuted).** For the reconciles of one
+queue granted after `t₀`:
+- **(i) A survivor-conditioned profile:** `F̄(a) = E[F(a) | in flight at age a]`
+  is nondecreasing in `a`.
+- **(ii) Cost independent of lifetime:** the CPU per reconcile is independent of
+  how long the reconcile lives, so the in-flight set and the completed set have
+  the same mean cost.
+- **(iii) One regime across the edges:** `t₀` is after the plant's change, so
+  `I₁` and the later grants share the cost and the profile. If `t₀` is before the
+  change (review M3), a cost increase makes the pairs larger, on the safe side.
+  A decrease makes them smaller, by up to `(c_old − c)·F̄`, towards more slots.
+- **(iv) Matching within a queue.**
+
+Under the assumption, `E[ĉ] ≥ c`. When it fails, a pair can contribute down to
+`−c` (`F_k = 0`, `F_j = 1`). That gives:
+
+**Worst case, for any profile:** a relative bias of at least `−β`, towards more
+slots. The cap is what bounds it.
+
+**Choosing β.**
+- **The amplification.** A relative bias `b` in `ĉ` moves the law's fixed point by
+  about `b/(1 − g′(S*))`. On the drain plant `g′ ≈ 0.61`, which is about `2.6b`
+  (review H4).
+- **What keeps the worst case inside the band.** The band's upper edge
+  `S*(1 + 3r̄)` holds in the worst case when `2.6β ≤ 3r̄`, that is `β ≤ 0.058`.
+  So **β = r̄ = 0.05** is the value consistent with the band. Any larger β trades
+  the band for the long drain's entry, and that is the user's call.
+- **What β = 0.05 buys.** At `C = 20` (about 330 s after `t₁` at 0.06/s) it allows
+  one held completion; at `C = 40`, two. That is less than the 2–3 matches the
+  drain makes, so with β = r̄ the long drain's `ĉ` stays biased high by roughly
+  `(N_G − M)/C`.
+
+**Its variance.** The ratio estimator's (§17.1), with the counted held
+completions in the denominator. Each counted pair adds at most `c²/2` to the
+numerator's variance (review L3), and `M` steps change `ĉ` by about `ĉ/C` per
+step. Trust's standard error is restated with them.
+
+**τ:** unchanged.
+
+#### (C) The rise rules
+
+Each rule below has the reason it exists, what the data shows, and the change.
+None of these changes was fitted to seeds 1–20; each follows from the window
+algebra above or from the model.
+
+1. **The pending block** (§17.8 item 2, against seed 6's sawtooth, which was
+   stale-low `ĉ` and wait-heavy samples after a cut).
+   - It protects against rising on a `ĉ` that is stale **low**, which is a
+     pending test on the **high** side.
+   - **Change:** a test pending on the low side (cost falling, `ĉ` stale high)
+     doesn't block rises. While `ĉ` is stale high, the law's value is below the
+     one the new data would give, so a rise up to it can't overshoot that law.
+   - **Overshoot bound:** none added beyond today's law value.
+   - Pooling, (A), removes the spurious pendings from alternating windows.
+2. **The sign guard** (§4.2; §17.10 (A), for mix-shift seeds 2, 4 and 20, and for
+   the long drain's phase-driven re-raises): no rise while `U_W > ρL`.
+   **Unchanged.** It is the rule that would have stopped seed 20 had it fired;
+   it didn't fire because `U_W` was under `ρL` in the wait phases. That calls for
+   more caution, not less.
+3. **The pacing** (§7: untrusted rises at most one slot per counted completion):
+   **unchanged.**
+   - It is what limits seed 20's overshoot to +1 per completion. Loosening it would
+     widen the pre-detection excursions at +30 s and +43 s.
+   - The oracle shows it isn't binding where the law is right: with exact
+     estimates, `S` rose only once or twice because the law and the blocks held
+     it, not the pace.
+4. **Trust** (§3.5, §17.1: 60 completions since `ĉ`'s start and relative SE
+   `≤ r̄`): **unchanged.** At 0.06/s it is about 1000 s, so the long drain is
+   paced throughout. The pacing is the guard that stays.
+5. **The capped rule's first term** (§17.8 item 4; §17.10 (B)) uses `c_W`, whose
+   in-flight excess drives the cycle's crash.
+   - **Change:** the first term uses `c_W` over the window `W` with the same
+     pooled correction. Its denominator also counts the completions of the window
+     just before `W`, and its numerator that window's CPU, so the shared boundary
+     cancels. It stays high-biased, the safe side, by the outer edges only.
+   - The floor (§17.8 item 4) is unchanged; this change is what keeps it.
+
+#### (D) Predictions, before any code
+
+- **The long drain.**
+  - **Every seed restarts `ĉ`** after the change: the four that didn't (11, 16, 18
+    and 20) by about +150 to +350 s, from (A).
+  - **No sample above `S*(1 + 3r̄) = 5.07` after the restart.**
+  - **The limit cycle and seed 11's floor violation disappear**, from (A) and
+    (C.5).
+  - **Seed 20's pre-detection rises (+30 s, +43 s) remain.** They come before any
+    restart, so the band doesn't judge them, and the rise rule there holds
+    (`U_W < ρL`).
+  - **Entry.** With β = r̄, `ĉ` after `t₁` is still about `(N_G − M)/C` high: 10–15%
+    at `C = 20–40`. The fixed point then sits at about 3.3–3.6, so **the band is
+    still predicted to fail in most seeds**, by a margin like arm 2 of the oracle
+    (median `S` 3.5–4.2). The pass rate is predicted between 2/20 and 11/20, the
+    oracle's arms 1 and 4.
+  - **With β uncapped** (β = 1), predicted 11/20 to 20/20. Its worst case, from
+    the assumption failing, would be a bias of up to `N/C`, which is 15% at
+    `C = 20`, towards more slots: outside the band.
+- **The other cases.**
+  - The short-reconcile cases (headline, start, cost doubles, limit halves and
+    doubles, H1, rising cost, contention, no limit): windows of 1–2 samples hold
+    about 10–20 completions against an in-flight count of about 5, so the edge
+    term is under 25% of one window and about 12% pooled.
+    - (A) changes the confirming window's decision only when the edge term
+      matters, so restarts, entries and counts are expected unchanged.
+    - (B) is negligible: `C` reaches the cap's scale within seconds.
+    - (C.1) matters only on a cost decrease, which none of them has.
+  - **Cost doubles** keeps its mechanism (a deferral, then a restart, within
+    `2⌈W_test/Δt⌉ + 1`).
+  - **Mix shift** uses per-queue matching. Both of its queues' credits are capped
+    by β.
+  - **False restarts, 0.47 s and 30 s:** the rate is expected unchanged or lower,
+    from (A)'s argument.
+  - **Limit halves, seed 12** (one sample late since the bit-reproducible engine)
+    is unaffected by these changes, and stays a dev-seed failure.
+
+#### (E) New gate cases, pre-registered before any run
+
+Each uses the long drain's protocol and conditions: the safety conditions; the
+band from `ĉ`'s first restart at 5% outside; the restart-edge floor. Each takes
+`S*` from its own plant's forty-seed mean curve under the GKE protocol, with the
+determinacy rule, and is reported, not judged, if undetermined. Each reports
+`ĉ`'s bias against the plant's true CPU per reconcile, and the number of held
+completions counted.
+
+1. **CPU-last.** The long drain with every reconcile's wait first and its CPU
+   last (the engine gains a profile option). (i) holds, so this tests the safe
+   side of (B): `ĉ` high early.
+2. **The profile moves with the cost.** `drainBase` CPU-first at 1657 ms, then
+   CPU-last at 3157 ms. This breaks (iii) at the edge.
+3. **Survivor conditioning.** One queue with half short CPU-first reconciles
+   (1000 ms of CPU, 9 s of wait) and half long CPU-last ones (1000 ms of CPU,
+   59 s of wait), drawn per admission (the engine gains a per-admission mixture).
+   It breaks (i), because `F̄` decreases with age, so this is the worst case of
+   (B). Its condition is the band's upper edge.
+4. **Cost against lifetime.** One queue with half short expensive reconciles
+   (2000 ms of CPU, 1 s of wait) and half long cheap ones (100 ms of CPU, 60 s of
+   wait), with a cost doubling applied to both. This breaks (ii).
+5. **The cost halves.** `drainHeavy` → `drainBase`, CPU-first. It tests (iii)'s
+   decrease side, where the bias is towards more slots.
+
+Their seeds are 1–20, as every case's are. Seeds 21–40 are untouched.
+
+#### The tests, with the implementation
+
+- **The restart edge (unit):** synthetic cohorts with CPU-first, CPU-last and
+  uniform profiles, and with the four violations above, across a restart at an
+  increase and a decrease. Assert `E[ĉ] ≥ c` under the assumption and a bias of
+  at least `−β` without it.
+- **Detection (unit):** synthetic windows with edge-driven and noise-driven
+  deferrals, and real changes of 2σ–10σ. The pooled rule's confirmation and
+  false-confirmation rates are compared with today's.
+- **Stress:** random grants, completions, profiles and costs over many seeds,
+  asserting the worst-case bound.
+- **Drain:** the long drain's plant with `t₀`, `t₁`, `M`, the counted held
+  completions, `ĉ_now`, `ĉ_new` and the pooled windows reported every sample.
+
+Then the gate runs on seeds 1–20.
+
+**The decision this leaves to the user:** β. At β = r̄ the worst case stays inside
+the band, and the long drain is predicted to still fail. At a larger β the long
+drain is predicted to pass more often, and the worst case leaves the band.
