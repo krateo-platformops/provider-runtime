@@ -18,16 +18,19 @@ const (
 	SpanDelete  = "delete"
 )
 
-// Events on the root span (docs/design-tracing.md §4.5).
+// Events on the root span (docs/design-tracing.md §4.5). EventReconcilePaused,
+// EventConflict and EventMarkerFailed, and the AttrStep key below, are
+// plumbing's tracecontext constants, which unstructured-runtime emits too. The
+// rate-limit events and keys are provider-runtime's own.
 const (
 	// EventRateLimitDeferred: the governor deferred the pass's next call.
 	EventRateLimitDeferred = "ratelimit.deferred"
 	// EventReconcilePaused: the pause annotation short-circuited the pass.
-	EventReconcilePaused = "reconcile.paused"
+	EventReconcilePaused = tracecontext.EventReconcilePaused
 	// EventConflict: the pass requeued because a write returned a conflict.
-	EventConflict = "k8s.conflict"
+	EventConflict = tracecontext.EventConflict
 	// EventMarkerFailed: the marker write failed with anything but a conflict.
-	EventMarkerFailed = "trace.marker_failed"
+	EventMarkerFailed = tracecontext.EventMarkerFailed
 )
 
 // Event attribute keys.
@@ -36,7 +39,7 @@ const (
 	AttrRateLimitCause        = attribute.Key("provider_runtime.ratelimit.cause")
 	AttrRateLimitRequeueAfter = attribute.Key("provider_runtime.ratelimit.requeue_after_s")
 	AttrRateLimitUntil        = attribute.Key("provider_runtime.ratelimit.until")
-	AttrStep                  = attribute.Key("provider_runtime.step")
+	AttrStep                  = tracecontext.AttrStep
 )
 
 // A Step names the write that returned a conflict, as the k8s.conflict event's

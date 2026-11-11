@@ -12,6 +12,24 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — v1.14.3: shared event names
+- **A patch release. Behaviour is unchanged:** every span, event and
+  attribute carries the same bytes as in v1.14.2.
+- **Shared names:** `pkg/tracing`'s `EventReconcilePaused`
+  (`reconcile.paused`), `EventConflict` (`k8s.conflict`), `EventMarkerFailed`
+  (`trace.marker_failed`) and `AttrStep` (`provider_runtime.step`) now
+  reference plumbing's `tracecontext` constants (plumbing v1.45.0,
+  plumbing#126). unstructured-runtime emits the same constants, so a query or
+  a sampler rule reads the same bytes from either runtime.
+  - Their names and docs are unchanged.
+  - The rate-limit events and keys stay provider-runtime's own.
+  - `TestAliasedNamesAreTheirStrings` pins all four literal strings.
+- **The plumbing bump, v1.44.0 to v1.45.0:** it's one commit, which adds
+  `tracecontext/events.go` and its test.
+  - Nothing else provider-runtime links changes. `env`, `kubeutil/event` and
+    the rest of `tracecontext` are byte-identical.
+  - No other module in the build graph moves.
+
 ## 2026-11-11 — v1.14.2: the trace rule lives in plumbing
 - **A patch release. Behaviour is unchanged,** with tracing on or off.
 - **The rule's source of truth is plumbing's `tracecontext`** (plumbing
