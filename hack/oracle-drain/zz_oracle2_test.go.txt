@@ -1,0 +1,85 @@
+package sim
+
+// SCRATCH (never committed): why S stays under 3.60 in arm 4 (both oracles).
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel"
+)
+
+func TestZZOracleWhy(t *testing.T) {
+	if os.Getenv("SIM_ORACLE") == "" {
+		t.Skip()
+	}
+	var gc gateCase
+	for _, c := range gateCases() {
+		if c.name == "long drain" {
+			gc = c
+		}
+	}
+	costmodel.OracleFrom, costmodel.OracleC, costmodel.OracleD = 6000, 3.157, oracleD
+	defer func() { costmodel.OracleFrom, costmodel.OracleC, costmodel.OracleD = 0, 0, nil }()
+	var b strings.Builder
+	for _, seed := range []uint64{4, 6, 8, 12, 15, 19, 20} {
+		tr := Run(gc.cfg(seed))
+		i0 := index(tr, drainAt)
+		rst := -1
+		for i := i0; i < len(tr.Results); i++ {
+			if tr.Results[i].CPU.CRestarted {
+				rst = i
+				break
+			}
+		}
+		from := rst + 178
+		if rst < 0 {
+			from = i0
+		}
+		n, low, capped, guard, pend, dhold, paced, held, chold, unres, rose, over := 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+		for i := from; i < len(tr.Results); i++ {
+			r := tr.Results[i]
+			c := r.CPU
+			n++
+			if r.Slots > 5.07 {
+				over++
+			}
+			if r.Slots >= 3.6 {
+				continue
+			}
+			low++
+			if c.Kind == costmodel.Capped {
+				capped++
+			}
+			if c.Guarded {
+				guard++
+			}
+			if c.CPending || c.CDeferred || c.DPending || c.DDeferred {
+				pend++
+			}
+			if c.DHold {
+				dhold++
+			}
+			if c.Paced {
+				paced++
+			}
+			if r.Held {
+				held++
+			}
+			if c.CHold {
+				chold++
+			}
+			if c.Unresolvable || c.UnresHold {
+				unres++
+			}
+			if r.Slots > tr.Results[i-1].Slots {
+				rose++
+			}
+		}
+		fmt.Fprintf(&b, "seed %2d: from +%d, %d samples: %d under 3.60 (%d over 5.07); of those under: capped %d, guarded %d, a test pending %d, D-hold %d, paced %d, held %d, ĉ-hold %d, unresolvable %d, rose %d\n",
+			seed, from-i0, n, low, over, capped, guard, pend, dhold, paced, held, chold, unres, rose)
+	}
+	t.Log("\n" + b.String())
+}

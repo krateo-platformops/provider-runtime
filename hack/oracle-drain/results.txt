@@ -1,0 +1,114 @@
+The long drain with oracle estimates, seeds 1-20 (B's diagnostic, 2026-11-11). Data only; nothing here is part of the
+controller or the gate.
+
+How it was run: a detached scratch worktree at 22fc600, with the env-free patch oracle-cpu.diff applied to
+pkg/ratelimit/internal/costmodel/cpu.go (never committed: package variables OracleFrom, OracleC, OracleD, active
+from ĉ's first restart at or after OracleFrom = 6000 s, the long drain's change) and the two test files here
+(zz_oracle_test.go.txt, zz_oracle2_test.go.txt, renamed to .go in pkg/ratelimit/internal/costmodel/sim/):
+  SIM_ORACLE=1 go test -count=1 -run '^TestZZOracle$' -v ./pkg/ratelimit/internal/costmodel/sim/
+  SIM_ORACLE=1 go test -count=1 -run '^TestZZOracleWhy$' -v ./pkg/ratelimit/internal/costmodel/sim/
+go1.26.10 darwin/arm64 (the engine is bit-reproducible across platforms from b32f3fc on).
+Arms, from ĉ's first restart after the change: 1 as is; 2 ĉ and c_W forced to 3.157 s (the plant's CPU per
+reconcile), the restart hold and the unresolvable rule bypassed; 3 the law's D̂ and the capped rule's D_mix forced to
+D(S_prev) from freeze-6aafb84's drain mean curve; 4 both. The estimators themselves (tau_c, trust, the change tests)
+run on the real data in every arm. "band" is the gate's long-drain band verdict at the frozen values; the median is of
+S from the restart + 178 samples; entries are the first sample in [3.60, 5.07]. Seeds with "restart at +-6000" had
+no ĉ restart after the change, so no oracle applied (11, 16, 18, 20).
+
+arm 1 as is:
+  seed  1: band OUT outside  863 of  974; median S from restart+178 2.65; first entry +55 after the change (restart at +159, entry +-1 after it); other fails 0 [] invalid ""
+  seed  2: band OUT outside  555 of  596; median S from restart+178 3.09; first entry +80 after the change (restart at +224, entry +940 after it); other fails 0 [] invalid ""
+  seed  3: band OUT outside  211 of  554; median S from restart+178 3.60; first entry +273 after the change (restart at +315, entry +0 after it); other fails 0 [] invalid ""
+  seed  4: band OUT outside  751 of  820; median S from restart+178 3.03; first entry +212 after the change (restart at +271, entry +-1 after it); other fails 0 [] invalid ""
+  seed  5: band OUT outside  461 of  670; median S from restart+178 3.59; first entry +0 after the change (restart at +253, entry +363 after it); other fails 0 [] invalid ""
+  seed  6: band OUT outside  376 of  524; median S from restart+178 3.27; first entry +0 after the change (restart at +247, entry +0 after it); other fails 0 [] invalid ""
+  seed  7: band OUT outside  252 of  697; median S from restart+178 4.37; first entry +31 after the change (restart at +112, entry +395 after it); other fails 0 [] invalid ""
+  seed  8: band OUT outside  303 of  727; median S from restart+178 3.81; first entry +41 after the change (restart at +180, entry +411 after it); other fails 0 [] invalid ""
+  seed  9: band OUT outside  731 of  794; median S from restart+178 2.96; first entry +146 after the change (restart at +229, entry +0 after it); other fails 0 [] invalid ""
+  seed 10: band OUT outside  389 of  532; median S from restart+178 3.40; first entry +101 after the change (restart at +210, entry +0 after it); other fails 0 [] invalid ""
+  seed 11: band in  outside    - of    -; median S from restart+178 -1.00; first entry +22 after the change (restart at +-6000, entry +-1 after it); other fails 1 [S 1.51 at 1h45m50.001s below the restart-edge floor 1.77] invalid ""
+  seed 12: band OUT outside  291 of  815; median S from restart+178 3.60; first entry +24 after the change (restart at +269, entry +423 after it); other fails 0 [] invalid ""
+  seed 13: band OUT outside  156 of  874; median S from restart+178 3.92; first entry +24 after the change (restart at +242, entry +0 after it); other fails 0 [] invalid ""
+  seed 14: band OUT outside  680 of  681; median S from restart+178 2.21; first entry +-1 after the change (restart at +330, entry +-1 after it); other fails 0 [] invalid ""
+  seed 15: band OUT outside  440 of  698; median S from restart+178 3.26; first entry +840 after the change (restart at +369, entry +471 after it); other fails 0 [] invalid ""
+  seed 16: band in  outside    - of    -; median S from restart+178 -1.00; first entry +40 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 17: band OUT outside  353 of  512; median S from restart+178 3.31; first entry +48 after the change (restart at +200, entry +732 after it); other fails 1 [S 1.57 at 1h46m34s below the restart-edge floor 1.77] invalid ""
+  seed 18: band in  outside    - of    -; median S from restart+178 -1.00; first entry +66 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 19: band OUT outside  315 of  775; median S from restart+178 4.36; first entry +65 after the change (restart at +210, entry +493 after it); other fails 0 [] invalid ""
+  seed 20: band OUT outside   89 of   91; median S from restart+178 -1.00; first entry +119 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  arm 1 as is: 2/20 pass the whole case
+arm 2 oracle ĉ:
+  seed  1: band OUT outside  253 of  702; median S from restart+178 3.60; first entry +55 after the change (restart at +159, entry +266 after it); other fails 0 [] invalid ""
+  seed  2: band OUT outside  162 of  578; median S from restart+178 4.13; first entry +80 after the change (restart at +224, entry +0 after it); other fails 0 [] invalid ""
+  seed  3: band OUT outside  182 of  201; median S from restart+178 3.76; first entry +273 after the change (restart at +315, entry +0 after it); other fails 0 [] invalid ""
+  seed  4: band OUT outside   48 of  463; median S from restart+178 5.06; first entry +212 after the change (restart at +271, entry +0 after it); other fails 0 [] invalid ""
+  seed  5: band OUT outside   52 of  588; median S from restart+178 4.20; first entry +0 after the change (restart at +253, entry +0 after it); other fails 0 [] invalid ""
+  seed  6: band OUT outside  182 of  684; median S from restart+178 3.83; first entry +0 after the change (restart at +247, entry +0 after it); other fails 0 [] invalid ""
+  seed  7: band in  outside    - of    -; median S from restart+178 5.40; first entry +31 after the change (restart at +112, entry +74 after it); other fails 0 [] invalid ""
+  seed  8: band OUT outside  138 of  501; median S from restart+178 4.50; first entry +41 after the change (restart at +180, entry +0 after it); other fails 0 [] invalid ""
+  seed  9: band OUT outside  139 of  933; median S from restart+178 3.96; first entry +146 after the change (restart at +229, entry +0 after it); other fails 0 [] invalid ""
+  seed 10: band in  outside    - of    -; median S from restart+178 4.34; first entry +101 after the change (restart at +210, entry +0 after it); other fails 0 [] invalid ""
+  seed 11: band in  outside    - of    -; median S from restart+178 -1.00; first entry +22 after the change (restart at +-6000, entry +-1 after it); other fails 1 [S 1.51 at 1h45m50.001s below the restart-edge floor 1.77] invalid ""
+  seed 12: band OUT outside   66 of  608; median S from restart+178 4.50; first entry +24 after the change (restart at +269, entry +29 after it); other fails 0 [] invalid ""
+  seed 13: band in  outside    - of    -; median S from restart+178 4.09; first entry +24 after the change (restart at +242, entry +0 after it); other fails 0 [] invalid ""
+  seed 14: band OUT outside  412 of  660; median S from restart+178 3.54; first entry +381 after the change (restart at +330, entry +51 after it); other fails 0 [] invalid ""
+  seed 15: band in  outside    - of    -; median S from restart+178 4.66; first entry +742 after the change (restart at +369, entry +373 after it); other fails 0 [] invalid ""
+  seed 16: band in  outside    - of    -; median S from restart+178 -1.00; first entry +40 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 17: band OUT outside  268 of  679; median S from restart+178 3.60; first entry +48 after the change (restart at +200, entry +0 after it); other fails 0 [] invalid ""
+  seed 18: band in  outside    - of    -; median S from restart+178 -1.00; first entry +66 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 19: band in  outside    - of    -; median S from restart+178 4.50; first entry +65 after the change (restart at +210, entry +96 after it); other fails 0 [] invalid ""
+  seed 20: band OUT outside   89 of   91; median S from restart+178 -1.00; first entry +119 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  arm 2 oracle ĉ: 7/20 pass the whole case
+arm 3 oracle D̂:
+  seed  1: band OUT outside  863 of  974; median S from restart+178 3.00; first entry +55 after the change (restart at +159, entry +-1 after it); other fails 0 [] invalid ""
+  seed  2: band OUT outside  597 of  669; median S from restart+178 2.47; first entry +80 after the change (restart at +224, entry +-1 after it); other fails 1 [S 1.30 at 1h43m45.001s below the restart-edge floor 1.77] invalid ""
+  seed  3: band OUT outside  577 of  669; median S from restart+178 2.69; first entry +273 after the change (restart at +315, entry +0 after it); other fails 1 [S 1.52 at 1h45m19s below the restart-edge floor 1.77] invalid ""
+  seed  4: band OUT outside  665 of  730; median S from restart+178 2.54; first entry +212 after the change (restart at +271, entry +-1 after it); other fails 1 [S 1.72 at 1h44m33.001s below the restart-edge floor 1.77] invalid ""
+  seed  5: band OUT outside  675 of  704; median S from restart+178 2.88; first entry +0 after the change (restart at +253, entry +-1 after it); other fails 1 [S 1.76 at 1h44m16.001s below the restart-edge floor 1.77] invalid ""
+  seed  6: band OUT outside  508 of  571; median S from restart+178 3.01; first entry +0 after the change (restart at +247, entry +0 after it); other fails 0 [] invalid ""
+  seed  7: band OUT outside  216 of  813; median S from restart+178 3.86; first entry +31 after the change (restart at +112, entry +333 after it); other fails 0 [] invalid ""
+  seed  8: band OUT outside  770 of  832; median S from restart+178 3.20; first entry +41 after the change (restart at +180, entry +956 after it); other fails 1 [S 1.77 at 1h43m8.001s below the restart-edge floor 1.77] invalid ""
+  seed  9: band OUT outside  627 of  707; median S from restart+178 3.31; first entry +146 after the change (restart at +229, entry +0 after it); other fails 0 [] invalid ""
+  seed 10: band OUT outside  642 of  748; median S from restart+178 3.13; first entry +101 after the change (restart at +210, entry +0 after it); other fails 0 [] invalid ""
+  seed 11: band in  outside    - of    -; median S from restart+178 -1.00; first entry +22 after the change (restart at +-6000, entry +-1 after it); other fails 1 [S 1.51 at 1h45m50.001s below the restart-edge floor 1.77] invalid ""
+  seed 12: band OUT outside  691 of  931; median S from restart+178 2.99; first entry +24 after the change (restart at +269, entry +738 after it); other fails 0 [] invalid ""
+  seed 13: band OUT outside  541 of  877; median S from restart+178 3.36; first entry +24 after the change (restart at +242, entry +0 after it); other fails 0 [] invalid ""
+  seed 14: band OUT outside  608 of  658; median S from restart+178 2.93; first entry +-1 after the change (restart at +330, entry +-1 after it); other fails 1 [S 1.58 at 1h45m32.001s below the restart-edge floor 1.77] invalid ""
+  seed 15: band OUT outside  565 of  622; median S from restart+178 3.25; first entry +1190 after the change (restart at +369, entry +821 after it); other fails 1 [S 1.77 at 1h46m10.001s below the restart-edge floor 1.77] invalid ""
+  seed 16: band in  outside    - of    -; median S from restart+178 -1.00; first entry +40 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 17: band OUT outside  582 of  642; median S from restart+178 3.12; first entry +48 after the change (restart at +200, entry +753 after it); other fails 1 [S 1.77 at 1h43m28.001s below the restart-edge floor 1.77] invalid ""
+  seed 18: band in  outside    - of    -; median S from restart+178 -1.00; first entry +66 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 19: band OUT outside  715 of  977; median S from restart+178 3.23; first entry +65 after the change (restart at +210, entry +685 after it); other fails 0 [] invalid ""
+  seed 20: band OUT outside   89 of   91; median S from restart+178 -1.00; first entry +119 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  arm 3 oracle D̂: 2/20 pass the whole case
+arm 4 both:
+  seed  1: band in  outside    - of    -; median S from restart+178 4.06; first entry +55 after the change (restart at +159, entry +13 after it); other fails 0 [] invalid ""
+  seed  2: band in  outside    - of    -; median S from restart+178 4.26; first entry +80 after the change (restart at +224, entry +0 after it); other fails 0 [] invalid ""
+  seed  3: band in  outside    - of    -; median S from restart+178 3.60; first entry +273 after the change (restart at +315, entry +0 after it); other fails 0 [] invalid ""
+  seed  4: band OUT outside  373 of  619; median S from restart+178 3.04; first entry +212 after the change (restart at +271, entry +0 after it); other fails 0 [] invalid ""
+  seed  5: band in  outside    - of    -; median S from restart+178 4.43; first entry +0 after the change (restart at +253, entry +1 after it); other fails 0 [] invalid ""
+  seed  6: band OUT outside  343 of  691; median S from restart+178 3.60; first entry +0 after the change (restart at +247, entry +0 after it); other fails 0 [] invalid ""
+  seed  7: band OUT outside   27 of  170; median S from restart+178 3.60; first entry +31 after the change (restart at +112, entry +13 after it); other fails 0 [] invalid ""
+  seed  8: band OUT outside   54 of  618; median S from restart+178 3.60; first entry +41 after the change (restart at +180, entry +0 after it); other fails 0 [] invalid ""
+  seed  9: band in  outside    - of    -; median S from restart+178 4.30; first entry +146 after the change (restart at +229, entry +0 after it); other fails 0 [] invalid ""
+  seed 10: band in  outside    - of    -; median S from restart+178 4.23; first entry +101 after the change (restart at +210, entry +0 after it); other fails 0 [] invalid ""
+  seed 11: band in  outside    - of    -; median S from restart+178 -1.00; first entry +22 after the change (restart at +-6000, entry +-1 after it); other fails 1 [S 1.51 at 1h45m50.001s below the restart-edge floor 1.77] invalid ""
+  seed 12: band OUT outside  256 of  463; median S from restart+178 3.84; first entry +24 after the change (restart at +269, entry +38 after it); other fails 0 [] invalid ""
+  seed 13: band in  outside    - of    -; median S from restart+178 4.11; first entry +24 after the change (restart at +242, entry +0 after it); other fails 0 [] invalid ""
+  seed 14: band in  outside    - of    -; median S from restart+178 4.30; first entry +333 after the change (restart at +330, entry +3 after it); other fails 0 [] invalid ""
+  seed 15: band OUT outside  269 of  587; median S from restart+178 3.45; first entry +372 after the change (restart at +369, entry +3 after it); other fails 0 [] invalid ""
+  seed 16: band in  outside    - of    -; median S from restart+178 -1.00; first entry +40 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 17: band in  outside    - of    -; median S from restart+178 4.43; first entry +48 after the change (restart at +200, entry +0 after it); other fails 0 [] invalid ""
+  seed 18: band in  outside    - of    -; median S from restart+178 -1.00; first entry +66 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  seed 19: band OUT outside   65 of  733; median S from restart+178 4.43; first entry +65 after the change (restart at +210, entry +23 after it); other fails 0 [] invalid ""
+  seed 20: band OUT outside   89 of   91; median S from restart+178 -1.00; first entry +119 after the change (restart at +-6000, entry +-1 after it); other fails 0 [] invalid ""
+  arm 4 both: 11/20 pass the whole case
+
+Arm 4's samples under 3.60, by flag (TestZZOracleWhy):
+seed  4: from +449, 751 samples: 461 under 3.60 (0 over 5.07); of those under: capped 30, guarded 98, a test pending 285, D-hold 0, paced 461, held 0, ĉ-hold 0, unresolvable 0, rose 1
+seed  6: from +425, 775 samples: 377 under 3.60 (0 over 5.07); of those under: capped 54, guarded 10, a test pending 199, D-hold 0, paced 377, held 0, ĉ-hold 0, unresolvable 0, rose 1
+seed  8: from +358, 842 samples: 217 under 3.60 (0 over 5.07); of those under: capped 133, guarded 10, a test pending 47, D-hold 0, paced 217, held 0, ĉ-hold 0, unresolvable 0, rose 2
+seed 12: from +447, 753 samples: 332 under 3.60 (0 over 5.07); of those under: capped 80, guarded 161, a test pending 150, D-hold 0, paced 332, held 0, ĉ-hold 0, unresolvable 0, rose 2
+seed 15: from +547, 653 samples: 358 under 3.60 (0 over 5.07); of those under: capped 45, guarded 69, a test pending 216, D-hold 0, paced 358, held 0, ĉ-hold 0, unresolvable 0, rose 2
+seed 19: from +388, 812 samples: 201 under 3.60 (0 over 5.07); of those under: capped 9, guarded 5, a test pending 63, D-hold 0, paced 201, held 0, ĉ-hold 0, unresolvable 0, rose 1
+seed 20: from +0, 1200 samples: 99 under 3.60 (577 over 5.07); of those under: capped 28, guarded 0, a test pending 0, D-hold 71, paced 99, held 0, ĉ-hold 0, unresolvable 0, rose 0

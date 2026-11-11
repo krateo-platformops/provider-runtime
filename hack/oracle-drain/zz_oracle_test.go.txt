@@ -1,0 +1,121 @@
+package sim
+
+// SCRATCH (never committed): the long drain with oracle ĉ and/or D̂.
+
+import (
+	"fmt"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel"
+)
+
+// The calibrated drain plant's mean curve D(n), freeze-6aafb84.
+var oracleCurve = []float64{41.2847, 44.7248, 50.0795, 58.3414, 67.2274, 78.0612, 88.7626, 101.8060, 115.5072, 127.8193, 136.5566, 149.3003}
+
+func oracleD(S float64) float64 {
+	if S <= 1 {
+		return oracleCurve[0]
+	}
+	if S >= 12 {
+		return oracleCurve[11]
+	}
+	i := int(S) // between n=i and n=i+1
+	f := S - float64(i)
+	a, b := oracleCurve[i-1], oracleCurve[i]
+	return a + float64(f*(b-a))
+}
+
+func TestZZOracle(t *testing.T) {
+	if os.Getenv("SIM_ORACLE") == "" {
+		t.Skip()
+	}
+	var gc gateCase
+	for _, c := range gateCases() {
+		if c.name == "long drain" {
+			gc = c
+		}
+	}
+	re := regexp.MustCompile(`outside the band \[[0-9.]+, [0-9.]+\] in (\d+) of (\d+)`)
+	arms := []struct {
+		name string
+		c    float64
+		d    func(float64) float64
+	}{{"1 as is", 0, nil}, {"2 oracle ĉ", 3.157, nil}, {"3 oracle D̂", 0, oracleD}, {"4 both", 3.157, oracleD}}
+	var b strings.Builder
+	for _, arm := range arms {
+		costmodel.OracleFrom, costmodel.OracleC, costmodel.OracleD = 6000, arm.c, arm.d
+		type row struct {
+			verdict            verdict
+			med                float64
+			entry, entryR, rst int
+			outside, n         string
+		}
+		rows := make([]row, 20)
+		parallel(20, func(k int) {
+			seed := uint64(k + 1)
+			v := runCase(gc, ctlCost, seed)
+			tr := Run(gc.cfg(seed))
+			i0 := index(tr, drainAt)
+			rst := -1
+			for i := i0; i < len(tr.Results); i++ {
+				if tr.Results[i].CPU.CRestarted {
+					rst = i
+					break
+				}
+			}
+			var ss []float64
+			for i := rst + 178; rst >= 0 && i < len(tr.Results); i++ {
+				ss = append(ss, tr.Results[i].Slots)
+			}
+			sort.Float64s(ss)
+			med := -1.0
+			if len(ss) > 0 {
+				med = ss[len(ss)/2]
+			}
+			entry, entryR := -1, -1
+			for i := i0; i < len(tr.Results); i++ {
+				if S := tr.Results[i].Slots; S >= 3.6-1e-9 && S <= 5.07+1e-9 {
+					if entry < 0 {
+						entry = i - i0
+					}
+					if rst >= 0 && i >= rst && entryR < 0 {
+						entryR = i - rst
+					}
+				}
+			}
+			r := row{verdict: v, med: med, entry: entry, entryR: entryR, rst: rst - i0, outside: "-", n: "-"}
+			for _, f := range v.fails {
+				if m := re.FindStringSubmatch(f); m != nil {
+					r.outside, r.n = m[1], m[2]
+				}
+			}
+			rows[k] = r
+		})
+		pass := 0
+		fmt.Fprintf(&b, "\narm %s:\n", arm.name)
+		for k, r := range rows {
+			band := "in"
+			if r.outside != "-" {
+				band = "OUT"
+			}
+			var other []string
+			for _, f := range r.verdict.fails {
+				if !re.MatchString(f) {
+					other = append(other, f)
+				}
+			}
+			if len(r.verdict.fails) == 0 && r.verdict.invalid == "" {
+				pass++
+			}
+			fmt.Fprintf(&b, "  seed %2d: band %-3s outside %4s of %4s; median S from restart+178 %.2f; first entry +%d after the change (restart at +%d, entry +%d after it); other fails %d %v invalid %q\n",
+				k+1, band, r.outside, r.n, r.med, r.entry, r.rst, r.entryR, len(other), other, r.verdict.invalid)
+		}
+		fmt.Fprintf(&b, "  arm %s: %d/20 pass the whole case\n", arm.name, pass)
+	}
+	costmodel.OracleFrom, costmodel.OracleC, costmodel.OracleD = 0, 0, nil
+	t.Log(b.String())
+}

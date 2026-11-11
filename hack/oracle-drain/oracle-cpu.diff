@@ -1,0 +1,91 @@
+diff --git a/pkg/ratelimit/internal/costmodel/cpu.go b/pkg/ratelimit/internal/costmodel/cpu.go
+index 9d5c7cd..9634c67 100644
+--- a/pkg/ratelimit/internal/costmodel/cpu.go
++++ b/pkg/ratelimit/internal/costmodel/cpu.go
+@@ -154,8 +154,18 @@ func (w *dWindow) value() (float64, bool) {
+ 
+ // CPU is the CPU path's state (design §3.3–§3.5, §4.2, §17). The sampler
+ // goroutine owns it.
++// SCRATCH ORACLE (never committed): forced estimates from the first ĉ
++// restart at or after OracleFrom seconds.
++var (
++	OracleFrom float64
++	OracleC    float64
++	OracleD    func(S float64) float64
++)
++
+ type CPU struct {
+-	cfg CPUConfig
++	oracleOn bool
++	oracleS  float64
++	cfg      CPUConfig
+ 
+ 	t     float64 // seconds since the first sample
+ 	lastL float64 // the last sample's cpu.max, cores
+@@ -604,6 +614,10 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
+ 		res.Restarted = true
+ 	}
+ 	stale = stale || res.DPending
++	if OracleFrom > 0 && c.t >= OracleFrom && res.CRestarted {
++		c.oracleOn = true
++	}
++	c.oracleS = prev
+ 
+ 	if books.SlotSeconds > 0 && c.shareShift(books, alpha) {
+ 		c.c.reset()
+@@ -614,6 +628,9 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
+ 	}
+ 
+ 	ch, cok := c.c.value()
++	if c.oracleOn && OracleC > 0 {
++		ch, cok = OracleC, true
++	}
+ 	seC := c.c.seRatio()
+ 	res.SECost = seC
+ 	if cok && dok && ch > 0 && dv > 0 {
+@@ -644,9 +661,16 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
+ 		}
+ 	case kind == Capped:
+ 		// §17.10 (A): a window-capped sample never rises.
++		if c.oracleOn && OracleD != nil {
++			dv, dok = OracleD(prev), true
++		}
+ 		g = math.Min(prev, c.capped(from, limit, bg, nbar, dv, dok, &res))
+ 	default:
+ 		switch {
++		case c.oracleOn && OracleC > 0 && OracleD != nil:
++			g = (float64(rho*limit) - bg) * OracleD(prev) / ch
++		case c.oracleOn && OracleC > 0 && dok:
++			g = (float64(rho*limit) - bg) * dv / ch
+ 		case c.restartC:
+ 			// §17.8 item 5: after a ĉ restart, with CPU but no completion its
+ 			// denominator counts, the active law holds (reported as such, not
+@@ -664,6 +688,8 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
+ 				g = float64(ceiling)
+ 				res.Paced = true
+ 			}
++		case c.oracleOn && OracleD != nil:
++			g = (float64(rho*limit) - bg) * OracleD(prev) / ch
+ 		case !dok:
+ 			res.DHold = true
+ 		default:
+@@ -968,6 +994,9 @@ func (c *CPU) capped(from int, limit, bg, nbar, dv float64, dok bool, res *CPURe
+ 	theta := (float64(rho*limit) - bg) / (limit - bg)
+ 	g := theta * nbar
+ 	cw, ok := c.windowCost(from, bg)
++	if c.oracleOn && OracleC > 0 {
++		cw, ok = OracleC, true
++	}
+ 	if !ok || cw <= 0 {
+ 		return g
+ 	}
+@@ -1011,6 +1040,9 @@ func (c *CPU) capped(from int, limit, bg, nbar, dv float64, dok bool, res *CPURe
+ 		mix += float64(float64(n) * d)
+ 	}
+ 	mix /= float64(total)
++	if c.oracleOn && OracleD != nil {
++		mix = OracleD(c.oracleS)
++	}
+ 	if first := (float64(rho*limit) - bg) * mix / cw; first < g {
+ 		res.FirstTerm = true
+ 		return first
