@@ -1,0 +1,50 @@
+runs:
+  results/pc-n3-r1.log n=3 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.1897 completions=112 burn check A (idle moments, 453 in the window): 109 calls, 3009 ms asked, measured +0.0025%; cgroup CPU per completion 3120 ms (edge allowance ±2.7%, not judged): valid
+  results/pc-n3-r3.log n=3 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.1854 completions=106 burn check B (window): 109 calls, 2993 ms asked, measured +0.0026%; cgroup CPU per completion 3191 ms (edge allowance ±2.8%, not judged): valid
+  results/pc-n4-r1.log n=4 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2219 completions=130 burn check A (idle moments, 207 in the window): 115 calls, 2994 ms asked, measured +0.0025%; cgroup CPU per completion 3146 ms (edge allowance ±3.1%, not judged): valid
+  results/pc-n4-r2.log n=4 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2188 completions=125 burn check B (window): 126 calls, 3022 ms asked, measured +0.0025%; cgroup CPU per completion 3177 ms (edge allowance ±3.2%, not judged): valid
+  results/pc-n4-r3.log n=4 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2146 completions=123 burn check B (window): 120 calls, 3042 ms asked, measured +0.0025%; cgroup CPU per completion 3144 ms (edge allowance ±3.3%, not judged): valid
+  results/pc-n4-r4.log n=4 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2340 completions=134 burn check B (window): 137 calls, 2978 ms asked, measured +0.0025%; cgroup CPU per completion 3167 ms (edge allowance ±3.0%, not judged): valid
+  results/pc-n4-s2-r1.log n=4 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2238 completions=131 burn check B (window): 131 calls, 3022 ms asked, measured +0.0022%; cgroup CPU per completion 3174 ms (edge allowance ±3.1%, not judged): valid
+  results/pc-n4-s2-r2.log n=4 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2247 completions=128 burn check B (window): 131 calls, 2983 ms asked, measured +0.0026%; cgroup CPU per completion 3176 ms (edge allowance ±3.1%, not judged): valid
+  results/pc-n5-r1.log n=5 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2374 completions=139 burn check B (window): 141 calls, 3008 ms asked, measured +0.0026%; cgroup CPU per completion 3149 ms (edge allowance ±3.6%, not judged): valid
+  results/pc-n5-r2.log n=5 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2423 completions=140 burn check B (window): 139 calls, 3011 ms asked, measured +0.0024%; cgroup CPU per completion 3153 ms (edge allowance ±3.6%, not judged): valid
+  results/pc-n5-r3.log n=5 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2451 completions=142 burn check B (window): 144 calls, 2992 ms asked, measured +0.0024%; cgroup CPU per completion 3111 ms (edge allowance ±3.5%, not judged): valid
+  results/pc-n5-r4.log n=5 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2332 completions=133 burn check B (window): 134 calls, 3046 ms asked, measured +0.0025%; cgroup CPU per completion 3161 ms (edge allowance ±3.8%, not judged): valid
+  results/pc-n5-s2-r1.log n=5 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2327 completions=137 burn check B (window): 139 calls, 2962 ms asked, measured +0.0026%; cgroup CPU per completion 3106 ms (edge allowance ±3.6%, not judged): valid
+  results/pc-n5-s2-r2.log n=5 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2319 completions=134 burn check B (window): 135 calls, 3020 ms asked, measured +0.0028%; cgroup CPU per completion 3141 ms (edge allowance ±3.7%, not judged): valid
+  results/pc-n6-r1.log n=6 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2405 completions=136 burn check B (window): 141 calls, 2994 ms asked, measured +0.0023%; cgroup CPU per completion 3188 ms (edge allowance ±4.4%, not judged): valid
+  results/pc-n6-r2.log n=6 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2428 completions=138 burn check B (window): 142 calls, 3044 ms asked, measured +0.0025%; cgroup CPU per completion 3241 ms (edge allowance ±4.3%, not judged): valid
+  results/pc-n6-r3.log n=6 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2445 completions=141 burn check B (window): 138 calls, 2987 ms asked, measured +0.0025%; cgroup CPU per completion 3142 ms (edge allowance ±4.3%, not judged): valid
+  results/pc-n6-r4.log n=6 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2433 completions=141 burn check B (window): 141 calls, 3011 ms asked, measured +0.0025%; cgroup CPU per completion 3159 ms (edge allowance ±4.3%, not judged): valid
+  results/pc-n7-r1.log n=7 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2442 completions=142 burn check B (window): 138 calls, 3029 ms asked, measured +0.0028%; cgroup CPU per completion 3125 ms (edge allowance ±4.9%, not judged): valid
+  results/pc-n7-r3.log n=7 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2490 completions=144 burn check B (window): 139 calls, 3018 ms asked, measured +0.0025%; cgroup CPU per completion 3123 ms (edge allowance ±4.9%, not judged): valid
+  results/pc-n8-r2.log n=8 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2500 completions=146 burn check B (window): 145 calls, 2989 ms asked, measured +0.0026%; cgroup CPU per completion 3118 ms (edge allowance ±5.5%, not judged): valid
+  results/pc-n8-r4.log n=8 node=gke-rlgov-curve-default-pool-339d02b3-qhph model=Intel(R) Xeon(R) CPU @ 2.20GHz U=0.2500 completions=140 burn check B (window): 141 calls, 3090 ms asked, measured +0.0024%; cgroup CPU per completion 3239 ms (edge allowance ±5.7%, not judged): valid
+
+per n (valid runs; the unit is the run):
+  n=3 k=2 mean U 0.1876 cores, 95% CI ±0.0272, between-run sd 0.0030
+       throttled periods per sample: mean 0.76, all throttled in 70% of samples
+       per-second stall share: p10/p50/p90 0.0/60.7/75.1, over 50 in 65% of samples; avg10 p50 52.8
+  n=4 k=6 mean U 0.2230 cores, 95% CI ±0.0068, between-run sd 0.0065
+       throttled periods per sample: mean 0.89, all throttled in 83% of samples
+       per-second stall share: p10/p50/p90 13.2/61.7/74.0, over 50 in 79% of samples; avg10 p50 58.8
+  n=5 k=6 mean U 0.2371 cores, 95% CI ±0.0058, between-run sd 0.0055
+       throttled periods per sample: mean 0.95, all throttled in 92% of samples
+       per-second stall share: p10/p50/p90 46.6/60.7/72.9, over 50 in 86% of samples; avg10 p50 59.5
+  n=6 k=4 mean U 0.2428 cores, 95% CI ±0.0027, between-run sd 0.0017
+       throttled periods per sample: mean 0.97, all throttled in 96% of samples
+       per-second stall share: p10/p50/p90 47.6/58.8/70.6, over 50 in 86% of samples; avg10 p50 57.9
+  n=7 k=2 mean U 0.2466 cores, 95% CI ±0.0306, between-run sd 0.0034
+       throttled periods per sample: mean 0.99, all throttled in 98% of samples
+       per-second stall share: p10/p50/p90 46.9/57.3/68.4, over 50 in 83% of samples; avg10 p50 56.7
+  n=8 k=2 mean U 0.2500 cores, 95% CI ±0.0001, between-run sd 0.0000
+       throttled periods per sample: mean 1.00, all throttled in 99% of samples
+       per-second stall share: p10/p50/p90 49.1/57.1/66.4, over 50 in 87% of samples; avg10 p50 56.9
+
+S* = 4.14 slots (between n=4 and n=5)
+  bootstrap 95% interval [3.92, 4.38], width 0.45; 0 of 10000 resamples with no crossing (sorted to ±inf)
+  delta method: SE 0.16, 95% CI ±0.32 (width 0.64)
+
+decision (pre-registered): the interval's width against the band's half-width above, S*·3r̄ = 0.62
+  The 95% CI of S* is narrower than the band's half-width above: the band is judged with the measured S* = 4.14.
