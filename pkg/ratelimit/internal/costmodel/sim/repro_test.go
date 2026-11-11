@@ -19,7 +19,7 @@ import (
 func traceHash(tr *Trace) string {
 	h := sha256.New()
 	for i := range tr.Samples {
-		fmt.Fprintf(h, "%v|%+v|%+v|%d\n", tr.At[i], tr.Samples[i], tr.Results[i], tr.Capacity[i])
+		_, _ = fmt.Fprintf(h, "%v|%+v|%+v|%d\n", tr.At[i], tr.Samples[i], tr.Results[i], tr.Capacity[i])
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

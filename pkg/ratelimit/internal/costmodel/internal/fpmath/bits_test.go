@@ -29,7 +29,7 @@ func TestBits(t *testing.T) {
 			Hypot(math.Ldexp(m, -20+i*27/4000), math.Ldexp(2-m, 7-i*27/4000)), // about 1e-6 … 128
 			Lgamma(0.5 + float64(60*f)),
 		} {
-			fmt.Fprintf(h, "%016x\n", math.Float64bits(v))
+			_, _ = fmt.Fprintf(h, "%016x\n", math.Float64bits(v))
 		}
 	}
 	if got := fmt.Sprintf("%x", h.Sum(nil)); got != bitsWant {
