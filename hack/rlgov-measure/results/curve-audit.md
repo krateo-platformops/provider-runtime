@@ -20,20 +20,22 @@ with these caveats stated:
 2. **The interval undercovers.** A simulation of this design puts the percentile
    bootstrap's real coverage at about 85–87%, not 95%. Corrected widths still pass: 0.47
    (√(k/(k−1))), 0.52 (t10) and 0.575 (t5). The margin under 0.62 shrinks to 7–24%.
-3. **The warm-up was too short at n = 5** (and partly at n = 4). Mean U kept rising past
-   300 s, most likely a slow desynchronization after all workers start together. With
-   warm-ups of 450–1200 s, S* falls to 4.05–4.09, and the decision doesn't change.
-   **Read 4.14 as S* ≈ 4.05–4.15.** At the curve's slope, that's under 0.001 cores of CPU.
+3. **Withdrawn by the auditor (2026-11-11).** It had read a late-window rise at n = 5 as
+   a too-short warm-up, with S* ≈ 4.05–4.15. A closed-form check (mean-value analysis of a
+   processor-sharing closed queue at the measured 3157 ms of CPU per reconcile, fitting
+   nothing) reproduces every window mean within 0.004 cores, and puts the stationary S* at
+   4.33, inside [3.92, 4.38]. So the rise isn't evidence of a higher, or lower, steady state,
+   and 4.14 isn't known to be biased.
 4. **k*'s factor 0.71 assumes S* midway between the bracketing n.** At 4.16 the weight
    gives k* = 8, not 6. The rule was followed as pre-registered, and the decision uses the
    realized width.
 5. **Stage 2 is one time block** (11 Nov, n = 4 before n = 5). An exploratory,
-   post-hoc split by day gives S* of 4.28 (day 1) against 3.94 (day 2). The likely cause
-   is caveat 3's transient, but the design can't separate it from drift.
+   post-hoc split by day gives S* of 4.28 (day 1) against 3.94 (day 2). The design can't
+   separate a time effect from drift.
 
 Smaller notes: the 4.03–4.26 leave-one-out range; smooth interpolations give 4.09–4.14;
 method B checks the counters rather than the plant; and the "18:44Z" in 3aa8174's message
 is most likely local time.
 
-Lesson for the GKE re-measure after PR 5: set the warm-up from a measured settling time,
-not "3 lifetimes", and randomize across days.
+Lesson for the GKE re-measure after PR 5: randomize across days, and check window means
+against the queueing model at the measured CPU per reconcile.
