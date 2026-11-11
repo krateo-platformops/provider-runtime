@@ -1041,8 +1041,9 @@ not judged.** Each drain plant's curve is run at `n` = 1..12 on seeds 9001–904
 under the GKE protocol; per `n`, the mean of the forty run means is the mean
 curve. The bootstrap resamples the forty seeds with replacement, 10,000 times,
 with the simulation's generator seeded 20261111. It re-interpolates the curve each
-time, and takes the 2.5% and 97.5% order statistics; a resample with no crossing
-sorts to the end it lies at, as in `curve_report.py`. One run computes the frozen
+time, and takes the 2.5% and 97.5% order statistics at `curve_report.py`'s
+indices, the 250th and the 9749th of the sorted 10,000 counted from 0; a resample
+with no crossing sorts to the end it lies at, as in `curve_report.py`. One run computes the frozen
 values, the determinacy decision and these tests.
 
 - **(i) Equivalence with GKE in `U`**, at `n` = 3–7. The margin is
@@ -1126,12 +1127,16 @@ engine at `b2e5757`:
 The drain plants are frozen from forty-seed mean curves instead, so for them the
 rule is the measurement's (decision 1): the seed bootstrap's 95% interval at
 forty seeds narrower than `0.15·S*`. That applies to `drain0` as well as `drain`,
-each with its own bootstrap, and the freeze still stops if `N₀` isn't 7. Every other case's band is judged as now. The rule is
+each with its own bootstrap, and the freeze still stops if `N₀` isn't 7. An
+undetermined `drain0` stops the freeze too, before anything is written, as an
+undetermined short plant does: the "false restarts, 30s" case and the long
+drain's precondition judge `drain0`'s band. Every other case's band is judged as now. The rule is
 re-applied whenever a plant is re-frozen, the calibrated drain plants included.
-In the code, `TestFreeze` applies the rule to every plant. If a short plant is
-undetermined, or `N₀` isn't 7, it stops for review and writes nothing. Each drain
-plant's decision is frozen with its values, and the long drain reports its band
-instead of judging it when the drain plant's is false.
+In the code, `TestFreeze` applies the rule to every plant. If a short plant or
+`drain0` is undetermined, or `N₀` isn't 7, it stops for review and writes nothing.
+`drain0` runs before `drain`, so such a stop leaves the drain plant's one-shot
+unspent. The drain plant's decision is frozen with its values, and the long drain
+reports its band instead of judging it when that decision is false.
 
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline

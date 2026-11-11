@@ -118,8 +118,14 @@ func bootstrapS(runs [][]curvePoint, limit float64) (lo, hi, sd float64, none in
 	}
 	mean := sum / float64(m)
 	sd = math.Sqrt((sq - float64(m)*mean*mean) / float64(m-1))
-	return bs[drainBoots*25/1000-1], bs[drainBoots*975/1000-1], sd, none
+	ilo, ihi := bootOrder(drainBoots)
+	return bs[ilo], bs[ihi], sd, none
 }
+
+// bootOrder is the bootstrap's 2.5% and 97.5% order statistics' indices in b
+// sorted resamples, as curve_report.py takes them: out[int(0.025·b)] and
+// out[int(0.975·b) − 1].
+func bootOrder(b int) (lo, hi int) { return b * 25 / 1000, b*975/1000 - 1 }
 
 // meanVar is the mean and the sample variance.
 func meanVar(xs []float64) (m, v float64) {
@@ -333,6 +339,9 @@ func TestFreezeStats(t *testing.T) {
 		if got := mvaU(n, 3.157, mvaThink, 0.25); math.Abs(got-want) > 5e-5 {
 			t.Errorf("mvaU(%d) = %.4f, want %.4f", n, got, want)
 		}
+	}
+	if lo, hi := bootOrder(drainBoots); lo != 250 || hi != 9749 {
+		t.Errorf("bootOrder(%d) = %d, %d, want curve_report.py's 250, 9749", drainBoots, lo, hi)
 	}
 	sd, df := gkePooled(3, 4, 5)
 	if df != 11 || math.Abs(sd-0.0058) > 1e-4 {

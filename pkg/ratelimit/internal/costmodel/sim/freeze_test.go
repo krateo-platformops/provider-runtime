@@ -221,6 +221,9 @@ func TestFreeze(t *testing.T) {
 				per[k] = fmt.Sprintf("%.3f", crossing(runs[k], L))
 			}
 			t.Logf("%s: per-seed S*: %s", p.name, strings.Join(per, " "))
+			if p.name == "drain0" && !det {
+				t.Fatalf("drain0 is undetermined: the freeze stops for review (plan §4.5)")
+			}
 			if p.name == "drain0" && math.Ceil(s) != 7 {
 				t.Fatalf("drain0: N₀ = ⌈S*₀⌉ = %.0f, not 7: the freeze stops for review (plan §4.5)", math.Ceil(s))
 			}
