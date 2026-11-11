@@ -85,7 +85,8 @@ MUTANTS = [
     ("t_obs ignores recordSince", "verified.go", [("\tobs := since\n", "\tvar obs time.Time\n\t_ = since\n")]),
     ("t_obs ignores observed", "verified.go", [("\tif o, ok := v.observed[h][p]; ok && o.After(obs) {\n", "\tif o, ok := v.observed[h][p]; false && ok && o.After(obs) {\n")]),
     ("t_obs ignores the last relist", "verified.go", [("\tif v.lastList.After(obs) {\n", "\tif false {\n")]),
-    ("equal times skip", "verified.go", [("\treturn obs.Before(issued)\n", "\treturn !obs.After(issued)\n")]),
+    # 1c3ff46 moved canSkip's comparison into a variable, for its read hook.
+    ("equal times skip", "verified.go", [("\tskip := obs.Before(issued)\n", "\tskip := !obs.After(issued)\n")]),
     ("recordSince restarts on every event", "verified.go", [("\t\tif _, ok := runs[p]; !ok {\n", "\t\tif true {\n")]),
     ("a version without P doesn't end the run", "verified.go", [("\t\tif !names[p] {\n\t\t\tdelete(runs, p)\n", "\t\tif false && !names[p] {\n\t\t\tdelete(runs, p)\n")]),
     ("a version that ends the run keeps observed (H1)", "verified.go", [("\t\t\tdelete(runs, p)\n\t\t\tdelete(v.observed[uid], p)\n", "\t\t\tdelete(runs, p)\n")]),
