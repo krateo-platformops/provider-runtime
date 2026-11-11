@@ -83,6 +83,9 @@ type protocol struct {
 	seen            *firstSight
 	reports         reports
 	newEpoch        func() (string, error)
+	// restoredEpochRequeue, if set, replaces the constant of that name
+	// (epochRequeue).
+	restoredEpochRequeue time.Duration
 }
 
 // firstSight remembers when this process first saw each protected object's

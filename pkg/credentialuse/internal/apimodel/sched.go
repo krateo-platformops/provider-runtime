@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"math/rand"
 	"slices"
 	"strings"
@@ -15,8 +16,8 @@ import (
 // The scheduler runs actors so that exactly one runs at a time.
 //
 // Time is event-driven (docs/credential-use-model-reduction.md §3.1): the
-// clock ticks 1ms on each call step and on no other step, and moves further
-// only by a jump to a pending deadline. A schedule may choose up to
+// clock ticks on each call step, by at most BaseTick, and on no other step,
+// and moves further only by a jump to a pending deadline. A schedule may choose up to
 // Bounds.Jumps jumps, at any step; when nothing else can go, the clock jumps
 // to the earliest notBefore, uncounted. Deadlines are every actor's
 // notBefore and whatever Sched.Deadlines returns (grace ends, a scenario's
@@ -37,8 +38,11 @@ import (
 // Exploring every schedule of a scenario is a depth-first search over those
 // choices, by replay. It is bounded the usual way for stateless model
 // checking: by the number of preemptions (switching away from an actor that
-// could go on, as in CHESS) and by the number of injected faults. Within the
-// bounds the search is exhaustive, and Explore says whether it finished.
+// could go on, as in CHESS) and by the number of injected faults. As in
+// CHESS, only visible steps count: a quiet resume (§4) is never a
+// preemption and never the last actor, whether rule R runs it silently or
+// as a step of its own (§5, C-bounds). Within the bounds the search is
+// exhaustive, and Explore says whether it finished.
 
 // A Fault is what the scheduler does to one call.
 type Fault int
@@ -75,8 +79,8 @@ var (
 // errStopped unwinds an actor the run no longer needs.
 var errStopped = errors.New("apimodel: stopped")
 
-// Clock is the scheduler's logical clock: it moves 1ms on every call step,
-// and jumps to deadlines.
+// Clock is the scheduler's logical clock: it ticks on every call step, and
+// jumps to deadlines.
 type Clock struct {
 	t time.Time
 	s *Sched
@@ -172,15 +176,11 @@ type Sched struct {
 	// Key, if set, returns the scenario's abstract state, for a stateful
 	// search (§10): everything but the scheduler's own part, which Run adds.
 	Key func() string
-	// NoQuiet turns rule R off (§4): quiet parks are ordinary ones, each
-	// resume a step. The differential test compares the two.
+	// NoQuiet turns rule R off (§4): each quiet resume is a step of its own,
+	// still invisible to the preemption bound (never a preemption, never the
+	// last actor). The differential test compares the two.
 	NoQuiet bool
-	// QuietInvisible makes a quiet resume, rule R off, invisible to the
-	// preemption bound: never a preemption, never the last actor. The
-	// reduction is sound only against that counting (issue 1, under review);
-	// the differential test sets it on its unreduced searches.
-	QuietInvisible bool
-	inQuiet        bool
+	inQuiet bool
 	// Terms, if set, returns every live time term of the state (§10.2), for
 	// tick's invariant.
 	Terms func() []time.Time
@@ -204,6 +204,28 @@ type Sched struct {
 	// the prefix replays under the original bounds, so that its choice
 	// indices mean what they meant.
 	left *Budget
+
+	// For the capacity condition (§10.2): calls since the last jump, chosen
+	// or forced; and what the schedule used, for Result.
+	callsSinceJump int
+	usage          Usage
+}
+
+// Usage is what one schedule, or the most of any schedule in a search, used
+// of the time representation's capacity (§10.2): the most calls between two
+// jumps, the most jumps (chosen and forced), and the smallest tick.
+type Usage struct {
+	MaxCallsBetweenJumps, MaxJumps int
+	MinTick                        time.Duration
+}
+
+// Merge keeps the most of u and o.
+func (u *Usage) Merge(o Usage) {
+	u.MaxCallsBetweenJumps = max(u.MaxCallsBetweenJumps, o.MaxCallsBetweenJumps)
+	u.MaxJumps = max(u.MaxJumps, o.MaxJumps)
+	if o.MinTick > 0 && (u.MinTick == 0 || o.MinTick < u.MinTick) {
+		u.MinTick = o.MinTick
+	}
 }
 
 // ReplayLabels runs one schedule that follows a labelled trace (each step's
@@ -379,11 +401,14 @@ func (s *Sched) Views() []ActorView {
 // Now returns the clock, for the state hash, without recording a read.
 func (s *Sched) Now() time.Time { return s.Clock.t }
 
-// Start is the clock at the start of every schedule: on a whole second, the
+// Start is the clock at the start of every schedule: on a whole hour, the
 // unit U every time constant is a multiple of (§10.2).
-var Start = time.Date(2026, 11, 8, 16, 26, 0, 0, time.UTC)
+var Start = time.Date(2026, 11, 8, 16, 0, 0, 0, time.UTC)
 
 func newSched(b Bounds, prefix []int, rng *rand.Rand, visited *Visited) *Sched {
+	if err := CheckCapacity(b.Jumps); err != nil {
+		panic(err.Error())
+	}
 	s := &Sched{
 		bounds:  b,
 		prefix:  prefix,
@@ -633,7 +658,7 @@ func (s *Sched) Run() error {
 			}
 			// A quiet resume (rule R off) is invisible: it is never a
 			// preemption, and doesn't become the last actor (§5, C-bounds).
-			if (!a.quiet || !s.QuietInvisible) && s.last != nil && s.last != a && s.last.enabled(now) && s.preemptions >= s.bounds.Preemptions {
+			if !a.quiet && s.last != nil && s.last != a && s.last.enabled(now) && s.preemptions >= s.bounds.Preemptions {
 				continue // no preemption left: the last actor must go on
 			}
 			opts = append(opts, option{actor: a, fault: FaultNone})
@@ -666,6 +691,7 @@ func (s *Sched) Run() error {
 				return fmt.Errorf("apimodel: deadlock: %s", s.parked())
 			}
 			s.Clock.t = next
+			s.jumped()
 			continue
 		}
 		// The state the next choice is made from, after any forced jump: one
@@ -706,9 +732,10 @@ func (s *Sched) Run() error {
 			s.jumps++
 			s.trace = append(s.trace, "jump:+"+o.jump.Sub(now).String())
 			s.Clock.t = o.jump
+			s.jumped()
 			continue
 		}
-		quiet := o.actor.quiet && s.QuietInvisible
+		quiet := o.actor.quiet
 		if !quiet && s.last != nil && s.last != o.actor && s.last.enabled(now) {
 			s.preemptions++
 		}
@@ -727,33 +754,90 @@ func (s *Sched) Run() error {
 }
 
 // TimeUnit is U: every constant the scenarios and the protocol add to a time
-// is a multiple of it (docs/credential-use-model-reduction.md §10.2).
-const TimeUnit = time.Second
+// is a multiple of it (docs/credential-use-model-reduction.md §10.2). A fine
+// part, a time's offset from the nearest whole U, stays within ±U/2.
+const TimeUnit = time.Hour
+
+const (
+	// BaseTick is the most one call moves the clock.
+	BaseTick = time.Second
+	// TickDivisor is D: a tick is also at most a D-th of the gap to the next
+	// pending deadline, and of the gap to the next larger fine part of a live
+	// term (§10.2's invariant).
+	TickDivisor = 1024
+	// MaxCallsBetweenJumps is K: the most calls a schedule may make between
+	// two jumps, chosen or forced. CheckCapacity is derived for it, and a
+	// schedule that makes more panics.
+	MaxCallsBetweenJumps = 512
+)
+
+// CheckCapacity checks that time.Time's 1ns resolution leaves room for the
+// ticks of a schedule with up to jumps nested jumps and K calls between any
+// two (§10.2, the capacity condition):
+//
+//   - K ≤ D calls shrink a gap by at most a factor (1 − 1/D)^K ≥ 1/e, so
+//     every tick of a level is at least its starting gap over e·D;
+//   - a jump lands on a term, and the next larger fine part, made at the
+//     level before, is at least one of that level's ticks away: so a level's
+//     gap is at least the level before's smallest tick;
+//   - level 0's gap is U/2, and its ticks are at most B: its smallest tick
+//     is at least min(B, U/2/(e·D));
+//   - so level T's smallest tick is at least min(B, U/2/(e·D))/(e·D)^T.
+//
+// It must be at least 1ns:
+//
+//	room = min(e·D·B, U/2) ≥ (e·D)^(T+1) ns.
+func CheckCapacity(jumps int) error {
+	if MaxCallsBetweenJumps > TickDivisor {
+		return fmt.Errorf("apimodel: the capacity condition needs K ≤ D, so that K calls shrink a gap by at most e: K = %d, D = %d (§10.2)",
+			MaxCallsBetweenJumps, TickDivisor)
+	}
+	eD := math.E * TickDivisor
+	room := math.Min(eD*float64(BaseTick), float64(TimeUnit/2))
+	need := math.Pow(eD, float64(jumps+1))
+	if room < need {
+		return fmt.Errorf("apimodel: the time representation has no room for %d nested jumps: room = min(e·D·B, U/2) = min(e·%d·%s, %s) = %.4g ns, "+
+			"below (e·D)^(T+1) = (e·%d)^%d = %.4g ns, so a tick at the deepest level could fall below 1ns (§10.2): raise U or B, or lower D or T",
+			jumps, TickDivisor, BaseTick, TimeUnit/2, room, TickDivisor, jumps+1, need)
+	}
+	return nil
+}
 
 // Fine returns t's fine part: its offset from the nearest whole U, counted
 // from anchor (the scheduler and the state hash use Start, itself a whole
 // U).
-func Fine(t, earliest time.Time) time.Duration {
-	d := t.Sub(earliest)
+func Fine(t, anchor time.Time) time.Duration {
+	d := t.Sub(anchor)
 	n := (d + TimeUnit/2) / TimeUnit
 	return d - n*TimeUnit
 }
 
-// tick is how far a call moves the clock: 1µs, or less, so that it never
-// reaches a pending deadline. Deadlines derived from the times of events
-// (two processes' first sights, a deletion and its first sight) lie only a
-// few ticks apart; after a jump to one, the next must still be crossed only
-// by a jump. So the tick is at most 1/1024 of the time left to the next
-// deadline (and of the gap to the next larger fine part, below), and at
-// least the clock's 1ns resolution. That leaves room for about 20,000 calls
-// at level 0 before the 1ns floor, about 14,000 after one jump, and hundreds
-// after two. A tick that can't fit panics: time would have to move through a
-// call.
+// jumped starts a new level: the clock jumped, by choice or forced.
+func (s *Sched) jumped() {
+	s.callsSinceJump = 0
+	s.usage.MaxJumps++
+}
+
+// tick is how far a call moves the clock: at most BaseTick, and less, so
+// that it never reaches a pending deadline. Deadlines derived from the times
+// of events (two processes' first sights, a deletion and its first sight)
+// lie only a few ticks apart; after a jump to one, the next must still be
+// crossed only by a jump. So the tick is at most a D-th of the time left to
+// the next deadline (and of the gap to the next larger fine part, below),
+// and at least the clock's 1ns resolution. CheckCapacity shows that, with at
+// most K calls between jumps, the 1ns floor is never reached; a tick that
+// can't fit panics all the same: time would have to move through a call.
 func (s *Sched) tick(now time.Time) time.Duration {
-	d := time.Millisecond
+	s.callsSinceJump++
+	s.usage.MaxCallsBetweenJumps = max(s.usage.MaxCallsBetweenJumps, s.callsSinceJump)
+	if s.callsSinceJump > MaxCallsBetweenJumps {
+		panic(fmt.Sprintf("apimodel: %d calls since the last jump, more than K = %d, the most the capacity condition is derived for (§10.2); raise K within D = %d, and recheck CheckCapacity (trace %s)",
+			s.callsSinceJump, MaxCallsBetweenJumps, TickDivisor, s.Trace()))
+	}
+	d := BaseTick
 	if ds := s.pending(now); len(ds) > 0 {
 		gap := ds[0].Sub(now)
-		if g := gap / 1024; g < d {
+		if g := gap / TickDivisor; g < d {
 			d = max(g, time.Nanosecond)
 		}
 		if d >= gap {
@@ -772,21 +856,30 @@ func (s *Sched) tick(now time.Time) time.Duration {
 				gap = f - fn
 			}
 		}
-		if g := gap / 1024; g < d {
+		if g := gap / TickDivisor; g < d {
 			d = max(g, time.Nanosecond)
 		}
 		if d >= gap {
 			panic(fmt.Sprintf("apimodel: a call's tick would pass a live term's fine part: too many calls since the last jump (trace %s)", s.Trace()))
 		}
 	}
+	if s.usage.MinTick == 0 || d < s.usage.MinTick {
+		s.usage.MinTick = d
+	}
 	return d
 }
 
-// liveActors reports whether some actor that keeps the run going isn't
-// done: a jump after that would change nothing anyone sees.
+// liveActors reports whether some actor that keeps the run going has more
+// to do than a quiet segment that is due: a jump after that would change
+// nothing anyone sees. An actor at a ready quiet park doesn't count. Rule R
+// runs its segment before any choice, so with R the actor is past it; and
+// if the segment ends the actor, a jump there must not be offered without R
+// either, or the unreduced search would reach states the reduced one can't
+// (docs/credential-use-model-reduction.md §5, C-bounds, jumps).
 func (s *Sched) liveActors() bool {
+	now := s.Clock.t
 	for _, a := range s.actors {
-		if !a.done && !a.daemon {
+		if !a.done && !a.daemon && !(a.quiet && a.enabled(now)) {
 			return true
 		}
 	}
@@ -845,6 +938,9 @@ type Result struct {
 	// States is a stateful search's count of distinct abstract states;
 	// Pruned, of runs that ended at a visited one.
 	States, Pruned int
+	// Usage is the most any schedule used of the time representation's
+	// capacity (§10.2).
+	Usage Usage
 }
 
 // Explore runs scenario once per schedule within b, depth first. scenario
@@ -899,6 +995,7 @@ func explore(b Bounds, visited *Visited, audit func(pruned, witness Witness), sc
 		s := newSched(b, prefix, nil, visited)
 		err := scenario(s)
 		res.Runs++
+		res.Usage.Merge(s.usage)
 		if s.pruned {
 			res.Pruned++
 			if audit != nil {
@@ -935,7 +1032,9 @@ func Walk(b Bounds, n int, seed int64, scenario func(s *Sched) error) Result {
 	rng := rand.New(rand.NewSource(seed)) // #nosec G404 -- reproducible schedules, not security
 	for range n {
 		s := newSched(b, nil, rng, nil)
-		if err := scenario(s); err != nil {
+		err := scenario(s)
+		res.Usage.Merge(s.usage)
+		if err != nil {
 			res.Failures = append(res.Failures, Failure{Err: err, Trace: s.Trace()})
 			if len(res.Failures) >= 10 {
 				break

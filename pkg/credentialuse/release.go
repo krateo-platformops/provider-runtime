@@ -19,6 +19,17 @@ const maxReleaseRounds = 5
 // missing epoch.
 const restoredEpochRequeue = time.Second
 
+// epochRequeue is how soon a batch looks again after R1 restored a missing
+// epoch: restoredEpochRequeue, unless the protocol sets its own (the model
+// does, a multiple of its time unit, docs/credential-use-model-reduction.md
+// §10.2).
+func (p *protocol) epochRequeue() time.Duration {
+	if p.restoredEpochRequeue != 0 {
+		return p.restoredEpochRequeue
+	}
+	return restoredEpochRequeue
+}
+
 // ErrReleaseRejected is a release patch that failed against the very
 // resourceVersion it was built from: not contention but a defect, reported
 // and not retried (§6.2, L1 of the review of revision 16).
@@ -124,7 +135,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 					errs = append(errs, err)
 				}
 				now := p.clock.Now()
-				res.requeueAt(now, now.Add(restoredEpochRequeue))
+				res.requeueAt(now, now.Add(p.epochRequeue()))
 				continue
 			}
 			r := r1Read{id: id, meta: m}

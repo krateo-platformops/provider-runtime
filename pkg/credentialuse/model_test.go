@@ -57,10 +57,25 @@ import (
 //   - firstSight is pruned without a cache, from what R1 and R3 see; that is
 //     memory hygiene only, and no decision depends on it.
 
-// testGrace is long next to the 1ms a call ticks, so that only a jump
+// testGrace is long next to the at most 1s a call ticks, so that only a jump
 // crosses a grace end (docs/credential-use-model-reduction.md §3.1). The
-// scheduler panics if a tick would cross a pending deadline.
-const testGrace = time.Hour
+// scheduler panics if a tick would cross a pending deadline. It and every
+// other constant the model adds to a time are multiples of the time unit U,
+// 1h (§10.2): the grace is 1000 U, half of it 500 U.
+const testGrace = 1000 * apimodel.TimeUnit
+
+// testEpochRequeue is the model's restored-epoch requeue: one U, where
+// production's is 1s (restoredEpochRequeue), so that now plus it is a term
+// plus a multiple of U (§10.2, case (c)).
+const testEpochRequeue = apimodel.TimeUnit
+
+// modelProtocol is newProtocol for the model's actors: the test grace, and
+// the model's restored-epoch requeue.
+func modelProtocol(srv server, v views, ver *verified, seen *firstSight, c clock.PassiveClock) *protocol {
+	p := newProtocol(srv, v, ver, seen, c, testGrace)
+	p.restoredEpochRequeue = testEpochRequeue
+	return p
+}
 
 // testJumps is how many times a schedule may jump to a deadline (§3.1, the
 // user's T).
@@ -455,7 +470,7 @@ func (w *world) holder(spec holderSpec, p **process) {
 		a.Locals = func() []any { return []any{pass, liveIdx, delIdx, deletionPhaseLoop} }
 		run := func() (gone bool) {
 			a.Restart()
-			pr := newProtocol(modelServer{w.m, a}, cacheViews{p}, (*p).ver, (*p).seen, a.Clock(), testGrace)
+			pr := modelProtocol(modelServer{w.m, a}, cacheViews{p}, (*p).ver, (*p).seen, a.Clock())
 			srv := modelServer{w.m, a}
 			obj, err := srv.Get(ctx, widgetGK, w.ns, spec.name)
 			if !deletionPhaseLoop {
@@ -596,7 +611,7 @@ func (w *world) releaser(name string, p **process, n int, cacheless bool, after 
 			}
 			began := false
 			srv := firstCall{modelServer{w.m, a}, &began, func() { w.inc(w.batchesStarted, name) }}
-			pr := newProtocol(srv, v, (*p).ver, (*p).seen, a.Clock(), testGrace)
+			pr := modelProtocol(srv, v, (*p).ver, (*p).seen, a.Clock())
 			res, err := pr.release(context.Background(), w.ns, []ID{w.p})
 			w.inc(w.batches, name)
 			at := w.s.Now()
@@ -722,7 +737,7 @@ func (w *world) check() error {
 // until nothing changes; then, with no user left, the finalizer must be gone.
 func (w *world) converge() error {
 	later := clockAt(w.s.Clock.Now().Add(3 * testGrace))
-	pr := newProtocol(modelServer{m: w.m}, noViews{}, newVerified(widgetGK), newFirstSight(), later, testGrace)
+	pr := modelProtocol(modelServer{m: w.m}, noViews{}, newVerified(widgetGK), newFirstSight(), later)
 	for range 3 {
 		if _, err := pr.release(context.Background(), w.ns, []ID{w.p}); err != nil {
 			return err
@@ -883,6 +898,8 @@ func explore(t *testing.T, name string, flags scenarioFlags, scenario func(w *wo
 func report(t *testing.T, name string, res apimodel.Result) {
 	t.Helper()
 	t.Logf("%s: %d schedules, finished=%v", name, res.Runs, res.Finished)
+	t.Logf("%s: capacity used (§10.2): at most %d calls between jumps (K = %d), %d jumps chosen or forced, smallest tick %s",
+		name, res.Usage.MaxCallsBetweenJumps, apimodel.MaxCallsBetweenJumps, res.Usage.MaxJumps, res.Usage.MinTick)
 	for _, f := range res.Failures {
 		t.Errorf("%s: %v\nschedule: %s", name, f.Err, f.Trace)
 	}

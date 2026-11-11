@@ -207,18 +207,36 @@ func normalized(err error) []string {
 	return slices.Compact(out)
 }
 
+// violation is a run's error that the scenario's checks found, as against
+// one of the harness's own (a deadlock, say).
+type violation struct{ err error }
+
+func (v violation) Error() string { return v.err.Error() }
+func (v violation) Unwrap() error { return v.err }
+
+func violations(err error) error {
+	if err == nil {
+		return nil
+	}
+	return violation{err}
+}
+
 // runner runs a scenario with the state hash set, recording each terminal
-// state and the violations of each schedule. noQuiet turns the quiet-segment
-// reduction off (§4).
+// state and the violations of each schedule. mode.off turns the quiet-segment
+// reduction off (§4). What the checks find comes back as a violation.
 func runner(sc func(w *world), terminal func(key string, violations []string), mode quietMode) func(s *apimodel.Sched) error {
 	return func(s *apimodel.Sched) error {
 		w := newWorld(s)
-		s.NoQuiet, s.QuietInvisible = mode.off, mode.invisible
+		s.NoQuiet = mode.off
 		sc(w)
 		s.Key = w.stateKey
 		if err := s.Run(); err != nil {
-			if errors.Is(err, apimodel.ErrPruned) || errors.Is(err, apimodel.ErrCapped) {
-				return errors.Join(w.errs...)
+			switch {
+			case errors.Is(err, apimodel.ErrPruned):
+				return violations(errors.Join(w.errs...))
+			case errors.Is(err, apimodel.ErrCapped):
+				// The audit must see the cap, and stop there.
+				return errors.Join(err, violations(errors.Join(w.errs...)))
 			}
 			return err
 		}
@@ -231,7 +249,7 @@ func runner(sc func(w *world), terminal func(key string, violations []string), m
 		if terminal != nil {
 			terminal(key, normalized(err))
 		}
-		return err
+		return violations(err)
 	}
 }
 
@@ -261,9 +279,7 @@ type searchResult struct {
 // with the quiet-segment reduction or without it. A stateful search audits
 // every prune.
 func search(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQuiet bool) searchResult {
-	// The differential test's unreduced searches count quiet resumes as
-	// invisible, the counting the reduction is sound against (issue 1).
-	mode := quietMode{off: noQuiet, invisible: true}
+	mode := quietMode{off: noQuiet}
 	t.Helper()
 	r := searchResult{states: map[string]bool{}, violations: map[string]bool{}, traces: map[string]string{}}
 	var cur *apimodel.Sched
@@ -276,7 +292,21 @@ func search(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQuie
 			r.violations[v] = true
 		}
 	}, mode)
-	run := func(s *apimodel.Sched) error { cur = s; return inner(s) }
+	// Every violation is recorded, on a pruned run too, and the search goes
+	// on: under a mutant, the searches are compared on every violation they
+	// find, not on the first ten. Only the harness's own errors are failures.
+	run := func(s *apimodel.Sched) error {
+		cur = s
+		err := inner(s)
+		var v violation
+		if errors.As(err, &v) {
+			for _, m := range normalized(v.err) {
+				r.violations[m] = true
+			}
+			return nil
+		}
+		return err
+	}
 	if !stateful {
 		r.res = apimodel.Explore(b, run)
 		return r
@@ -317,10 +347,23 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 			t.Fatalf("a stateful search didn't finish (%d runs)", r.res.Runs)
 		}
 	}
-	t.Logf("stateless: %d schedules, %d terminal states; stateful: %d runs, %d states, %d pruned, %d terminal states, %d audits, %d divergences; reduced: %d runs, %d states, %d pruned, %d terminal states, %d audits, %d divergences",
-		plain.res.Runs, len(plain.states),
-		full.res.Runs, full.res.States, full.res.Pruned, len(full.states), full.audits, full.divergences,
-		reduced.res.Runs, reduced.res.States, reduced.res.Pruned, len(reduced.states), reduced.audits, reduced.divergences)
+	for what, r := range map[string]searchResult{"stateless": plain, "stateful": full, "reduced": reduced} {
+		for _, f := range r.res.Failures {
+			t.Errorf("%s: the harness failed: %v\nschedule: %s", what, f.Err, f.Trace)
+		}
+	}
+	t.Logf("stateless: %d schedules, %d terminal states, %d violations; stateful: %d runs, %d states, %d pruned, %d terminal states, %d violations, %d audits, %d divergences; reduced: %d runs, %d states, %d pruned, %d terminal states, %d violations, %d audits, %d divergences",
+		plain.res.Runs, len(plain.states), len(plain.violations),
+		full.res.Runs, full.res.States, full.res.Pruned, len(full.states), len(full.violations), full.audits, full.divergences,
+		reduced.res.Runs, reduced.res.States, reduced.res.Pruned, len(reduced.states), len(reduced.violations), reduced.audits, reduced.divergences)
+	for _, v := range sortedSet(plain.violations) {
+		t.Logf("violation: %s", v)
+	}
+	u := plain.res.Usage
+	u.Merge(full.res.Usage)
+	u.Merge(reduced.res.Usage)
+	t.Logf("capacity used (§10.2): at most %d calls between jumps (K = %d), %d jumps chosen or forced, smallest tick %s",
+		u.MaxCallsBetweenJumps, apimodel.MaxCallsBetweenJumps, u.MaxJumps, u.MinTick)
 	compare := func(what string, a, b searchResult) {
 		if !mapsEqual(a.states, b.states) {
 			t.Errorf("%s: terminal abstract states differ (%d against %d)", what, len(a.states), len(b.states))
@@ -448,9 +491,10 @@ func firstDiff(a, b []string) string {
 	return ""
 }
 
-// quietMode is how a search treats quiet parks (§4): off runs no rule R;
-// invisible keeps quiet resumes out of the preemption bound.
-type quietMode struct{ off, invisible bool }
+// quietMode is how a search treats quiet parks (§4): off runs no rule R, so
+// that each quiet resume is a step of its own (never a preemption, never the
+// last actor, §5).
+type quietMode struct{ off bool }
 
 // defaultQuiet is the model tests' mode: the reduction is off unless
 // CREDENTIALUSE_MODEL_QUIET is set (work in progress, not reviewed).

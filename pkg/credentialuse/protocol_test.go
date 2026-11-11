@@ -599,6 +599,37 @@ func TestReleaseRestoresAMissingEpoch(t *testing.T) {
 	}
 }
 
+// The restored epoch's requeue: 1s from the batch's reading of the clock in
+// production, where the protocol leaves restoredEpochRequeue unset; the
+// model's own, when it sets one (docs/credential-use-model-reduction.md
+// §10.2).
+func TestReleaseRestoredEpochRequeue(t *testing.T) {
+	for name, tc := range map[string]struct {
+		set, want time.Duration
+	}{
+		"production: unset, 1s": {0, time.Second},
+		"the model's: one U":    {testEpochRequeue, testEpochRequeue},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.p.restoredEpochRequeue = tc.set
+			must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{Finalizers: []string{fNS}}))
+			res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The rig's clock moves on every reading; the requeue is from the
+			// last, R1's after the restore.
+			if got := res.RequeueAt.Sub(r.now); got != tc.want {
+				t.Errorf("requeue %s after the batch's now, want %s", got, tc.want)
+			}
+		})
+	}
+	if restoredEpochRequeue != time.Second {
+		t.Errorf("production's restoredEpochRequeue = %s, want 1s", restoredEpochRequeue)
+	}
+}
+
 // A concurrent A2 between R1 and R3 breaks the release; the next round reads
 // again, and keeps P for its new user.
 func TestReleaseRetriesAfterAStateChange(t *testing.T) {
