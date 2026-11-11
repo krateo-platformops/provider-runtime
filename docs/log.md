@@ -14,9 +14,11 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
 ## Unreleased — v1.16.0: a status conflict names its cause
 - **A minor release: the error text of a status conflict changes, and there
-  are two new exports.** It's option 1 of #80, the user's decision of
-  2026-11-11 (design-status-write-conflict §7.1, §12). Behaviour is otherwise
-  unchanged: a status write is still sent once, with no retry and no merge.
+  are four new exports:** `reconciler.WithAPIReader`, `tracing.StepStatus`,
+  `reconcilertest.AssertLeavesManagedCurrent` and `reconcilertest.Method`.
+  It's option 1 of #80, the user's decision of 2026-11-11
+  (design-status-write-conflict §7.1, §12). Behaviour is otherwise unchanged:
+  a status write is still sent once, with no retry and no merge.
 - **The contract is written down.** The `ExternalClient` doc now says a
   method that writes the managed object must leave `mg` describing what is
   stored: write `mg` itself, or copy the new resourceVersion and every field it
@@ -24,35 +26,45 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   version silently reverts the write. A re-read-then-write can revert someone
   else's change, a human's status patch included.
 - **The error names the likely cause.** A status write that conflicts now
-  returns `cannot update managed resource status: the object changed during
-  this pass (read at resourceVersion V): if an ExternalClient method writes the
-  object itself, it must copy ... back onto mg (see ExternalClient); pass
-  error: <the pass's own error>`.
-  - The `cannot update managed resource status` prefix stays, so existing
-    searches still match. `kerrors.IsConflict` and `errors.Is` on the pass's
-    error still see through it.
+  returns `cannot update managed resource status: <the API server's conflict>:
+  the object changed since the pass's read (read at resourceVersion V): if an
+  ExternalClient method writes the object itself, it must copy ... back onto mg
+  (see ExternalClient); pass error: <the pass's own error>`.
+  - It starts with what it said before, the prefix and the API server's
+    conflict text, so existing searches still match.
+  - `kerrors.IsConflict`, `errors.Is` on the pass's error, and
+    `resource.IsAPIErrorWrapped` still see through it: it's a
+    `kerrors.APIStatus` itself, the conflict's.
   - Before, on an error path, the status conflict replaced the pass's own
     error (an Observe or Update failure, for example). Now both are kept.
   - It stays an error that `Reconcile` returns, not a silent requeue.
   - All 20 status writes go through one function, so every one gets it. A
     status write that fails with anything but a conflict reads as before.
+  - **Consumers' tests may need updating:** a test that compares a status
+    conflict's error with `test.EquateErrors` against
+    `errors.Wrap(conflict, errUpdateManagedStatus)` now fails, because both the
+    type and the text differ. Compare with `kerrors.IsConflict`, or the prefix.
 - **New step `status` on `k8s.conflict`** (`tracing.StepStatus`, in
   `tracing.Steps()`). It's the one step whose pass returns an error, so its
   root is Error.
-- **New export `reconciler.WithAPIReader`.** Pass `mgr.GetAPIReader()` and a
-  status conflict reads the object live once, for the message only: it adds
-  the live resourceVersion, the top-level status keys that differ from the
-  pass's read, and the newest managedFields entry, labelled as a hint. Nothing
-  is decided from it, and a failed read gives the plain message.
+- **`reconciler.WithAPIReader`.** Pass `mgr.GetAPIReader()` and a status
+  conflict reads the object live once, for the message only: it adds the live
+  resourceVersion and generation (next to the pass's, so a spec edit shows),
+  the top-level status keys that differ from the pass's read, and the newest
+  managedFields entry, labelled as a hint. Nothing is decided from it, and a
+  failed read gives the plain message.
   - It's opt-in. `NewReconciler` can't take the reader from its manager:
     `fake.Manager` embeds a nil `manager.Manager`, whose `GetAPIReader` would
     panic, and so would any consumer's fake built the same way.
-  - With it, each pass keeps one deep copy of the object as read, for the
-    comparison.
-- **New export `reconcilertest.AssertLeavesManagedCurrent`.** It runs one of a
-  provider's methods against a stored object, writes `mg`'s status as the
-  runtime would, and fails if that write conflicts or reverts a field the
-  method wrote. It checks the contract in a provider's own tests.
+  - Its cost: one in-memory deep copy of the managed object per pass (the
+    pass's read, kept for the comparison), and one uncached Get, only when a
+    status write conflicts. With a rate-limit governor, the governor's copy
+    is that same one.
+- **`reconcilertest.AssertLeavesManagedCurrent`,** with its `Method` type. It
+  runs one of a provider's methods against a stored object, writes `mg`'s
+  status as the runtime would, and fails if that write conflicts or reverts a
+  status field the method wrote. It checks the contract in a provider's own
+  tests, on envtest or controller-runtime's fake client.
 - **Consumers need no change.** oasgen-provider mirrors, incident-provider and
   git-provider write through `mg`, and alert-provider and core-provider don't
   write `mg` from handlers (design-status-write-conflict §4).
