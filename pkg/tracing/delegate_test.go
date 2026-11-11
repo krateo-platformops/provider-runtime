@@ -19,6 +19,10 @@ func TestAliasedNamesAreTheirStrings(t *testing.T) {
 		{"AttrObjectName", string(AttrObjectName), "k8s.object.name"},
 		{"AttrObjectNamespace", string(AttrObjectNamespace), "k8s.object.namespace"},
 		{"SpanReconcile", SpanReconcile, "reconcile"},
+		{"EventReconcilePaused", EventReconcilePaused, "reconcile.paused"},
+		{"EventConflict", EventConflict, "k8s.conflict"},
+		{"EventMarkerFailed", EventMarkerFailed, "trace.marker_failed"},
+		{"AttrStep", string(AttrStep), "provider_runtime.step"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
