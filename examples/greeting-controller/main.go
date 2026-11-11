@@ -241,6 +241,9 @@ func main() {
 		reconciler.WithLogger(log.WithValues("controller", "greeting")),
 		// A no-op when the governor is off (o.RateLimitGovernor is nil).
 		reconciler.WithRateLimitGovernor(o.RateLimitGovernor),
+		// A status write that conflicts reads the object live once, to say in
+		// the error what changed. Nothing is decided from the read.
+		reconciler.WithAPIReader(mgr.GetAPIReader()),
 	)
 
 	if err := ctrl.NewControllerManagedBy(mgr).

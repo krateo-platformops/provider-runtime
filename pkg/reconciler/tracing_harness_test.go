@@ -150,6 +150,7 @@ type faults struct {
 	mu     sync.Mutex
 	patch  func(obj client.Object) error
 	update func(obj client.Object) error
+	status func(obj client.Object) error
 	get    func(key client.ObjectKey, obj client.Object) (handled bool, err error)
 }
 
@@ -216,6 +217,15 @@ func newTraceServer(t *testing.T, objs ...client.Object) *traceServer {
 			return nil
 		},
 		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			s.faults.mu.Lock()
+			fn := s.faults.status
+			s.faults.mu.Unlock()
+			if fn != nil {
+				if err := fn(obj); err != nil {
+					s.ops.add("status-rejected")
+					return err
+				}
+			}
 			if err := c.SubResource(sub).Update(ctx, obj, opts...); err != nil {
 				s.ops.add("status-failed")
 				return err

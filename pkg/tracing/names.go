@@ -27,7 +27,9 @@ const (
 	EventRateLimitDeferred = "ratelimit.deferred"
 	// EventReconcilePaused: the pause annotation short-circuited the pass.
 	EventReconcilePaused = tracecontext.EventReconcilePaused
-	// EventConflict: the pass requeued because a write returned a conflict.
+	// EventConflict: a write returned a conflict. At every Step but
+	// StepStatus the pass requeues, rate-limited, with a nil error; a status
+	// conflict is returned as the pass's error.
 	EventConflict = tracecontext.EventConflict
 	// EventMarkerFailed: the marker write failed with anything but a conflict.
 	EventMarkerFailed = tracecontext.EventMarkerFailed
@@ -52,7 +54,8 @@ const AttrActed = tracecontext.AttrActed
 
 // A Step names the write that returned a conflict, as the k8s.conflict event's
 // provider_runtime.step attribute. The set is every kerrors.IsConflict site in
-// the reconciler, and the marker write.
+// the reconciler, and the marker write. StepStatus is every status write: one
+// site, which all the reconciler's status writes go through.
 type Step string
 
 const (
@@ -64,9 +67,10 @@ const (
 	StepCreate        Step = "create"
 	StepLateInit      Step = "late_init"
 	StepMarker        Step = "marker"
+	StepStatus        Step = "status"
 )
 
 // Steps returns every Step, in the order above, as a new slice each call.
 func Steps() []Step {
-	return []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker}
+	return []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker, StepStatus}
 }
