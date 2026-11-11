@@ -1138,6 +1138,67 @@ In the code, `TestFreeze` applies the rule to every plant. If a short plant or
 unspent. The drain plant's decision is frozen with its values, and the long drain
 reports its band instead of judging it when that decision is false.
 
+**Reproducibility across platforms, pre-registered 2026-11-11, before any run
+of the changed code** (the user's decision on the long drain's diagnosis).
+Limit halves seed 12 failed on CI's linux/amd64 and passed on darwin/arm64 at
+`58ac0fc` with identical code. The simulation is made bit-reproducible, and the
+frozen values are regenerated for it. This is a regeneration, not a new
+judgment.
+
+- **The code**:
+  - `b32f3fc`: no fused multiply-add, portable elementary functions in
+    `costmodel/internal/fpmath`, and `D_mix`'s sum in key order;
+  - `b91472d`: gosec G115, integer only;
+  - `bb78049`: TestNoIO.
+- **Checked statically**:
+  - the three packages compiled for arm64 with `-S` contain no FMADDD, FMSUBD,
+    FNMADDD or FNMSUBD (154 before);
+  - compiled for amd64 at GOAMD64 v1 and v3, they contain no VFMADD or VFMSUB.
+
+**What runs, in order, each once:**
+
+1. **The reproducibility hashes, on darwin/arm64.** `TestReproducible` (sim)
+   hashes five traces: limit halves seed 12 on the cost model, the level PI ×1
+   and the reservation gate; mix shift seen seed 1 on the cost model; and the
+   drain plant at a fixed 4 slots, seed 9001, 600 s. `TestBits` (fpmath) hashes
+   the functions over a grid. The hashes are committed as their constants
+   (commit R). Seconds of CPU.
+2. **Push R; CI on linux/amd64 runs both tests** in its race and 20-seed steps.
+   - **Passes when every hash is identical.** Limit halves seed 12's verdict must
+     also agree: TestGate locally against CI's log.
+   - **The gate's other cases** on that push run with the old frozen values;
+     their results are reported, not judged. The long drain is expected to fail
+     until the estimator's amendment.
+   - **A different hash stops the work:** reported, with no freeze, until the
+     remaining source is found.
+3. **The freeze, once, at R, on darwin/arm64**:
+   `SIM_FREEZE=1 go test ./pkg/ratelimit/internal/costmodel/sim/ -run 'TestFreeze$' -count=1 -v -timeout 180m`,
+   output to `testdata/freeze-<R>.txt`. The method, seeds, plants and rules are
+   unchanged. If a determinacy call or `N₀` changes, the regeneration stops and
+   is reported: that would be a new judgment.
+4. **The same command at R on linux/amd64**: a disposable VM with Go 1.26.10,
+   or a one-off CI job, the coordinator's choice.
+   - **Byte for byte:** its output must equal step 3's, except the two timing
+     lines (`--- PASS: TestFreeze (…s)` and `ok … …s`).
+   - **The source:** `renderFrozen`'s output must be identical, so the
+     regenerated `frozen_test.go` matches.
+   - **Any difference stops the work** and is reported.
+5. **The deltas against `freeze-6aafb84`**, reported: every frozen value; `S*`
+   and its interval for both drain plants; the determinacy calls; `N₀`;
+   fidelity (i)–(iii); and the derived long-drain values. Values move in the
+   last bits, so most printed figures are expected not to change.
+6. **Then commit the regenerated `frozen_test.go` and the report (F)**, and push.
+   The gate on seeds 1–20 at F is reported, not judged, until the estimator's
+   amendment is implemented.
+
+**Not re-run**:
+- TestTuneBaseline: its gains are committed, and its grid alone keeps
+  `math.Pow`;
+- the GKE results;
+- the uncalibrated diagnostic (`curve-engine-b2e5757.txt`, historical).
+
+Seeds 21–40 are not used.
+
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
 modelled on Temporal's tuner at its defaults (design §17.8, item 6): inside the
