@@ -898,12 +898,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 // reconcile span; externalCtx is the provider calls' context, with the external
 // timeout. The pass's own spans, events and the marker go through pass.
 func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Logger, managed resource.Managed, pass *tracePass) (reconcile.Result, error) { //nolint:gocyclo // See note below.
-	// read is the object as the pass read it. A status conflict's message
-	// compares the live object's status with it, and the governor's deferral
-	// reuses it as pristine (below), so a pass takes at most one deep copy. It's
-	// taken only when one of them is set.
+	// read is the object as the pass read it, taken only with a live reader. A
+	// status conflict's message compares the live object's status with it, and
+	// the governor's deferral reuses it as pristine (below), so a pass with both
+	// still takes one deep copy, unless the marker moved the version.
 	var read resource.Managed
-	if r.apiReader != nil || r.governor != nil {
+	if r.apiReader != nil {
 		read, _ = managed.DeepCopyObject().(resource.Managed)
 	}
 	// writeStatus is every status write of the pass. Each is the last write of
@@ -1008,8 +1008,8 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 
 	// pristine is the object as read, so a deferral that would write it back
 	// unchanged can skip the status update. Taken only with a governor.
-	// It's read, unless the marker was written above: that write moved the
-	// version, and pristine must be the object after it.
+	// It's read when there is one, unless the marker was written above: that
+	// write moved the version, and pristine must be the object after it.
 	var pristine resource.Managed
 	if r.governor != nil {
 		pristine = read

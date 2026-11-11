@@ -19,6 +19,7 @@ import (
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 	"github.com/krateo-platformops/provider-runtime/pkg/tracing"
 )
@@ -471,5 +472,43 @@ func TestStatusConflictIsStillAnAPIError(t *testing.T) {
 	var st kerrors.APIStatus
 	if !errors.As(err, &st) || st.Status().Message != conflict.Error() {
 		t.Errorf("the API status must be the conflict's")
+	}
+}
+
+// With a live reader, the governor reuses the pass's read as pristine, unless
+// the marker written at Now moved the version: then pristine is the object
+// after the marker, and a deferral that changes nothing else still skips its
+// status write.
+func TestDeferralAfterTheMarkerStillSkipsAnIdenticalWrite(t *testing.T) {
+	s := newTraceServer(t, newWidget("w", ann(meta.AnnotationKeyTraceparent, tpA)))
+	tp, _ := tracer(t)
+	g := newGovernor(t, ratelimit.Options{MaxConcurrentReconciles: 1})
+	held, d := g.Acquire(context.Background(), "api.example.com")
+	if d != nil {
+		t.Fatal(d)
+	}
+	defer held()
+	// The live reader makes the pass take its read, which the governor reuses.
+	r := newTraceReconciler(s, &widgetProvider{ops: s.ops, key: "api.example.com"},
+		WithTracerProvider(tp), WithRateLimitGovernor(g), WithAPIReader(s.raw))
+
+	// The first pass sees the value and defers at capacity: it writes the deferral.
+	if res, err := r.Reconcile(context.Background(), reqFor("w")); err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a deferral", res, err)
+	}
+	if n := s.ops.count("status"); n != 1 {
+		t.Fatalf("status writes = %d, want the first deferral's", n)
+	}
+	// The window closes, so the next pass writes the marker at Now, then defers
+	// with the same condition.
+	backdate(r, "w", time.Hour)
+	if res, err := r.Reconcile(context.Background(), reqFor("w")); err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile = %+v, %v; want a deferral", res, err)
+	}
+	if s.ops.count("patch") != 1 {
+		t.Fatalf("ops = %v, want the marker written on the second pass", s.ops.list())
+	}
+	if n := s.ops.count("status"); n != 1 {
+		t.Errorf("status writes = %d, want 1: the second deferral changes nothing but the marker", n)
 	}
 }
