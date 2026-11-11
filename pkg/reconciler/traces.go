@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/krateo-platformops/plumbing/tracecontext"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -25,7 +26,7 @@ import (
 // window"). Every default poll fits in it at least three times (1m for
 // provider-runtime, incident- and alert-provider; 3m for git- and core-provider),
 // and the controller's failure backoff, capped at 60s, saturates well inside it.
-const defaultTraceContinueWindow = 10 * time.Minute
+const defaultTraceContinueWindow = tracecontext.DefaultContinueWindow
 
 // WithTracerProvider sets the TracerProvider the Reconciler's spans go to,
 // instead of the one tracing.SetTracerProvider set (which telemetry.Setup sets

@@ -4,31 +4,33 @@ import (
 	"context"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
+	"github.com/krateo-platformops/plumbing/tracecontext"
 	"go.opentelemetry.io/otel/trace"
 )
 
 // The root span's attribute keys: exactly these three, as unstructured-runtime
 // sets them.
 const (
-	AttrObjectKind      = attribute.Key("k8s.object.kind")
-	AttrObjectName      = attribute.Key("k8s.object.name")
-	AttrObjectNamespace = attribute.Key("k8s.object.namespace")
+	AttrObjectKind      = tracecontext.AttrObjectKind
+	AttrObjectName      = tracecontext.AttrObjectName
+	AttrObjectNamespace = tracecontext.AttrObjectNamespace
 )
 
 // Object names the object a reconcile is about.
-type Object struct {
-	// Kind is the Kind alone, such as Repo, without its group.
-	Kind string
-	// Name is the object's name.
-	Name string
-	// Namespace is the object's namespace, "" for a cluster-scoped object.
-	Namespace string
-}
+//
+//   - Kind is the Kind alone, such as Repo, without its group.
+//   - Name is the object's name.
+//   - Namespace is the object's namespace, "" for a cluster-scoped object.
+type Object = tracecontext.Object
 
-// inboundKey holds, with tracing off, the annotation's span context for Inject
-// and InjectAnnotations. It is never the active span.
-type inboundKey struct{}
+// tracer is tp's tracer for provider-runtime's instrumentation scope, or nil,
+// which tracecontext reads as tracing off, when tp is nil.
+func tracer(tp trace.TracerProvider) trace.Tracer {
+	if tp == nil {
+		return nil
+	}
+	return tp.Tracer(ScopeName)
+}
 
 // StartReconcile opens the reconcile root span for obj, starting at start.
 // Every reconcile is its own trace (docs/design-tracing.md, D8): the root is
@@ -42,26 +44,7 @@ type inboundKey struct{}
 // With tp nil it starts nothing. It returns ctx carrying d.Remote, when that's
 // valid, for Inject and InjectAnnotations only, and the no-op span.
 func StartReconcile(ctx context.Context, tp trace.TracerProvider, obj Object, d Decision, start time.Time) (context.Context, trace.Span) {
-	if tp == nil {
-		if d.Remote.IsValid() {
-			ctx = context.WithValue(ctx, inboundKey{}, d.Remote)
-		}
-		return ctx, trace.SpanFromContext(context.Background())
-	}
-	opts := []trace.SpanStartOption{
-		trace.WithSpanKind(trace.SpanKindServer),
-		trace.WithTimestamp(start),
-		trace.WithAttributes(
-			AttrObjectKind.String(obj.Kind),
-			AttrObjectName.String(obj.Name),
-			AttrObjectNamespace.String(obj.Namespace),
-		),
-		trace.WithNewRoot(),
-	}
-	if d.Mode != NoParent && d.Remote.IsValid() {
-		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: d.Remote}))
-	}
-	return tp.Tracer(ScopeName).Start(ctx, SpanReconcile, opts...)
+	return tracecontext.StartReconcile(ctx, tracer(tp), obj, d, start)
 }
 
 // StartActStep opens an act step, the create, update or delete span around
@@ -80,34 +63,12 @@ func StartReconcile(ctx context.Context, tp trace.TracerProvider, obj Object, d 
 // With upstream invalid it is an ordinary StartStep child of the root. With tp
 // nil it starts nothing.
 func StartActStep(ctx context.Context, tp trace.TracerProvider, obj Object, step string, upstream trace.SpanContext) (context.Context, trace.Span) {
-	if tp == nil || !upstream.IsValid() {
-		return StartStep(ctx, tp, step)
-	}
-	root := trace.SpanFromContext(ctx)
-	opts := []trace.SpanStartOption{
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			AttrObjectKind.String(obj.Kind),
-			AttrObjectName.String(obj.Name),
-			AttrObjectNamespace.String(obj.Namespace),
-		),
-	}
-	if sc := root.SpanContext(); sc.IsValid() {
-		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: sc}))
-	}
-	actCtx, act := tp.Tracer(ScopeName).Start(trace.ContextWithRemoteSpanContext(ctx, upstream), step, opts...)
-	if act.SpanContext().IsSampled() {
-		root.AddLink(trace.Link{SpanContext: act.SpanContext()})
-	}
-	return actCtx, act
+	return tracecontext.StartActStep(ctx, tracer(tp), obj, step, upstream)
 }
 
 // StartStep opens the child span named step under the reconcile root in ctx,
 // with tp's tracer. It's SpanKindInternal and has no attributes of its own. With
 // tp nil it starts nothing and returns ctx and the no-op span.
 func StartStep(ctx context.Context, tp trace.TracerProvider, step string) (context.Context, trace.Span) {
-	if tp == nil {
-		return ctx, trace.SpanFromContext(context.Background())
-	}
-	return tp.Tracer(ScopeName).Start(ctx, step, trace.WithSpanKind(trace.SpanKindInternal))
+	return tracecontext.StartStep(ctx, tracer(tp), step)
 }

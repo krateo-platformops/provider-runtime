@@ -1,81 +1,55 @@
 package tracing
 
 import (
-	"context"
 	"time"
 
-	"go.opentelemetry.io/otel/propagation"
+	"github.com/krateo-platformops/plumbing/tracecontext"
 	"go.opentelemetry.io/otel/trace"
-
-	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 )
+
+// The parent-or-link rule lives in plumbing's tracecontext, so that
+// provider-runtime and unstructured-runtime apply one identical rule
+// (docs/design-tracing.md §14). The names below are aliases and thin wrappers:
+// every exported name, signature and doc is provider-runtime's, unchanged.
 
 // Mode is how a reconcile relates to the object's krateo.io/traceparent
 // (docs/design-tracing.md §6.2, D8). In every mode the reconcile root is a new
 // root; the modes differ in its link and in whether an act step joins the
 // upstream trace.
-type Mode int
+type Mode = tracecontext.Mode
 
 const (
 	// NoParent: the object carries no valid traceparent. The root has no link.
-	NoParent Mode = iota
+	NoParent = tracecontext.NoParent
 	// Parent: the traceparent's value is new. The root links to it, and the
 	// pass's first act step (create, update or delete) is its child.
-	Parent
+	Parent = tracecontext.Parent
 	// Link: the value was already continued, or its window has closed. The root
 	// links to it, and nothing is its child.
-	Link
+	Link = tracecontext.Link
 )
 
-func (m Mode) String() string {
-	switch m {
-	case NoParent:
-		return "NoParent"
-	case Parent:
-		return "Parent"
-	case Link:
-		return "Link"
-	}
-	return "Mode(?)"
-}
-
 // When says when the reconciler writes Decision.Marker.
-type When int
+type When = tracecontext.When
 
 const (
 	// Never: there's no marker to write.
-	Never When = iota
+	Never = tracecontext.Never
 	// BeforeFirstAction: just before the pass's first Create, Update or Delete
 	// call. A pass that doesn't act writes nothing.
-	BeforeFirstAction
+	BeforeFirstAction = tracecontext.BeforeFirstAction
 	// Now: right after the span starts, past the pause and Orphan checks.
-	Now
+	Now = tracecontext.Now
 )
 
-func (w When) String() string {
-	switch w {
-	case Never:
-		return "Never"
-	case BeforeFirstAction:
-		return "BeforeFirstAction"
-	case Now:
-		return "Now"
-	}
-	return "When(?)"
-}
-
 // A Decision is what Decide concluded for one reconcile.
-type Decision struct {
-	// Mode is how the reconcile relates to Remote.
-	Mode Mode
-	// Remote is the annotation's span context. It is valid in Parent and Link.
-	Remote trace.SpanContext
-	// Marker is the krateo.io/traceparent-continued value to write, or "" when
-	// WriteMarker is Never.
-	Marker string
-	// WriteMarker is when the reconciler writes Marker.
-	WriteMarker When
-}
+//
+//   - Mode is how the reconcile relates to Remote.
+//   - Remote is the annotation's span context. It is valid in Parent and Link.
+//   - Marker is the krateo.io/traceparent-continued value to write, or "" when
+//     WriteMarker is Never.
+//   - WriteMarker is when the reconciler writes Marker.
+type Decision = tracecontext.Decision
 
 // Decide applies the parent-or-link rule of docs/design-tracing.md §6.2. It is
 // pure, and it allocates nothing when the object carries no
@@ -99,64 +73,12 @@ type Decision struct {
 //  4. firstSeen is zero, or now - firstSeen < window: Parent, BeforeFirstAction.
 //  5. Otherwise: Link, Now.
 func Decide(annotations map[string]string, remembered string, firstSeen, now time.Time, window time.Duration) Decision {
-	tp := annotations[meta.AnnotationKeyTraceparent]
-	if tp == "" {
-		return Decision{}
-	}
-	r := parse(tp, annotations[meta.AnnotationKeyTracestate])
-	if !r.IsValid() {
-		return Decision{}
-	}
-	if continues(annotations[meta.AnnotationKeyTraceparentContinued], r) || continues(remembered, r) {
-		return Decision{Mode: Link, Remote: r}
-	}
-	d := Decision{Remote: r, Marker: Canonical(r)}
-	switch {
-	case window <= 0:
-		d.Mode, d.WriteMarker = Parent, Now
-	case firstSeen.IsZero() || now.Sub(firstSeen) < window:
-		d.Mode, d.WriteMarker = Parent, BeforeFirstAction
-	default:
-		d.Mode, d.WriteMarker = Link, Now
-	}
-	return d
+	return tracecontext.Decide(annotations, remembered, firstSeen, now, window)
 }
 
 // Canonical is sc's traceparent as W3C TraceContext writes it: version 00,
 // lower-case hex, and only the sampled and random flags. It's the form the
 // marker records, and "" for an invalid sc.
 func Canonical(sc trace.SpanContext) string {
-	if !sc.IsValid() {
-		return ""
-	}
-	carrier := propagation.MapCarrier{}
-	propagation.TraceContext{}.Inject(trace.ContextWithSpanContext(context.Background(), sc), carrier)
-	return carrier[traceparentHeader]
-}
-
-// The W3C carrier keys.
-const (
-	traceparentHeader = "traceparent"
-	tracestateHeader  = "tracestate"
-)
-
-// parse reads a traceparent and an optional tracestate into a span context. An
-// invalid traceparent gives an invalid span context.
-func parse(traceparent, tracestate string) trace.SpanContext {
-	carrier := propagation.MapCarrier{traceparentHeader: traceparent}
-	if tracestate != "" {
-		carrier[tracestateHeader] = tracestate
-	}
-	ctx := propagation.TraceContext{}.Extract(context.Background(), carrier)
-	return trace.SpanContextFromContext(ctx)
-}
-
-// continues reports whether the traceparent value v names r: the same trace ID
-// and span ID. Flags and tracestate don't count.
-func continues(v string, r trace.SpanContext) bool {
-	if v == "" {
-		return false
-	}
-	m := parse(v, "")
-	return m.IsValid() && m.TraceID() == r.TraceID() && m.SpanID() == r.SpanID()
+	return tracecontext.Canonical(sc)
 }

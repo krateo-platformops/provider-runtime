@@ -6,6 +6,12 @@
 // Kubernetes object (Inject, InjectAnnotations) or an HTTP request
 // (InjectHeader).
 //
+// The rule and the spans live in plumbing's tracecontext, which
+// unstructured-runtime applies too, so both runtimes relate to an upstream
+// trace in the same way. This package delegates to it and keeps its own API:
+// its Start functions take a TracerProvider and start spans in ScopeName's
+// instrumentation scope.
+//
 // It depends on the OpenTelemetry API only, never on the SDK or an exporter,
 // so the reconciler imports it without linking an OTLP exporter into every
 // provider. telemetry.Setup builds the SDK pipeline and hands it here with
