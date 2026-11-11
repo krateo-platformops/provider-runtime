@@ -1,0 +1,275 @@
+The freeze regenerated at R = 22fc600 for bit reproducibility (plan §4.5, pre-registered in e5889f2; steps 3-5).
+Command: SIM_FREEZE=1 go test ./pkg/ratelimit/internal/costmodel/sim/ -run 'TestFreeze$' -count=1 -v -timeout 180m
+Step 3, darwin/arm64, go1.26.10, a clean detached worktree at 22fc600: 2026-11-11 19:34:58 to 19:36:50 +0100, 1:52.35
+  elapsed, 410.25 s user and 24.67 s system CPU; exit 0, no stop. Its output follows, verbatim.
+Step 4, linux/amd64 (x86_64), go1.26.10 (go.dev's tarball, SHA-256 checked), GOTOOLCHAIN=local, the source from
+  git archive 22fc600, on a disposable GCE e2-standard-4 VM (deleted after): 18:36:44Z to 18:43:21Z, 385.03 s.
+  Its output is freeze-22fc600-amd64.txt. Compared with this one, the two are identical byte for byte except the
+  two timing lines and one warning line the go command printed on the VM ("both GOPATH and GOROOT are the same
+  directory", from the VM's install layout): SHA-256 3ae7a00fb19eb4876b62795466fd24b49c6ea87d9769c8e20f6b227770fccfd8
+  for both without them. The generated frozen_test.go equals the committed one byte for byte.
+Step 5, deltas against freeze-6aafb84 (the "file:line:" prefixes normalized): every determinacy call, N0 = 7, both
+  drain plants' S* and bootstrap intervals, fidelity (i)-(iii) and every frozen value are unchanged at printed
+  precision. One curve line moved: cost46 n=5, X 5.3776 -> 5.3792 and D 0.9298 -> 0.9295 (a path change from the
+  last-bit rounding). The rest is the generator's output since 348b05d (the time import, gofmt's alignment).
+
+=== RUN   TestFreeze
+    freeze_test.go:239: base: S* 4.7167 / 4.7294 / 4.7404 on seeds 9001–9003, range 0.024 against S*·3r̄ 0.708: determined true
+    freeze_test.go:259: base n= 1 U=0.0534 X=2.3154 D=0.4319
+    freeze_test.go:259: base n= 2 U=0.1059 X=4.5934 D=0.4354
+    freeze_test.go:259: base n= 3 U=0.1556 X=6.7718 D=0.4430
+    freeze_test.go:259: base n= 4 U=0.2021 X=8.7875 D=0.4552
+    freeze_test.go:259: base n= 5 U=0.2340 X=10.1666 D=0.4918
+    freeze_test.go:259: base n= 6 U=0.2450 X=10.6417 D=0.5638
+    freeze_test.go:259: base n= 7 U=0.2480 X=10.7750 D=0.6497
+    freeze_test.go:259: base n= 8 U=0.2493 X=10.8208 D=0.7393
+    freeze_test.go:259: base n= 9 U=0.2495 X=10.8417 D=0.8301
+    freeze_test.go:259: base n=10 U=0.2498 X=10.8583 D=0.9210
+    freeze_test.go:259: base n=11 U=0.2499 X=10.8583 D=1.0130
+    freeze_test.go:259: base n=12 U=0.2500 X=10.8500 D=1.1060
+    freeze_test.go:259: base n=13 U=0.2500 X=10.8583 D=1.1972
+    freeze_test.go:259: base n=14 U=0.2500 X=10.8667 D=1.2883
+    freeze_test.go:259: base n=15 U=0.2500 X=10.8583 D=1.3814
+    freeze_test.go:259: base n=16 U=0.2500 X=10.8625 D=1.4730
+    freeze_test.go:239: cost46: S* 2.8403 / 2.8278 / 2.8769 on seeds 9001–9003, range 0.049 against S*·3r̄ 0.426: determined true
+    freeze_test.go:259: cost46 n= 1 U=0.0914 X=1.9833 D=0.5042
+    freeze_test.go:259: cost46 n= 2 U=0.1775 X=3.8340 D=0.5216
+    freeze_test.go:259: cost46 n= 3 U=0.2340 X=5.0750 D=0.5911
+    freeze_test.go:259: cost46 n= 4 U=0.2459 X=5.3375 D=0.7494
+    freeze_test.go:259: cost46 n= 5 U=0.2480 X=5.3792 D=0.9295
+    freeze_test.go:259: cost46 n= 6 U=0.2496 X=5.4167 D=1.1077
+    freeze_test.go:259: cost46 n= 7 U=0.2498 X=5.4167 D=1.2923
+    freeze_test.go:259: cost46 n= 8 U=0.2499 X=5.4167 D=1.4769
+    freeze_test.go:259: cost46 n= 9 U=0.2500 X=5.4208 D=1.6603
+    freeze_test.go:259: cost46 n=10 U=0.2500 X=5.4417 D=1.8377
+    freeze_test.go:259: cost46 n=11 U=0.2500 X=5.4333 D=2.0245
+    freeze_test.go:259: cost46 n=12 U=0.2500 X=5.4167 D=2.2154
+    freeze_test.go:259: cost46 n=13 U=0.2500 X=5.4333 D=2.3926
+    freeze_test.go:259: cost46 n=14 U=0.2500 X=5.4333 D=2.5767
+    freeze_test.go:259: cost46 n=15 U=0.2500 X=5.4375 D=2.7586
+    freeze_test.go:259: cost46 n=16 U=0.2500 X=5.4375 D=2.9425
+    freeze_test.go:239: limit125: S* 2.8237 / 2.8308 / 2.8494 on seeds 9001–9003, range 0.026 against S*·3r̄ 0.424: determined true
+    freeze_test.go:259: limit125 n= 1 U=0.0470 X=2.0375 D=0.4908
+    freeze_test.go:259: limit125 n= 2 U=0.0907 X=3.9212 D=0.5101
+    freeze_test.go:259: limit125 n= 3 U=0.1172 X=5.0834 D=0.5902
+    freeze_test.go:259: limit125 n= 4 U=0.1224 X=5.3125 D=0.7529
+    freeze_test.go:259: limit125 n= 5 U=0.1241 X=5.3917 D=0.9274
+    freeze_test.go:259: limit125 n= 6 U=0.1246 X=5.4167 D=1.1077
+    freeze_test.go:259: limit125 n= 7 U=0.1249 X=5.4167 D=1.2923
+    freeze_test.go:259: limit125 n= 8 U=0.1250 X=5.4167 D=1.4769
+    freeze_test.go:259: limit125 n= 9 U=0.1250 X=5.4250 D=1.6590
+    freeze_test.go:259: limit125 n=10 U=0.1250 X=5.4417 D=1.8377
+    freeze_test.go:259: limit125 n=11 U=0.1250 X=5.4292 D=2.0261
+    freeze_test.go:259: limit125 n=12 U=0.1250 X=5.4125 D=2.2171
+    freeze_test.go:259: limit125 n=13 U=0.1250 X=5.4333 D=2.3926
+    freeze_test.go:259: limit125 n=14 U=0.1250 X=5.4250 D=2.5806
+    freeze_test.go:259: limit125 n=15 U=0.1250 X=5.4375 D=2.7586
+    freeze_test.go:259: limit125 n=16 U=0.1250 X=5.4375 D=2.9425
+    freeze_test.go:239: limit500: S* 8.7623 / 8.7490 / 8.7423 on seeds 9001–9003, range 0.020 against S*·3r̄ 1.314: determined true
+    freeze_test.go:259: limit500 n= 1 U=0.0543 X=2.3527 D=0.4250
+    freeze_test.go:259: limit500 n= 2 U=0.1083 X=4.7012 D=0.4254
+    freeze_test.go:259: limit500 n= 3 U=0.1621 X=7.0581 D=0.4250
+    freeze_test.go:259: limit500 n= 4 U=0.2157 X=9.3693 D=0.4269
+    freeze_test.go:259: limit500 n= 5 U=0.2693 X=11.6929 D=0.4276
+    freeze_test.go:259: limit500 n= 6 U=0.3212 X=13.9461 D=0.4302
+    freeze_test.go:259: limit500 n= 7 U=0.3713 X=16.1080 D=0.4346
+    freeze_test.go:259: limit500 n= 8 U=0.4186 X=18.1784 D=0.4401
+    freeze_test.go:259: limit500 n= 9 U=0.4598 X=19.9669 D=0.4507
+    freeze_test.go:259: limit500 n=10 U=0.4857 X=21.1083 D=0.4737
+    freeze_test.go:259: limit500 n=11 U=0.4949 X=21.4958 D=0.5117
+    freeze_test.go:259: limit500 n=12 U=0.4968 X=21.5875 D=0.5559
+    freeze_test.go:259: limit500 n=13 U=0.4985 X=21.6667 D=0.6000
+    freeze_test.go:259: limit500 n=14 U=0.4991 X=21.6833 D=0.6457
+    freeze_test.go:259: limit500 n=15 U=0.4996 X=21.7000 D=0.6912
+    freeze_test.go:259: limit500 n=16 U=0.4997 X=21.7083 D=0.7370
+    freeze_test.go:239: rising: S* 4.6098 / 4.6146 / 4.6310 on seeds 9001–9003, range 0.021 against S*·3r̄ 0.691: determined true
+    freeze_test.go:259: rising n= 1 U=0.0534 X=2.3154 D=0.4319
+    freeze_test.go:259: rising n= 2 U=0.1067 X=4.5792 D=0.4368
+    freeze_test.go:259: rising n= 3 U=0.1571 X=6.7137 D=0.4468
+    freeze_test.go:259: rising n= 4 U=0.2048 X=8.6390 D=0.4630
+    freeze_test.go:259: rising n= 5 U=0.2379 X=9.9416 D=0.5029
+    freeze_test.go:259: rising n= 6 U=0.2455 X=10.1542 D=0.5909
+    freeze_test.go:259: rising n= 7 U=0.2485 X=10.1750 D=0.6880
+    freeze_test.go:259: rising n= 8 U=0.2491 X=10.1208 D=0.7904
+    freeze_test.go:259: rising n= 9 U=0.2497 X=10.0375 D=0.8966
+    freeze_test.go:259: rising n=10 U=0.2499 X=9.9708 D=1.0029
+    freeze_test.go:259: rising n=11 U=0.2500 X=9.8667 D=1.1149
+    freeze_test.go:259: rising n=12 U=0.2500 X=9.7833 D=1.2266
+    freeze_test.go:259: rising n=13 U=0.2500 X=9.6917 D=1.3414
+    freeze_test.go:259: rising n=14 U=0.2500 X=9.6000 D=1.4583
+    freeze_test.go:259: rising n=15 U=0.2500 X=9.5417 D=1.5721
+    freeze_test.go:259: rising n=16 U=0.2500 X=9.4333 D=1.6961
+    freeze_test.go:216: drain0: S* 6.6816 from the mean curve of seeds 9001–9040; bootstrap 95% [6.575, 6.814], width 0.239 against 0.15·S* 1.002, sd 0.062, 0 of 10000 with no crossing: determined true
+    freeze_test.go:222: drain0: per-seed S*: 6.622 6.667 6.210 6.527 7.193 7.407 7.104 6.649 7.135 6.181 6.902 6.890 6.706 6.141 6.744 5.989 5.898 5.967 6.526 7.120 6.959 6.774 6.690 6.456 7.317 6.577 6.754 6.630 6.650 7.192 6.995 6.584 6.361 6.468 6.718 7.206 7.165 6.140 6.513 7.505
+    freeze_test.go:259: drain0 n= 1 U=0.0471 X=0.0285 D=35.1097
+    freeze_test.go:259: drain0 n= 2 U=0.0916 X=0.0552 D=36.2147
+    freeze_test.go:259: drain0 n= 3 U=0.1313 X=0.0792 D=37.8983
+    freeze_test.go:259: drain0 n= 4 U=0.1667 X=0.1003 D=39.8796
+    freeze_test.go:259: drain0 n= 5 U=0.1948 X=0.1174 D=42.6280
+    freeze_test.go:259: drain0 n= 6 U=0.2156 X=0.1302 D=46.1098
+    freeze_test.go:259: drain0 n= 7 U=0.2294 X=0.1380 D=50.7863
+    freeze_test.go:259: drain0 n= 8 U=0.2388 X=0.1439 D=55.6228
+    freeze_test.go:259: drain0 n= 9 U=0.2430 X=0.1474 D=61.0917
+    freeze_test.go:259: drain0 n=10 U=0.2458 X=0.1477 D=67.7158
+    freeze_test.go:259: drain0 n=11 U=0.2480 X=0.1483 D=74.1776
+    freeze_test.go:259: drain0 n=12 U=0.2490 X=0.1503 D=79.8232
+    freeze_test.go:216: drain: S* 4.4088 from the mean curve of seeds 9001–9040; bootstrap 95% [4.272, 4.514], width 0.242 against 0.15·S* 0.661, sd 0.061, 0 of 10000 with no crossing: determined true
+    freeze_test.go:222: drain: per-seed S*: 4.287 4.763 3.857 4.499 4.472 4.289 4.015 3.795 4.577 5.186 4.415 3.737 4.767 4.422 4.634 5.170 4.111 4.161 4.438 4.083 4.395 4.282 4.481 4.599 3.860 4.654 4.387 3.939 3.857 3.842 4.725 4.420 4.506 3.942 4.480 3.852 4.239 5.081 4.752 4.891
+    freeze_test.go:230: 
+        fidelity (i), equivalence with GKE in U, δ = r̄·ρL = 0.0112 cores; 90% Welch intervals of engine − GKE
+          n=3 engine 0.1890 GKE 0.1875 (k=2, pooled sd 0.0058 on 11 df) Δ +0.0014 [-0.0062, +0.0091] ν 13.4: equivalent
+          n=4 engine 0.2182 GKE 0.2230 (k=6, pooled sd 0.0058 on 11 df) Δ -0.0048 [-0.0096, +0.0001] ν 20.9: equivalent
+          n=5 engine 0.2348 GKE 0.2371 (k=6, pooled sd 0.0058 on 11 df) Δ -0.0023 [-0.0068, +0.0023] ν 15.3: equivalent
+          n=6 engine 0.2448 GKE 0.2428 (k=4, pooled sd 0.0022 on 4 df) Δ +0.0020 [-0.0004, +0.0044] ν 5.9: equivalent
+          n=7 engine 0.2468 GKE 0.2466 (k=2, pooled sd 0.0022 on 4 df) Δ +0.0002 [-0.0031, +0.0036] ν 5.2: equivalent
+          n=8 reported: engine 0.2489 GKE 0.2500 (GKE's two runs read the cap exactly)
+          equivalence at n = 3..7 (all five): true. Reported, not judged; n = 6..7 sit near the cap, nearly automatic.
+        fidelity (ii), the informative test: engine − MVA at c = 3.157 s, think time 28.5 s; 95% t(39) intervals, against ±δ
+          n=3 engine 0.1890 MVA 0.1880 Δ +0.0010 [-0.0017, +0.0038] within ±δ: true; MVA − GKE +0.0004
+          n=4 engine 0.2182 MVA 0.2193 Δ -0.0011 [-0.0042, +0.0020] within ±δ: true; MVA − GKE -0.0037
+          n=5 engine 0.2348 MVA 0.2369 Δ -0.0020 [-0.0041, +0.0000] within ±δ: true; MVA − GKE -0.0002
+          n=6 engine 0.2448 MVA 0.2452 Δ -0.0004 [-0.0015, +0.0007] within ±δ: true; MVA − GKE +0.0024
+          n=7 engine 0.2468 MVA 0.2484 Δ -0.0016 [-0.0028, -0.0004] within ±δ: true; MVA − GKE +0.0018
+          n=8 engine 0.2489 MVA 0.2496 Δ -0.0007 [-0.0011, -0.0003] within ±δ: true; MVA − GKE -0.0004
+          MVA's S* at this c: 4.325
+        fidelity (iii), reported: S*_engine − 4.14 = +0.269, z 1.66 (SE_e 0.061 from the bootstrap, SE_g 0.15)
+          between-run sd, engine against GKE: n=3 0.0086/0.0030 n=4 0.0097/0.0065 n=5 0.0065/0.0055 n=6 0.0033/0.0017 n=7 0.0037/0.0034 n=8 0.0012/0.0000
+        
+    freeze_test.go:259: drain n= 1 U=0.0764 X=0.0242 D=41.2847
+    freeze_test.go:259: drain n= 2 U=0.1416 X=0.0448 D=44.7248
+    freeze_test.go:259: drain n= 3 U=0.1890 X=0.0600 D=50.0795
+    freeze_test.go:259: drain n= 4 U=0.2182 X=0.0687 D=58.3414
+    freeze_test.go:259: drain n= 5 U=0.2348 X=0.0744 D=67.2274
+    freeze_test.go:259: drain n= 6 U=0.2448 X=0.0769 D=78.0612
+    freeze_test.go:259: drain n= 7 U=0.2468 X=0.0789 D=88.7626
+    freeze_test.go:259: drain n= 8 U=0.2489 X=0.0786 D=101.8060
+    freeze_test.go:259: drain n= 9 U=0.2497 X=0.0779 D=115.5072
+    freeze_test.go:259: drain n=10 U=0.2498 X=0.0783 D=127.8193
+    freeze_test.go:259: drain n=11 U=0.2499 X=0.0806 D=136.5566
+    freeze_test.go:259: drain n=12 U=0.2499 X=0.0804 D=149.3003
+    freeze_test.go:178: no-limit share 0.20: stall mean 58.9, sd 0.0, D 3.677
+    freeze_test.go:178: no-limit share 0.25: stall mean 58.1, sd 0.0, D 2.942
+    freeze_test.go:178: no-limit share 0.30: stall mean 57.3, sd 0.0, D 2.452
+    freeze_test.go:178: no-limit share 0.35: stall mean 56.6, sd 0.0, D 2.103
+    freeze_test.go:178: no-limit share 0.40: stall mean 55.8, sd 0.0, D 1.842
+    freeze_test.go:178: no-limit share 0.45: stall mean 55.0, sd 0.0, D 1.636
+    freeze_test.go:178: no-limit share 0.50: stall mean 54.2, sd 0.0, D 1.473
+    freeze_test.go:178: no-limit share 0.55: stall mean 53.5, sd 0.0, D 1.341
+    freeze_test.go:178: no-limit share 0.60: stall mean 52.7, sd 0.0, D 1.231
+    freeze_test.go:178: no-limit share 0.65: stall mean 51.9, sd 0.0, D 1.135
+    freeze_test.go:178: no-limit share 0.70: stall mean 51.1, sd 0.0, D 1.053
+    freeze_test.go:178: no-limit share 0.75: stall mean 50.4, sd 0.0, D 0.984
+    freeze_test.go:178: no-limit share 0.80: stall mean 49.6, sd 0.0, D 0.922
+    freeze_test.go:178: no-limit share 0.85: stall mean 48.8, sd 0.0, D 0.868
+    freeze_test.go:178: no-limit share 0.90: stall mean 48.0, sd 0.2, D 0.819
+    freeze_test.go:178: no-limit share 0.95: stall mean 47.3, sd 0.0, D 0.777
+    freeze_test.go:178: no-limit share 1.00: stall mean 46.5, sd 0.2, D 0.738
+    freeze_test.go:178: no-limit share 1.05: stall mean 45.5, sd 0.6, D 0.703
+    freeze_test.go:178: no-limit share 1.10: stall mean 44.5, sd 1.1, D 0.673
+    freeze_test.go:178: no-limit share 1.15: stall mean 43.4, sd 1.5, D 0.644
+    freeze_test.go:178: no-limit share 1.20: stall mean 42.6, sd 1.3, D 0.618
+    freeze_test.go:178: no-limit share 1.25: stall mean 41.5, sd 1.9, D 0.596
+    freeze_test.go:178: no-limit share 1.30: stall mean 40.7, sd 1.6, D 0.572
+    freeze_test.go:178: no-limit share 1.35: stall mean 39.2, sd 2.0, D 0.552
+    freeze_test.go:178: no-limit share 1.40: stall mean 37.4, sd 2.2, D 0.537
+    freeze_test.go:178: no-limit share 1.45: stall mean 35.9, sd 2.6, D 0.523
+    freeze_test.go:178: no-limit share 1.50: stall mean 33.8, sd 2.4, D 0.512
+    freeze_test.go:178: no-limit share 1.55: stall mean 32.1, sd 2.3, D 0.501
+    freeze_test.go:178: no-limit share 1.60: stall mean 29.9, sd 2.6, D 0.495
+    freeze_test.go:178: no-limit share 1.65: stall mean 28.0, sd 2.4, D 0.486
+    freeze_test.go:178: no-limit share 1.70: stall mean 26.4, sd 2.4, D 0.479
+    freeze_test.go:178: no-limit share 1.75: stall mean 24.4, sd 2.1, D 0.475
+    freeze_test.go:178: no-limit share 1.80: stall mean 22.4, sd 2.2, D 0.469
+    freeze_test.go:178: no-limit share 1.85: stall mean 20.7, sd 2.0, D 0.465
+    freeze_test.go:178: no-limit share 1.90: stall mean 19.1, sd 1.9, D 0.459
+    freeze_test.go:178: no-limit share 1.95: stall mean 17.6, sd 2.0, D 0.456
+    freeze_test.go:178: no-limit share 2.00: stall mean 16.2, sd 1.9, D 0.453
+    freeze_test.go:178: no-limit share 2.05: stall mean 15.0, sd 1.8, D 0.450
+    freeze_test.go:178: no-limit share 2.10: stall mean 14.1, sd 1.7, D 0.449
+    freeze_test.go:178: no-limit share 2.15: stall mean 13.0, sd 1.7, D 0.446
+    freeze_test.go:178: no-limit share 2.20: stall mean 11.9, sd 1.5, D 0.443
+    freeze_test.go:178: no-limit share 2.25: stall mean 11.1, sd 1.6, D 0.442
+    freeze_test.go:178: no-limit share 2.30: stall mean 10.3, sd 1.6, D 0.441
+    freeze_test.go:178: no-limit share 2.35: stall mean 9.5, sd 1.4, D 0.439
+    freeze_test.go:178: no-limit share 2.40: stall mean 8.7, sd 1.3, D 0.438
+    freeze_test.go:178: no-limit share 2.45: stall mean 8.0, sd 1.2, D 0.436
+    freeze_test.go:178: no-limit share 2.50: stall mean 7.3, sd 1.3, D 0.435
+    freeze_test.go:178: no-limit share 2.55: stall mean 6.7, sd 1.2, D 0.434
+    freeze_test.go:178: no-limit share 2.60: stall mean 6.1, sd 1.2, D 0.433
+    freeze_test.go:178: no-limit share 2.65: stall mean 5.5, sd 1.2, D 0.432
+    freeze_test.go:178: no-limit share 2.70: stall mean 5.0, sd 1.1, D 0.432
+    freeze_test.go:178: no-limit share 2.75: stall mean 4.5, sd 1.0, D 0.431
+    freeze_test.go:178: no-limit share 2.80: stall mean 4.1, sd 1.0, D 0.430
+    freeze_test.go:178: no-limit share 2.85: stall mean 3.7, sd 0.9, D 0.430
+    freeze_test.go:178: no-limit share 2.90: stall mean 3.3, sd 0.9, D 0.429
+    freeze_test.go:178: no-limit share 2.95: stall mean 2.9, sd 0.8, D 0.429
+    freeze_test.go:178: no-limit share 3.00: stall mean 2.5, sd 0.7, D 0.428
+    freeze_test.go:178: no-limit share 3.05: stall mean 2.3, sd 0.7, D 0.428
+    freeze_test.go:178: no-limit share 3.10: stall mean 2.2, sd 0.7, D 0.428
+    freeze_test.go:178: no-limit share 3.15: stall mean 2.0, sd 0.6, D 0.427
+    freeze_test.go:178: no-limit share 3.20: stall mean 1.8, sd 0.5, D 0.427
+    freeze_test.go:178: no-limit share 3.25: stall mean 1.7, sd 0.5, D 0.427
+    freeze_test.go:178: no-limit share 3.30: stall mean 1.5, sd 0.5, D 0.427
+    freeze_test.go:178: no-limit share 3.35: stall mean 1.4, sd 0.4, D 0.427
+    freeze_test.go:178: no-limit share 3.40: stall mean 1.2, sd 0.4, D 0.426
+    freeze_test.go:178: no-limit share 3.45: stall mean 1.1, sd 0.4, D 0.426
+    freeze_test.go:178: no-limit share 3.50: stall mean 1.0, sd 0.3, D 0.426
+    freeze_test.go:178: no-limit share 3.55: stall mean 0.8, sd 0.3, D 0.426
+    freeze_test.go:178: no-limit share 3.60: stall mean 0.7, sd 0.2, D 0.426
+    freeze_test.go:178: no-limit share 3.65: stall mean 0.6, sd 0.2, D 0.426
+    freeze_test.go:178: no-limit share 3.70: stall mean 0.5, sd 0.2, D 0.425
+    freeze_test.go:178: no-limit share 3.75: stall mean 0.4, sd 0.1, D 0.425
+    freeze_test.go:178: no-limit share 3.80: stall mean 0.3, sd 0.1, D 0.425
+    freeze_test.go:178: no-limit share 3.85: stall mean 0.2, sd 0.1, D 0.425
+    freeze_test.go:178: no-limit share 3.90: stall mean 0.2, sd 0.0, D 0.425
+    freeze_test.go:178: no-limit share 3.95: stall mean 0.1, sd 0.0, D 0.425
+    freeze_test.go:178: no-limit share 4.00: stall mean 0.0, sd 0.0, D 0.425
+    freeze_test.go:267: 
+        // Code generated by TestFreeze (SIM_FREEZE=1); frozen before any gate run.
+        
+        package sim
+        
+        import "time"
+        
+        // frozenPlants are each case plant's S*, D(S*) and n_iter from its fixed-
+        // capacity curve (plan §4.5). nStart counts from one slot to θ⌊S*⌋; nFrom
+        // from the base plant's S* into this plant's band; nAbove from
+        // X*·D(⌈S*(1 + 3r̄)⌉) down to S*(1 + 3r̄). The drain plants are from the
+        // forty-seed mean curve under the GKE protocol; determined is the plan's
+        // determinacy rule.
+        var frozenPlants = map[string]frozen{
+        	"base":     {sStar: 4.7167, dStar: 0.4814, nStart: 2, nFrom: 1, nAbove: 1, determined: true},
+        	"cost46":   {sStar: 2.8403, dStar: 0.5800, nStart: 1, nFrom: 5, nAbove: 2, determined: true},
+        	"limit125": {sStar: 2.8237, dStar: 0.5760, nStart: 1, nFrom: 5, nAbove: 2, determined: true},
+        	"limit500": {sStar: 8.7623, dStar: 0.4482, nStart: 2, nFrom: 1, nAbove: 0, determined: true},
+        	"rising":   {sStar: 4.6098, dStar: 0.4874, nStart: 2, nFrom: 1, nAbove: 1, determined: true},
+        	"drain0":   {sStar: 6.6816, dStar: 49.2973, nStart: 65, nFrom: 65, nAbove: 0, determined: true},
+        	"drain":    {sStar: 4.4088, dStar: 61.9737, nStart: 59, nFrom: 59, nAbove: 2, determined: true},
+        }
+        
+        // frozenXCap is each plant's throughput at the cap: X at its curve's largest
+        // capacity (plan §4.5, design §17.8 item 4).
+        var frozenXCap = map[string]float64{
+        	"base":     10.8625,
+        	"cost46":   5.4375,
+        	"limit125": 5.4375,
+        	"limit500": 21.7083,
+        	"rising":   9.4333,
+        	"drain0":   0.1503,
+        	"drain":    0.0804,
+        }
+        
+        // The no-limit case's alternation (plan §4.5, the review of 0ce649f), from
+        // the node curve at the demand (32 slots fixed, no limit): s_over, the largest
+        // share whose mean stall is at least T + 3σ_s; s_under, the smallest whose mean
+        // stall is at most T − 3σ_s (σ_s the per-sample stall's standard deviation in
+        // the same run); switching every 3·|W|, |W| = ⌈D/Δt⌉ + 1 at s_over.
+        const (
+        	frozenAltOver    = 0.75
+        	frozenAltUnder   = 0.80
+        	frozenAltStretch = 6 * time.Second
+        )
+        
+--- PASS: TestFreeze (111.74s)
+PASS
+ok  	github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel/sim	111.901s
