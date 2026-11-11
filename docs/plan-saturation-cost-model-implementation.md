@@ -1185,8 +1185,9 @@ judgment.
    - **Any difference stops the work** and is reported.
 5. **The deltas against `freeze-6aafb84`**, reported: every frozen value; `S*`
    and its interval for both drain plants; the determinacy calls; `N₀`;
-   fidelity (i)–(iii); and the derived long-drain values. Values move in the
-   last bits, so most printed figures are expected not to change.
+   fidelity (i)–(iii); and the derived long-drain values. Deltas of any size are
+   reported: a last-bit change can move a completion across a tick, so a run's
+   path can change. Only a changed determinacy call or `N₀` stops (step 3).
 6. **Then commit the regenerated `frozen_test.go` and the report (F)**, and push.
    The gate on seeds 1–20 at F is reported, not judged, until the estimator's
    amendment is implemented.
