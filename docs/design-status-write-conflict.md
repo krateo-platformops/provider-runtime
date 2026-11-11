@@ -809,7 +809,21 @@ merge.
 **Whichever option is chosen,** tell oasgen-provider before it lands (C2),
 and relay §4's two cautions to the oasgen-provider and git-provider sessions.
 
-## 12. Open questions for the user
+## 12. The user's decisions (2026-11-11)
+
+- **Q1: option 1,** document the contract, with option 3's diagnostic read in
+  the message.
+- **Q2: a status conflict stays an error** that Reconcile returns.
+- **Q3: yes,** one live `Get` per status conflict, for the message only, with
+  a nil-safe fallback to the plain message when no APIReader is available
+  (fake.Manager, §8.3).
+- **Q4:** the `ExternalClient` doc covers the locked writes after Observe too,
+  as §7.1's text already does.
+- **Q5: ship** `reconcilertest.AssertLeavesManagedCurrent` with option 1.
+
+The questions as they were asked:
+
+## 12.1 Open questions for the user
 
 - **Q1.** Which option: 1, 2c, 3a or 3b?
 - **Q2.** Should a status conflict stay an error, as recommended (§7.1), or
