@@ -93,7 +93,7 @@ func TestBooksHandBackIsNotACompletion(t *testing.T) {
 func TestRatioWarmStartHoldOutAndRestart(t *testing.T) {
 	var r ratio
 	for i := 0; i < 20; i++ {
-		x := 1.0 + 0.01*float64(i%3-1)
+		x := 1.0 + float64(0.01*float64(i%3-1))
 		if r.add(x, 1, 0.1, true) != averaged {
 			t.Fatalf("sample %d not averaged", i)
 		}

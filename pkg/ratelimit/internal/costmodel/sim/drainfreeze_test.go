@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel/internal/fpmath"
 )
 
 // The drain plants' freeze (plan §4.5, the GKE plant curve, 2026-11-11): each
@@ -114,10 +116,10 @@ func bootstrapS(runs [][]curvePoint, limit float64) (lo, hi, sd float64, none in
 			none++
 			continue
 		}
-		sum, sq, m = sum+x, sq+x*x, m+1
+		sum, sq, m = sum+x, sq+float64(x*x), m+1
 	}
 	mean := sum / float64(m)
-	sd = math.Sqrt((sq - float64(m)*mean*mean) / float64(m-1))
+	sd = math.Sqrt((sq - float64(float64(m)*mean*mean)) / float64(m-1))
 	ilo, ihi := bootOrder(drainBoots)
 	return bs[ilo], bs[ihi], sd, none
 }
@@ -134,7 +136,7 @@ func meanVar(xs []float64) (m, v float64) {
 	}
 	m /= float64(len(xs))
 	for _, x := range xs {
-		v += (x - m) * (x - m)
+		v += float64((x - m) * (x - m))
 	}
 	return m, v / float64(len(xs)-1)
 }
@@ -159,7 +161,7 @@ func gkePooled(ns ...int) (sd float64, df int) {
 	for _, n := range ns {
 		_, v := meanVar(gkeRuns[n])
 		k := len(gkeRuns[n])
-		ss += float64(k-1) * v
+		ss += float64(float64(k-1) * v)
 		df += k - 1
 	}
 	return math.Sqrt(ss / float64(df)), df
@@ -172,10 +174,10 @@ func mvaU(n int, c, z, limit float64) float64 {
 	s := c / limit
 	sum, term := 1.0, 1.0
 	for k := 1; k <= n; k++ {
-		term *= float64(n-k+1) * s / z
+		term = float64(term * (float64(n-k+1) * s / z))
 		sum += term
 	}
-	return limit * (1 - 1/sum)
+	return float64(limit * (1 - 1/sum))
 }
 
 // fidelity is the pre-registered fidelity report (plan §4.5): (i) equivalence
@@ -202,13 +204,13 @@ func fidelity(runs [][]curvePoint, sStar, seBoot float64, c float64) string {
 		}
 		se, t, nu := welch(ev, k, sg, float64(len(gkeRuns[n])), float64(dfg))
 		d := em - gm
-		pass := math.Abs(d)+t*se < fidelityDelta
+		pass := math.Abs(d)+float64(t*se) < fidelityDelta
 		all = all && pass
 		fmt.Fprintf(&b, "  n=%d engine %.4f GKE %.4f (k=%d, pooled sd %.4f on %d df) Δ %+.4f [%+.4f, %+.4f] ν %.1f: %s\n",
-			n, em, gm, len(gkeRuns[n]), sg, dfg, d, d-t*se, d+t*se, nu, map[bool]string{true: "equivalent", false: "not shown"}[pass])
+			n, em, gm, len(gkeRuns[n]), sg, dfg, d, d-float64(t*se), d+float64(t*se), nu, map[bool]string{true: "equivalent", false: "not shown"}[pass])
 		if n == 3 && !pass {
 			fmt.Fprintf(&b, "    not shown; at n=3 the test can only pass if |Δ| < %.4f. A failure isn't evidence that the plants differ.\n", n3Limit)
-			fmt.Fprintf(&b, "    (the limit with this run's own engine sd: |Δ| < %.4f)\n", fidelityDelta-t*se)
+			fmt.Fprintf(&b, "    (the limit with this run's own engine sd: |Δ| < %.4f)\n", fidelityDelta-float64(t*se))
 		}
 	}
 	em8, _ := meanVar(col(8))
@@ -221,7 +223,7 @@ func fidelity(runs [][]curvePoint, sStar, seBoot float64, c float64) string {
 		em, ev := meanVar(col(n))
 		mv := mvaU(n, c, mvaThink, 0.25)
 		gm, _ := meanVar(gkeRuns[n])
-		h := t39 * math.Sqrt(ev/k)
+		h := float64(t39 * math.Sqrt(ev/k))
 		d := em - mv
 		fmt.Fprintf(&b, "  n=%d engine %.4f MVA %.4f Δ %+.4f [%+.4f, %+.4f] within ±δ: %v; MVA − GKE %+.4f\n",
 			n, em, mv, d, d-h, d+h, math.Abs(d)+h < fidelityDelta, mv-gm)
@@ -231,7 +233,7 @@ func fidelity(runs [][]curvePoint, sStar, seBoot float64, c float64) string {
 		mvaPts[n] = curvePoint{n: float64(n + 1), u: mvaU(n+1, c, mvaThink, 0.25)}
 	}
 	fmt.Fprintf(&b, "  MVA's S* at this c: %.3f\n", target(mvaPts, 0.25))
-	z := (sStar - gkeSStar) / math.Hypot(seBoot, gkeSE)
+	z := (sStar - gkeSStar) / fpmath.Hypot(seBoot, gkeSE)
 	fmt.Fprintf(&b, "fidelity (iii), reported: S*_engine − %.2f = %+.3f, z %.2f (SE_e %.3f from the bootstrap, SE_g %.2f)\n", gkeSStar, sStar-gkeSStar, z, seBoot, gkeSE)
 	fmt.Fprintf(&b, "  between-run sd, engine against GKE:")
 	for n := 3; n <= 8; n++ {
@@ -260,7 +262,7 @@ func tQuantile(p, nu float64) float64 {
 
 // tCDF is Student's t CDF for t ≥ 0: 1 − I_x(ν/2, 1/2)/2 with x = ν/(ν + t²).
 func tCDF(t, nu float64) float64 {
-	return 1 - 0.5*betaInc(nu/2, 0.5, nu/(nu+t*t))
+	return 1 - float64(0.5*betaInc(nu/2, 0.5, nu/(nu+float64(t*t))))
 }
 
 // betaInc is the regularized incomplete beta function I_x(a, b), by the
@@ -272,10 +274,8 @@ func betaInc(a, b, x float64) float64 {
 	if x >= 1 {
 		return 1
 	}
-	la, _ := math.Lgamma(a + b)
-	lb, _ := math.Lgamma(a)
-	lc, _ := math.Lgamma(b)
-	front := math.Exp(la - lb - lc + a*math.Log(x) + b*math.Log(1-x))
+	la, lb, lc := fpmath.Lgamma(a+b), fpmath.Lgamma(a), fpmath.Lgamma(b)
+	front := fpmath.Exp(la - lb - lc + float64(a*fpmath.Log(x)) + float64(b*fpmath.Log(1-x)))
 	if x < (a+1)/(a+b+2) {
 		return front * betaCF(a, b, x) / a
 	}
@@ -294,7 +294,7 @@ func betaCF(a, b, x float64) float64 {
 	for m := 1; m <= 300; m++ {
 		fm := float64(m)
 		aa := fm * (b - fm) * x / ((qam + 2*fm) * (a + 2*fm))
-		d = 1 + aa*d
+		d = 1 + float64(aa*d)
 		if math.Abs(d) < tiny {
 			d = tiny
 		}
@@ -305,7 +305,7 @@ func betaCF(a, b, x float64) float64 {
 		d = 1 / d
 		h *= d * c
 		aa = -(a + fm) * (qab + fm) * x / ((a + 2*fm) * (qap + 2*fm))
-		d = 1 + aa*d
+		d = 1 + float64(aa*d)
 		if math.Abs(d) < tiny {
 			d = tiny
 		}
@@ -314,7 +314,7 @@ func betaCF(a, b, x float64) float64 {
 			c = tiny
 		}
 		d = 1 / d
-		del := d * c
+		del := float64(d * c)
 		h *= del
 		if math.Abs(del-1) < 3e-14 {
 			break
@@ -352,7 +352,7 @@ func TestFreezeStats(t *testing.T) {
 	// pre-registered n3Limit at forty (0.00366).
 	for _, c := range []struct{ k, want float64 }{{10, 0.0031}, {drainSeeds, n3Limit}} {
 		se, tq, _ := welch(0.0068*0.0068, c.k, sd, 2, float64(df))
-		if got := fidelityDelta - tq*se; math.Abs(got-c.want) > 5e-5 {
+		if got := fidelityDelta - float64(tq*se); math.Abs(got-c.want) > 5e-5 {
 			t.Errorf("the n = 3 limit at %v seeds = %.5f, want %.4f", c.k, got, c.want)
 		}
 	}

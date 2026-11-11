@@ -62,12 +62,12 @@ func TestCurveDiag(t *testing.T) {
 		var su, sq, sx, sc float64
 		for k := 0; k < K; k++ {
 			q := runs[k][n]
-			su, sq = su+q.u, sq+q.u*q.u
+			su, sq = su+q.u, sq+float64(q.u*q.u)
 			sx += q.x
 			sc += q.u / q.x
 		}
 		m := su / K
-		sd := math.Sqrt(math.Max(sq/K-m*m, 0) * K / (K - 1))
+		sd := math.Sqrt(math.Max(sq/K-float64(m*m), 0) * K / (K - 1))
 		fmt.Fprintf(&b, "gke-protocol drain n=%2d meanU %.4f sd %.4f X %.4f c/compl %.3f\n", n+1, m, sd, sx/K, sc/K)
 	}
 	fmt.Fprintf(&b, "gke-protocol drain S* per seed:")
@@ -111,11 +111,11 @@ func TestCurveDiag(t *testing.T) {
 // between whole capacities.
 func crossings(pts []curvePoint, limit float64) []float64 {
 	var xs []float64
-	r := 0.9 * limit
+	r := float64(0.9 * limit)
 	for i := 1; i < len(pts); i++ {
 		a, b := pts[i-1], pts[i]
 		if (a.u-r)*(b.u-r) <= 0 && a.u != b.u {
-			xs = append(xs, a.n+(r-a.u)/(b.u-a.u)*(b.n-a.n))
+			xs = append(xs, a.n+float64((r-a.u)/(b.u-a.u)*(b.n-a.n)))
 		}
 	}
 	return xs

@@ -50,7 +50,7 @@ func (b *baseline) Step(s costmodel.Sample, ceiling int) costmodel.Result {
 	if !b.started || b.cfg.TauU <= 0 {
 		b.u = used
 	} else {
-		b.u += dt / (b.cfg.TauU + dt) * (used - b.u)
+		b.u += float64(dt / (b.cfg.TauU + dt) * (used - b.u))
 	}
 	var S float64
 	stall := 100 * s.Stall.Seconds() / dt
@@ -76,7 +76,7 @@ func (b *baseline) Step(s costmodel.Sample, ceiling int) costmodel.Result {
 		if !b.started {
 			b.prevE, b.started = e, true
 		}
-		S = b.prev + b.cfg.Kp*(e-b.prevE) + b.cfg.Ki*e*dt
+		S = b.prev + float64(b.cfg.Kp*(e-b.prevE)) + float64(b.cfg.Ki*e*dt)
 		b.prevE = e
 	}
 	clamped := false

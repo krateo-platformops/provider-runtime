@@ -100,7 +100,7 @@ func at(pts []curvePoint, S float64) curvePoint {
 		if S <= pts[i].n {
 			a, b := pts[i-1], pts[i]
 			f := (S - a.n) / (b.n - a.n)
-			return curvePoint{S, a.u + f*(b.u-a.u), a.x + f*(b.x-a.x), a.d + f*(b.d-a.d)}
+			return curvePoint{S, a.u + float64(f*(b.u-a.u)), a.x + float64(f*(b.x-a.x)), a.d + float64(f*(b.d-a.d))}
 		}
 	}
 	return pts[len(pts)-1]
@@ -111,7 +111,7 @@ func target(pts []curvePoint, limit float64) float64 {
 	for i := 1; i < len(pts); i++ {
 		a, b := pts[i-1], pts[i]
 		if a.u <= 0.9*limit && b.u >= 0.9*limit {
-			return a.n + (0.9*limit-a.u)/(b.u-a.u)*(b.n-a.n)
+			return a.n + float64((float64(0.9*limit)-a.u)/(b.u-a.u)*(b.n-a.n))
 		}
 	}
 	return math.NaN()
@@ -169,17 +169,17 @@ func alternation(t *testing.T) (over, under float64, stretch int) {
 				continue
 			}
 			x := 100 * tr.Samples[i].Stall.Seconds() / tr.Samples[i].Dt.Seconds()
-			sum, sq, n = sum+x, sq+x*x, n+1
+			sum, sq, n = sum+x, sq+float64(x*x), n+1
 			a += tr.Samples[i].Books.SlotSeconds
 			comp += tr.Samples[i].Books.Completions
 		}
 		m := sum / float64(n)
-		sd := math.Sqrt(math.Max(sq/float64(n)-m*m, 0))
+		sd := math.Sqrt(math.Max(sq/float64(n)-float64(m*m), 0))
 		t.Logf("no-limit share %.2f: stall mean %.1f, sd %.1f, D %.3f", sh, m, sd, a/float64(comp))
-		if m >= 50+3*sd {
+		if m >= 50+float64(3*sd) {
 			over, dOver = sh, a/float64(comp)
 		}
-		if math.IsNaN(under) && m <= 50-3*sd {
+		if math.IsNaN(under) && m <= 50-float64(3*sd) {
 			under = sh
 		}
 	}

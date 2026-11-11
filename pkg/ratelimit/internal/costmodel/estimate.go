@@ -48,7 +48,7 @@ func (r *ratio) seRatio() float64 {
 	if !ok || r.n < 3 {
 		return math.Inf(1)
 	}
-	q := r.qnn - 2*v*r.qnd + v*v*r.qdd
+	q := r.qnn - float64(2*v*r.qnd) + float64(v*v*r.qdd)
 	return math.Sqrt(math.Max(q, 0)) / r.den
 }
 
@@ -70,12 +70,12 @@ const (
 func (r *ratio) fold(num, den, alpha float64) {
 	r.n++
 	a := math.Max(alpha, 1/float64(r.n))
-	r.num = (1-a)*r.num + a*num
-	r.den = (1-a)*r.den + a*den
+	r.num = float64((1-a)*r.num) + float64(a*num)
+	r.den = float64((1-a)*r.den) + float64(a*den)
 	b, a2 := (1-a)*(1-a), a*a
-	r.qnn = b*r.qnn + a2*num*num
-	r.qnd = b*r.qnd + a2*num*den
-	r.qdd = b*r.qdd + a2*den*den
+	r.qnn = float64(b*r.qnn) + float64(a2*num*num)
+	r.qnd = float64(b*r.qnd) + float64(a2*num*den)
+	r.qdd = float64(b*r.qdd) + float64(a2*den*den)
 	if den <= 0 {
 		return
 	}
@@ -86,8 +86,8 @@ func (r *ratio) fold(num, den, alpha float64) {
 		return
 	}
 	d := x - r.mu
-	r.mu += a * d
-	r.v = (1 - a) * (r.v + a*d*d)
+	r.mu += float64(a * d)
+	r.v = (1 - a) * (r.v + float64(a*d*d))
 }
 
 // deviation is a sample's distance from the mean in standard deviations, and
@@ -157,6 +157,6 @@ func (s *spread) moved(x, alpha float64) bool {
 	big := s.n >= 3 && d*d > changeSigma*changeSigma*s.v
 	s.n++
 	al := math.Max(alpha, 1/float64(s.n-1))
-	s.v = (1-al)*s.v + al*d*d
+	s.v = float64((1-al)*s.v) + float64(al*d*d)
 	return big
 }

@@ -228,14 +228,14 @@ func TestTuneBaseline(t *testing.T) {
 			var n int
 			for j := e; j < gx.n(); j++ {
 				x := gx.S(j)
-				s, s2, n = s+x, s2+x*x, n+1
+				s, s2, n = s+x, s2+float64(x*x), n+1
 				if !b.in(x) {
 					out++
 				}
 			}
 			if n > 0 {
 				m := s / float64(n)
-				vars += s2/float64(n) - m*m
+				vars += s2/float64(n) - float64(m*m)
 				outs += out / float64(n)
 			} else {
 				outs++

@@ -86,13 +86,13 @@ func (b *Books) Close(at time.Duration) Interval {
 			iv.NMax = n
 		}
 		d := (until - cur).Seconds()
-		iv.SlotSeconds += float64(n) * d
+		iv.SlotSeconds += float64(float64(n) * d)
 		for q, k := range b.perQueue {
 			if k == 0 {
 				continue
 			}
 			qi := iv.Queues[q]
-			qi.SlotSeconds += float64(k) * d
+			qi.SlotSeconds += float64(float64(k) * d)
 			iv.Queues[q] = qi
 		}
 		cur = until

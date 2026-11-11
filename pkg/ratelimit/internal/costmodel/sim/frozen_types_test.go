@@ -22,7 +22,7 @@ func floorAfterCostIncrease() float64 {
 	p, b := frozenPlants["cost46"], frozenPlants["base"]
 	n0 := math.Ceil(b.sStar)
 	x := frozenXCap["cost46"]
-	cw := x * (math.Ceil(n0/x) + 1)
+	cw := float64(x * (math.Ceil(n0/x) + 1))
 	return p.sStar * (b.dStar / p.dStar) * cw / (cw + n0)
 }
 
@@ -52,6 +52,6 @@ func floorAfterDrainChange() float64 {
 	p, b := frozenPlants["drain"], frozenPlants["drain0"]
 	n0 := drainN0()
 	x := frozenXCap["drain"]
-	cw := x * (math.Ceil(n0/x) + 1)
+	cw := float64(x * (math.Ceil(n0/x) + 1))
 	return p.sStar * (b.dStar / p.dStar) * cw / (cw + n0)
 }

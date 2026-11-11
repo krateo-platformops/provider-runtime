@@ -2,7 +2,10 @@ package costmodel
 
 import (
 	"math"
+	"sort"
 	"time"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel/internal/fpmath"
 )
 
 // CPUConfig configures the CPU path.
@@ -308,7 +311,7 @@ func (c *CPU) kind(s Sample, from int) (Kind, int) {
 		thr += h.throttled
 	}
 	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
-	if per >= 1 && u >= s.Limit*d-slack*float64(n) && thr+uint64(n) >= per {
+	if per >= 1 && u >= float64(s.Limit*d)-float64(slack*float64(n)) && thr+uint64(n) >= per {
 		return Capped, n
 	}
 	return Active, n
@@ -321,7 +324,7 @@ func tightSample(s Sample, used float64) bool {
 		return false
 	}
 	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
-	return used*s.Dt.Seconds() >= s.Limit*s.Dt.Seconds()-slack
+	return used*s.Dt.Seconds() >= float64(s.Limit*s.Dt.Seconds())-slack
 }
 
 // costCompletions counts the completions ĉ's denominator takes: those of
@@ -384,7 +387,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	c.lastL = s.Limit
 
 	tau := c.tau()
-	alpha := 1 - math.Exp(-dt/tau)
+	alpha := 1 - fpmath.Exp(-dt/tau)
 	over := stall > c.cfg.PressureThreshold
 	// §17.9 items 1, 5 and 8: stall the quota doesn't explain, with no
 	// throttled period, is contention; with no quota every stall over the
@@ -410,7 +413,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if kind == Capped {
 		c.lastCapT = c.t
 	}
-	keepFrom := books.End - time.Duration((2*c.maxLife+3*tau+2*dt)*float64(time.Second))
+	keepFrom := books.End - time.Duration((float64(2*c.maxLife)+float64(3*tau)+float64(2*dt))*float64(time.Second))
 	for len(c.hist) > 1 && c.hist[0].to < keepFrom && from > 0 {
 		c.hist = c.hist[1:]
 		from--
@@ -462,8 +465,8 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		c.tightAll = c.tightAll[1:]
 	}
 
-	c.idle = prune(c.idle, c.t-3*tau)
-	c.activeU = prune(c.activeU, c.t-3*tau)
+	c.idle = prune(c.idle, c.t-float64(3*tau))
+	c.activeU = prune(c.activeU, c.t-float64(3*tau))
 	switch kind {
 	case Idle:
 		c.idle = append(c.idle, timed{c.t, used})
@@ -490,7 +493,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if kind != Idle {
 		c.tputN++
 		al := math.Max(alpha, 1/float64(c.tputN))
-		c.tput = (1-al)*c.tput + al*x
+		c.tput = float64((1-al)*c.tput) + float64(al*x)
 	}
 
 	// §17.8 item 3: a move of the published S of at least max(3σ of its
@@ -585,8 +588,8 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 	if dok {
 		tauC = math.Max(tau, dv/rbar)
 	}
-	alphaC := 1 - math.Exp(-dt/tauC)
-	cpuNum := s.Usage.Seconds() - bg*dt
+	alphaC := 1 - fpmath.Exp(-dt/tauC)
+	cpuNum := s.Usage.Seconds() - float64(bg*dt)
 	den := costCompletions(books, c.cStart)
 	c.c.add(cpuNum, float64(den), alphaC, false)
 	c.since += den
@@ -617,7 +620,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		if res.DFallback {
 			seD = c.little.seRatio()
 		}
-		res.RelSE = math.Hypot(seC/ch, seD/dv)
+		res.RelSE = fpmath.Hypot(seC/ch, seD/dv)
 		res.Trusted = c.since >= trustCompletions && c.c.n >= 3 && c.d.n >= 3 && res.RelSE <= rbar
 	}
 
@@ -636,7 +639,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		// allows over what the sample used, its usage counted up to the new
 		// limit.
 		if d := math.Min(used, limit) - bg; d > 0 {
-			g = math.Min(prev, (rho*limit-bg)*nbar/d)
+			g = math.Min(prev, (float64(rho*limit)-bg)*nbar/d)
 		}
 	case kind == Capped:
 		// §17.10 (A): a window-capped sample never rises.
@@ -663,7 +666,7 @@ func (c *CPU) Step(s Sample, prev float64, capacity, ceiling int) CPUResult {
 		case !dok:
 			res.DHold = true
 		default:
-			g = (rho*limit - bg) * dv / ch
+			g = (float64(rho*limit) - bg) * dv / ch
 		}
 	}
 	// The sign guard (§4.2), reading the window's CPU (§17.10 (A)).
@@ -750,7 +753,7 @@ func (c *CPU) windowTest(b Interval, num float64, den int, alpha, dt, tauC float
 		}
 		return
 	}
-	aw := 1 - math.Exp(-(b.End-w.from).Seconds()/tauC)
+	aw := 1 - fpmath.Exp(-(b.End-w.from).Seconds()/tauC)
 	fold := func(v float64) {
 		c.wn++
 		a := math.Max(aw, 1/float64(c.wn))
@@ -759,8 +762,8 @@ func (c *CPU) windowTest(b Interval, num float64, den int, alpha, dt, tauC float
 			return
 		}
 		d := v - c.wmu
-		c.wmu += a * d
-		c.wv = (1 - a) * (c.wv + a*d*d)
+		c.wmu += float64(a * d)
+		c.wv = (1 - a) * (c.wv + float64(a*d*d))
 	}
 	if c.wn < 3 {
 		if p := c.pend; p != nil {
@@ -825,8 +828,8 @@ func (c *CPU) restartFrom(p, w *costWindow) {
 				c.wmu = v
 			} else {
 				d := v - c.wmu
-				c.wmu += d / 2
-				c.wv = (c.wv + d*d/2) / 2
+				c.wmu += float64(d / 2)
+				c.wv = (c.wv + float64(d*d/2)) / 2
 			}
 		}
 	}
@@ -886,7 +889,7 @@ func (c *CPU) dWindowTest(dt, tauC float64, res *CPUResult) {
 		}
 		return
 	}
-	aw := 1 - math.Exp(-float64(res.WindowLen)*dt/tauC)
+	aw := 1 - fpmath.Exp(-float64(res.WindowLen)*dt/tauC)
 	fold := func(v float64) {
 		c.dwn++
 		a := math.Max(aw, 1/float64(c.dwn))
@@ -895,8 +898,8 @@ func (c *CPU) dWindowTest(dt, tauC float64, res *CPUResult) {
 			return
 		}
 		d := v - c.dwmu
-		c.dwmu += a * d
-		c.dwv = (1 - a) * (c.dwv + a*d*d)
+		c.dwmu += float64(a * d)
+		c.dwv = (1 - a) * (c.dwv + float64(a*d*d))
 	}
 	if c.dwn < 3 {
 		if p := c.dPend; p != nil {
@@ -946,7 +949,7 @@ func (c *CPU) windowCost(from int, bg float64) (float64, bool) {
 	var cpu float64
 	var comp int
 	for _, h := range c.hist[from:] {
-		cpu += h.usage - bg*h.dt
+		cpu += h.usage - float64(bg*h.dt)
 		comp += h.completions
 	}
 	if comp == 0 {
@@ -961,7 +964,7 @@ func (c *CPU) windowCost(from int, bg float64) (float64, bool) {
 // its start uses the D̂ in force (§17.10 (C)); without either, only θN̄.
 func (c *CPU) capped(from int, limit, bg, nbar, dv float64, dok bool, res *CPUResult) float64 {
 	rho := c.cfg.Target
-	theta := (rho*limit - bg) / (limit - bg)
+	theta := (float64(rho*limit) - bg) / (limit - bg)
 	g := theta * nbar
 	cw, ok := c.windowCost(from, bg)
 	if !ok || cw <= 0 {
@@ -979,8 +982,14 @@ func (c *CPU) capped(from int, limit, bg, nbar, dv float64, dok bool, res *CPURe
 	if total == 0 {
 		return g
 	}
+	queues := make([]string, 0, len(per))
+	for q := range per {
+		queues = append(queues, q)
+	}
+	sort.Strings(queues) // a fixed order: a float sum depends on it
 	var mix float64
-	for q, n := range per {
+	for _, q := range queues {
+		n := per[q]
 		var d float64
 		r := c.dq[q]
 		v, vok := 0.0, false
@@ -998,10 +1007,10 @@ func (c *CPU) capped(from int, limit, bg, nbar, dv float64, dok bool, res *CPURe
 		default:
 			return g
 		}
-		mix += float64(n) * d
+		mix += float64(float64(n) * d)
 	}
 	mix /= float64(total)
-	if first := (rho*limit - bg) * mix / cw; first < g {
+	if first := (float64(rho*limit) - bg) * mix / cw; first < g {
 		res.FirstTerm = true
 		return first
 	}

@@ -192,7 +192,7 @@ func Run(cfg Config) *Trace {
 		if j <= 0 {
 			return ms
 		}
-		return math.Max(0.1*ms, ms*(1+j*rng.normFloat64()))
+		return math.Max(0.1*ms, ms*(1+float64(j*rng.normFloat64())))
 	}
 	admit := func(t time.Duration) bool {
 		changed := false
@@ -207,7 +207,7 @@ func Run(cfg Config) *Trace {
 				c := q.Class(t)
 				cpu := draw(c.CPU, c.Jitter)
 				if cfg.CostPerSlot > 0 {
-					cpu *= 1 + cfg.CostPerSlot*float64(len(inflight))
+					cpu *= 1 + float64(cfg.CostPerSlot*float64(len(inflight)))
 				}
 				inflight = append(inflight, &recon{queue: qi, granted: t, cpuLeft: cpu, waitLeft: draw(c.Wait, c.Jitter)})
 				perQueue[qi]++
@@ -325,7 +325,7 @@ func Run(cfg Config) *Trace {
 			}
 		}
 		usage += ran
-		stall += cfg.PSIScale * math.Max(0, worst)
+		stall += float64(cfg.PSIScale * math.Max(0, worst))
 		// The node's other cgroups, saturated: they use whatever the container
 		// doesn't, up to N − share (design §17.8, item 6).
 		if cfg.Share != nil {
@@ -387,7 +387,7 @@ func Run(cfg Config) *Trace {
 					Books:        books.Close(end),
 				}
 				if cfg.UsageNoise > 0 {
-					s.Usage = time.Duration(float64(s.Usage) * math.Max(0, 1+cfg.UsageNoise*rng.normFloat64()))
+					s.Usage = time.Duration(float64(s.Usage) * math.Max(0, 1+float64(cfg.UsageNoise*rng.normFloat64())))
 				}
 				last.at, last.usage, last.stall = end, usage, stall
 				last.nrPeriods, last.nrThrottle = nrPeriods, nrThr
@@ -517,8 +517,8 @@ func (r *reserver) decide(t time.Duration, issued, ceiling int, limit, nodeCPUs,
 		dt = 0.001
 	}
 	e := r.cfg.Target - r.reading
-	r.integral += e * dt
-	out := r.cfg.Kp*e + r.cfg.Ki*r.integral + r.cfg.Kd*(e-r.prevE)/dt
+	r.integral += float64(e * dt)
+	out := float64(r.cfg.Kp*e) + float64(r.cfg.Ki*r.integral) + float64(r.cfg.Kd*(e-r.prevE)/dt)
 	r.prevE, r.lastDecision = e, t
 	if out > r.cfg.Threshold {
 		r.lastIssue, r.next = t, t+r.cfg.Ramp+tick

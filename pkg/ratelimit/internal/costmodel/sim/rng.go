@@ -1,6 +1,10 @@
 package sim
 
-import "math"
+import (
+	"math"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel/internal/fpmath"
+)
 
 // rng is SplitMix64, a small seeded generator. The simulation needs its runs
 // reproducible from a seed, which crypto/rand can't give; this is not used for
@@ -35,7 +39,7 @@ func (r *rng) normFloat64() float64 {
 		return r.spare
 	}
 	u1, u2 := r.float64(), r.float64()
-	m := math.Sqrt(-2 * math.Log(u1))
-	r.spare, r.has = m*math.Sin(2*math.Pi*u2), true
-	return m * math.Cos(2*math.Pi*u2)
+	m := math.Sqrt(-2 * fpmath.Log(u1))
+	r.spare, r.has = m*fpmath.Sin(2*math.Pi*u2), true
+	return m * fpmath.Cos(2*math.Pi*u2)
 }

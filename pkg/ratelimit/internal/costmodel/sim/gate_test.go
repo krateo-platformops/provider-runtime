@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel/internal/fpmath"
 )
 
 // The gate: the plan's §4.5 conditions, on the cost model and on the
@@ -82,7 +83,7 @@ func tightPerSample(s costmodel.Sample) bool {
 		return false
 	}
 	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
-	return s.Usage.Seconds() >= s.Limit*s.Dt.Seconds()-slack
+	return s.Usage.Seconds() >= float64(s.Limit*s.Dt.Seconds())-slack
 }
 
 // window is the first sample of sample i's window W: the most recent samples
@@ -130,7 +131,7 @@ func (g *gctx) capped(i int) bool {
 	}
 	n := i - j + 1
 	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
-	return per >= 1 && u >= s.Limit*d-slack*float64(n) && thr+uint64(n) >= per
+	return per >= 1 && u >= float64(s.Limit*d)-float64(slack*float64(n)) && thr+uint64(n) >= per
 }
 
 // inRuns marks each sample in a contention run (design §17.10 (D)): a run
@@ -175,7 +176,7 @@ func (g *gctx) stall(i int) float64 {
 type band struct{ sStar, lo, hi float64 }
 
 func bandOf(sStar float64) band {
-	return band{sStar, rho * math.Floor(sStar), sStar * (1 + 3*rbar)}
+	return band{sStar, float64(rho * math.Floor(sStar)), float64(sStar * (1 + 3*rbar))}
 }
 
 func (b band) in(S float64) bool { return S >= b.lo-1e-9 && S <= b.hi+1e-9 }
@@ -210,7 +211,7 @@ func (g *gctx) outsideLo(b band, from, to int, lo func(i int) float64) {
 					excluded++
 					continue
 				}
-				hi = b.sStar * (1 + 3*math.Max(c.RelSE, rbar))
+				hi = float64(b.sStar * (1 + float64(3*math.Max(c.RelSE, rbar))))
 			}
 		}
 		n++
@@ -258,7 +259,7 @@ func (g *gctx) monotone(from, to int) {
 				g.report("an untrusted fall at %v: %.2f to %.2f with U over ρL", g.tr.At[i], prev, S)
 				continue
 			}
-			if S >= prev*(1-3*rbar)-1e-9 {
+			if S >= float64(prev*(1-3*rbar))-1e-9 {
 				continue
 			}
 			g.fail("a trusted fall at %v larger than 3r̄: %.2f to %.2f", g.tr.At[i], prev, S)
@@ -567,7 +568,7 @@ func gateCases() []gateCase {
 				want := s0
 				if u := g.tr.Used(i0); u > rho*L {
 					if d := math.Min(u, L) - r.CPU.Background; d > 0 {
-						want = math.Min(s0, (rho*L-r.CPU.Background)*r.CPU.InFlight/d)
+						want = math.Min(s0, (float64(rho*L)-r.CPU.Background)*r.CPU.InFlight/d)
 					}
 				}
 				if math.Abs(r.Slots-want) > 1e-6 {
@@ -646,11 +647,11 @@ func gateCases() []gateCase {
 			for i, a := range g.tr.At {
 				if a >= 60*time.Second {
 					x := g.S(i)
-					s, s2, n = s+x, s2+x*x, n+1
+					s, s2, n = s+x, s2+float64(x*x), n+1
 				}
 			}
 			m := s / float64(n)
-			if sd := math.Sqrt(s2/float64(n) - m*m); sd >= 0.3 {
+			if sd := math.Sqrt(s2/float64(n) - float64(m*m)); sd >= 0.3 {
 				g.fail("slots' standard deviation %.2f, want under 0.3", sd)
 			}
 		}},
@@ -690,7 +691,7 @@ func gateCases() []gateCase {
 				Model: defaultModel(),
 			}
 			nz := newNoise(seed)
-			c.Background = func(t time.Duration) float64 { return math.Max(0, 0.015+0.010*nz.at(t)) }
+			c.Background = func(t time.Duration) float64 { return math.Max(0, 0.015+float64(0.010*nz.at(t))) }
 			return c
 		}, check: func(g *gctx) {
 			warm := -1
@@ -776,7 +777,7 @@ func gateCases() []gateCase {
 					}
 				}
 			}
-			lim := int(math.Min(math.Ceil(math.Log(32/base.sStar)/math.Log(1/rho)), math.Ceil(dOut+float64(nw))+1)) + nw - 1
+			lim := int(math.Min(math.Ceil(fpmath.Log(32/base.sStar)/fpmath.Log(1/rho)), math.Ceil(dOut+float64(nw))+1)) + nw - 1
 			g.report("D_out %.2fs, n_W %d: out of the cap within %d", dOut, nw, lim)
 			if capped > 0 && (out < 0 || out-i0 > lim) {
 				g.fail("not out of the cap within %d samples of the shift: %v", lim, g.slotsFrom(i0, 12))
@@ -1161,7 +1162,7 @@ func gateCases() []gateCase {
 							excluded++
 							continue
 						}
-						hi = p.sStar * (1 + 3*math.Max(c.RelSE, rbar))
+						hi = float64(p.sStar * (1 + float64(3*math.Max(c.RelSE, rbar))))
 					}
 				}
 				top = math.Max(top, g.S(i))
@@ -1269,7 +1270,7 @@ func (n noise) at(t time.Duration) float64 {
 	h2 := (sec*0xc2b2ae3d27d4eb4f ^ n.seed*0x165667b19e3779f9) >> 11
 	u1 := (float64(h1%(1<<52)) + 0.5) / (1 << 52)
 	u2 := (float64(h2%(1<<52)) + 0.5) / (1 << 52)
-	return math.Sqrt(-2*math.Log(u1)) * math.Cos(2*math.Pi*u2)
+	return math.Sqrt(-2*fpmath.Log(u1)) * fpmath.Cos(2*math.Pi*u2)
 }
 
 // runCase runs one case for one controller and seed.
