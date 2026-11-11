@@ -303,15 +303,16 @@ func (c *CPU) kind(s Sample, from int) (Kind, int) {
 		return Active, n
 	}
 	var u, d float64
-	var per, thr uint64
+	var per, thr, k uint64 // k counts the window's samples, one boundary period each
 	for _, h := range c.hist[from:] {
 		u += h.usage
 		d += h.dt
 		per += h.periods
 		thr += h.throttled
+		k++
 	}
 	slack := math.Min(s.Limit*s.Period.Seconds(), float64(s.Procs)*s.Slice.Seconds())
-	if per >= 1 && u >= float64(s.Limit*d)-float64(slack*float64(n)) && thr+uint64(n) >= per {
+	if per >= 1 && u >= float64(s.Limit*d)-float64(slack*float64(n)) && thr+k >= per {
 		return Capped, n
 	}
 	return Active, n
