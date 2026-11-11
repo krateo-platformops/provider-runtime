@@ -22,14 +22,23 @@ func near(t *testing.T, what string, got, want, tol float64) {
 func TestNoIO(t *testing.T) {
 	// Direct imports: the standard library's own packages reach syscall
 	// through time, which is not I/O done here.
-	out, err := exec.Command("go", "list", "-f", "{{join .Imports \" \"}}", ".").Output()
-	if err != nil {
-		t.Skipf("go list: %v", err)
-	}
-	allowed := map[string]bool{"math": true, "time": true, "sort": true}
-	for _, dep := range strings.Fields(string(out)) {
-		if !allowed[dep] {
-			t.Errorf("costmodel imports %s; only %v are allowed", dep, allowed)
+	// internal/fpmath, the portable elementary functions, may import math alone.
+	const fpmath = "github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel/internal/fpmath"
+	for _, c := range []struct {
+		pkg     string
+		allowed map[string]bool
+	}{
+		{".", map[string]bool{"math": true, "time": true, "sort": true, fpmath: true}},
+		{"./internal/fpmath", map[string]bool{"math": true}},
+	} {
+		out, err := exec.Command("go", "list", "-f", "{{join .Imports \" \"}}", c.pkg).Output()
+		if err != nil {
+			t.Skipf("go list: %v", err)
+		}
+		for _, dep := range strings.Fields(string(out)) {
+			if !c.allowed[dep] {
+				t.Errorf("%s imports %s; only %v are allowed", c.pkg, dep, c.allowed)
+			}
 		}
 	}
 }
