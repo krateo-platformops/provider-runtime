@@ -1,0 +1,30 @@
+The engine's fixed-capacity curves at b2e5757, for the plan §4.5 change on the measured S* (2026-11-11).
+Not a gate run: seeds 9001-9010 only (1-20 are the gate's, 21-40 reserved).
+
+Method. "freeze": TestFreeze's measureCurve (freeze_test.go) at each seed, unchanged: n = 1..maxN via Config.Fixed,
+each run p.length long (1800 s for the drain plants, 300 s for the others), the first p.warmup (300 s / 60 s) dropped;
+S* by target(), linear between the bracketing whole n. "gke-protocol": the drain plant (drainHeavy, 3000 ms CPU then
+28500 ms wait, jitter 0.1, 250m, Procs 2) at n = 1..10, each run 2100 s with the first 300 s dropped (the GKE runs'
+protocol, hack/rlgov-measure/results/curve-settings.txt), seeds 9001-9010; per n the mean of the ten run means, their
+between-run sd, the mean X and the mean CPU per completion (U/X). Produced by an env-gated diagnostic test
+(SIM_CURVEDIAG, zz_curve_diag_test.go), not committed with this file.
+
+freeze base: 9001:4.717 9002:4.729 9003:4.740
+freeze cost46: 9001:2.840 9002:2.828 9003:2.877
+freeze limit125: 9001:2.824 9002:2.831 9003:2.849
+freeze limit500: 9001:8.762 9002:8.749 9003:8.742
+freeze rising: 9001:4.610 9002:4.615 9003:4.631
+freeze drain0: 9001:6.945 9002:7.158 9003:7.059 9004:7.250 9005:7.549 9006:7.159 9007:7.248 9008:6.653 9009:7.595 9010:6.702
+freeze drain: 9001:3.905 9002:4.822 9003:4.492 9004:4.514 9005:4.668 9006:4.799 9007:5.417 9008:4.286 9009:4.225 9010:5.305
+gke-protocol drain n= 1 meanU 0.0738 sd 0.0018 X 0.0245 c/compl 3.008
+gke-protocol drain n= 2 meanU 0.1366 sd 0.0033 X 0.0456 c/compl 2.997
+gke-protocol drain n= 3 meanU 0.1894 sd 0.0068 X 0.0629 c/compl 3.013
+gke-protocol drain n= 4 meanU 0.2150 sd 0.0078 X 0.0711 c/compl 3.024
+gke-protocol drain n= 5 meanU 0.2306 sd 0.0088 X 0.0773 c/compl 2.982
+gke-protocol drain n= 6 meanU 0.2417 sd 0.0065 X 0.0799 c/compl 3.023
+gke-protocol drain n= 7 meanU 0.2461 sd 0.0032 X 0.0832 c/compl 2.959
+gke-protocol drain n= 8 meanU 0.2482 sd 0.0013 X 0.0827 c/compl 3.001
+gke-protocol drain n= 9 meanU 0.2492 sd 0.0017 X 0.0822 c/compl 3.033
+gke-protocol drain n=10 meanU 0.2498 sd 0.0004 X 0.0814 c/compl 3.068
+gke-protocol drain S* per seed: 3.893 5.053 4.432 4.560 4.628 4.666 5.416 4.263 4.113 5.184
+gke-protocol drain S* of the mean curve: 4.640

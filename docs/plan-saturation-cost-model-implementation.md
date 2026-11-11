@@ -920,6 +920,123 @@ text; the controller unchanged):
   seeds 9001–9003, non-monotone, with `U` nearly flat near the target; the real
   curve is measured first (`hack/rlgov-measure/results/curve-settings.txt`).
 
+**Proposed after the GKE plant curve, 2026-11-11: for review before any code or
+gate run.** The measurement determined the real drain plant's target,
+`S* = 4.14`, bootstrap 95% [3.92, 4.38] (`hack/rlgov-measure/results/curve-report.txt`,
+with the audit's caveats in `curve-audit.md`), and the user decided that the long
+drain's band is judged with it. The gate's long-drain trajectories come from the
+engine's drain plant, so that judgement is valid only if the engine's plant has
+the measured target. This was checked first; the engine's curves are in
+`pkg/ratelimit/internal/costmodel/sim/testdata/curve-engine-b2e5757.txt`
+(seeds 9001–9010; none of 1–40 used).
+
+- **The premise fails at the committed parameters.** The engine's drain plant
+  under the GKE runs' protocol (300 s warm-up, 1800 s measured, ten seeds per
+  `n`) against the GKE means (`k` runs per `n`), in cores:
+
+  | n | engine, mean ± 95% | GKE mean (k) | engine − GKE | z |
+  |---|---|---|---|---|
+  | 3 | 0.1894 ± 0.0042 | 0.1876 (2) | +0.0019 | +0.6 |
+  | 4 | 0.2150 ± 0.0048 | 0.2230 (6) | −0.0080 | −2.2 |
+  | 5 | 0.2306 ± 0.0055 | 0.2371 (6) | −0.0065 | −1.8 |
+  | 6 | 0.2417 ± 0.0040 | 0.2428 (4) | −0.0011 | −0.5 |
+  | 7 | 0.2461 ± 0.0020 | 0.2466 (2) | −0.0005 | −0.2 |
+  | 8 | 0.2482 ± 0.0008 | 0.2500 (2) | −0.0018 | (GKE sd 0) |
+
+  The engine's mean-curve `S*` is **4.64, 95% ±0.25 (delta method), [4.39, 4.89]**,
+  disjoint from the measured [3.92, 4.38]. Its per-seed values are 3.89–5.42 (sd
+  0.48): the frozen 3.90 is seed 9001's, the lowest of the ten. (At `b2e5757` the
+  freeze's method gives 3.905, 4.822 and 4.492 on seeds 9001–9003; the review of
+  `c1acaa4` quoted 4.3 for 9003, not reconciled.) At 4.14 the band's upper edge is
+  4.76, and the engine's own target would sit at 97% of it: judging the
+  uncalibrated engine with 4.14 tests the gap between the two plants, not the
+  controller. The same gap may explain the 5 failures in 20 under the frozen 3.90,
+  whose upper edge, 4.49, is under the engine's own target; that is a hypothesis,
+  not traced.
+- **Where the plants differ.** The cgroup's CPU per completion is 3.157 s on GKE
+  (22 runs, sd 0.036 s, 3.12–3.18 s by `n`), against the engine's 3.00 s, the burn
+  as drawn. The burn itself matched its request within 0.003% on every run, so
+  the 5.2% excess is outside it: the controller's own per-reconcile work and the
+  Go runtime. It is flat in `n` while the throughput varies from 0.061 to
+  0.080/s, so it is per reconcile, not a background (a background would make it
+  fall with the throughput). The engine is also noisier: its between-run sd at
+  `n` = 4 and 5 is 0.0078 and 0.0088 against GKE's 0.0065 and 0.0055, in line with
+  the reviewer's caveat that its CPU-first, admission-aligned reconciles are
+  burstier than real ones.
+
+**The proposal: calibrate the drain plant from a directly measured quantity, and
+validate it against the measured curve.**
+
+1. **The calibration, one parameter, not fitted to `U`.** The drain plant's CPU
+   per reconcile (`drainHeavy`) becomes **3157 ms**, the GKE runs' mean cgroup CPU
+   per completion; the wait (28,500 ms), the jitter (0.1), the limit, `Procs` and
+   everything else stay. It is not fitted to the per-`n` means, for two reasons: a
+   fit would make the match in `S*` true by construction, from the same data it is
+   then checked against; and if the `c` that fits `U` differed from the `c`
+   measured directly, the difference would be the model's misfit, which a fit
+   would hide. `drain0` (the 30 s plant before the change) is not measured and is
+   left unchanged; physically it carries the same per-reconcile excess, about 10%
+   of its 1500 ms. It enters the long drain through `N₀ = ⌈S*₀⌉` and the floor's
+   `D_mix` (for the reviewer: apply the excess to `drain0` too, or not).
+2. **The validation, pre-registered here and run once at the freeze.** The
+   calibrated plant's curve under the GKE protocol on seeds 9001–9010, `n` =
+   1..10. It passes when both hold:
+   - **(i)** `|S*_engine − 4.14| ≤ 1.96·√(SE_e² + SE_g²)`, with `S*_engine` the
+     mean curve's crossing, `SE_e` the bootstrap's over seeds (10,000 resamples,
+     seeds resampled, the curve re-interpolated each time, as `curve_report.py`),
+     and `SE_g = 0.45/3.92 = 0.115`, the measured interval's width over 2·1.96;
+   - **(ii)** at `n` = 3..7, the engine's mean within `1.96·√(se_e² + se_g²)` of
+     the GKE mean at no fewer than four of the five. `n` = 8 is reported, not
+     judged: GKE's two runs read the cap exactly (sd 0), where the engine reads
+     0.7% under it.
+   **Disclosed before the run:** a processor-sharing closed-queue (BCMP)
+   reference with think time 28.5 s, within 0.004 cores of the GKE means at every
+   `n` at `c` = 3.157 s (its `S*` is about 4.33), predicts the calibration lowers the
+   engine's `S*` by about 0.15 slots. From 4.64 that is about 4.5, and (i) would
+   then fail narrowly (z about 2). The residual would be the engine's burstiness,
+   which no measured parameter sets.
+3. **If it validates:** the long drain's band is judged with the measured
+   `S* = 4.14` (the user's decision): lower edge `θ⌊4.14⌋ = 3.6`, upper
+   `4.14·(1 + 3r̄) = 4.76`; the restart-edge floor (design §17.8 item 4) uses
+   `S*' = 4.14`. `D*'`, `X'_cap`, `n_above`, the frozen count and the floor's `C_W`
+   come from the calibrated plant's ten-seed mean curve, not from seed 9001. The
+   engine's own `S*` is reported beside 4.14. The audit's caveat 3 (read 4.14 as
+   4.05–4.15) is reported, not applied.
+4. **If it doesn't:** no second parameter is fitted. Two outcomes, for the user
+   to choose before the run, so that the result doesn't choose:
+   - **(a)** judge the band with the calibrated engine's own mean-curve `S*`,
+     provided it is determined by the GKE rule (its bootstrap interval narrower
+     than `0.15·S*`), and report its gap to 4.14 in slots and in cores; or
+   - **(b)** report the long drain's band, not judge it, with its safety
+     conditions judged as now.
+   This plan's author recommends (a): the band is then about the plant the
+   trajectories ran on, and the measurement bounds how far that plant is from
+   the real one.
+
+**The determinacy rule, for every plant** (the reviewer's, held until this
+measurement). At the freeze, each case plant's `S*` is computed by the freeze's
+method on seeds 9001, 9002 and 9003. A case's band in `S` is judged only when the
+three values' range (largest minus smallest) is under the band's half-width
+above, `S*·3r̄`, with `S*` the frozen value; otherwise the band is reported, not
+judged. The frozen values themselves are unchanged (seed 9001's). On the engine
+at `b2e5757`:
+
+| Plant | S*, seeds 9001 / 9002 / 9003 | range | S*·3r̄ | determined |
+|---|---|---|---|---|
+| base | 4.717 / 4.729 / 4.740 | 0.023 | 0.71 | yes |
+| cost46 | 2.840 / 2.828 / 2.877 | 0.049 | 0.43 | yes |
+| limit125 | 2.824 / 2.831 / 2.849 | 0.025 | 0.42 | yes |
+| limit500 | 8.762 / 8.749 / 8.742 | 0.020 | 1.31 | yes |
+| rising | 4.610 / 4.615 / 4.631 | 0.021 | 0.69 | yes |
+| drain0 | 6.945 / 7.158 / 7.059 | 0.213 | 1.04 | yes |
+| drain | 3.905 / 4.822 / 4.492 | 0.917 | 0.59 | no |
+
+The drain plant fails the rule, as the review of `c1acaa4` found. Its band is
+judged instead by the path above: its target from the measurement, its engine
+plant calibrated and validated against it, its derived values from a ten-seed
+mean curve. Every other case's band is judged as now. The rule is re-applied
+whenever a plant is re-frozen.
+
 **Three controllers.** The gate runs on the cost model, the level-PI baseline
 re-tuned with `K_p ∈ {0, 0.01, 0.03}` added, and the reservation-gating baseline
 modelled on Temporal's tuner at its defaults (design §17.8, item 6): inside the
