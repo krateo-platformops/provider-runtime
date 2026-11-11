@@ -19,7 +19,7 @@ func TestBits(t *testing.T) {
 		// The inputs are exact (math.Ldexp of a dyadic mantissa) or one rounded
 		// operation, so they are the same on every platform; math.Pow isn't.
 		f := float64(i) / 4000
-		m := 1 + float64(i%64)/64
+		m := 1 + float64(float64(i%64)/64)
 		e := math.Ldexp(m, -996+i*993/4000) // 2⁻⁹⁹⁶ ≈ 1e-300 … 2⁻³
 		for _, v := range []float64{
 			Exp(-40 + float64(80*f)),
