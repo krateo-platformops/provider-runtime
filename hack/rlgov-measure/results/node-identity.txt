@@ -186,3 +186,9 @@
 2026-11-10T16:31:10Z after-pc-n3-r3 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
 2026-11-10T17:06:35Z after-pc-n5-r3 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
 2026-11-10T17:41:57Z after-pc-n4-r3 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
+2026-11-11T07:02:44Z after-pc-n6-r3 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
+2026-11-11T07:38:11Z after-pc-n7-r3 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
+2026-11-11T08:13:35Z after-pc-n5-r4 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
+2026-11-11T08:49:09Z after-pc-n4-r4 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
+2026-11-11T09:25:10Z after-pc-n6-r4 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
+2026-11-11T10:00:55Z after-pc-n8-r4 gke-rlgov-curve-default-pool-339d02b3-qhph 0666f3c3-d97a-41b9-b9c9-0ae5f1ef24f2 v1.36.4-gke.2377000 6.12.110+
