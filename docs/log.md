@@ -12,7 +12,7 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.15.0: symmetric act links, and acting passes are marked
+## 2026-11-11 — v1.15.0: symmetric act links, and acting passes are marked
 - **A minor release: two tracing behaviours change.** Both are the user's
   decisions of 2026-11-11. Nothing changes with tracing off.
 - **The act links to its root only when the root is sampled** (#74). Before,
