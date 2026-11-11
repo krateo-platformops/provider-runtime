@@ -12,7 +12,7 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.17.0: a failed write leaves mg's version
+## 2026-11-11 — v1.17.0: a failed write leaves mg's version
 - **A minor release: one new export,
   `reconcilertest.AssertFailedWriteLeavesManaged`.** Behaviour is unchanged.
   It's the #80 follow-up the user approved after v1.16.0, from
