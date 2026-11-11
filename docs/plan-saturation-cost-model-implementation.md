@@ -1042,7 +1042,7 @@ under the GKE protocol; per `n`, the mean of the forty run means is the mean
 curve. The bootstrap resamples the forty seeds with replacement, 10,000 times,
 with the simulation's generator seeded 20261111. It re-interpolates the curve each
 time, and takes the 2.5% and 97.5% order statistics at `curve_report.py`'s
-indices, the 250th and the 9749th of the sorted 10,000 counted from 0; a resample
+indices, the 0-based indices 250 and 9749 of the sorted 10,000; a resample
 with no crossing sorts to the end it lies at, as in `curve_report.py`. One run computes the frozen
 values, the determinacy decision and these tests.
 

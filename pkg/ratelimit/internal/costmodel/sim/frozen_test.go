@@ -7,15 +7,17 @@ import "time"
 // frozenPlants are each case plant's S*, D(S*) and n_iter from its fixed-
 // capacity curve (plan §4.5). nStart counts from one slot to θ⌊S*⌋; nFrom
 // from the base plant's S* into this plant's band; nAbove from
-// X*·D(⌈S*(1 + 3r̄)⌉) down to S*(1 + 3r̄).
+// X*·D(⌈S*(1 + 3r̄)⌉) down to S*(1 + 3r̄). The drain plants are from the
+// forty-seed mean curve under the GKE protocol; determined is the plan's
+// determinacy rule.
 var frozenPlants = map[string]frozen{
-	"base":     {sStar: 4.7167, dStar: 0.4814, nStart: 2, nFrom: 1, nAbove: 1},
-	"cost46":   {sStar: 2.8403, dStar: 0.5800, nStart: 1, nFrom: 5, nAbove: 2},
-	"limit125": {sStar: 2.8237, dStar: 0.5760, nStart: 1, nFrom: 5, nAbove: 2},
-	"limit500": {sStar: 8.7623, dStar: 0.4482, nStart: 2, nFrom: 1, nAbove: 0},
-	"rising":   {sStar: 4.6098, dStar: 0.4874, nStart: 2, nFrom: 1, nAbove: 1},
-	"drain0":   {sStar: 6.9454, dStar: 46.4097, nStart: 62, nFrom: 62, nAbove: 0},
-	"drain":    {sStar: 3.9046, dStar: 51.9911, nStart: 44, nFrom: 44, nAbove: 6},
+	"base":     {sStar: 4.7167, dStar: 0.4814, nStart: 2, nFrom: 1, nAbove: 1, determined: true},
+	"cost46":   {sStar: 2.8403, dStar: 0.5800, nStart: 1, nFrom: 5, nAbove: 2, determined: true},
+	"limit125": {sStar: 2.8237, dStar: 0.5760, nStart: 1, nFrom: 5, nAbove: 2, determined: true},
+	"limit500": {sStar: 8.7623, dStar: 0.4482, nStart: 2, nFrom: 1, nAbove: 0, determined: true},
+	"rising":   {sStar: 4.6098, dStar: 0.4874, nStart: 2, nFrom: 1, nAbove: 1, determined: true},
+	"drain0":   {sStar: 6.6816, dStar: 49.2973, nStart: 65, nFrom: 65, nAbove: 0, determined: true},
+	"drain":    {sStar: 4.4088, dStar: 61.9737, nStart: 59, nFrom: 59, nAbove: 2, determined: true},
 }
 
 // frozenXCap is each plant's throughput at the cap: X at its curve's largest
@@ -26,8 +28,8 @@ var frozenXCap = map[string]float64{
 	"limit125": 5.4375,
 	"limit500": 21.7083,
 	"rising":   9.4333,
-	"drain0":   0.1620,
-	"drain":    0.0860,
+	"drain0":   0.1503,
+	"drain":    0.0804,
 }
 
 // The no-limit case's alternation (plan §4.5, the review of 0ce649f), from
