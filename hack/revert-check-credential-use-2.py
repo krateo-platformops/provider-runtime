@@ -14,6 +14,11 @@ It runs the protocol's unit tests and the model's exhaustive searches
 
 Usage:
   python3 hack/revert-check-credential-use-2.py > hack/revert-check-credential-use-2.txt
+
+hack/revert-check-credential-use-2.txt is the old base's run (7ba9d76);
+hack/revert-check-credential-use-2.new-base.txt is the new base's, side by
+side with it for the gate (docs/credential-use-model-reduction.md §3.3).
+REVERT_TIMEOUT_S sets go test's timeout per run (default 3000).
 """
 import hashlib, os, re, signal, subprocess, sys
 
@@ -116,12 +121,15 @@ class Run:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
+TIMEOUT = int(os.environ.get("REVERT_TIMEOUT_S", "3000"))
+
+
 def go_test():
     env = dict(os.environ, CI="1", CREDENTIALUSE_MODEL_BOUNDS=os.environ.get("REVERT_MODEL_BOUNDS", "0,1,200000;1,0,200000"))
     code, out, err = 0, "", ""
     for tests in (UNIT, MODEL):
-        r = subprocess.run(["go", "test", "-count=1", "-timeout", "3000s", "-run", tests, *PKGS],
-                           cwd=ROOT, env=env, capture_output=True, text=True, timeout=3600)
+        r = subprocess.run(["go", "test", "-count=1", "-timeout", f"{TIMEOUT}s", "-run", tests, *PKGS],
+                           cwd=ROOT, env=env, capture_output=True, text=True, timeout=TIMEOUT + 600)
         code = code or r.returncode
         out += r.stdout
         err += r.stderr
@@ -162,7 +170,8 @@ base = go_test()
 if base.returncode != 0:
     print("BASELINE FAILED: the run is invalid\n" + (base.stdout + base.stderr)[-3000:])
     sys.exit(1)
-print("baseline passed\n")
+print("baseline passed, commit " + subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+      + ", load " + subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip() + "\n")
 
 # A run stopped by a signal restores the file it is mutating before it exits:
 # a terminated process skips finally blocks.

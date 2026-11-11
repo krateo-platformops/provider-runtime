@@ -14,6 +14,15 @@ is as it started.
 
 Usage:
   python3 hack/differential-mutants-credential-use-2.py > hack/differential-mutants-credential-use-2.txt
+
+Each part can also run alone, so that the parts run side by side, each in its
+own clone: name them, "baseline" or a mutant's number from 1:
+  python3 hack/differential-mutants-credential-use-2.py baseline
+  python3 hack/differential-mutants-credential-use-2.py 2
+
+DIFF_TIMEOUT_S is go test's timeout (default a day), DIFF_PARALLEL its
+-parallel (default GOMAXPROCS), and DIFF_LOG_DIR, if set, keeps each part's
+full go test output there.
 """
 import hashlib, os, re, signal, subprocess, sys, time
 
@@ -38,13 +47,30 @@ MUTANTS = [
 TEST = "^TestModelStatefulAgreesWithStateless$"
 
 
-def go_test():
+TIMEOUT = int(os.environ.get("DIFF_TIMEOUT_S", "86400"))
+PARALLEL = os.environ.get("DIFF_PARALLEL", "")
+LOG_DIR = os.environ.get("DIFF_LOG_DIR", "")
+
+
+def uptime():
+    return subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
+
+
+def go_test(part):
     env = dict(os.environ)
     env.pop("CREDENTIALUSE_MODEL_AUDITSTOP", None)
+    args = ["go", "test", "-count=1", "-v", "-timeout", f"{TIMEOUT}s", "-run", TEST]
+    if PARALLEL:
+        args += ["-parallel", PARALLEL]
     start = time.time()
-    r = subprocess.run(["go", "test", "-count=1", "-v", "-timeout", "7200s", "-run", TEST, "./" + PKG],
-                       cwd=ROOT, env=env, capture_output=True, text=True, timeout=7500)
-    return r.returncode, r.stdout + r.stderr, time.time() - start
+    print(f"  load at the start: {uptime()}", flush=True)
+    r = subprocess.run(args + ["./" + PKG], cwd=ROOT, env=env, capture_output=True, text=True, timeout=TIMEOUT + 300)
+    print(f"  load at the end:   {uptime()}", flush=True)
+    out = r.stdout + r.stderr
+    if LOG_DIR:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        open(os.path.join(LOG_DIR, f"differential-{part}.log"), "w").write(out)
+    return r.returncode, out, time.time() - start
 
 
 def digest():
@@ -125,17 +151,25 @@ def on_signal(signum, _frame):
 signal.signal(signal.SIGTERM, on_signal)
 signal.signal(signal.SIGINT, on_signal)
 
-code, out, secs = go_test()
-lines, msgs, complete = report(out)
-print(f"BASELINE  {'passed' if code == 0 and complete else 'FAILED'} in {secs/60:.1f} min")
-print("\n".join(lines))
-if code != 0 or not complete:
-    print("BASELINE FAILED: the run is invalid\n" + out[-3000:])
-    sys.exit(1)
-print(flush=True)
+parts = sys.argv[1:] or ["baseline"] + [str(i + 1) for i in range(len(MUTANTS))]
+print(f"commit {subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()}, parts {' '.join(parts)}", flush=True)
+
+if "baseline" in parts:
+    code, out, secs = go_test("baseline")
+    lines, msgs, complete = report(out)
+    print(f"BASELINE  {'passed' if code == 0 and complete else 'FAILED'} in {secs/60:.1f} min")
+    print("\n".join(lines))
+    for m in msgs:
+        print(f"       message: {m[:240]}")
+    if code != 0 or not complete:
+        print("BASELINE FAILED: the run is invalid\n" + out[-3000:])
+        sys.exit(1)
+    print(flush=True)
 
 results = {}
-for name, f, edits in MUTANTS:
+for i, (name, f, edits) in enumerate(MUTANTS):
+    if str(i + 1) not in parts:
+        continue
     full = os.path.join(ROOT, PKG, f)
     src = open(full).read()
     bad = [old for old, _ in edits if src.count(old) != 1]
@@ -149,7 +183,7 @@ for name, f, edits in MUTANTS:
     restore = (full, src)
     try:
         open(full, "w").write(mutated)
-        code, out, secs = go_test()
+        code, out, secs = go_test(str(i + 1))
     finally:
         open(full, "w").write(src)
         restore = None
@@ -169,5 +203,6 @@ for name, f, edits in MUTANTS:
         print(f"       message: {m[:240]}")
     print(flush=True)
 
-print(" ".join(f"{k}={v}" for k, v in sorted(results.items())) + f" of {len(MUTANTS)}")
+if results:
+    print(" ".join(f"{k}={v}" for k, v in sorted(results.items())) + f" of {sum(results.values())} run here")
 print("tree restored" if digest() == start else "TREE DIFFERS FROM THE START")
