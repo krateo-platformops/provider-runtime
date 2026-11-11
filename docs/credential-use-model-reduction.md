@@ -46,7 +46,8 @@ scheduler it changes is `pkg/credentialuse/internal/apimodel/sched.go`.
   notBefore when nothing is enabled.
 - A **preemption** is a step that picks an actor other than the last one
   while the last one is still enabled. A schedule has at most P preemptions
-  and F faults. `Explore` is a DFS over every choice within (P, F).
+  and F faults. `Explore` is a DFS over every choice within (P, F). (On the
+  new base, only visible steps count, §5.)
 - **A crash** is FaultCrash on a call of an actor in process Π. It marks
   every actor of Π crashed, and replaces Π's memory (`*process`) with a fresh
   one. A crashed actor's calls return ErrCrashed until it calls Restart (each
@@ -75,7 +76,7 @@ The user decided the choices below.
 
 ### 3.1 Event-driven time
 
-- **Only calls move time.** Each call step ticks the clock, by at most 1ms
+- **Only calls move time.** Each call step ticks the clock, by at most 1s
   (§10.2), and no other step does: not resumes, not informer deliveries, not relists. A delivery
   carries the time of the last call before it. Equal times can only stop a
   skip, since `canSkip` needs `t_obs < t_issue` strictly.
@@ -98,16 +99,17 @@ today's 5ms test grace and 1ms per call, any five calls end the grace with
 no jump, so "many calls, still inside the grace" can't be represented, and
 time would move through uncounted ticks as well as through the jumps the
 user decided. So:
-- **The test grace is 1h**, against at most 1ms per call. A schedule makes
-  at most a few hundred calls, so ticks never come near a deadline.
+- **The test grace is 1000h**, against at most 1s per call (§10.2 sets the
+  time unit to 1h). A schedule makes at most a few hundred calls, so ticks
+  never come near a deadline.
 - **Every "into the grace" moment a scenario needs is a declared
   deadline**, reached by a jump, not by counting calls.
 - **A call's tick never reaches a pending deadline.** Deadlines built from
   event times lie only a few ticks apart: a deletion and its first sight, or
   two processes' first sights. So after a jump to one, a fixed tick would
   cross the next within a few calls. The tick is therefore at most 1/1024
-  of the time left to the next pending deadline, and at most 1ms, which
-  leaves room for hundreds of calls. **A run-time check panics if a tick can't fit**, that
+  of the time left to the next pending deadline, and at most 1s, which
+  leaves room for hundreds of calls (§10.2's capacity condition). **A run-time check panics if a tick can't fit**, that
   is, if a call would have to cross a deadline. Only jumps (and the forced
   jump when nothing is enabled) cross deadlines.
 
@@ -126,8 +128,8 @@ clock with a deadline:
 The remaining time comparisons (t_obs, t_issue, delivery times,
 deletionTimestamps) compare step times with each other, and only their order
 matters, which calls already fix. So any assignment of real times to a
-schedule's steps is equivalent, for every check, to one where time moves 1ms
-per call and jumps only to deadlines. Each jump crosses one deadline the
+schedule's steps is equivalent, for every check, to one where time moves a
+tick per call and jumps only to deadlines. Each jump crosses one deadline the
 schedule needs crossed early. T = 2 covers the scenarios' needs, one grace
 and one timer. A scenario that needs more raises T, and the vacuity counters
 show which.
@@ -218,7 +220,9 @@ The harness **declares** quietness at the park that precedes the segment:
 once, every actor parked at a quiet park whose Wait is ready. It does so in
 the order the actors were added, and repeats until none is left. This is a
 **silent transition**: no choice point, no clock change, no preemption, no
-change to `last`, and no trace entry. The segment runs to the actor's next
+change to `last`, and no trace entry. With rule R off, each quiet resume is
+a step of its own, and it is still never a preemption and never `last`
+(§5: only visible steps count). The segment runs to the actor's next
 park. If that park is a Call, the Call is an ordinary step later, with all
 its fault options.
 
@@ -256,13 +260,21 @@ its Wait ready, or at the start.
 calls, jumps, deliveries, terminal state and observations. So the reduced
 search adds no behaviour.
 
-**The converse mapping.** Put each of X's quiet resumes into the unreduced
-schedule as a step **right before X's next step in ρ** (its next call or
-non-quiet resume). By C-stable, X's Wait is still ready there. By
-C-invisible and C-independent, running the segment there instead of where R
-ran it changes nothing. The switch into X now happens at the inserted
-resume, and costs what the switch into X's next step cost in ρ. The resume
-followed by X's next step is no switch at all. So the bounds hold.
+**The converse mapping.** Put each quiet resume into the unreduced
+schedule as a step at the point where R ran it in ρ: right after the step
+that made its Wait ready (a call, a visible resume, or a jump, chosen or
+forced), or at the start, in the order R ran them. The unreduced search
+offers each of them there: a ready quiet park is enabled, and the
+preemption bound never filters out a quiet resume (below). The two
+schedules then pass through the same state at every visible step: every
+actor at the same park, with the same memory.
+
+**Preemptions count visible steps only (the user's decision).** As in
+CHESS, a preemption is a **visible step** (a call, or a resume from a park
+that isn't quiet) whose actor isn't the last visible step's, while that
+actor is still enabled. A quiet resume is never a preemption and never
+becomes the last actor, in every search: with rule R, where it isn't a step
+at all, and without it, where it is a step of its own.
 
 **The conditions** (partial-order reduction terms: a singleton ample set made
 of an invisible transition, independent of every other, with no cycle to
@@ -306,16 +318,54 @@ ignore):
 - **C-progress.** Every quiet segment reaches a park, and no cycle of quiet
   parks runs without a call. So R terminates.
 
-**C-bounds for the forward mapping.**
+**C-bounds.** Faults and jumps are the same steps in both schedules:
 - *Faults:* σ' has every call of σ, with the same fault.
-- *Jumps:* σ' has the same jumps, at the same points between calls.
-- *Preemptions:* removing a resume step s_X of actor X between steps of Y
-  and Z can only remove switches. The switch into s_X and the switch out of
-  it each cost at most one preemption in σ. In σ', the step Y→Z costs at
-  most one. The switch into X's later call has the same predecessor in both
-  schedules, and X is enabled in both: in σ parked at its call after its
-  resume, in σ' parked at the same call after its silent segment. So σ' has
-  no more preemptions than σ.
+- *Jumps:* σ' has the same jumps, at the same points between calls. Each is
+  offered in σ' too:
+  - an actor's notBefore can differ between the two only while σ still has
+    it at a ready quiet park, whose notBefore has passed, so every deadline
+    pending in σ is pending in σ';
+  - a jump is offered only while some non-daemon actor has more to do than
+    a quiet segment that is due: an actor at a ready quiet park doesn't
+    count, in either search. Without that rule, σ could jump while the last
+    live actor sits at a ready quiet park whose segment ends it. σ' can't
+    make that jump: R has run the segment, and only daemons are left. With
+    the rule, every actor that counts in σ counts in σ'. Nothing is lost:
+    by C-independent, moving a quiet resume ahead of a jump reaches the
+    same state.
+
+A visible step's cost depends on three things: its own actor, the last
+visible actor L, and whether L is enabled.
+- *Converse:* at every visible step the two schedules are in the same
+  state, so the same actors are enabled, and every step costs the same.
+  Quiet resumes cost nothing. The bounds hold exactly.
+- *Forward:* σ' is σ without its quiet resumes. The visible steps are the
+  same, in the same order, so each has the same actor and the same L. And
+  every actor enabled at a visible step of σ' is enabled at the same step
+  of σ: either it is at the same park in both, or σ hasn't yet taken a
+  quiet resume that R has taken in σ', and the ready quiet park it still
+  sits at in σ is enabled. So no visible step costs more in σ' than in σ.
+
+**Why the old counting failed.** Under §1's counting, a quiet resume taken
+as a step was a switch like any other: it cost a preemption if the last
+actor was enabled, and it became the last actor. So the cost of switching
+to X was paid at X's resume, and it depended on the time then. Take Y's
+call, after which Y waits for a deadline; then X's quiet resume, free,
+since Y is disabled; then a jump to Y's deadline, which wakes Y; then X's
+call, free, since X is the last actor. Reduced, R runs X's segment
+silently, X's call comes after the jump with Y last and enabled, and it
+costs a preemption. Revision 2's argument said the switch into X's call
+"has the same predecessor in both schedules, and X is enabled in both".
+That held for X, but not for the last actor: a jump between X's quiet
+resume and X's call can wake the last actor, so the switch's cost depends
+on time. The differential test found it. On Teardown interleaving A at
+{1,0}, the old counting gave 240 terminal states reduced against 246
+unreduced; visible-only counting gives 240 = 240.
+
+Visible-only counting is the new base's, so it changes what a bound p
+reaches against the old base: an old schedule within p can cost more than
+p on the new base. The gate maps that difference explicitly (§10.4,
+preemption reclassification).
 
 **Faults still apply at every original point.** Faults apply only at calls,
 and every call is still a step. A crash that, unreduced, fell between a
@@ -389,7 +439,10 @@ the differential test passing.
 ## 10. Stateful search with a time-abstract state hash (the user's decision, under review)
 
 *Revision 3: answers the soundness reviews of 87f333b and 5bb4446, and records
-the user's decision on the gate.*
+the user's decision on the gate. Revision 4 records the user's two decisions
+after the reduction's first build: preemptions count visible steps only
+(§5, and §10.4's third mapping), and the time unit is 1h (§10.2's capacity
+condition).*
 
 **Why.** The new base (§3) is what the user decided, but T = 2 jumps multiply
 every search by 70 to 110. AwayAndBack with 3 live passes goes from 19,555
@@ -482,17 +535,24 @@ four such cases:
   the harness. That is the grace end plus the ticks between R2's now and
   `at`, not the grace end itself.
 - (b) `requeueAt` falls back to 1ms when the grace end is already past.
-- (c) a restored epoch's requeue at now + 1s, which can fall either side of a
-  pending grace end;
+- (c) a restored epoch's requeue at now + `restoredEpochRequeue`, which can
+  fall either side of a pending grace end;
 - (d) the late deletions' threshold, dt + grace/2, created after dt.
 
 **The representation: values relative to the earliest live term, with tick
 parts reduced to their order.**
 - **Every constant the code adds to a time is an integer multiple of a unit
-  U:** grace = 1h, grace/2 = 30min, `restoredEpochRequeue` = 1s, so U = 1s.
-- **A call's tick is at most 1ms**, and less near deadlines and live terms'
-  fine parts (the invariant below). A schedule makes at most a few hundred
-  calls at level 0, so its total ticks stay below U/2.
+  U = 1h:** the model's grace is 1000h, grace/2 is 500h, and the model's
+  restored-epoch requeue is 1h.
+  - `restoredEpochRequeue` is a protocol field for this. Production leaves
+    it unset and keeps 1s, the constant and its doc unchanged; a test pins
+    that. The model sets one U.
+  - U was 1s until the capacity condition below showed that the clock's 1ns
+    resolution can't hold two nested jumps at that size.
+- **A call's tick is at most B = 1s**, and less near deadlines and live
+  terms' fine parts (the invariant below). A schedule makes at most K = 512
+  calls between two jumps (below), so its level-0 ticks add up to at most
+  512s, below U/2 = 30min.
 - Every time value is then a jump-built coarse part plus a fine part: an
   earlier term plus constants, from jumps to deadlines, plus a sum of ticks.
   Written relative to the earliest live term, a value is n·U + f with
@@ -506,9 +566,9 @@ parts reduced to their order.**
   states with equal representations.
 - **The invariant the representation relies on: a tick never moves now's
   fine part past any live term's fine part.** The tick is
-  min(1ms, a 1024th of the gap to the next pending deadline, a 1024th of
-  the gap from now's fine part to the next larger fine part of any live
-  term), and at least the clock's 1ns resolution. A tick that can't fit
+  min(B, a D-th of the gap to the next pending deadline, a D-th of the gap
+  from now's fine part to the next larger fine part of any live term), with
+  D = 1024, and at least the clock's 1ns resolution. A tick that can't fit
   panics. Then:
   - fixed terms keep a static global order of fine parts, and that order
     changes only when a term is added;
@@ -520,12 +580,39 @@ parts reduced to their order.**
   The only thing the invariant gives up is a tick passing an unregistered
   t + c, which the design excludes: the code compares now only with
   registered deadlines.
-- **Why a 1ms base tick.** Fine parts of events after a jump sit between
-  fine parts already there, so each jump shrinks the room ticks have by
-  about 1024. A 1ms base leaves room for T = 2 jumps and hundreds of calls
-  after each, at the 1ns resolution. A schedule's level-0 ticks stay below
-  U/2 (a few hundred calls at 1ms), which the encoder checks: it panics on
-  a fine part at or beyond U/2.
+- **The capacity condition, and why U = 1h and B = 1s.** Fine parts of
+  events after a jump sit between fine parts already there, so each jump
+  shrinks the room ticks have, by about e·D. The condition that 1ns still
+  holds the deepest level's ticks, for T nested jumps and at most K calls
+  between any two jumps (chosen or forced):
+  - K ≤ D calls shrink a gap by at most a factor (1 − 1/D)^K ≥ 1/e, so
+    every tick of a level is at least the level's starting gap over e·D;
+  - a jump lands on a term, and the next larger fine part, made at the
+    level before, is at least one of that level's ticks away: so a level's
+    gap is at least the level before's smallest tick;
+  - level 0's gap is U/2 (fine parts start at 0, at a whole U), and its
+    ticks are also at most B, so its smallest tick is at least
+    min(B, U/2/(e·D));
+  - so the deepest level's smallest tick is at least
+    min(B, U/2/(e·D))/(e·D)^T, and that must be at least 1ns:
+
+  **room = min(e·D·B, U/2) ≥ (e·D)^(T+1) ns.**
+
+  With U = 1h, B = 1s, D = 1024 and T = 2: room = min(2,784s, 1,800s) =
+  1,800s, against (e·D)^3 ≈ 21.6s, a margin of about 83. With revision 3's
+  U = 1s and B = 1ms, room = min(2.78s, 0.5s) = 0.5s, 43 times too small:
+  DeletionsAroundTheGrace's small variant at {1,0} panicked with "a call's
+  tick would pass a live term's fine part". A third nested jump doesn't fit
+  either way: (e·D)^4 ≈ 16.7h.
+  - The scheduler checks the condition at the start of every search, for
+    the search's T (`CheckCapacity`), and K is declared,
+    `MaxCallsBetweenJumps` = 512: a schedule that makes more calls between
+    two jumps panics, since the condition no longer covers it.
+  - A test runs the tick's own arithmetic in the worst case the condition
+    is derived for (K calls per level, each jump landing one smallest tick
+    below the next fine part). The deepest level's smallest tick is 351ns.
+  - The tick's run-time panic stays as it was, the backstop for anything
+    the derivation doesn't model.
 - The shift to the earliest live term is sound because every comparison is
   a difference.
 - **Why not zones (DBMs).** Zones represent symbolic clocks and constraints
@@ -553,8 +640,8 @@ Only jumps move coarse parts, and only jumps cross deadlines.
   panics unless it differs from that term by a multiple of U.**
 - **`Clock.Since` panics in the model.** Every duration the code needs is a
   constant, or a difference that the absolute requeues remove.
-- **The schedule's start sits on a whole U** (16:26:00 today), so that
-  coarse parts are whole multiples from the start.
+- **The schedule's start sits on a whole U** (16:00:00), so that coarse
+  parts are whole multiples from the start.
 
 **Two code changes make every requeue a term** (they land with the
 implementation):
@@ -573,7 +660,7 @@ implementation):
 | `acquire.go` A1, `at := clock.Now()` | stored as `observed` | a term, compared only |
 | `acquire.go` A2, `issued := clock.Now()` (×2) | held across the call, then stored as `written` | a held term (§10.1), then a stored term |
 | `release.go` R1, `now` | stored as a first sight; `GraceEnd` = max(dt, first sight) + grace; `now.Before(graceEnd)`; the requeue | the first sight is a term, the grace end a deadline; the requeue is absolute (`RequeueAt = graceEnd`) |
-| `release.go` R1, a restored epoch | `RequeueAt = now + restoredEpochRequeue` | case (c): a deadline, term plus 1s |
+| `release.go` R1, a restored epoch | `RequeueAt = now + epochRequeue()` | case (c): a deadline, term plus one U in the model (1s in production) |
 | `release.go` R2, `now` before the reads | held across the Namespace GET and the list; GraceOver is now ≥ grace end | a held term, compared with a deadline |
 | `release.go` R2, `nsReadAt = clock.Now()` | stored in the decision, read by the read monitor | a term |
 | `release.go` `requeueAt` | the earliest requeue | an absolute minimum of terms; a past grace end gives now (case (b), removed) |
@@ -584,7 +671,7 @@ implementation):
 | the harness: requeue waits | until `RequeueAt` | case (a), removed: exactly the grace end |
 | the harness: late deletions | until dt + grace/2 | case (d): a deadline, term plus constant |
 | the harness: `converge` | its clock at now + 3 × grace, after the search | outside the search |
-| the scheduler: `tick` | at most 1ms, and a 1024th of the gap to the next deadline or larger fine part | a fine part; only its order is kept, and the assertion bounds the total |
+| the scheduler: `tick` | at most 1s, and a 1024th of the gap to the next deadline or larger fine part | a fine part; only its order is kept, and the assertion bounds the total |
 
 **What enforces "time is used only by comparison, storage, or adding a
 constant":**
@@ -644,13 +731,25 @@ a projection both bases share.**
     before or after the Namespace GET and the grace end, a hold before the
     holder's deletion. So the projection keeps what the gate compares, and
     drops only values no check reads at the end.
-- **The two intended differences go through a declared mapping, or are
+- **The three intended differences go through a declared mapping, or are
   reported for triage, never silently dropped:**
   - crash rule (ii)'s extra pass (§3.2);
   - the redefined thresholds: the late deletions' "into the grace" moves
-    from start + grace − 1ms to dt + grace/2.
+    from start + grace − 1ms to dt + grace/2;
+  - **preemption reclassification** (the user's decision, §5): the new base
+    counts only visible steps as preemptions, so an old schedule within
+    bound p can cost p′ ≠ p on the new base. For each old-base terminal
+    state found at bound p, its labelled old schedule
+    (`actor:label!fault`, with jumps where the old base's ticks crossed a
+    deadline) is replayed on the new base with `ReplayLabels`, its
+    visible-only preemption count p′ is computed, and the state must be in
+    proj(S_new) at p′. Where p′ is above the gate's bound, the state is
+    checked with a reduced new-base search at p′. On Teardown interleaving
+    A at {1,0}, 6 terminal states need p′ = 2. They are checked with a
+    reduced new-base search at {2,0}, and the gate's output lists them as
+    mapped, each with its p′.
 
-  Both are path-based, so they are implemented by **replaying the old
+  All three are path-based, so they are implemented by **replaying the old
   schedule's labelled trace** (each step's actor, label and fault) on the
   new base, not its choice indices, which mean nothing on the other base.
   A trace that doesn't replay, or that replays to a terminal state outside
