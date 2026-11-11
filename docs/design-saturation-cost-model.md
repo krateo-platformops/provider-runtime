@@ -2117,8 +2117,10 @@ boundaries; any of the samples capped.
    restart of ĉ, its denominator counts only the completions of reconciles
    granted after the restart, from the grant times §17.1 already records. The
    CPU that the reconciles in flight across it spend afterwards stays in the
-   numerator. So until they have completed, ĉ is biased high, towards fewer
-   slots, and the restart edge can no longer raise the slots. The gate also
+   numerator. So ĉ is biased high, towards fewer slots, and the restart edge
+   can no longer raise the slots. (Corrected in §17.11: the bias doesn't end
+   when they complete; it is diluted only as completions accumulate, over
+   about `τ_ĉ`.) The gate also
    reports `ĉ`'s restarts that weren't caused by a scenario change, in the start,
    headline and mix cases.
 3. **`D̂` is a mean of whole lifetimes**, each counted once at its completion, so
@@ -2625,7 +2627,8 @@ text, at the review of `0ce649f`.)
 
 **The regime of long CPU-first reconciles.** With reconciles of tens of seconds
 and CPU-first bursts above the quota, a cost change is followed in lifetimes,
-through ĉ's restart, with an undershoot for about one lifetime. The long drain
+through ĉ's restart, with an undershoot for about `τ_ĉ`, 15–20 lifetimes there
+(§17.11, correcting "about one lifetime"). The long drain
 is that regime. Its safety is judged and its entry time reported, not judged
 (decided by the user, 2026-11-10); deriving a defensible entry bound for it is a
 tracked follow-up, due before the GKE re-measure (the plan's §6, item 13).
@@ -2650,3 +2653,163 @@ durations (§3.4), not a bias; the reports say so.
 
 **What this doesn't change:** the law's form; the window tests (§17.8 item 2,
 §17.9 item 7); §17.9's items.
+
+### 17.11 `ĉ`'s restart edge, after the long drain at `348b05d`
+
+**For review before any code** (the user's decision, 2026-11-11). The gate's band
+and its 1200 s case stay exactly as pre-registered; only the estimator changes.
+Where this section and §17.1 item 2 or §17.10 disagree, this section is right.
+
+**The finding** (the long drain at `348b05d`; seeds 1 and 2 locally, reproducing
+CI's verdicts):
+- **S sits under the band, not over it.** From the restart-edge window's end to
+  the case's end, S has p50 2.65 and 3.09 against a lower edge of 3.60, and it
+  never exceeds the upper edge.
+- **`D̂` is right.** It is 46–47 s, the plant's duration at S ≈ 3.
+- **`ĉ` is high for the whole judged span.** It runs 3.5–5.4 s against the
+  plant's 3.157 s, and is still 8–11% high at the end. The law
+  `(ρL − B̂)·D̂/ĉ ≈ 2–3` is where S sits.
+- **The excess is a constant.** (`ĉ − c`)·completions since the restart holds at
+  16–24 s of CPU from +600 s to the end, so the bias falls only as completions
+  accumulate, about 0.06 a second here.
+- **It is not the band.** With the uncalibrated plant the same seeds sat at 3.47–3.60
+  against that engine's own S* of 4.64, the same undershoot; they passed only
+  because the single-seed frozen S* (3.90) put the lower edge at 2.70.
+
+**Corrections.**
+- **§17.1 item 2's "until they have completed, ĉ is biased high" is wrong.** The
+  CPU that the reconciles in flight across the restart spend afterwards stays in
+  the numerator, and their completions never enter the denominator. So their
+  excess doesn't end when they complete: it is diluted only as the restarted
+  window's completions accumulate.
+- **The reconciles granted after the restart add a second excess.** While they are
+  in flight they have spent CPU without a completion yet, which is CPU in the
+  numerator and nothing in the denominator. In a stationary smoothed window, the
+  same term at the window's old edge balances it. A restart removes the old edge,
+  so nothing balances it until the window has forgotten the restart, about `τ_ĉ`.
+- **§17.10's "an undershoot for about one lifetime" is wrong.** In the long drain
+  the undershoot lasts about `τ_ĉ = D̂/r̄`, which is 940–990 s, or 15–20 lifetimes.
+
+**The accounting.** Restart `ĉ` at `t₀` (the deferred window's start, §17.8
+item 2). Let the cohort `K₀` be the `N₀` reconciles in flight at `t₀`, `G(t)` the
+reconciles granted in `[t₀, t]`, `C_G(t)` those of them completed, and `N_G(t)`
+those still in flight. For one cost class at CPU `c` per reconcile, let
+`F_j(a)` ∈ [0, 1] be the fraction of reconcile `j`'s CPU spent by age `a`
+(nondecreasing; its shape is the profile). With the background subtracted
+exactly:
+
+`CPU(t₀, t] = Σ_{j∈K₀} c·(1 − F_j(a_j(t₀))) + c·C_G(t) + Σ_{k∈G in flight} c·F_k(a_k(t))`
+
+`        = R₀ + c·C_G(t) + E_G(t)`.
+
+The current estimator is `ĉ_now = CPU/C_G = c·(1 + (R₀ + E_G)/(c·C_G))`. That is
+at least `c` for any profile, which was §17.1's safety argument, with a relative
+bias of at most `(N₀ + N_G)/C_G`. In the long drain at 1000 s, `N₀` is about 6 (the
+in-flight count at the deferred window's start, before the cut), `N_G` about 3
+and `C_G` about 58, which bounds the bias at about 16%. The 8–13% measured is
+within that.
+
+**A premise the request rests on, checked.** The request was to make the
+numerator and denominator count the same reconciles: exclude the CPU of
+reconciles admitted before the restart, and credit in-flight work as fractional
+completions.
+- **The first part isn't observable.** The cgroup reports CPU in aggregate. The
+  Go runtime doesn't attribute CPU to goroutines, and a reconcile's CPU is not
+  measured anywhere in the Governor. So `R₀` and `E_G` are not observable, only
+  their sum, through the identity.
+- **The second needs the profile `F`, which isn't observed either.** A credit
+  `k > 0` in the denominator, from counts and ages alone, is unsafe for some
+  profile. With all-CPU-last reconciles, `E_G = 0`. With a cohort that had
+  already spent its CPU, `R₀ = 0`.
+- **So an exact fix doesn't exist without per-reconcile CPU.** What follows is
+  the closest estimator that keeps §17.1's guarantee (never biased towards more
+  slots, in expectation).
+
+**Proposed: credit matched edges.**
+- **The exchangeability assumption.** It is used in expectation, and stated so
+  the reviewer can reject it: reconciles of one cost class are exchangeable given
+  their age, so that `E[F_j(a)] = F̄(a)` is the same nondecreasing function for
+  the cohort and for `G`.
+- **The pairing.** Pair a cohort member of age `a` at `t₀` with a reconcile of `G`
+  in flight at `t` whose age is `a' ≥ a`. The pair contributes
+  `c·(1 − F_j(a)) + c·F_k(a')` to the excess, whose expectation is
+  `c·(1 + F̄(a') − F̄(a)) ≥ c`.
+- **The credit.** Let `M(t)` be the size of a maximum matching under `a' ≥ a`.
+  That is the greedy matching of the two sorted age lists; the Books already
+  record the grant instants of the reconciles in flight. Then
+  `E[R₀ + E_G] ≥ c·M`, for any profile, under the assumption.
+- **A cost change between the edges.** The cohort may run at the old cost `c₀`.
+  A pair's excess is then at least `c₀(1 − F) + c·F ≥ min(c₀, c)`.
+- **The estimator.** With `ĉ₀` the estimate before the restart:
+
+  `ĉ_new = max( (CPU − M·ĉ₀)/C_G , CPU/(C_G + M) )`.
+
+  - If `c₀ ≤ c` (a cost increase), the first term is at least `c` in expectation.
+  - If `c₀ > c`, the second is.
+  - So their maximum is safe in both cases. Before any completion it holds as
+    `ĉ_now` does (§17.8 item 5).
+- **`M` is recomputed every sample, from scratch.** A cohort member counts until
+  it completes, after which it is matched no longer. That is the point at which
+  its whole remaining CPU is in the numerator: it is then a known excess, and
+  nothing balances it.
+
+**Its bias, variance and `τ`, against the current estimator.**
+- **Bias.** The excess left after the credit is three non-negative terms:
+  1. the matched pairs' `c·(F̄(a') − F̄(a))`;
+  2. the unmatched cohort's remaining CPU;
+  3. the unmatched in-flight reconciles' spent CPU.
+
+  It falls to 0 when `N₀ = N_G`, the ages match and the cost didn't change; that
+  is the stationary case, where the old edge balanced the new one. The relative
+  bias is at most `(N₀ + N_G − 2M)/C_G`, plus `M·(c − c₀)/(c·C_G)` after a cost
+  increase, where `ĉ₀ < c`.
+- **Variance.** The ratio estimator's linearized variance (§17.1) gets a smaller
+  denominator weight: `SE` is scaled by `C_G/(C_G + M)` in the second form. Each
+  matched pair adds a term with variance at most `c²/4`, `c²·Var(F)` for that
+  pair, to the numerator.
+- **`τ` is unchanged:** `τ_ĉ = max(τ, D̂/r̄)`. The matching acts only on the
+  restart's edge, and as the window forgets that edge, the edge terms leave the
+  sums with it.
+
+**What it predicts for the long drain, disclosed before any code.** The prediction
+is that this estimator won't, by itself, bring the long drain into its band.
+- **The bound:** at 1000 s, `N₀ ≈ 6`, `N_G ≈ 3`, so `M ≤ 3`. The cost doubled
+  (`ĉ₀ ≈ 1.66` s against `c = 3.157` s), so the safe form is the first one, which
+  removes about `3 × 1.66 ≈ 5` s of the 16–24 s of excess.
+- **The bias falls** from 8–13% to about 6–10%.
+- **S then rises** to about 0.225·D̂/ĉ ≈ 3.1–3.3, still under the band's lower
+  edge of 3.60. The compounding through `D̂` (A1: more slots, longer lives) may add
+  a little; the implementation's drain test will measure it.
+- **What could close it:** a profile assumption, such as crediting the unmatched
+  cohort as already spent, which is exact for CPU-first work. That is unsafe for
+  CPU-last work, by up to `N₀/C_G` towards more slots.
+- **That choice is the user's.** The plan's options are (i) keep the safe estimator
+  and accept the transient, which leaves the case failing under its
+  pre-registered conditions; (ii) add the profile assumption, with its unsafe
+  bound stated and a CPU-last gate case added; or (iii) a per-reconcile CPU
+  measurement, which the Governor doesn't have.
+
+**Rejected:**
+- **Counting grants instead of completions.** That is biased low for CPU-last
+  work, towards more slots.
+- **Crediting in-flight work by its share of elapsed lifetime.** That is biased
+  low for CPU-last work too.
+- **Restarting again once the cohort has completed.** That just makes a new cohort.
+- **Counting the cohort's completions with no credit.** Its bias is
+  `(E_G − E₀)/C`, which is towards more slots whenever the in-flight count fell
+  across the restart, as it does at a cut.
+- **The utilization-ratio law, which needs no `ĉ`.** That is §17.1's phase cycle.
+
+**The tests, with the implementation:**
+- a unit test of the restart edge: a cohort of synthetic reconciles with known
+  profiles (CPU-first, CPU-last, uniform) across a restart, asserting
+  `E[ĉ_new] ≥ c` and the predicted bias in each, at a cost increase and a
+  decrease;
+- a stress test: random grant and completion times, profiles and costs over many
+  seeds, asserting that the safe form never falls below `c` beyond its standard
+  error;
+- a drain test: the long drain's plant with `M`, `ĉ_now` and `ĉ_new` reported
+  every sample.
+
+The independent review that found the concurrency tests missing asked for the
+last two kinds. The gate then runs on seeds 1–20; seeds 21–40 stay untouched.
