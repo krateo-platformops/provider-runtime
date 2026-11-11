@@ -6,6 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/krateo-platformops/plumbing/tracecontext"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
@@ -18,11 +19,14 @@ func objectContext(ctx context.Context) trace.SpanContext {
 	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
 		return sc
 	}
-	if sc, ok := ctx.Value(inboundKey{}).(trace.SpanContext); ok && sc.IsValid() {
+	if sc := tracecontext.Inbound(ctx); sc.IsValid() {
 		return sc
 	}
 	return trace.SpanContext{}
 }
+
+// The W3C carrier key InjectHeader checks.
+const traceparentHeader = "traceparent"
 
 // Inject writes ctx's trace context onto obj, an object another Krateo
 // controller reconciles: krateo.io/traceparent, and krateo.io/tracestate when

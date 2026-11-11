@@ -4,7 +4,7 @@ title: provider-runtime — trace every reconcile
 description: Design, built in v1.14.0 with D8 in v1.14.1, for OpenTelemetry tracing in provider-runtime. telemetry.Setup gains a TracerProvider, the reconciler opens a reconcile root span with connect, observe, create, update and delete children, and the krateo.io/traceparent contract gets a parent-or-link rule for long-lived objects. Trace context is propagated on outbound HTTP calls and onto Kubernetes objects that other Krateo controllers reconcile.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, tracing, opentelemetry, reconciler, propagation]
-timestamp: 2026-11-10T00:00:00Z
+timestamp: 2026-11-11T00:00:00Z
 ---
 
 # Trace every reconcile
@@ -17,6 +17,19 @@ shipped in v1.13.0 (`3ab2917`). The user decided its open questions on
 on #60, and D7, the OTLP endpoint, from core-provider's review of it. D8, on
 2026-11-10, came from krateo-057's first day under v1.14.0: every reconcile is
 its own trace, and only the first act for a new value joins the upstream.
+
+**Source of truth, from v1.14.2:** the rule's code is plumbing's
+[`tracecontext`](https://github.com/krateo-platformops/plumbing/tree/v1.44.0/tracecontext)
+(plumbing v1.44.0, plumbing#125). It's ported verbatim from v1.14.1 except
+for two seams. The Start functions take the caller's `trace.Tracer`, and the
+inbound context is the exported `WithInbound` and `Inbound`. provider-runtime's
+`pkg/tracing` delegates to it and keeps its own API. unstructured-runtime
+adopts the same package in its own session (unstructured-runtime#77, open on
+2026-11-11). A change to the rule (`Decide`, the root, the act step and their
+links) is made in `tracecontext`, so both runtimes change together. The memo,
+the marker write and the act-step choice stay here, in
+`pkg/reconciler/traces.go`, which `tracecontext`'s package doc names as the
+reference implementation of its contract. §14 records what was checked.
 
 **The goal** (the user's decision). Every provider built on provider-runtime
 (git-provider, incident-provider, alert-provider and the others) gets
@@ -1918,6 +1931,23 @@ Checked in source:
   core-provider's `main`, read through the API on 2026-11-10. The digest is computed from the manifest with the
   traceparent lines stripped, and the objects are decoded from the original
   manifest, so they keep it.
+- **For the delegation to plumbing's `tracecontext` (v1.14.2):**
+  - plumbing v1.44.0's `tracecontext` (`doc.go`, `decide.go`, `start.go`,
+    `keys.go`), read in the module cache. `Decide`, `Canonical` and the Start
+    functions match v1.14.1's line for line, apart from the two seams above.
+    `WithInbound` returns ctx unchanged for an invalid span context, as
+    v1.14.1's guarded `context.WithValue` did.
+  - plumbing's own `tracecontext` tests pass under provider-runtime's
+    module graph (OTel v1.45.0, where plumbing's `go.mod` asks for v1.39.0).
+    They include `TestStartActStepRecordOnlyActGetsNoRootLink`, which closes
+    provider-runtime#72. `pkg/tracing` keeps a copy of it, so a plumbing bump
+    that broke the guard fails here too. They also include
+    `TestStartActStepLinksToAnUnsampledRootAsInV1141`, which pins
+    provider-runtime#74 as v1.14.1 has it. #74 stays open for its decision.
+  - The bump from v1.13.0 to v1.44.0 changes no other module in the build
+    graph (`go list -m all`, before and after). The other plumbing packages
+    provider-runtime links, `env` and `kubeutil/event`, are byte-identical in
+    both versions.
 
 Not checked:
 

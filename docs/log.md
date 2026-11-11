@@ -4,13 +4,47 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-10T00:00:00Z
+timestamp: 2026-11-11T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## Unreleased — v1.14.2: the trace rule lives in plumbing
+- **A patch release. Behaviour is unchanged,** with tracing on or off.
+- **The rule's source of truth is plumbing's `tracecontext`** (plumbing
+  v1.44.0, plumbing#125). provider-runtime and unstructured-runtime now apply one
+  identical `krateo.io/traceparent` rule, D8's (the user's decision).
+  - `pkg/tracing`'s `Decide`, `Decision`, `Mode`, `When`, `Canonical`,
+    `Object` and `StartReconcile`, `StartActStep` and `StartStep` are aliases
+    and thin wrappers over it. Every exported name, signature and doc is
+    unchanged.
+  - The Start functions keep their `TracerProvider` signatures and pass
+    `tp.Tracer(ScopeName)`, or nil when `tp` is nil, so every span keeps
+    provider-runtime's instrumentation scope.
+  - `Inject` reads the inbound context through `tracecontext.Inbound`.
+- **What pins it:** provider-runtime's own tracing tests (D8, envtest, the
+  zero-allocation tests) pass unchanged. New tests pin that a nil `tp`
+  allocates nothing, that every span carries `ScopeName`, that `pkg/meta`'s
+  three keys equal `tracecontext`'s, and the 10-minute default window.
+  - `pkg/meta` keeps its own constants, so it still doesn't import
+    OpenTelemetry.
+  - `go list -deps ./pkg/tracing` gains only `plumbing/tracecontext`, with
+    no SDK.
+- **The plumbing bump, v1.13.0 to v1.44.0:**
+  - It changes nothing else that provider-runtime links. Its other plumbing
+    packages, `env` and `kubeutil/event`, are byte-identical in both
+    versions.
+  - No other module in the build graph moves.
+  - plumbing's `go 1.26.0` directive matches provider-runtime's.
+- **Follow-ups:** provider-runtime#72 closes, covered by plumbing's
+  `TestStartActStepRecordOnlyActGetsNoRootLink`. `pkg/tracing` keeps a copy of
+  that test, so a plumbing bump that broke the guard fails here too.
+  provider-runtime#74 stays open, pinned by plumbing's
+  `TestStartActStepLinksToAnUnsampledRootAsInV1141`. A change to it goes in
+  `tracecontext`.
 
 ## 2026-11-10 — v1.14.1: every reconcile is its own trace
 - **Design:** [design-tracing](./design-tracing.md) §13, D8, decided by the

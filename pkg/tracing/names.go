@@ -1,11 +1,14 @@
 package tracing
 
-import "go.opentelemetry.io/otel/attribute"
+import (
+	"github.com/krateo-platformops/plumbing/tracecontext"
+	"go.opentelemetry.io/otel/attribute"
+)
 
 // Span names: a fixed set, never one per object (docs/design-tracing.md §4).
 const (
 	// SpanReconcile is the root span of one reconcile.
-	SpanReconcile = "reconcile"
+	SpanReconcile = tracecontext.SpanReconcile
 	// SpanConnect, SpanObserve, SpanCreate, SpanUpdate and SpanDelete are the
 	// children around the provider's calls.
 	SpanConnect = "connect"
