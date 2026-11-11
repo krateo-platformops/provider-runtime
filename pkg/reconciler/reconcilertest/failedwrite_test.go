@@ -109,6 +109,23 @@ func TestAssertFailedWriteLeavesManaged(t *testing.T) {
 			wantFail:     "mg's resourceVersion changed",
 			wantAttempts: retry.DefaultRetry.Steps,
 		},
+		// The idiom of re-reading into mg itself, inside a retry loop, fails too,
+		// and the message says why and what to do instead.
+		"RetriesAndReReadsIntoMg": {
+			method: func(kube client.Client) Method {
+				return func(ctx context.Context, mg resource.Managed) error {
+					return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+						if err := kube.Get(ctx, client.ObjectKeyFromObject(mg), mg); err != nil {
+							return err
+						}
+						mg.(*Thing).Status.Note = "written"
+						return kube.Status().Update(ctx, mg)
+					})
+				}
+			},
+			wantFail:     "Re-reading into mg itself, for example inside RetryOnConflict, also does this: re-read into a copy",
+			wantAttempts: retry.DefaultRetry.Steps,
+		},
 		"ReturnsNil": {
 			method:   func(client.Client) Method { return func(context.Context, resource.Managed) error { return nil } },
 			wantFail: "the method returned nil",

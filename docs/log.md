@@ -34,12 +34,17 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     land, and fails if `mg`'s resourceVersion changed. Only the version is
     checked: a method may change status in memory on failure.
   - A `retry.RetryOnConflict` loop that fails on every attempt is covered.
+  - The rule is strict, by the user's decision: re-reading the object into
+    `mg` itself, for example inside `RetryOnConflict`, fails too. Re-read into
+    a copy and copy back only after success. A re-read into `mg` drops the
+    pass's in-memory status, and on the REST client the Get merges the stored
+    object into `mg` rather than replacing it. The failure message says so.
 - **Its tests:**
   - These pass: copying the version only after success, with or without a
     retry loop.
   - These fail: copying the re-read version before the write, or despite
-    its error, also inside a retry loop; a method that returns nil; a write
-    that landed; a stale `mg`.
+    its error, also inside a retry loop; re-reading into `mg` inside a retry
+    loop; a method that returns nil; a write that landed; a stale `mg`.
 - The `ExternalClient` doc now names both helpers.
 
 ## 2026-11-11 — v1.16.0: a status conflict names its cause

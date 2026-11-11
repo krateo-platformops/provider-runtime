@@ -143,11 +143,12 @@ const annotationVersionMoved = "reconcilertest.krateo.io/version-moved"
 // loudly.
 //
 // mg must be stored in kube at the resourceVersion it carries: create it, or
-// read it, through kube first. kube must fail the method's writes of the
-// object; with controller-runtime's fake client, build it with
+// read it, through kube first. kube must fail every write of the object the
+// method makes, not only the first: a retry that lands makes the check
+// meaningless. With controller-runtime's fake client, build it with
 // WithInterceptorFuncs and, for a method that writes status, an
-// interceptor.Funcs whose SubResourceUpdate (or SubResourcePatch) returns a
-// conflict.
+// interceptor.Funcs whose SubResourceUpdate (or SubResourcePatch) always
+// returns a conflict.
 //
 // Before it calls the method, the helper moves the stored resourceVersion with
 // a write of its own: a kube.Update that adds one annotation. A method that
@@ -168,7 +169,18 @@ const annotationVersionMoved = "reconcilertest.krateo.io/version-moved"
 // memory on failure; the runtime then writes it, and that write fails on the
 // stale version, as it should. A retry loop such as retry.RetryOnConflict that
 // fails on every attempt is covered: each attempt's re-read version must stay
-// off mg. It returns what the method returned.
+// off mg.
+//
+// Re-reading the object into mg itself, for example with kube.Get(ctx, key,
+// mg) inside RetryOnConflict, also fails this check, on purpose. Re-read into
+// a copy instead, and copy back onto mg only after the write succeeded: a
+// re-read into mg drops the pass's own in-memory status, and on the REST
+// client the Get decodes into mg without zeroing it, so it merges the stored
+// object into mg rather than replacing it.
+//
+// The helper's annotation, reconcilertest.krateo.io/version-moved, and the
+// version its write moved to stay on the stored object after it returns. It
+// returns what the method returned.
 func AssertFailedWriteLeavesManaged(t testing.TB, ctx context.Context, kube client.Client, mg resource.Managed, method Method) error {
 	t.Helper()
 
@@ -215,7 +227,10 @@ func AssertFailedWriteLeavesManaged(t testing.TB, ctx context.Context, kube clie
 	}
 	if got := mg.GetResourceVersion(); got != want {
 		t.Errorf("the method's write failed, but mg's resourceVersion changed from %q to %q (%q is stored): "+
-			"copy a written resourceVersion onto mg only after the write succeeded (see reconciler.ExternalClient)",
+			"copy a written resourceVersion onto mg only after the write succeeded (see reconciler.ExternalClient). "+
+			"Re-reading into mg itself, for example inside RetryOnConflict, also does this: re-read into a copy, and copy back "+
+			"only after success, because a re-read into mg drops the pass's in-memory status and, on the REST client, "+
+			"merges the stored object into mg rather than replacing it",
 			want, got, moved)
 	}
 	return err
