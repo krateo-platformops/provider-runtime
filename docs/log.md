@@ -12,7 +12,7 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.14.3: shared event names
+## 2026-11-11 — v1.14.3: shared event names
 - **A patch release. Behaviour is unchanged:** every span, event and
   attribute carries the same bytes as in v1.14.2.
 - **Shared names:** `pkg/tracing`'s `EventReconcilePaused`
