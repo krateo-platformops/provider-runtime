@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/errors"
@@ -66,15 +67,41 @@ func (l *ThingList) DeepCopyObject() runtime.Object {
 
 var thingGV = schema.GroupVersion{Group: "current.test.krateo.io", Version: "v1"}
 
-// stored is a client over one stored Thing, and that Thing as read through it.
+// storedThing is a client over one stored Thing, and that Thing as read
+// through it.
 func storedThing(t *testing.T) (client.Client, *Thing) {
+	t.Helper()
+	return storedThingWith(t, "", false)
+}
+
+// storedThingWith stores a Thing whose status carries note. With restDecoding,
+// the client's Get decodes JSON into the target without zeroing it first, as
+// the REST client does: a field the stored object omits keeps the target's
+// value. controller-runtime's fake client zeroes it.
+func storedThingWith(t *testing.T, note string, restDecoding bool) (client.Client, *Thing) {
 	t.Helper()
 	s := runtime.NewScheme()
 	s.AddKnownTypes(thingGV, &Thing{}, &ThingList{})
 	metav1.AddToGroupVersion(s, thingGV)
-	seed := &Thing{ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "demo"}}
+	seed := &Thing{ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "demo"}, Status: ThingStatus{Note: note}}
 	seed.SetGroupVersionKind(thingGV.WithKind("Thing"))
-	kube := clientfake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&Thing{}).WithObjects(seed).Build()
+	b := clientfake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&Thing{}).WithObjects(seed)
+	if restDecoding {
+		b = b.WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				fresh := &Thing{}
+				if err := c.Get(ctx, key, fresh, opts...); err != nil {
+					return err
+				}
+				raw, err := json.Marshal(fresh)
+				if err != nil {
+					return err
+				}
+				return json.Unmarshal(raw, obj)
+			},
+		})
+	}
+	kube := b.Build()
 	mg := &Thing{}
 	if err := kube.Get(context.Background(), client.ObjectKeyFromObject(seed), mg); err != nil {
 		t.Fatal(err)
@@ -246,5 +273,35 @@ func TestAssertLeavesManagedCurrent(t *testing.T) {
 				t.Errorf("stored Synced = %s, want %s", c.Reason, want.Reason)
 			}
 		})
+	}
+}
+
+// A method that clears a status field on a copy and mirrors only the version
+// is caught on a client that decodes as the REST client does, without zeroing
+// the target: the helper reads the stored object into a zero object, not into
+// a copy of mg, which would keep mg's stale value of the cleared field.
+func TestAssertLeavesManagedCurrentCatchesAClearedField(t *testing.T) {
+	ctx := context.Background()
+	kube, mg := storedThingWith(t, "old", true)
+	if mg.Status.Note != "old" {
+		t.Fatalf("fixture: note = %q, want old", mg.Status.Note)
+	}
+	tb := &recordingTB{TB: t}
+
+	_ = AssertLeavesManagedCurrent(tb, ctx, kube, mg, func(ctx context.Context, mg resource.Managed) error {
+		cp, err := freshCopy(ctx, kube, mg)
+		if err != nil {
+			return err
+		}
+		cp.Status.Note = ""
+		if err := kube.Status().Update(ctx, cp); err != nil {
+			return err
+		}
+		mg.SetResourceVersion(cp.GetResourceVersion())
+		return nil
+	})
+
+	if len(tb.failures) == 0 || !strings.Contains(tb.failures[0], "reverted what the method wrote: status.note") {
+		t.Errorf("want a failure naming status.note, got %q", tb.failures)
 	}
 }

@@ -74,8 +74,9 @@ type Method func(ctx context.Context, mg resource.Managed) error
 // runtime does next: it sets Synced on mg (ReconcileSuccess, or ReconcileError
 // with the method's error) and writes mg's status with kube.Status().Update.
 // It fails t if that write conflicts, because the method wrote and left mg
-// stale, or if it reverts any field the method wrote, which is what a method
-// that copies back only the resourceVersion does.
+// stale, or if it reverts a status field the method wrote, which is what a
+// method that copies back only the resourceVersion does. It checks status
+// fields only: a status write can't change anything else.
 //
 // A method that writes nothing passes. It returns what the method returned.
 func AssertLeavesManagedCurrent(t testing.TB, ctx context.Context, kube client.Client, mg resource.Managed, method Method) error {
@@ -130,12 +131,20 @@ func AssertLeavesManagedCurrent(t testing.TB, ctx context.Context, kube client.C
 	return err
 }
 
-// stored reads key from kube into a new object of mg's type.
+// stored reads key from kube into a new, zero object of mg's type. Not a copy
+// of mg: a decoder that doesn't zero its target, as the REST client's JSON
+// decoding doesn't, would keep mg's value of a field the stored object omits,
+// and a field the method cleared would look unchanged.
 func stored(t testing.TB, ctx context.Context, kube client.Client, key client.ObjectKey, mg resource.Managed, when string) (client.Object, bool) {
 	t.Helper()
-	obj, ok := mg.DeepCopyObject().(client.Object)
+	ty := reflect.TypeOf(mg)
+	if ty.Kind() != reflect.Pointer || ty.Elem().Kind() != reflect.Struct {
+		t.Errorf("mg is a %s, not a pointer to a struct", ty)
+		return nil, false
+	}
+	obj, ok := reflect.New(ty.Elem()).Interface().(client.Object)
 	if !ok {
-		t.Errorf("mg's DeepCopyObject is not a client.Object")
+		t.Errorf("a new %s is not a client.Object", ty)
 		return nil, false
 	}
 	if err := kube.Get(ctx, key, obj); err != nil {
@@ -145,17 +154,19 @@ func stored(t testing.TB, ctx context.Context, kube client.Client, key client.Ob
 	return obj, true
 }
 
-// ignored are paths a status write may change, or that the helper changes
-// itself: the version and managedFields, and the Synced condition the helper
-// sets as the runtime does.
-func ignored(path string) bool {
-	return path == "metadata.resourceVersion" ||
-		strings.HasPrefix(path, "metadata.managedFields") ||
-		strings.HasPrefix(path, "status.conditions["+string(prv1.TypeSynced)+"]")
+func isStatus(path string) bool {
+	return path == "status" || strings.HasPrefix(path, "status.")
 }
 
-// revertedPaths are the leaf paths the method changed (before to written)
-// whose value the status write then changed again (written to after), sorted.
+// ignored is the Synced condition, which the helper sets itself, as the
+// runtime does.
+func ignored(path string) bool {
+	return strings.HasPrefix(path, "status.conditions["+string(prv1.TypeSynced)+"]")
+}
+
+// revertedPaths are the leaf status paths the method changed (before to
+// written) whose value the status write then changed again (written to
+// after), sorted.
 func revertedPaths(before, written, after runtime.Object) ([]string, error) {
 	leaves := make([]map[string]any, 3)
 	for i, obj := range []runtime.Object{before, written, after} {
@@ -170,7 +181,7 @@ func revertedPaths(before, written, after runtime.Object) ([]string, error) {
 
 	var out []string
 	for path := range union(b, w) {
-		if ignored(path) || same(b, w, path) {
+		if !isStatus(path) || ignored(path) || same(b, w, path) {
 			continue // the method didn't write it
 		}
 		if !same(w, a, path) {
@@ -183,14 +194,11 @@ func revertedPaths(before, written, after runtime.Object) ([]string, error) {
 
 // flatten records every leaf of v under prefix. A list of objects that all
 // carry a string type, such as conditions, is keyed by type; other lists are
-// leaves.
+// leaves. An empty object records nothing, so it reads as absent: a cleared
+// field is reported by its own path, not also by its emptied parent's.
 func flatten(prefix string, v any, out map[string]any) {
 	switch x := v.(type) {
 	case map[string]any:
-		if len(x) == 0 {
-			out[prefix] = x
-			return
-		}
 		for k, e := range x {
 			flatten(join(prefix, k), e, out)
 		}
