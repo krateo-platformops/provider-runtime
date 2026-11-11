@@ -12,6 +12,36 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — v1.17.0: a failed write leaves mg's version
+- **A minor release: one new export,
+  `reconcilertest.AssertFailedWriteLeavesManaged`.** Behaviour is unchanged.
+  It's the #80 follow-up the user approved after v1.16.0, from
+  oasgen-provider's request in the review of #84.
+- **What it checks:** the `ExternalClient` ordering rule. A method whose
+  write of the managed object fails must leave `mg`'s resourceVersion
+  untouched. A version copied onto `mg` too early, from a re-read, lets the
+  runtime's next write succeed against an object the method never wrote. A
+  stale version fails loudly instead.
+- **How:**
+  - The caller passes a kube client that fails the method's writes, for
+    example the fake client with an interceptor whose `SubResourceUpdate`
+    returns a conflict.
+  - The helper first moves the stored version with its own `kube.Update` of
+    one annotation, so a re-read returns a version `mg` doesn't carry. The
+    caller's interceptor must let that Update through; failing only status
+    writes does.
+  - It then requires the method to return an error and its write not to
+    land, and fails if `mg`'s resourceVersion changed. Only the version is
+    checked: a method may change status in memory on failure.
+  - A `retry.RetryOnConflict` loop that fails on every attempt is covered.
+- **Its tests:**
+  - These pass: copying the version only after success, with or without a
+    retry loop.
+  - These fail: copying the re-read version before the write, or despite
+    its error, also inside a retry loop; a method that returns nil; a write
+    that landed; a stale `mg`.
+- The `ExternalClient` doc now names both helpers.
+
 ## 2026-11-11 — v1.16.0: a status conflict names its cause
 - **A minor release: the error text of a status conflict changes, and there
   are four new exports:** `reconciler.WithAPIReader`, `tracing.StepStatus`,
