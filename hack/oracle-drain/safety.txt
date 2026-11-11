@@ -1,0 +1,362 @@
+The long drain's no-restart path and its overshoot (2026-11-11), data only, at 22fc600 (go1.26.10 darwin/arm64;
+the engine is bit-reproducible). Nothing here changes the controller or the gate: an uncommitted, env-gated scratch
+test file, zz_safety_diag_test.go.txt here (rename to .go in pkg/ratelimit/internal/costmodel/sim/), run on the
+unpatched code with SIM_ZZ=1 (and SIM_ZZ_SEEDS=1618 for seeds 16 and 18):
+  TestZZSafety    50-sample bins from 100 samples before the change: mean S [min, max], ĉ, D̂ (0 where it has no
+                  value, so bin means are diluted), U, U_W, N, and the count of each flag;
+  TestZZWindows   every closed ĉ window: its length, completions, c_W = ΣU/ΣC over its samples, σ_W, and the
+                  test's deferral, pending and restart flags;
+  TestZZRises     every sample after the change in which S rose, with the law's inputs;
+  TestZZAbsBound  the proposed absolute upper bound (design §17.12) applied to the current code, seeds 1-20.
+
+== seeds 11 and 20: bins ==
+seed 11: fails [S 1.51 at 1h45m50.001s below the restart-edge floor 1.77]; reports [entry at +22 samples (reported, not judged; the frozen count was 178) drained samples: 702; the restart-edge floor 1.77 for 177 samples from +0 1174 untrusted samples without a standard error excluded from the band rule the path before entry: first term D_mix from the D̂ fallback in 0 capped samples (else from D̂_q); Little's fallback 0; ĉ restarts 0; lives over tight samples in D̂ 19 (in this self-throttled regime, the plant's real durations, §3.4)]
+   -100..  -50 S 5.63 [5.63, 5.63] ĉ 1.724 D̂ 38.7 U 0.1680 U_W 0.1751 N 5.99 | cpend 22, dhold 16, paced 50, wclosed 1
+    -50..   +0 S 6.72 [5.63, 7.06] ĉ 1.735 D̂ 22.3 U 0.2315 U_W 0.2096 N 6.92 | cpend 15, dhold 30, rewarm 1, paced 50, wclosed 1
+     +0..  +50 S 5.48 [3.92, 7.06] ĉ 1.741 D̂ 0.0 U 0.2499 U_W 0.2441 N 6.74 | capped 31, first 21, cpend 1, dhold 19, rewarm 2, paced 50, wclosed 1
+    +50.. +100 S 3.60 [3.60, 3.60] ĉ 1.745 D̂ 0.0 U 0.1686 U_W 0.2135 N 3.99 | capped 12, dhold 38, paced 50
+   +100.. +150 S 3.60 [3.60, 3.60] ĉ 1.845 D̂ 8.1 U 0.1800 U_W 0.1912 N 4.00 | cpend 6, dhold 44, paced 50, wclosed 1
+   +150.. +200 S 5.22 [3.60, 5.60] ĉ 1.931 D̂ 17.0 U 0.2500 U_W 0.2038 N 5.56 | cdef 1, cpend 36, dhold 38, rewarm 1, paced 50, wclosed 1
+   +200.. +250 S 3.14 [1.81, 5.60] ĉ 2.084 D̂ 0.0 U 0.1763 U_W 0.2317 N 5.50 | capped 21, first 21, cpend 50, dhold 29, rewarm 1, paced 50
+   +250.. +300 S 1.81 [1.81, 1.81] ĉ 2.024 D̂ 0.0 U 0.1207 U_W 0.1859 N 2.08 | cpend 40, dhold 50, paced 50, wclosed 1
+   +300.. +350 S 3.63 [1.81, 3.81] ĉ 2.098 D̂ 1.8 U 0.2300 U_W 0.1587 N 3.76 | dhold 48, rewarm 1, paced 50, wclosed 1
+   +350.. +400 S 1.34 [1.33, 1.51] ĉ 2.194 D̂ 0.0 U 0.1068 U_W 0.1944 N 3.25 | capped 8, first 8, dhold 42, rewarm 1, paced 50
+   +400.. +450 S 1.91 [1.33, 3.33] ĉ 2.174 D̂ 2.0 U 0.1129 U_W 0.1258 N 2.50 | dhold 48, rewarm 1, paced 50, wclosed 1
+   +450.. +500 S 2.71 [1.38, 3.33] ĉ 2.300 D̂ 0.0 U 0.1845 U_W 0.1804 N 4.00 | capped 3, first 3, dhold 47, rewarm 1, paced 50, wclosed 1
+   +500.. +550 S 1.38 [1.38, 1.38] ĉ 2.287 D̂ 0.0 U 0.1105 U_W 0.1593 N 2.42 | dhold 50, paced 50
+   +550.. +600 S 2.64 [1.38, 3.38] ĉ 2.304 D̂ 4.0 U 0.1600 U_W 0.1113 N 3.19 | dhold 46, rewarm 1, paced 50, wclosed 1
+   +600.. +650 S 2.00 [1.35, 3.38] ĉ 2.436 D̂ 0.0 U 0.1030 U_W 0.2001 N 3.67 | capped 5, first 5, dhold 45, rewarm 1, paced 50, wclosed 1
+   +650.. +700 S 1.35 [1.35, 1.35] ĉ 2.381 D̂ 0.0 U 0.1147 U_W 0.1410 N 1.97 | dhold 50, paced 50, wclosed 1
+   +700.. +750 S 3.35 [3.35, 3.35] ĉ 2.447 D̂ 1.0 U 0.2474 U_W 0.1467 N 3.93 | dhold 49, rewarm 1, paced 50, wclosed 1
+   +750.. +800 S 1.38 [1.38, 1.40] ĉ 2.507 D̂ 0.0 U 0.1107 U_W 0.1842 N 3.06 | capped 2, first 2, dhold 48, rewarm 1, paced 50
+   +800.. +850 S 2.16 [1.38, 3.38] ĉ 2.481 D̂ 3.9 U 0.1128 U_W 0.1211 N 2.70 | dhold 46, rewarm 1, paced 50, wclosed 1
+   +850.. +900 S 3.38 [3.38, 3.38] ĉ 2.596 D̂ 0.0 U 0.1404 U_W 0.1787 N 3.98 | dhold 50, paced 50, wclosed 1
+   +900.. +950 S 5.26 [3.38, 5.38] ĉ 2.600 D̂ 6.9 U 0.2500 U_W 0.1776 N 5.78 | dhold 45, rewarm 1, paced 50
+   +950..+1000 S 3.17 [1.39, 5.38] ĉ 2.774 D̂ 0.0 U 0.1314 U_W 0.2120 N 5.76 | capped 6, first 6, dhold 44, rewarm 1, paced 50, wclosed 1
+  +1000..+1050 S 1.39 [1.39, 1.39] ĉ 2.623 D̂ 0.0 U 0.1430 U_W 0.1714 N 2.00 | dhold 50, paced 50
+  +1050..+1100 S 2.89 [1.39, 3.39] ĉ 2.670 D̂ 2.3 U 0.1850 U_W 0.1266 N 3.43 | dhold 48, rewarm 1, paced 50, wclosed 1
+  +1100..+1150 S 3.79 [3.39, 5.39] ĉ 2.771 D̂ 1.5 U 0.1560 U_W 0.1893 N 4.32 | dhold 49, rewarm 1, paced 50, wclosed 1
+  +1150..+1200 S 5.39 [5.39, 5.39] ĉ 2.853 D̂ 0.0 U 0.2500 U_W 0.1934 N 6.00 | dhold 50, paced 50, wclosed 1
+
+seed 20: fails [outside the band [3.60, 5.07] in 89 of 91 samples after entry]; reports [entry at +119 samples (reported, not judged; the frozen count was 178) drained samples: 491; the restart-edge floor 1.77 for 177 samples from +0 990 untrusted samples without a standard error excluded from the band rule the path before entry: EWMA only D_mix from the D̂ fallback in 14 capped samples (else from D̂_q); Little's fallback 0; ĉ restarts 0; lives over tight samples in D̂ 24 (in this self-throttled regime, the plant's real durations, §3.4)]
+   -100..  -50 S 5.62 [5.40, 6.30] ĉ 1.704 D̂ 0.0 U 0.1961 U_W 0.2250 N 6.20 | capped 20, cpend 27, dhold 30, rewarm 1, paced 50, wclosed 1
+    -50..   +0 S 5.40 [5.40, 5.40] ĉ 1.703 D̂ 19.2 U 0.1791 U_W 0.1909 N 5.96 | cpend 18, dhold 32, paced 50, wclosed 1
+     +0..  +50 S 5.88 [5.40, 7.00] ĉ 1.707 D̂ 45.8 U 0.2043 U_W 0.1914 N 6.34 | cpend 9, dhold 6, rewarm 1, paced 50, wclosed 1
+    +50.. +100 S 6.83 [6.30, 7.00] ĉ 1.759 D̂ 0.0 U 0.2500 U_W 0.2217 N 7.00 | capped 12, cpend 20, dhold 38, paced 50
+   +100.. +150 S 5.16 [4.50, 6.30] ĉ 1.878 D̂ 0.0 U 0.1310 U_W 0.2257 N 5.72 | capped 23, cdef 1, cpend 50, dhold 27, rewarm 1, paced 50, wclosed 1
+   +150.. +200 S 4.50 [4.50, 4.50] ĉ 1.865 D̂ 0.0 U 0.2500 U_W 0.1944 N 4.99 | cpend 50, dhold 50, paced 50
+   +200.. +250 S 5.14 [4.50, 6.50] ĉ 1.985 D̂ 16.4 U 0.1564 U_W 0.1773 N 5.57 | cpend 28, dhold 40, rewarm 1, paced 50, wclosed 1
+   +250.. +300 S 6.50 [6.50, 6.50] ĉ 2.105 D̂ 0.0 U 0.2500 U_W 0.1993 N 7.00 | cpend 34, dhold 50, paced 50
+   +300.. +350 S 6.50 [6.50, 6.50] ĉ 2.226 D̂ 39.2 U 0.2172 U_W 0.2312 N 6.98 | guard 20, cdef 1, cpend 50, dhold 30, paced 50, wclosed 1
+   +350.. +400 S 6.50 [6.50, 6.50] ĉ 2.236 D̂ 98.9 U 0.2500 U_W 0.2345 N 6.98 | guard 50, cpend 50, paced 50
+   +400.. +450 S 5.80 [4.50, 6.50] ĉ 2.255 D̂ 51.3 U 0.2500 U_W 0.2433 N 6.35 | capped 29, first 1, guard 21, cpend 30, rewarm 1, paced 50, wclosed 1, mixfb 7
+   +450.. +500 S 3.93 [3.60, 4.50] ĉ 2.286 D̂ 0.0 U 0.2231 U_W 0.2466 N 4.36 | capped 38, dhold 12, rewarm 1, paced 50
+   +500.. +550 S 3.60 [3.60, 3.60] ĉ 2.311 D̂ 13.1 U 0.2480 U_W 0.2340 N 4.00 | guard 14, dhold 36, paced 50, wclosed 1
+   +550.. +600 S 3.15 [2.70, 4.60] ĉ 2.358 D̂ 18.3 U 0.1854 U_W 0.2315 N 3.57 | capped 28, first 4, guard 3, dhold 11, rewarm 1, paced 50, wclosed 1, mixfb 7
+   +600.. +650 S 2.70 [2.70, 2.70] ĉ 2.374 D̂ 0.0 U 0.1869 U_W 0.1839 N 3.00 | dhold 50, paced 50, wclosed 1
+   +650.. +700 S 4.22 [2.70, 4.70] ĉ 2.420 D̂ 5.7 U 0.1950 U_W 0.1629 N 4.47 | dhold 45, rewarm 1, paced 50
+   +700.. +750 S 4.57 [4.50, 4.70] ĉ 2.571 D̂ 0.0 U 0.1963 U_W 0.2205 N 4.99 | capped 12, cpend 3, dhold 38, paced 50, wclosed 1
+   +750.. +800 S 4.50 [4.50, 4.50] ĉ 2.560 D̂ 0.0 U 0.2451 U_W 0.2204 N 5.00 | dhold 50, paced 50, wclosed 1
+   +800.. +850 S 5.68 [4.50, 6.00] ĉ 2.631 D̂ 20.4 U 0.2180 U_W 0.2159 N 5.84 | dhold 35, rewarm 1, paced 50
+   +850.. +900 S 5.77 [4.50, 6.00] ĉ 2.717 D̂ 0.0 U 0.2499 U_W 0.2352 N 5.97 | capped 17, dhold 33, rewarm 1, paced 50, wclosed 1
+   +900.. +950 S 4.08 [3.60, 4.50] ĉ 2.672 D̂ 0.0 U 0.2468 U_W 0.2481 N 4.53 | capped 50, rewarm 1, paced 50
+   +950..+1000 S 3.60 [3.60, 3.60] ĉ 2.677 D̂ 0.0 U 0.1730 U_W 0.2082 N 3.99 | capped 5, dhold 45, paced 50, wclosed 1
+  +1000..+1050 S 3.94 [3.60, 5.40] ĉ 2.726 D̂ 10.6 U 0.1577 U_W 0.1849 N 4.31 | cpend 1, dhold 42, rewarm 1, paced 50, wclosed 1
+  +1050..+1100 S 5.40 [5.40, 5.40] ĉ 2.790 D̂ 0.0 U 0.2500 U_W 0.1911 N 6.00 | dhold 50, paced 50
+  +1100..+1150 S 5.40 [5.40, 5.40] ĉ 2.888 D̂ 0.0 U 0.1910 U_W 0.2351 N 5.97 | capped 21, dhold 29, paced 50, wclosed 1
+  +1150..+1200 S 5.40 [5.40, 5.40] ĉ 2.831 D̂ 0.0 U 0.2500 U_W 0.2222 N 6.00 | dhold 50, paced 50
+
+
+== seeds 11, 20 and 1: windows from 300 samples before the change ==
+seed 11 windows:
+   -237 len  77 C 11 c_W 1.640 σ_W 0.273 def false pend false rst false S 7.31
+   -160 len  77 C 10 c_W 1.695 σ_W 0.255 def false pend false rst false S 7.31
+    -86 len  74 C  8 c_W 1.387 σ_W 0.244 def false pend false rst false S 5.63
+    -22 len  64 C  8 c_W 1.841 σ_W 0.255 def false pend false rst false S 7.06
+    +41 len  63 C 10 c_W 1.575 σ_W 0.245 def false pend false rst false S 4.49
+   +114 len  73 C  6 c_W 2.362 σ_W 0.232 def false pend false rst false S 3.60
+   +190 len  76 C  4 c_W 3.875 σ_W 0.318 def true pend true rst false S 5.60
+   +290 len 100 C  7 c_W 2.443 σ_W 0.318 def false pend false rst false S 1.81
+   +338 len  48 C  2 c_W 4.376 σ_W 0.764 def false pend false rst false S 3.81
+   +422 len  84 C  4 c_W 2.532 σ_W 0.940 def false pend false rst false S 1.33
+   +473 len  51 C  2 c_W 4.801 σ_W 0.884 def false pend false rst false S 3.33
+   +557 len  84 C  4 c_W 2.187 σ_W 1.061 def false pend false rst false S 1.38
+   +608 len  51 C  2 c_W 5.126 σ_W 1.007 def false pend false rst false S 3.38
+   +693 len  85 C  4 c_W 2.158 σ_W 1.173 def false pend false rst false S 1.35
+   +745 len  52 C  2 c_W 5.686 σ_W 1.121 def false pend false rst false S 3.35
+   +827 len  82 C  4 c_W 1.793 σ_W 1.316 def false pend false rst false S 1.38
+   +881 len  54 C  2 c_W 6.011 σ_W 1.287 def false pend false rst false S 3.38
+   +957 len  76 C  4 c_W 3.625 σ_W 1.476 def false pend false rst false S 5.38
+  +1057 len 100 C  6 c_W 1.954 σ_W 1.427 def false pend false rst false S 1.39
+  +1117 len  60 C  2 c_W 6.101 σ_W 1.385 def false pend false rst false S 3.39
+  +1195 len  78 C  4 c_W 4.088 σ_W 1.554 def false pend false rst false S 5.39
+seed 20 windows:
+   -264 len  64 C  7 c_W 1.820 σ_W 0.207 def false pend false rst false S 5.31
+   -209 len  55 C  8 c_W 1.426 σ_W 0.203 def false pend false rst false S 5.50
+   -144 len  65 C  6 c_W 2.237 σ_W 0.207 def false pend false rst false S 6.50
+    -84 len  60 C  7 c_W 2.087 σ_W 0.240 def false pend false rst false S 5.40
+    -25 len  59 C  6 c_W 1.742 σ_W 0.261 def false pend false rst false S 5.40
+    +32 len  57 C  7 c_W 1.489 σ_W 0.246 def false pend false rst false S 6.40
+   +121 len  89 C  7 c_W 3.107 σ_W 0.245 def true pend true rst false S 4.50
+   +228 len 107 C  7 c_W 2.375 σ_W 0.245 def false pend false rst false S 4.50
+   +324 len  96 C  5 c_W 4.472 σ_W 0.424 def true pend true rst false S 6.50
+   +430 len 106 C  9 c_W 2.944 σ_W 0.424 def false pend false rst false S 5.40
+   +533 len 103 C  9 c_W 2.712 σ_W 0.979 def false pend false rst false S 3.60
+   +591 len  58 C  5 c_W 2.635 σ_W 0.912 def false pend false rst false S 2.70
+   +649 len  58 C  3 c_W 3.115 σ_W 0.874 def false pend false rst false S 2.70
+   +708 len  59 C  3 c_W 4.001 σ_W 0.858 def false pend false rst false S 4.70
+   +799 len  91 C  5 c_W 3.965 σ_W 0.921 def false pend false rst false S 4.50
+   +879 len  80 C  7 c_W 2.629 σ_W 0.970 def false pend false rst false S 6.00
+   +963 len  84 C  6 c_W 3.005 σ_W 0.919 def false pend false rst false S 3.60
+  +1032 len  69 C  4 c_W 3.009 σ_W 0.871 def false pend false rst false S 3.60
+  +1106 len  74 C  5 c_W 3.610 σ_W 0.835 def false pend false rst false S 5.40
+seed 1 windows:
+   -278 len  79 C 10 c_W 1.560 σ_W 0.207 def false pend false rst false S 5.24
+   -218 len  60 C  8 c_W 1.614 σ_W 0.202 def false pend false rst false S 6.19
+   -157 len  61 C  7 c_W 1.722 σ_W 0.197 def false pend false rst false S 5.92
+    -95 len  62 C  8 c_W 1.668 σ_W 0.191 def false pend false rst false S 6.25
+    -41 len  54 C  8 c_W 1.581 σ_W 0.180 def false pend false rst false S 6.25
+    +23 len  64 C  9 c_W 1.562 σ_W 0.174 def false pend false rst false S 6.61
+    +98 len  75 C  7 c_W 2.678 σ_W 0.171 def true pend true rst false S 3.60
+   +159 len  61 C  5 c_W 2.698 σ_W 0.171 def false pend false rst true S 2.70
+   +214 len  55 C  4 c_W 2.491 σ_W 0.010 def false pend false rst false S 2.70
+   +273 len  59 C  4 c_W 3.029 σ_W 0.093 def true pend true rst false S 2.70
+   +325 len  52 C  4 c_W 2.487 σ_W 0.093 def false pend false rst false S 2.70
+   +377 len  52 C  3 c_W 3.893 σ_W 0.197 def true pend true rst false S 2.59
+   +428 len  51 C  3 c_W 3.473 σ_W 0.197 def false pend false rst true S 2.59
+   +472 len  44 C  3 c_W 3.031 σ_W 0.210 def false pend false rst false S 2.59
+   +523 len  51 C  3 c_W 3.379 σ_W 0.352 def false pend false rst false S 2.59
+   +569 len  46 C  3 c_W 3.243 σ_W 0.307 def false pend false rst false S 2.59
+   +621 len  52 C  4 c_W 2.527 σ_W 0.286 def true pend true rst false S 2.59
+   +681 len  60 C  3 c_W 4.273 σ_W 0.286 def true pend true rst false S 2.59
+   +738 len  57 C  4 c_W 2.963 σ_W 0.418 def false pend false rst false S 2.59
+   +794 len  56 C  3 c_W 3.855 σ_W 0.513 def false pend false rst false S 2.93
+   +840 len  46 C  3 c_W 3.032 σ_W 0.509 def false pend false rst false S 2.93
+   +897 len  57 C  4 c_W 2.873 σ_W 0.496 def false pend false rst false S 3.00
+   +958 len  61 C  3 c_W 4.399 σ_W 0.494 def false pend false rst false S 2.98
+  +1002 len  44 C  4 c_W 2.368 σ_W 0.559 def false pend false rst false S 2.99
+  +1047 len  45 C  3 c_W 3.479 σ_W 0.604 def false pend false rst false S 2.93
+  +1103 len  56 C  3 c_W 3.789 σ_W 0.584 def false pend false rst false S 3.03
+  +1157 len  54 C  3 c_W 3.764 σ_W 0.575 def false pend false rst false S 3.07
+
+== seeds 20 and 11: every rise after the change ==
+seed 20 rises after the change:
+    +30 S 5.40 -> 6.40 kind active ĉ 1.711 D̂ 51.65 law≈6.79 U_W 0.1740 C 1 paceC 1 trusted false relSE 0.088 paced true first false
+    +43 S 6.40 -> 7.00 kind active ĉ 1.710 D̂ 53.17 law≈7.00 U_W 0.2120 C 2 paceC 2 trusted false relSE 0.090 paced true first false
+   +234 S 4.50 -> 6.50 kind active ĉ 1.963 D̂ 84.55 law≈9.69 U_W 0.1694 C 2 paceC 2 trusted false relSE 0.091 paced true first false
+   +552 S 3.60 -> 4.60 kind active ĉ 2.342 D̂ 51.19 law≈4.92 U_W 0.2244 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +660 S 2.70 -> 3.70 kind active ĉ 2.399 D̂ 57.50 law≈5.39 U_W 0.1584 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +664 S 3.70 -> 4.70 kind active ĉ 2.384 D̂ 56.50 law≈5.33 U_W 0.1635 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +806 S 4.50 -> 5.50 kind active ĉ 2.635 D̂ 67.92 law≈5.80 U_W 0.2003 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +820 S 5.50 -> 6.00 kind active ĉ 2.620 D̂ 69.90 law≈6.00 U_W 0.2064 C 2 paceC 2 trusted false relSE +Inf paced true first false
+  +1040 S 3.60 -> 4.60 kind active ĉ 2.714 D̂ 63.89 law≈5.30 U_W 0.1831 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1041 S 4.60 -> 5.40 kind active ĉ 2.689 D̂ 64.56 law≈5.40 U_W 0.1841 C 1 paceC 1 trusted false relSE 0.091 paced true first false
+seed 11 rises after the change:
+   +158 S 3.60 -> 4.60 kind active ĉ 1.872 D̂ 71.61 law≈8.61 U_W 0.2040 C 1 paceC 1 trusted false relSE 0.095 paced true first false
+   +161 S 4.60 -> 5.60 kind active ĉ 1.864 D̂ 71.18 law≈8.59 U_W 0.2040 C 1 paceC 1 trusted false relSE 0.094 paced true first false
+   +304 S 1.81 -> 2.81 kind active ĉ 2.027 D̂ 46.05 law≈5.11 U_W 0.1385 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +305 S 2.81 -> 3.81 kind active ĉ 2.006 D̂ 43.03 law≈4.83 U_W 0.1385 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +435 S 1.33 -> 2.33 kind active ĉ 2.157 D̂ 49.65 law≈5.18 U_W 0.0831 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +436 S 2.33 -> 3.33 kind active ĉ 2.135 D̂ 48.77 law≈5.14 U_W 0.0831 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +567 S 1.38 -> 2.38 kind active ĉ 2.266 D̂ 49.49 law≈4.91 U_W 0.0744 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +570 S 2.38 -> 3.38 kind active ĉ 2.246 D̂ 49.30 law≈4.94 U_W 0.1137 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +700 S 1.35 -> 3.35 kind active ĉ 2.337 D̂ 49.05 law≈4.72 U_W 0.0824 C 2 paceC 2 trusted false relSE +Inf paced true first false
+   +829 S 1.38 -> 2.38 kind active ĉ 2.454 D̂ 48.92 law≈4.49 U_W 0.0814 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +832 S 2.38 -> 3.38 kind active ĉ 2.430 D̂ 50.61 law≈4.69 U_W 0.0814 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +901 S 3.38 -> 4.38 kind active ĉ 2.564 D̂ 68.86 law≈6.04 U_W 0.1739 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +905 S 4.38 -> 5.38 kind active ĉ 2.547 D̂ 68.86 law≈6.08 U_W 0.1779 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1062 S 1.39 -> 2.39 kind active ĉ 2.625 D̂ 57.46 law≈4.92 U_W 0.1047 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1063 S 2.39 -> 3.39 kind active ĉ 2.593 D̂ 57.73 law≈5.01 U_W 0.1048 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1140 S 3.39 -> 5.39 kind active ĉ 2.697 D̂ 76.36 law≈6.37 U_W 0.1898 C 2 paceC 2 trusted false relSE +Inf paced true first false
+
+== seeds 16 and 18: bins, windows, rises ==
+seed 16: fails []; reports [entry at +40 samples (reported, not judged; the frozen count was 178) drained samples: 569; the restart-edge floor 1.77 for 177 samples from +0 760 untrusted samples without a standard error excluded from the band rule the path before entry: first term D_mix from the D̂ fallback in 19 capped samples (else from D̂_q); Little's fallback 0; ĉ restarts 0; lives over tight samples in D̂ 41 (in this self-throttled regime, the plant's real durations, §3.4)]
+   -100..  -50 S 4.95 [4.52, 4.97] ĉ 1.686 D̂ 7.0 U 0.1886 U_W 0.1827 N 4.98 | cpend 5, dhold 41, rewarm 1, paced 50, wclosed 1
+    -50..   +0 S 5.95 [4.97, 6.02] ĉ 1.709 D̂ 7.7 U 0.2324 U_W 0.2106 N 5.96 | guard 6, cpend 8, dhold 41, rewarm 1, paced 50, wclosed 1
+     +0..  +50 S 5.46 [4.35, 6.02] ĉ 1.712 D̂ 24.8 U 0.2500 U_W 0.2365 N 5.99 | capped 12, first 2, guard 2, cpend 2, dhold 12, rewarm 1, paced 50, wclosed 1, mixfb 3
+    +50.. +100 S 4.35 [4.35, 4.35] ĉ 1.789 D̂ 0.0 U 0.2208 U_W 0.2448 N 4.97 | capped 37, cpend 48, dhold 13, paced 50
+   +100.. +150 S 4.35 [4.35, 4.35] ĉ 1.843 D̂ 2.3 U 0.2499 U_W 0.2315 N 4.97 | guard 2, cpend 32, dhold 48, paced 50, wclosed 1
+   +150.. +200 S 4.35 [4.35, 4.35] ĉ 1.927 D̂ 64.0 U 0.2214 U_W 0.2318 N 4.96 | guard 50, cpend 33, paced 50, wclosed 1
+   +200.. +250 S 4.35 [4.35, 4.35] ĉ 1.969 D̂ 64.3 U 0.2174 U_W 0.2276 N 4.97 | guard 39, cpend 50, paced 50
+   +250.. +300 S 4.35 [4.35, 4.35] ĉ 1.982 D̂ 67.0 U 0.2500 U_W 0.2296 N 4.98 | guard 50, cpend 28, paced 50, wclosed 1
+   +300.. +350 S 4.35 [4.35, 4.35] ĉ 2.021 D̂ 66.4 U 0.2198 U_W 0.2299 N 4.96 | guard 44, cpend 39, paced 50, wclosed 1
+   +350.. +400 S 4.35 [4.31, 4.35] ĉ 2.048 D̂ 66.6 U 0.2500 U_W 0.2334 N 4.97 | capped 5, first 1, guard 45, cpend 38, dpend 38, paced 50, mixfb 5
+   +400.. +450 S 3.60 [3.60, 3.69] ĉ 2.065 D̂ 66.3 U 0.2345 U_W 0.2406 N 3.99 | capped 11, guard 39, cpend 7, dpend 50, paced 50, wclosed 1, mixfb 11
+   +450.. +500 S 3.60 [3.60, 3.60] ĉ 2.101 D̂ 63.4 U 0.2313 U_W 0.2368 N 4.00 | guard 50, cpend 17, drst 1, dpend 34, paced 50, wclosed 1
+   +500.. +550 S 3.64 [3.60, 4.60] ĉ 2.134 D̂ 53.2 U 0.1765 U_W 0.2280 N 4.02 | guard 38, cpend 6, paced 50, wclosed 1
+   +550.. +600 S 5.54 [4.60, 5.60] ĉ 2.170 D̂ 4.4 U 0.2500 U_W 0.1944 N 5.88 | dpend 3, dhold 46, rewarm 1, paced 50
+   +600.. +650 S 5.44 [5.40, 5.60] ĉ 2.311 D̂ 0.0 U 0.1771 U_W 0.2246 N 5.99 | capped 14, cpend 40, dhold 36, paced 50, wclosed 1
+   +650.. +700 S 5.43 [5.40, 5.75] ĉ 2.279 D̂ 4.8 U 0.2500 U_W 0.2132 N 5.96 | guard 3, dhold 46, paced 50
+   +700.. +750 S 6.19 [5.75, 6.65] ĉ 2.366 D̂ 32.7 U 0.2499 U_W 0.2292 N 6.64 | capped 18, guard 24, dhold 6, rewarm 1, paced 50, wclosed 1
+   +750.. +800 S 5.44 [5.30, 6.30] ĉ 2.408 D̂ 0.0 U 0.2500 U_W 0.2500 N 6.07 | capped 50, cpend 29, rewarm 1, paced 50
+   +800.. +850 S 4.29 [2.70, 5.30] ĉ 2.451 D̂ 0.0 U 0.2228 U_W 0.2473 N 4.80 | capped 48, cpend 13, dhold 2, rewarm 2, paced 50, wclosed 1
+   +850.. +900 S 2.70 [2.70, 2.70] ĉ 2.421 D̂ 0.0 U 0.1932 U_W 0.2204 N 3.00 | dhold 50, paced 50
+   +900.. +950 S 4.24 [2.70, 4.66] ĉ 2.470 D̂ 16.6 U 0.2305 U_W 0.2004 N 4.48 | cpend 6, dhold 33, rewarm 1, paced 50, wclosed 1
+   +950..+1000 S 4.52 [4.50, 4.66] ĉ 2.583 D̂ 0.0 U 0.2086 U_W 0.2314 N 4.96 | capped 18, cpend 34, dhold 32, paced 50, wclosed 1
+  +1000..+1050 S 4.52 [4.50, 5.50] ĉ 2.598 D̂ 1.4 U 0.2386 U_W 0.2244 N 5.00 | dhold 49, paced 50
+  +1050..+1100 S 4.52 [3.60, 5.89] ĉ 2.668 D̂ 8.2 U 0.2499 U_W 0.2387 N 4.93 | capped 39, dhold 5, rewarm 2, paced 50, wclosed 1
+  +1100..+1150 S 3.60 [3.60, 3.60] ĉ 2.655 D̂ 0.0 U 0.1827 U_W 0.2084 N 3.98 | capped 1, dhold 49, paced 50, wclosed 1
+  +1150..+1200 S 4.13 [3.60, 4.44] ĉ 2.714 D̂ 37.9 U 0.2249 U_W 0.2117 N 4.59 | guard 30, cpend 8, dhold 17, paced 50
+
+seed 18: fails []; reports [entry at +66 samples (reported, not judged; the frozen count was 178) drained samples: 513; the restart-edge floor 1.77 for 177 samples from +0 1106 untrusted samples without a standard error excluded from the band rule the path before entry: first term D_mix from the D̂ fallback in 36 capped samples (else from D̂_q); Little's fallback 0; ĉ restarts 0; lives over tight samples in D̂ 17 (in this self-throttled regime, the plant's real durations, §3.4)]
+   -100..  -50 S 7.63 [7.50, 7.93] ĉ 1.759 D̂ 57.8 U 0.2164 U_W 0.2172 N 7.98 | guard 25, cpend 16, paced 50, wclosed 1
+    -50..   +0 S 7.50 [7.43, 7.57] ĉ 1.768 D̂ 59.5 U 0.2197 U_W 0.2236 N 7.96 | guard 26, cpend 15, paced 50
+     +0..  +50 S 7.42 [7.07, 7.54] ĉ 1.761 D̂ 58.6 U 0.2500 U_W 0.2331 N 7.99 | capped 10, first 2, guard 15, cpend 20, paced 50, wclosed 1, mixfb 10
+    +50.. +100 S 4.75 [3.60, 7.07] ĉ 1.755 D̂ 2.3 U 0.2500 U_W 0.2500 N 5.46 | capped 50, first 2, cpend 17, rewarm 3, paced 50, wclosed 1, mixfb 2
+   +100.. +150 S 3.50 [3.35, 3.60] ĉ 1.817 D̂ 0.0 U 0.2422 U_W 0.2467 N 3.99 | capped 50, cpend 45, paced 50
+   +150.. +200 S 2.98 [2.77, 3.35] ĉ 1.880 D̂ 0.0 U 0.1973 U_W 0.2279 N 3.36 | capped 19, cdef 1, cpend 50, dhold 31, paced 50, wclosed 1
+   +200.. +250 S 3.15 [2.77, 4.77] ĉ 1.935 D̂ 28.2 U 0.2166 U_W 0.2056 N 3.33 | cpend 29, dhold 17, rewarm 1, paced 50, wclosed 1
+   +250.. +300 S 4.55 [3.60, 4.77] ĉ 2.024 D̂ 0.0 U 0.2499 U_W 0.2279 N 4.84 | capped 15, cdef 1, cpend 44, dhold 35, rewarm 1, paced 50, wclosed 1
+   +300.. +350 S 3.60 [3.60, 3.60] ĉ 2.066 D̂ 0.0 U 0.1818 U_W 0.2172 N 4.00 | capped 10, cpend 45, dhold 40, paced 50, wclosed 1
+   +350.. +400 S 3.80 [3.60, 5.60] ĉ 2.153 D̂ 5.8 U 0.1478 U_W 0.1915 N 4.13 | cpend 1, dhold 46, rewarm 1, paced 50
+   +400.. +450 S 5.60 [5.60, 5.60] ĉ 2.228 D̂ 0.0 U 0.2500 U_W 0.1812 N 6.00 | dhold 50, paced 50, wclosed 1
+   +450.. +500 S 5.46 [5.40, 5.60] ĉ 2.354 D̂ 0.0 U 0.1722 U_W 0.2154 N 5.93 | capped 2, cpend 10, dhold 48, paced 50
+   +500.. +550 S 5.40 [5.40, 5.40] ĉ 2.354 D̂ 0.0 U 0.2500 U_W 0.2115 N 6.00 | dhold 50, paced 50, wclosed 1
+   +550.. +600 S 4.79 [3.15, 5.40] ĉ 2.455 D̂ 45.5 U 0.2387 U_W 0.2300 N 5.43 | capped 23, first 4, guard 6, cpend 32, dhold 3, rewarm 2, paced 50, mixfb 7
+   +600.. +650 S 2.71 [2.70, 3.14] ĉ 2.416 D̂ 0.0 U 0.1963 U_W 0.2370 N 2.99 | capped 28, dhold 22, paced 50, wclosed 1
+   +650.. +700 S 3.06 [2.35, 3.45] ĉ 2.458 D̂ 22.8 U 0.2499 U_W 0.2107 N 3.56 | capped 3, first 3, guard 16, cpend 4, dhold 20, paced 50, wclosed 1, mixfb 3
+   +700.. +750 S 2.91 [2.15, 3.95] ĉ 2.483 D̂ 42.6 U 0.1642 U_W 0.2047 N 3.49 | capped 11, first 10, guard 18, cpend 7, paced 50, wclosed 1, mixfb 11
+   +750.. +800 S 3.92 [3.87, 3.95] ĉ 2.542 D̂ 43.7 U 0.2009 U_W 0.2017 N 3.98 | guard 38, cpend 26, paced 50
+   +800.. +850 S 4.69 [4.69, 4.69] ĉ 2.563 D̂ 1.1 U 0.2500 U_W 0.2165 N 4.98 | cpend 15, dhold 49, rewarm 1, paced 50, wclosed 1
+   +850.. +900 S 5.23 [4.69, 6.09] ĉ 2.661 D̂ 8.6 U 0.1673 U_W 0.2079 N 5.52 | cpend 30, dhold 44, rewarm 1, paced 50
+   +900.. +950 S 6.09 [6.09, 6.09] ĉ 2.731 D̂ 0.0 U 0.2500 U_W 0.2025 N 7.00 | dhold 50, paced 50, wclosed 1
+   +950..+1000 S 6.07 [5.43, 6.09] ĉ 2.864 D̂ 0.0 U 0.2265 U_W 0.2360 N 6.77 | capped 11, cpend 23, dhold 39, paced 50
+  +1000..+1050 S 5.40 [5.40, 5.40] ĉ 2.774 D̂ 0.0 U 0.2500 U_W 0.2401 N 6.00 | capped 50, paced 50, wclosed 1
+  +1050..+1100 S 5.16 [3.60, 5.40] ĉ 2.872 D̂ 0.0 U 0.2328 U_W 0.2376 N 5.72 | capped 26, cpend 18, dhold 24, rewarm 1, paced 50
+  +1100..+1150 S 3.60 [3.60, 3.60] ĉ 2.806 D̂ 0.0 U 0.2110 U_W 0.2305 N 3.97 | capped 18, cpend 3, dhold 32, paced 50, wclosed 1
+  +1150..+1200 S 3.52 [3.07, 4.11] ĉ 2.846 D̂ 10.4 U 0.2209 U_W 0.2283 N 3.93 | capped 12, first 1, guard 2, dhold 31, rewarm 1, paced 50, wclosed 1, mixfb 3
+  +1200..+1201 S 3.07 [3.07, 3.07] ĉ 2.856 D̂ 0.0 U 0.0000 U_W 0.2233 N 3.00 | dhold 1, paced 1
+
+seed 16 windows:
+  -1473 len  65 C 10 c_W 1.392 σ_W 0.194 def false pend false rst false S 6.08
+  -1410 len  63 C  7 c_W 1.968 σ_W 0.202 def false pend false rst false S 6.45
+  -1349 len  61 C  9 c_W 1.428 σ_W 0.209 def false pend false rst false S 6.32
+  -1281 len  68 C  8 c_W 1.813 σ_W 0.211 def false pend false rst false S 6.57
+  -1216 len  65 C  9 c_W 1.504 σ_W 0.207 def false pend false rst false S 6.64
+  -1148 len  68 C  8 c_W 1.784 σ_W 0.205 def false pend false rst false S 6.78
+  -1083 len  65 C  8 c_W 1.683 σ_W 0.201 def false pend false rst false S 6.84
+  -1013 len  70 C  9 c_W 1.594 σ_W 0.195 def false pend false rst false S 6.94
+   -945 len  68 C  8 c_W 1.860 σ_W 0.190 def false pend false rst false S 6.97
+   -879 len  66 C  9 c_W 1.683 σ_W 0.189 def false pend false rst false S 6.30
+   -824 len  55 C  9 c_W 1.491 σ_W 0.184 def false pend false rst false S 5.40
+   -772 len  52 C  7 c_W 1.460 σ_W 0.183 def false pend false rst false S 4.62
+   -728 len  44 C  6 c_W 1.483 σ_W 0.184 def false pend false rst false S 5.07
+   -676 len  52 C  6 c_W 1.713 σ_W 0.182 def false pend false rst false S 5.51
+   -611 len  65 C  7 c_W 1.915 σ_W 0.178 def false pend false rst false S 5.95
+   -560 len  51 C  8 c_W 1.442 σ_W 0.185 def false pend false rst false S 5.81
+   -507 len  53 C  7 c_W 1.607 σ_W 0.187 def false pend false rst false S 5.83
+   -457 len  50 C  6 c_W 1.876 σ_W 0.181 def false pend false rst false S 5.73
+   -404 len  53 C  8 c_W 1.409 σ_W 0.184 def false pend false rst false S 5.96
+   -355 len  49 C  6 c_W 1.812 σ_W 0.188 def false pend false rst false S 5.92
+   -299 len  56 C  6 c_W 1.896 σ_W 0.185 def false pend false rst false S 5.92
+   -240 len  59 C  6 c_W 2.107 σ_W 0.190 def false pend false rst false S 4.74
+   -176 len  64 C 10 c_W 1.264 σ_W 0.223 def false pend false rst false S 3.66
+   -127 len  49 C  5 c_W 2.136 σ_W 0.262 def false pend false rst false S 4.52
+    -75 len  52 C  7 c_W 1.396 σ_W 0.279 def false pend false rst false S 4.97
+    -23 len  52 C  5 c_W 2.185 σ_W 0.281 def false pend false rst false S 6.02
+    +26 len  49 C  8 c_W 1.421 σ_W 0.308 def false pend false rst false S 5.44
+   +105 len  79 C  7 c_W 2.613 σ_W 0.307 def false pend false rst false S 4.35
+   +182 len  77 C  6 c_W 2.969 σ_W 0.428 def false pend false rst false S 4.35
+   +262 len  80 C  6 c_W 3.062 σ_W 0.488 def false pend false rst false S 4.35
+   +345 len  83 C  6 c_W 3.206 σ_W 0.545 def false pend false rst false S 4.35
+   +417 len  72 C  5 c_W 3.445 σ_W 0.604 def false pend false rst false S 3.60
+   +484 len  67 C  5 c_W 3.163 σ_W 0.666 def false pend false rst false S 3.60
+   +549 len  65 C  4 c_W 3.144 σ_W 0.688 def false pend false rst false S 4.60
+   +648 len  99 C  6 c_W 3.518 σ_W 0.705 def false pend false rst false S 5.40
+   +747 len  99 C  9 c_W 2.750 σ_W 0.792 def false pend false rst false S 6.30
+   +841 len  94 C  7 c_W 3.306 σ_W 0.744 def false pend false rst false S 3.60
+   +906 len  65 C  5 c_W 2.287 σ_W 0.751 def false pend false rst false S 3.70
+   +988 len  82 C  4 c_W 4.607 σ_W 0.730 def false pend false rst false S 4.50
+  +1069 len  81 C  5 c_W 3.937 σ_W 0.939 def false pend false rst false S 5.40
+  +1147 len  78 C  7 c_W 2.304 σ_W 0.958 def false pend false rst false S 3.60
+
+seed 18 windows:
+  -1453 len  69 C  9 c_W 1.630 σ_W 0.183 def false pend false rst false S 5.66
+  -1395 len  58 C  7 c_W 1.874 σ_W 0.170 def false pend false rst false S 6.25
+  -1332 len  63 C  8 c_W 1.764 σ_W 0.173 def false pend false rst false S 6.49
+  -1271 len  61 C  9 c_W 1.451 σ_W 0.169 def false pend false rst false S 6.58
+  -1206 len  65 C  8 c_W 1.764 σ_W 0.172 def false pend false rst false S 6.58
+  -1137 len  69 C  8 c_W 1.775 σ_W 0.169 def false pend false rst false S 5.63
+  -1071 len  66 C  8 c_W 1.862 σ_W 0.165 def false pend false rst false S 5.63
+  -1020 len  51 C  7 c_W 1.672 σ_W 0.166 def false pend false rst false S 5.37
+   -966 len  54 C  7 c_W 1.764 σ_W 0.162 def false pend false rst false S 6.32
+   -908 len  58 C  8 c_W 1.646 σ_W 0.159 def false pend false rst false S 6.25
+   -846 len  62 C  8 c_W 1.834 σ_W 0.154 def false pend false rst false S 6.10
+   -794 len  52 C  8 c_W 1.464 σ_W 0.154 def false pend false rst false S 5.40
+   -745 len  49 C  8 c_W 1.340 σ_W 0.162 def false pend false rst false S 6.11
+   -685 len  60 C  8 c_W 1.494 σ_W 0.175 def false pend false rst false S 5.73
+   -623 len  62 C  6 c_W 2.220 σ_W 0.173 def true pend true rst false S 6.39
+   -558 len  65 C  9 c_W 1.390 σ_W 0.173 def false pend false rst false S 4.90
+   -504 len  54 C  6 c_W 1.798 σ_W 0.226 def false pend false rst false S 6.20
+   -434 len  70 C  8 c_W 1.760 σ_W 0.222 def false pend false rst false S 6.15
+   -362 len  72 C  8 c_W 1.758 σ_W 0.215 def false pend false rst false S 6.51
+   -290 len  72 C  8 c_W 1.652 σ_W 0.201 def false pend false rst false S 8.51
+   -205 len  85 C 11 c_W 1.797 σ_W 0.187 def false pend false rst false S 8.27
+   -125 len  80 C 10 c_W 1.708 σ_W 0.183 def false pend false rst false S 7.50
+    -55 len  70 C  9 c_W 1.758 σ_W 0.169 def false pend false rst false S 7.56
+    +19 len  74 C 10 c_W 1.699 σ_W 0.164 def false pend false rst false S 7.50
+    +95 len  76 C  9 c_W 2.111 σ_W 0.159 def false pend false rst false S 3.60
+   +162 len  67 C  5 c_W 3.272 σ_W 0.208 def true pend true rst false S 3.35
+   +216 len  54 C  5 c_W 2.172 σ_W 0.208 def false pend false rst false S 2.77
+   +269 len  53 C  3 c_W 3.862 σ_W 0.410 def true pend true rst false S 4.77
+   +345 len  76 C  6 c_W 2.598 σ_W 0.410 def false pend false rst false S 3.60
+   +419 len  74 C  4 c_W 3.347 σ_W 0.732 def false pend false rst false S 5.60
+   +520 len 101 C  6 c_W 3.560 σ_W 0.783 def false pend false rst false S 5.40
+   +620 len 100 C  8 c_W 3.054 σ_W 0.847 def false pend false rst false S 2.70
+   +674 len  54 C  4 c_W 2.704 σ_W 0.807 def false pend false rst false S 3.45
+   +740 len  66 C  5 c_W 2.442 σ_W 0.779 def false pend false rst false S 3.95
+   +814 len  74 C  4 c_W 4.011 σ_W 0.751 def false pend false rst false S 4.69
+   +901 len  87 C  6 c_W 2.935 σ_W 0.832 def false pend false rst false S 6.09
+  +1020 len 119 C  8 c_W 3.572 σ_W 0.786 def false pend false rst false S 5.40
+  +1121 len 101 C  6 c_W 3.907 σ_W 0.782 def false pend false rst false S 3.60
+  +1182 len  61 C  5 c_W 2.849 σ_W 0.808 def false pend false rst false S 4.09
+
+seed 16 rises after the change:
+   +548 S 3.60 -> 4.60 kind active ĉ 2.133 D̂ 54.29 law≈5.73 U_W 0.1935 C 1 paceC 1 trusted false relSE 0.100 paced true first false
+   +553 S 4.60 -> 5.60 kind active ĉ 2.107 D̂ 55.42 law≈5.92 U_W 0.1935 C 1 paceC 1 trusted false relSE 0.093 paced true first false
+   +696 S 5.40 -> 5.75 kind active ĉ 2.344 D̂ 59.85 law≈5.75 U_W 0.2132 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +714 S 5.75 -> 6.28 kind active ĉ 2.364 D̂ 65.98 law≈6.28 U_W 0.2132 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +725 S 6.28 -> 6.65 kind active ĉ 2.369 D̂ 70.01 law≈6.65 U_W 0.2247 C 1 paceC 1 trusted false relSE 0.103 paced true first false
+   +903 S 2.70 -> 3.70 kind active ĉ 2.433 D̂ 48.78 law≈4.51 U_W 0.1759 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +919 S 3.70 -> 4.66 kind active ĉ 2.451 D̂ 50.78 law≈4.66 U_W 0.2032 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1049 S 4.50 -> 5.50 kind active ĉ 2.663 D̂ 68.04 law≈5.75 U_W 0.2178 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1055 S 5.50 -> 5.89 kind active ĉ 2.653 D̂ 69.49 law≈5.89 U_W 0.2218 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1167 S 3.60 -> 4.44 kind active ĉ 2.702 D̂ 53.36 law≈4.44 U_W 0.1840 C 1 paceC 1 trusted false relSE +Inf paced true first false
+
+seed 18 rises after the change:
+   +234 S 2.77 -> 3.77 kind active ĉ 1.934 D̂ 42.78 law≈4.98 U_W 0.1922 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +247 S 3.77 -> 4.77 kind active ĉ 1.949 D̂ 45.70 law≈5.28 U_W 0.2185 C 1 paceC 1 trusted false relSE 0.097 paced true first false
+   +394 S 3.60 -> 4.60 kind active ĉ 2.153 D̂ 72.11 law≈7.54 U_W 0.1751 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +396 S 4.60 -> 5.60 kind active ĉ 2.141 D̂ 71.94 law≈7.56 U_W 0.1809 C 1 paceC 1 trusted false relSE 0.083 paced true first false
+   +670 S 2.70 -> 3.45 kind active ĉ 2.426 D̂ 37.22 law≈3.45 U_W 0.2003 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +726 S 2.15 -> 3.15 kind active ĉ 2.467 D̂ 42.59 law≈3.88 U_W 0.1761 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +734 S 3.15 -> 3.95 kind active ĉ 2.428 D̂ 42.59 law≈3.95 U_W 0.1850 C 2 paceC 2 trusted false relSE +Inf paced true first false
+   +800 S 3.87 -> 4.69 kind active ĉ 2.524 D̂ 52.66 law≈4.69 U_W 0.2133 C 1 paceC 1 trusted false relSE 0.127 paced true first false
+   +880 S 4.69 -> 5.69 kind active ĉ 2.657 D̂ 71.43 law≈6.05 U_W 0.1972 C 1 paceC 1 trusted false relSE +Inf paced true first false
+   +883 S 5.69 -> 6.09 kind active ĉ 2.641 D̂ 71.43 law≈6.09 U_W 0.1990 C 1 paceC 1 trusted false relSE +Inf paced true first false
+  +1177 S 3.60 -> 4.11 kind active ĉ 2.846 D̂ 51.99 law≈4.11 U_W 0.2181 C 1 paceC 1 trusted false relSE +Inf paced true first false
+
+
+== the proposed absolute upper bound on the current code ==
+    zz_safety_diag_test.go:207: 
+  seed  1: from +159, 0 samples above 5.070, max S 3.07
+  seed  2: from +177, 0 samples above 5.070, max S 4.13
+  seed  3: from +177, 96 samples above 5.070, max S 7.20
+  seed  4: from +177, 35 samples above 5.070, max S 5.40
+  seed  5: from +177, 76 samples above 5.070, max S 5.40
+  seed  6: from +177, 95 samples above 5.070, max S 6.30
+  seed  7: from +112, 12 samples above 5.070, max S 5.29
+  seed  8: from +177, 0 samples above 5.070, max S 4.50
+  seed  9: from +177, 0 samples above 5.070, max S 4.50
+  seed 10: from +177, 0 samples above 5.070, max S 4.78
+  seed 11: from +177, 167 samples above 5.070, max S 5.60
+  seed 12: from +177, 0 samples above 5.070, max S 3.99
+  seed 13: from +177, 15 samples above 5.070, max S 5.48
+  seed 14: from +177, 153 samples above 5.070, max S 6.70
+  seed 15: from +177, 192 samples above 5.070, max S 6.37
+  seed 16: from +177, 286 samples above 5.070, max S 6.65
+  seed 17: from +177, 0 samples above 5.070, max S 4.36
+  seed 18: from +177, 394 samples above 5.070, max S 6.09
+  seed 19: from +177, 289 samples above 5.070, max S 6.03
+  seed 20: from +177, 458 samples above 5.070, max S 6.50
+  13 of 20 would fail the absolute bound (edge 177)

@@ -1,0 +1,208 @@
+package sim
+
+// SCRATCH (never committed): the long drain's seeds 11 and 20, no ĉ restart.
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit/internal/costmodel"
+)
+
+func TestZZSafety(t *testing.T) {
+	if os.Getenv("SIM_ZZ") == "" {
+		t.Skip()
+	}
+	var gc gateCase
+	for _, c := range gateCases() {
+		if c.name == "long drain" {
+			gc = c
+		}
+	}
+	for _, seed := range zzSeeds() {
+		v := runCase(gc, ctlCost, seed)
+		tr := Run(gc.cfg(seed))
+		i0 := index(tr, drainAt)
+		var b strings.Builder
+		fmt.Fprintf(&b, "seed %d: fails %v; reports %v\n", seed, v.fails, v.reports)
+		for from := i0 - 100; from < len(tr.Results); from += 50 {
+			to := min(from+50, len(tr.Results))
+			var s, smin, smax, ch, dv, u, uw, nin float64
+			smin, smax = 99, 0
+			k := map[string]int{}
+			for i := from; i < to; i++ {
+				r := tr.Results[i]
+				c := r.CPU
+				s += r.Slots
+				smin, smax = min(smin, r.Slots), max(smax, r.Slots)
+				ch += c.PerCompletion
+				dv += c.Duration
+				u += tr.Used(i)
+				uw += c.UW
+				nin += c.InFlight
+				flags := map[string]bool{"capped": c.Kind == costmodel.Capped, "first": c.FirstTerm, "guard": c.Guarded, "trust": c.Trusted,
+					"cdef": c.CDeferred, "cpend": c.CPending, "crst": c.CRestarted, "drst": c.DRestarted, "dpend": c.DPending || c.DDeferred,
+					"dhold": c.DHold, "dfb": c.DFallback, "rewarm": c.DRewarmed, "chold": c.CHold, "unres": c.Unresolvable || c.UnresHold,
+					"paced": c.Paced, "wclosed": c.WindowClosed, "mixfb": c.DMixFallback}
+				for f, on := range flags {
+					if on {
+						k[f]++
+					}
+				}
+			}
+			n := float64(to - from)
+			var fl []string
+			for _, f := range []string{"capped", "first", "guard", "trust", "cdef", "cpend", "crst", "drst", "dpend", "dhold", "dfb", "rewarm", "chold", "unres", "paced", "wclosed", "mixfb"} {
+				if k[f] > 0 {
+					fl = append(fl, fmt.Sprintf("%s %d", f, k[f]))
+				}
+			}
+			fmt.Fprintf(&b, "  %+5d..%+5d S %.2f [%.2f, %.2f] ĉ %.3f D̂ %.1f U %.4f U_W %.4f N %.2f | %s\n", from-i0, to-i0, s/n, smin, smax, ch/n, dv/n, u/n, uw/n, nin/n, strings.Join(fl, ", "))
+		}
+		t.Log("\n" + b.String())
+	}
+}
+
+// TestZZWindows: every closed ĉ window from 1500 s before the change, its c_W
+// (ΣU/ΣC over its samples, no background), σ_W and the test's flags.
+func TestZZWindows(t *testing.T) {
+	if os.Getenv("SIM_ZZ") == "" {
+		t.Skip()
+	}
+	var gc gateCase
+	for _, c := range gateCases() {
+		if c.name == "long drain" {
+			gc = c
+		}
+	}
+	for _, seed := range zzSeeds() {
+		tr := Run(gc.cfg(seed))
+		i0 := index(tr, drainAt)
+		var b strings.Builder
+		fmt.Fprintf(&b, "seed %d windows:\n", seed)
+		for i := i0 - 1500; i < len(tr.Results); i++ {
+			c := tr.Results[i].CPU
+			if !c.WindowClosed {
+				continue
+			}
+			var u float64
+			comp := 0
+			for j := i - c.WindowLen + 1; j <= i; j++ {
+				u += tr.Samples[j].Usage.Seconds()
+				comp += tr.Samples[j].Books.Completions
+			}
+			cw := -1.0
+			if comp > 0 {
+				cw = u / float64(comp)
+			}
+			fmt.Fprintf(&b, "  %+5d len %3d C %2d c_W %.3f σ_W %.3f def %v pend %v rst %v S %.2f\n", i-i0, c.WindowLen, comp, cw, c.SigmaW, c.CDeferred, c.CPending, c.CRestarted, tr.Results[i].Slots)
+		}
+		t.Log("\n" + b.String())
+	}
+}
+
+func TestZZWinCount(t *testing.T) {
+	if os.Getenv("SIM_ZZ") == "" {
+		t.Skip()
+	}
+	var gc gateCase
+	for _, c := range gateCases() {
+		if c.name == "long drain" {
+			gc = c
+		}
+	}
+	tr := Run(gc.cfg(20))
+	i0 := index(tr, drainAt)
+	var pos []int
+	for i, r := range tr.Results {
+		if r.CPU.WindowClosed {
+			pos = append(pos, i-i0)
+		}
+	}
+	t.Logf("n=%d i0=%d at(i0)=%v; closed windows at %v", len(tr.Results), i0, tr.At[i0], pos)
+}
+
+// TestZZRises: every sample of the long drain where S rose, seeds 20 and 11,
+// with the law's inputs.
+func TestZZRises(t *testing.T) {
+	if os.Getenv("SIM_ZZ") == "" {
+		t.Skip()
+	}
+	var gc gateCase
+	for _, c := range gateCases() {
+		if c.name == "long drain" {
+			gc = c
+		}
+	}
+	for _, seed := range zzSeeds() {
+		tr := Run(gc.cfg(seed))
+		i0 := index(tr, drainAt)
+		var b strings.Builder
+		fmt.Fprintf(&b, "seed %d rises after the change:\n", seed)
+		for i := i0; i < len(tr.Results); i++ {
+			r, p := tr.Results[i], tr.Results[i-1]
+			if r.Slots <= p.Slots+1e-9 {
+				continue
+			}
+			c := r.CPU
+			law := 0.0
+			if c.PerCompletion > 0 {
+				law = 0.225 * c.Duration / c.PerCompletion
+			}
+			fmt.Fprintf(&b, "  %+5d S %.2f -> %.2f kind %v ĉ %.3f D̂ %.2f law≈%.2f U_W %.4f C %d paceC %d trusted %v relSE %.3f paced %v first %v\n",
+				i-i0, p.Slots, r.Slots, c.Kind, c.PerCompletion, c.Duration, law, c.UW, tr.Samples[i].Books.Completions, c.PaceCompletions, c.Trusted, c.RelSE, c.Paced, c.FirstTerm)
+		}
+		t.Log("\n" + b.String())
+	}
+}
+
+func zzSeeds() []uint64 {
+	if os.Getenv("SIM_ZZ_SEEDS") == "1618" {
+		return []uint64{16, 18}
+	}
+	return []uint64{11, 20}
+}
+
+// TestZZAbsBound: the proposed absolute upper bound on the current code, all
+// twenty seeds: from the earlier of ĉ's first restart and the change + 177.
+func TestZZAbsBound(t *testing.T) {
+	if os.Getenv("SIM_ZZ") == "" {
+		t.Skip()
+	}
+	var gc gateCase
+	for _, c := range gateCases() {
+		if c.name == "long drain" {
+			gc = c
+		}
+	}
+	hi := bandOf(frozenPlants["drain"].sStar).hi
+	edge := drainCount() - 1
+	var b strings.Builder
+	fail := 0
+	for seed := uint64(1); seed <= 20; seed++ {
+		tr := Run(gc.cfg(seed))
+		i0 := index(tr, drainAt)
+		start := i0 + edge
+		for i := i0; i < len(tr.Results); i++ {
+			if tr.Results[i].CPU.CRestarted {
+				start = min(start, i)
+				break
+			}
+		}
+		n, mx := 0, 0.0
+		for i := start; i < len(tr.Results); i++ {
+			if S := tr.Results[i].Slots; S > hi+1e-9 {
+				n++
+			}
+			mx = max(mx, tr.Results[i].Slots)
+		}
+		if n > 0 {
+			fail++
+		}
+		fmt.Fprintf(&b, "  seed %2d: from +%d, %d samples above %.3f, max S %.2f\n", seed, start-i0, n, hi, mx)
+	}
+	fmt.Fprintf(&b, "  %d of 20 would fail the absolute bound (edge %d)\n", fail, edge)
+	t.Log("\n" + b.String())
+}
