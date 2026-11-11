@@ -12,6 +12,51 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — v1.16.0: a status conflict names its cause
+- **A minor release: the error text of a status conflict changes, and there
+  are two new exports.** It's option 1 of #80, the user's decision of
+  2026-11-11 (design-status-write-conflict §7.1, §12). Behaviour is otherwise
+  unchanged: a status write is still sent once, with no retry and no merge.
+- **The contract is written down.** The `ExternalClient` doc now says a
+  method that writes the managed object must leave `mg` describing what is
+  stored: write `mg` itself, or copy the new resourceVersion and every field it
+  wrote back onto `mg`, only after the write succeeded. Copying only the
+  version silently reverts the write. A re-read-then-write can revert someone
+  else's change, a human's status patch included.
+- **The error names the likely cause.** A status write that conflicts now
+  returns `cannot update managed resource status: the object changed during
+  this pass (read at resourceVersion V): if an ExternalClient method writes the
+  object itself, it must copy ... back onto mg (see ExternalClient); pass
+  error: <the pass's own error>`.
+  - The `cannot update managed resource status` prefix stays, so existing
+    searches still match. `kerrors.IsConflict` and `errors.Is` on the pass's
+    error still see through it.
+  - Before, on an error path, the status conflict replaced the pass's own
+    error (an Observe or Update failure, for example). Now both are kept.
+  - It stays an error that `Reconcile` returns, not a silent requeue.
+  - All 20 status writes go through one function, so every one gets it. A
+    status write that fails with anything but a conflict reads as before.
+- **New step `status` on `k8s.conflict`** (`tracing.StepStatus`, in
+  `tracing.Steps()`). It's the one step whose pass returns an error, so its
+  root is Error.
+- **New export `reconciler.WithAPIReader`.** Pass `mgr.GetAPIReader()` and a
+  status conflict reads the object live once, for the message only: it adds
+  the live resourceVersion, the top-level status keys that differ from the
+  pass's read, and the newest managedFields entry, labelled as a hint. Nothing
+  is decided from it, and a failed read gives the plain message.
+  - It's opt-in. `NewReconciler` can't take the reader from its manager:
+    `fake.Manager` embeds a nil `manager.Manager`, whose `GetAPIReader` would
+    panic, and so would any consumer's fake built the same way.
+  - With it, each pass keeps one deep copy of the object as read, for the
+    comparison.
+- **New export `reconcilertest.AssertLeavesManagedCurrent`.** It runs one of a
+  provider's methods against a stored object, writes `mg`'s status as the
+  runtime would, and fails if that write conflicts or reverts a field the
+  method wrote. It checks the contract in a provider's own tests.
+- **Consumers need no change.** oasgen-provider mirrors, incident-provider and
+  git-provider write through `mg`, and alert-provider and core-provider don't
+  write `mg` from handlers (design-status-write-conflict §4).
+
 ## 2026-11-11 — v1.15.0: symmetric act links, and acting passes are marked
 - **A minor release: two tracing behaviours change.** Both are the user's
   decisions of 2026-11-11. Nothing changes with tracing off.
