@@ -619,6 +619,12 @@ func TestTracingStatusMapping(t *testing.T) {
 			s.faults.patch = func(client.Object) error { return conflictErr() }
 			return s, &widgetProvider{ops: s.ops}, nil
 		},
+		// The one step that doesn't requeue: a status conflict is the pass's error.
+		tracing.StepStatus: func(t *testing.T) (*traceServer, *widgetProvider, []ReconcilerOption) {
+			s := newTraceServer(t, initialized(newWidget("w", nil)))
+			s.faults.status = func(client.Object) error { return conflictErr() }
+			return s, &widgetProvider{ops: s.ops}, nil
+		},
 	}
 	if len(conflictCases) != len(tracing.Steps()) {
 		t.Fatalf("conflict cases cover %d steps, tracing.Steps has %d", len(conflictCases), len(tracing.Steps()))
@@ -628,12 +634,21 @@ func TestTracingStatusMapping(t *testing.T) {
 			s, p, o := build(t)
 			tp, rec := tracer(t)
 			res, err := newTraceReconciler(s, p, append([]ReconcilerOption{WithTracerProvider(tp)}, o...)...).Reconcile(context.Background(), reqFor("w"))
-			if err != nil || !isRateLimitedRequeue(res) {
-				t.Fatalf("Reconcile = %v, %v; want a rate-limited requeue", res, err)
-			}
 			root := lastRoot(t, rec)
-			if root.Status().Code != codes.Unset {
-				t.Errorf("status = %v, want Unset", root.Status())
+			if step == tracing.StepStatus {
+				if err == nil || !kerrors.IsConflict(err) {
+					t.Fatalf("Reconcile = %v, %v; want the status conflict returned as the error", res, err)
+				}
+				if root.Status().Code != codes.Error {
+					t.Errorf("status = %v, want Error", root.Status())
+				}
+			} else {
+				if err != nil || !isRateLimitedRequeue(res) {
+					t.Fatalf("Reconcile = %v, %v; want a rate-limited requeue", res, err)
+				}
+				if root.Status().Code != codes.Unset {
+					t.Errorf("status = %v, want Unset", root.Status())
+				}
 			}
 			if got, ok := eventAttr(root, tracing.EventConflict, string(tracing.AttrStep)); !ok || got != string(step) {
 				t.Errorf("k8s.conflict step = %q (%v), want %s; events %v", got, ok, step, events(root))

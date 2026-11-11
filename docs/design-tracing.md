@@ -512,15 +512,17 @@ Event names are fixed, and their attributes are under `provider_runtime.`:
 |---|---|---|
 | `ratelimit.deferred` | a `gate` returns a Deferral (`ratelimit.go:140-162`) | `provider_runtime.ratelimit.key`, `.cause` (`throttled`, `capacity`, from `DeferReason.Cause()`), `.requeue_after_s`, and `.until` (RFC 3339) for throttled only |
 | `reconcile.paused` | the pause short-circuit (`reconciler.go:809`) | none |
-| `k8s.conflict` | a path that requeues because `kerrors.IsConflict(err)` | `provider_runtime.step`: `connect` (`reconciler.go:898`), `observe` (`:940`), `handshake` (the marker-removing Update, `:1047`), `finalizer` (`:836`, `:1136`, `:1162`), `create_pending` (`:1192`), `create` (`:1241`), `late_init` (`:1303`), or `marker` (§6.2) |
+| `k8s.conflict` | a path that requeues because `kerrors.IsConflict(err)`, or a status write that conflicts, which the pass returns as its error (#80) | `provider_runtime.step`: `connect` (`reconciler.go:898`), `observe` (`:940`), `handshake` (the marker-removing Update, `:1047`), `finalizer` (`:836`, `:1136`, `:1162`), `create_pending` (`:1192`), `create` (`:1241`), `late_init` (`:1303`), `marker` (§6.2), or `status` (every status write, through `writeStatus`; design-status-write-conflict §7.1) |
 | `trace.marker_failed` | the §6.2 marker write failed with anything but a conflict | `exception.message` |
 | `credentialuse.acquire`, `credentialuse.release` | reserved: credential-use isn't wired into the reconciler yet (`pkg/credentialuse/doc.go`: "nothing in provider-runtime uses this package yet"; the plan's PR 7 wires it) | named when PR 7 is designed: the number of refs and the outcome class, never a Secret's data |
 
 A deferral is at most one event per pass, because the pass ends on it. The
-`step` set is every `IsConflict` site in `reconciler.go` at `3ab2917`. A source
-test (§10) fails if one is added without a step. The event keys on
-`IsConflict` only: a conflict that a path wraps or turns into a
-`ReconcileError` is not this event.
+`step` set is every `IsConflict` site in `reconciler.go` at `3ab2917`, and
+`status`, added with #80. A source test (§10) fails if one is added without a
+step. The event keys on `IsConflict` only: a conflict that a path wraps or
+turns into a `ReconcileError` is not this event. `status` is the one step
+whose pass doesn't requeue: the conflict stays the pass's error, and the root
+is Error (§7).
 
 ## 5. Resource attributes
 
@@ -1088,6 +1090,7 @@ The root's status follows how the pass ended:
 | The unresolved create handshake, inside its recovery window (`reconciler.go:1012-1016`): `ReconcileError` written, nil returned | False, `ReconcileError` | Error, with the condition's message | `RecordError` |
 | A governor deferral (`ratelimit.go:180-199`) | False, `ReconcileDeferred` | Unset | `ratelimit.deferred` |
 | A conflict requeue (`rateLimitedRequeue()` on `IsConflict`), the marker's included | unchanged | Unset | `k8s.conflict`, with its step (§4.5) |
+| A status write that conflicts (since #80): the pass returns the conflict, which names the likely cause and keeps the pass's own error | not written | Error, with `err.Error()` as description | `k8s.conflict`, step `status`, and `RecordError(err)` |
 | Paused (`reconciler.go:809-818`) | False, `ReconcilePaused` | Unset | `reconcile.paused` |
 | Success, including `RequeueAfter` | True, `ReconcileSuccess` | Unset, never Ok | none |
 | A panic | none written | Error, `panic` | none |

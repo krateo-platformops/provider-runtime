@@ -285,7 +285,9 @@ func (p *tracePass) event(name string, attrs ...attribute.KeyValue) {
 	p.span.AddEvent(name, trace.WithAttributes(attrs...))
 }
 
-// conflict records that the pass requeues because a write at step conflicted.
+// conflict records that a write at step conflicted. At every step but
+// tracing.StepStatus the pass then requeues; a status conflict is the pass's
+// error.
 func (p *tracePass) conflict(step tracing.Step) {
 	if p.tp == nil {
 		return

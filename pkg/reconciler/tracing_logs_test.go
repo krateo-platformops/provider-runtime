@@ -171,8 +171,10 @@ func TestTracingSourceRules(t *testing.T) {
 		}
 		return true
 	})
-	if conflicts != 9 {
-		t.Errorf("found %d IsConflict sites, want the 9 design §4.5 lists; update tracing.Steps and this test together", conflicts)
+	// 9 that requeue (design-tracing §4.5), and writeStatus's, which every status
+	// write goes through (design-status-write-conflict §7.1).
+	if conflicts != 10 {
+		t.Errorf("found %d IsConflict sites, want the 10 design-tracing §4.5 lists; update tracing.Steps and this test together", conflicts)
 	}
 	if reconcileErrors == 0 {
 		t.Error("found no ReconcileError site: the source test is reading the wrong thing")
