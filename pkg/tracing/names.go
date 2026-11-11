@@ -42,6 +42,14 @@ const (
 	AttrStep                  = tracecontext.AttrStep
 )
 
+// AttrActed is a bool on the reconcile root, true when the pass started an act
+// step (create, update or delete), joined upstream or not, and never set
+// false. The collector's tail sampler keeps the traces that carry it, so every
+// change a provider makes keeps its reconcile (provider-runtime#74,
+// docs/design-tracing.md §6.7). It's plumbing's tracecontext key, which
+// unstructured-runtime sets too.
+const AttrActed = tracecontext.AttrActed
+
 // A Step names the write that returned a conflict, as the k8s.conflict event's
 // provider_runtime.step attribute. The set is every kerrors.IsConflict site in
 // the reconciler, and the marker write.

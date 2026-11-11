@@ -252,7 +252,10 @@ func (p *tracePass) step(ctx context.Context, name string) (context.Context, tra
 // actStep opens an act step (create, update or delete). The pass's first
 // act step for a new value is parented on the upstream context, carries the
 // root's object attributes and a link back to the root, and the root links to
-// it (D8); every other is an ordinary child of the root.
+// it (D8); every other is an ordinary child of the root. Every act step marks
+// the root with provider_runtime.acted, joined or not (#74, design-tracing
+// §6.7): StartActStep does it for the joined one, and MarkActed here for the
+// rest. ctx is the pass's externalCtx, whose active span is the root.
 func (p *tracePass) actStep(ctx context.Context, name string) (context.Context, trace.Span) {
 	if p.tp == nil {
 		return tracing.StartStep(ctx, nil, name)
@@ -261,6 +264,7 @@ func (p *tracePass) actStep(ctx context.Context, name string) (context.Context, 
 		p.actJoined = true
 		return tracing.StartActStep(ctx, p.tp, p.obj, name, p.d.Remote)
 	}
+	tracing.MarkActed(ctx)
 	return tracing.StartStep(ctx, p.tp, name)
 }
 
