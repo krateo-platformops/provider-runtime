@@ -35,6 +35,10 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   - `kerrors.IsConflict`, `errors.Is` on the pass's error, and
     `resource.IsAPIErrorWrapped` still see through it: it's a
     `kerrors.APIStatus` itself, the conflict's.
+  - **So `resource.IsAPIError(err)` is now true on the bare error,** where
+    it was false for the old wrapped one. A consumer that wraps a call in
+    `retry.OnError(…, resource.IsAPIError, …)` would now retry a status
+    conflict.
   - Before, on an error path, the status conflict replaced the pass's own
     error (an Observe or Update failure, for example). Now both are kept.
   - It stays an error that `Reconcile` returns, not a silent requeue.
@@ -59,7 +63,8 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   - Its cost: one in-memory deep copy of the managed object per pass (the
     pass's read, kept for the comparison), and one uncached Get, only when a
     status write conflicts. With a rate-limit governor, the governor's copy
-    is that same one.
+    is that same one, except on a pass where the trace marker write moved the
+    version (at most once per trace window), which takes two.
 - **`reconcilertest.AssertLeavesManagedCurrent`,** with its `Method` type. It
   runs one of a provider's methods against a stored object, writes `mg`'s
   status as the runtime would, and fails if that write conflicts or reverts a

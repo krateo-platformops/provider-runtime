@@ -756,7 +756,8 @@ func WithThrottledRecorder(er event.Recorder) ReconcilerOption {
 // Setting it costs one in-memory deep copy of the managed object per pass (the
 // pass's read, kept for the comparison), and one uncached Get, only when a
 // status write conflicts. With a rate-limit governor too, the governor reuses
-// that copy, so a pass still takes one.
+// that copy, so a pass takes one copy, or two on a pass where the trace marker
+// write moved the version, which happens at most once per trace window.
 //
 // Without it, or with a nil reader, a status conflict's error is the plain
 // message. NewReconciler can't take the reader from its manager itself: a
