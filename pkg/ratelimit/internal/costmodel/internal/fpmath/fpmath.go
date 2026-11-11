@@ -1,3 +1,64 @@
+// Exp, Log, Sin and Cos in this file are derived from Go's math package
+// (src/math/exp.go, log.go and sin.go), under this licence:
+//
+//	Copyright 2009 The Go Authors.
+//
+//	Redistribution and use in source and binary forms, with or without
+//	modification, are permitted provided that the following conditions are
+//	met:
+//
+//	   * Redistributions of source code must retain the above copyright
+//	notice, this list of conditions and the following disclaimer.
+//	   * Redistributions in binary form must reproduce the above
+//	copyright notice, this list of conditions and the following disclaimer
+//	in the documentation and/or other materials provided with the
+//	distribution.
+//	   * Neither the name of Google LLC nor the names of its
+//	contributors may be used to endorse or promote products derived from
+//	this software without specific prior written permission.
+//
+//	THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+//	"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+//	LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+//	A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+//	OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+//	SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+//	LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+//	DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+//	THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+//	(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+//	OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//
+// Go's exp.go and log.go are from FreeBSD's msun (e_exp.c, e_log.c), which
+// came with these notices:
+//
+//	Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
+//
+//	Permission to use, copy, modify, and distribute this
+//	software is freely granted, provided that this notice
+//	is preserved.
+//
+//	Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+//
+//	Developed at SunPro, a Sun Microsystems, Inc. business.
+//	Permission to use, copy, modify, and distribute this
+//	software is freely granted, provided that this notice
+//	is preserved.
+//
+// Go's sin.go is from the Cephes library
+// (http://netlib.sandia.gov/cephes/cmath/sin.c):
+//
+//	Cephes Math Library Release 2.8:  June, 2000
+//	Copyright 1984, 1987, 1989, 1992, 2000 by Stephen L. Moshier
+//
+//	The readme file at http://netlib.sandia.gov/cephes/ says:
+//	   Some software in this archive may be from the book _Methods and
+//	Programs for Mathematical Functions_ (Prentice-Hall or Simon & Schuster
+//	International, 1989) or from the Cephes Mathematical Library, a
+//	commercial product. In either event, it is copyrighted by the author.
+//	What you see here may be used freely but it comes with no support or
+//	guarantee.
+
 // Package fpmath is the few elementary functions the cost model and its
 // simulation need, computed the same way on every platform.
 //
@@ -11,13 +72,8 @@
 // ("Floating-point operators"). Their results are the same bits on every
 // platform; they may differ from the math package's in the last place.
 //
-// Exp, Log, Sin and Cos are from Go's math package (exp.go, log.go, sin.go),
-// Copyright 2009–2011 The Go Authors, used under its BSD-style license; Go's
-// code is in turn from FreeBSD's msun (Copyright (C) 1993 by Sun
-// Microsystems, Inc.: "Developed at SunPro, a Sun Microsystems, Inc. business.
-// Permission to use, copy, modify, and distribute this software is freely
-// granted, provided that this notice is preserved.") and from the Cephes
-// library (http://netlib.sandia.gov/cephes/cmath/sin.c, Stephen L. Moshier).
+// Exp, Log, Sin and Cos are derived from Go's math package, whose licence and
+// notices are at the top of this file and in the repository's NOTICE.
 package fpmath
 
 import "math"
