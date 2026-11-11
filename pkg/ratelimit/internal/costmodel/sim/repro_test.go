@@ -38,24 +38,24 @@ var reproRuns = []struct {
 	cfg  func() Config
 	want string
 }{
-	{"limit halves, seed 12, cost model", func() Config { return gateCfg("limit halves", 12) }, ""},
+	{"limit halves, seed 12, cost model", func() Config { return gateCfg("limit halves", 12) }, "0b71a227a868b903f20b63e6988be0c1a414e2bc91c9b8703a586395e11e85bc"},
 	{"limit halves, seed 12, level PI ×1", func() Config {
 		c := gateCfg("limit halves", 12)
 		ctlBaseline(1).apply(&c)
 		return c
-	}, ""},
+	}, "5b576452ae8c92cd7d98831d1f50c84338d95d616ad9aae5095f5336dc72130b"},
 	{"limit halves, seed 12, reservation gate", func() Config {
 		c := gateCfg("limit halves", 12)
 		ctlReserve.apply(&c)
 		return c
-	}, ""},
-	{"mix shift seen, seed 1, cost model", func() Config { return gateCfg("mix shift seen", 1) }, ""},
+	}, "ffd2e1fc4c097d20270d8be56ad983de19147ad16ec2abdfb9490f7667b3dbcc"},
+	{"mix shift seen, seed 1, cost model", func() Config { return gateCfg("mix shift seen", 1) }, "1629b60a105177e009759d20e41dc6f6206572e272ee7eba86cb71b79d869de6"},
 	{"drain plant at 4 slots, seed 9001, 600 s", func() Config {
 		c := measured(9001)
 		c.Queues[0].Class = fixedClass(drainHeavy())
 		c.Fixed, c.Duration = 4, 600*time.Second
 		return c
-	}, ""},
+	}, "d7328296e71dd3cb6b255aa83b3d04bdd35db2e73dbb6b5e452945ea933b440b"},
 }
 
 // TestReproducible checks each run's trace against its committed hash.

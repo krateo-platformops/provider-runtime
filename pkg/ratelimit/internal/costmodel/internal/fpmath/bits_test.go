@@ -10,7 +10,7 @@ import (
 // bitsWant is the SHA-256 of the functions' bits over TestAgainstMath's ranges,
 // committed:
 // the same on every platform (plan §4.5, the user's decision of 2026-11-11).
-const bitsWant = ""
+const bitsWant = "826d45fc550c0ba89d5b8161ddd3131b48e9b727b69ca928d81b4788b04e2f8e"
 
 // TestBits checks the functions' exact bits over a grid against bitsWant.
 func TestBits(t *testing.T) {
