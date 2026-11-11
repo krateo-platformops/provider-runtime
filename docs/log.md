@@ -12,7 +12,7 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.16.0: a status conflict names its cause
+## 2026-11-11 — v1.16.0: a status conflict names its cause
 - **A minor release: the error text of a status conflict changes, and there
   are four new exports:** `reconciler.WithAPIReader`, `tracing.StepStatus`,
   `reconcilertest.AssertLeavesManagedCurrent` and `reconcilertest.Method`.
