@@ -362,13 +362,21 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 	// only the stateful search and the reduced one are compared: §11.3's
 	// reduced coverage, where the stateless reference is infeasible.
 	withStateless := os.Getenv("CREDENTIALUSE_MODEL_DIFF_STATELESS") != "off"
-	var plain searchResult
+	// The three searches are independent, so they run side by side; the
+	// stateful ones are serial, and would otherwise follow a long stateless
+	// search.
+	var plain, full, reduced searchResult
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); full = search(t, sc, b, true, true) }()
+	go func() { defer wg.Done(); reduced = search(t, sc, b, true, false) }()
 	if withStateless {
 		plain = searchOn(t, sc, b, false, true, envInt("CREDENTIALUSE_MODEL_DIFF_WORKERS", 1))
 	} else {
 		plain.res.Finished = true
 		t.Logf("no stateless leg (CREDENTIALUSE_MODEL_DIFF_STATELESS=off): stateful against reduced only")
 	}
+	wg.Wait()
 	if withStateless && plain.res.Finished {
 		saveTerminal(t, plain)
 	}
@@ -378,8 +386,6 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 		}
 		t.Fatalf("stateless search didn't finish (%d schedules)", plain.res.Runs)
 	}
-	full := search(t, sc, b, true, true)
-	reduced := search(t, sc, b, true, false)
 	for _, r := range []searchResult{full, reduced} {
 		if !r.res.Finished {
 			t.Fatalf("a stateful search didn't finish (%d runs)", r.res.Runs)
@@ -606,12 +612,27 @@ func TestModelParallelStatelessIsSerial(t *testing.T) {
 // The split stateless search on a real scenario, briefly: the world, the
 // model and the scheduler share nothing between schedules, so CI's race
 // detector run finds no race in it (§11.2).
+// It also runs the differential test's three searches side by side, as
+// differential does.
 func TestModelParallelSearchShares(t *testing.T) {
-	r := searchOn(t, smallScenarios["teardown, interleaving A"], apimodel.Bounds{Faults: 1, Jumps: testJumps, MaxRuns: 200}, false, true, 4)
-	if r.res.Runs < 200 || len(r.states) == 0 {
-		t.Errorf("%d schedules, %d terminal states", r.res.Runs, len(r.states))
+	sc := smallScenarios["teardown, interleaving A"]
+	var full, reduced searchResult
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		full = search(t, sc, apimodel.Bounds{Faults: 1, Jumps: testJumps, MaxRuns: 60}, true, true)
+	}()
+	go func() {
+		defer wg.Done()
+		reduced = search(t, sc, apimodel.Bounds{Faults: 1, Jumps: testJumps, MaxRuns: 60}, true, false)
+	}()
+	r := searchOn(t, sc, apimodel.Bounds{Faults: 1, Jumps: testJumps, MaxRuns: 200}, false, true, 4)
+	wg.Wait()
+	if r.res.Runs < 200 || len(r.states) == 0 || full.res.Runs < 60 || reduced.res.Runs < 60 {
+		t.Errorf("%d schedules, %d terminal states; stateful %d runs, reduced %d", r.res.Runs, len(r.states), full.res.Runs, reduced.res.Runs)
 	}
-	for _, f := range r.res.Failures {
+	for _, f := range append(append(r.res.Failures, full.res.Failures...), reduced.res.Failures...) {
 		t.Errorf("the harness failed: %v\nschedule: %s", f.Err, f.Trace)
 	}
 }

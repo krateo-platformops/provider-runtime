@@ -237,3 +237,76 @@ var shrunkScenarios = map[string]func(w *world){
 			w.call(a, "delete h1", func() error { return w.m.Delete(widgetKey(w.ns, "h1")) })
 		})
 	}}
+
+// TestModelStatefulSize measures the stateful search and the reduced one
+// with every prune audited, as the differential test runs them, for the
+// scenarios whose stateless reference is out of reach (§11.3): whether
+// stateful against reduced fits the 24h rule. Behind
+// CREDENTIALUSE_MODEL_STATEFUL_SIZE (a Go duration: each search's time cap);
+// CREDENTIALUSE_MODEL_SIZE_ONLY picks scenarios, _SIZE_JUMPS sets T. A
+// search that finishes reports its exact counts; one that doesn't reports
+// what it reached, with its progress every 10,000 runs.
+func TestModelStatefulSize(t *testing.T) {
+	limit, err := time.ParseDuration(os.Getenv("CREDENTIALUSE_MODEL_STATEFUL_SIZE"))
+	if err != nil || limit <= 0 {
+		t.Skip("a measurement, run on its own (CREDENTIALUSE_MODEL_STATEFUL_SIZE=<cap>)")
+	}
+	t.Parallel()
+	only := regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_SIZE_ONLY"))
+	jumps := envInt("CREDENTIALUSE_MODEL_SIZE_JUMPS", testJumps)
+	for name, sc := range smallScenarios {
+		if !only.MatchString(name) {
+			continue
+		}
+		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: jumps}, {Preemptions: 1, Jumps: jumps}} {
+			for _, reduced := range []bool{false, true} {
+				leg := "stateful"
+				if reduced {
+					leg = "reduced"
+				}
+				t.Run(fmt.Sprintf("%s, %s, %+v", name, leg, b), func(t *testing.T) {
+					t.Parallel()
+					statefulSize(t, fmt.Sprintf("%s %s {%d,%d} T=%d", name, leg, b.Preemptions, b.Faults, b.Jumps), sc, b, quietMode{off: !reduced}, limit)
+				})
+			}
+		}
+	}
+}
+
+func statefulSize(t *testing.T, label string, sc func(w *world), b apimodel.Bounds, mode quietMode, limit time.Duration) {
+	start := time.Now()
+	b.Deadline = start.Add(limit)
+	runs, audits, divergences := 0, 0, 0
+	inner := runner(sc, nil, mode)
+	run := func(s *apimodel.Sched) error {
+		err := inner(s)
+		runs++
+		if runs%10_000 == 0 {
+			t.Logf("size: %s stateful runs=%d audits=%d divergences=%d elapsed=%s", label, runs, audits, divergences, time.Since(start).Round(time.Second))
+		}
+		var v violation
+		if errors.As(err, &v) {
+			return nil
+		}
+		return err
+	}
+	audit := func(pruned, witness apimodel.Witness) {
+		audits++
+		if msg := auditPrune(b, sc, pruned, witness, 1, mode); msg != "" {
+			divergences++
+			if divergences <= 3 {
+				t.Errorf("%s: merge audit: %s", label, msg)
+			}
+		}
+	}
+	res := apimodel.ExploreAudited(b, audit, run)
+	for _, f := range res.Failures {
+		t.Errorf("%s: the harness failed: %v\nschedule: %s", label, f.Err, f.Trace)
+	}
+	state := "capped"
+	if res.Finished {
+		state = "finished"
+	}
+	t.Logf("size: %s stateful %s runs=%d states=%d pruned=%d audits=%d divergences=%d elapsed=%s",
+		label, state, res.Runs, res.States, res.Pruned, audits, divergences, time.Since(start).Round(time.Second))
+}

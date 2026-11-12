@@ -121,6 +121,9 @@ type Bounds struct {
 	Jumps int
 	// MaxRuns stops the search; Explore then reports it unfinished.
 	MaxRuns int
+	// Deadline, if set, stops the search at the first schedule that would
+	// start after it; Explore then reports it unfinished. For measuring.
+	Deadline time.Time
 }
 
 // Flags say how the scheduler treats an actor.
@@ -997,6 +1000,9 @@ func explore(b Bounds, visited *Visited, audit func(pruned, witness Witness), sc
 	}()
 	for {
 		if b.MaxRuns > 0 && res.Runs >= b.MaxRuns {
+			return res
+		}
+		if !b.Deadline.IsZero() && time.Now().After(b.Deadline) {
 			return res
 		}
 		s := newSched(b, prefix, nil, visited)
