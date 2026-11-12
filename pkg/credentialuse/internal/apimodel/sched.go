@@ -917,6 +917,13 @@ func (s *Sched) choose(n int) int {
 	return i
 }
 
+// Choices returns the schedule's choices and, for each, how many options it
+// had: its path through the search's choice tree, for estimating the tree's
+// size (docs/credential-use-model-reduction.md §11).
+func (s *Sched) Choices() (choices, options []int) {
+	return slices.Clone(s.choices), slices.Clone(s.options)
+}
+
 // Steps is the schedule that ran, one entry per step, as Trace writes them.
 func (s *Sched) Steps() []string { return slices.Clone(s.trace) }
 

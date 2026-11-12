@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -224,7 +225,7 @@ func violations(err error) error {
 // runner runs a scenario with the state hash set, recording each terminal
 // state and the violations of each schedule. mode.off turns the quiet-segment
 // reduction off (§4). What the checks find comes back as a violation.
-func runner(sc func(w *world), terminal func(key string, violations []string), mode quietMode) func(s *apimodel.Sched) error {
+func runner(sc func(w *world), terminal func(s *apimodel.Sched, key string, violations []string), mode quietMode) func(s *apimodel.Sched) error {
 	return func(s *apimodel.Sched) error {
 		w := newWorld(s)
 		s.NoQuiet = mode.off
@@ -247,7 +248,7 @@ func runner(sc func(w *world), terminal func(key string, violations []string), m
 		key := w.stateKey()
 		err := w.check()
 		if terminal != nil {
-			terminal(key, normalized(err))
+			terminal(s, key, normalized(err))
 		}
 		return violations(err)
 	}
@@ -279,13 +280,22 @@ type searchResult struct {
 // with the quiet-segment reduction or without it. A stateful search audits
 // every prune.
 func search(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQuiet bool) searchResult {
+	return searchOn(t, sc, b, stateful, noQuiet, 1)
+}
+
+// searchOn is search, with a stateless search split across workers
+// (apimodel.ExploreParallel, §11.2) when workers is above 1.
+func searchOn(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQuiet bool, workers int) searchResult {
 	mode := quietMode{off: noQuiet}
 	t.Helper()
 	r := searchResult{states: map[string]bool{}, violations: map[string]bool{}, traces: map[string]string{}}
-	var cur *apimodel.Sched
-	inner := runner(sc, func(key string, vs []string) {
-		if !r.states[key] && cur != nil {
-			r.traces[key] = strings.Join(cur.Steps(), "\x1f")
+	// A parallel search runs schedules on several goroutines at once.
+	var mu sync.Mutex
+	inner := runner(sc, func(s *apimodel.Sched, key string, vs []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !r.states[key] {
+			r.traces[key] = strings.Join(s.Steps(), "\x1f")
 		}
 		r.states[key] = true
 		for _, v := range vs {
@@ -296,19 +306,24 @@ func search(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQuie
 	// on: under a mutant, the searches are compared on every violation they
 	// find, not on the first ten. Only the harness's own errors are failures.
 	run := func(s *apimodel.Sched) error {
-		cur = s
 		err := inner(s)
 		var v violation
 		if errors.As(err, &v) {
+			mu.Lock()
 			for _, m := range normalized(v.err) {
 				r.violations[m] = true
 			}
+			mu.Unlock()
 			return nil
 		}
 		return err
 	}
 	if !stateful {
-		r.res = apimodel.Explore(b, run)
+		if workers > 1 {
+			r.res = apimodel.ExploreParallel(b, workers, run)
+		} else {
+			r.res = apimodel.Explore(b, run)
+		}
 		return r
 	}
 	audit := func(pruned, witness apimodel.Witness) {
@@ -333,7 +348,9 @@ func search(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQuie
 // violations must be equal; every prune is audited.
 func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 	t.Helper()
-	plain := search(t, sc, b, false, true)
+	// CREDENTIALUSE_MODEL_DIFF_WORKERS splits the stateless leg across that
+	// many workers (§11.2); by default it is the serial search.
+	plain := searchOn(t, sc, b, false, true, envInt("CREDENTIALUSE_MODEL_DIFF_WORKERS", 1))
 	if !plain.res.Finished {
 		for _, f := range plain.res.Failures {
 			t.Errorf("stateless: %v\nschedule: %s", f.Err, f.Trace)
@@ -433,8 +450,8 @@ func auditPrune(b apimodel.Bounds, sc func(w *world), pruned, witness apimodel.W
 	// seeded at random.
 	for _, seed := range []int64{-1, -2, seed & (1<<62 - 1)} {
 		var pv, wv []string
-		pk, perr := apimodel.Replay(b, pruned.Choices, pruned.Left, seed, 10_000, runner(sc, func(_ string, vs []string) { pv = vs }, mode))
-		wk, werr := apimodel.Replay(b, witness.Choices, pruned.Left, seed, 10_000, runner(sc, func(_ string, vs []string) { wv = vs }, mode))
+		pk, perr := apimodel.Replay(b, pruned.Choices, pruned.Left, seed, 10_000, runner(sc, func(_ *apimodel.Sched, _ string, vs []string) { pv = vs }, mode))
+		wk, werr := apimodel.Replay(b, witness.Choices, pruned.Left, seed, 10_000, runner(sc, func(_ *apimodel.Sched, _ string, vs []string) { wv = vs }, mode))
 		if errors.Is(perr, apimodel.ErrCapped) || errors.Is(werr, apimodel.ErrCapped) {
 			return fmt.Sprintf("continuation %d hit the step cap", seed)
 		}
@@ -500,4 +517,65 @@ type quietMode struct{ off bool }
 // CREDENTIALUSE_MODEL_QUIET is set (work in progress, not reviewed).
 func defaultQuiet() quietMode {
 	return quietMode{off: os.Getenv("CREDENTIALUSE_MODEL_QUIET") == ""}
+}
+
+// TestModelParallelStatelessIsSerial proves the split stateless search
+// (§11.2) against the serial one where the serial one finishes: on every
+// Teardown order at {0,1} and {1,0} with T = 2, the same schedule count,
+// the same terminal abstract states and the same violations. It runs only
+// with CREDENTIALUSE_MODEL_PARALLEL_PROOF set (hours, serially); the workers
+// per search are CREDENTIALUSE_MODEL_PARALLEL_PROOF (default 4 if not a
+// number).
+func TestModelParallelStatelessIsSerial(t *testing.T) {
+	if os.Getenv("CREDENTIALUSE_MODEL_PARALLEL_PROOF") == "" {
+		t.Skip("hours of serial search, run on its own (CREDENTIALUSE_MODEL_PARALLEL_PROOF)")
+	}
+	workers := envInt("CREDENTIALUSE_MODEL_PARALLEL_PROOF", 4)
+	for name, sc := range smallScenarios {
+		if !strings.HasPrefix(name, "teardown") {
+			continue
+		}
+		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: testJumps}, {Preemptions: 1, Jumps: testJumps}} {
+			t.Run(fmt.Sprintf("%s, %+v", name, b), func(t *testing.T) {
+				t.Parallel()
+				start := time.Now()
+				serial := searchOn(t, sc, b, false, true, 1)
+				ts := time.Since(start)
+				start = time.Now()
+				split := searchOn(t, sc, b, false, true, workers)
+				tp := time.Since(start)
+				t.Logf("serial: %d schedules, %d terminal states, %d violations, %s; split over %d workers: %d schedules, %d terminal states, %d violations, %s",
+					serial.res.Runs, len(serial.states), len(serial.violations), ts.Round(time.Second),
+					workers, split.res.Runs, len(split.states), len(split.violations), tp.Round(time.Second))
+				if !serial.res.Finished || !split.res.Finished {
+					t.Fatalf("a search didn't finish: serial %v, split %v", serial.res.Finished, split.res.Finished)
+				}
+				if serial.res.Runs != split.res.Runs || serial.res.Usage != split.res.Usage {
+					t.Errorf("runs or usage differ: %d %+v against %d %+v", serial.res.Runs, serial.res.Usage, split.res.Runs, split.res.Usage)
+				}
+				if !mapsEqual(serial.states, split.states) {
+					t.Errorf("terminal abstract states differ: %d against %d", len(serial.states), len(split.states))
+				}
+				if !mapsEqual(serial.violations, split.violations) {
+					t.Errorf("violations differ: %v against %v", sortedSet(serial.violations), sortedSet(split.violations))
+				}
+				for _, f := range append(serial.res.Failures, split.res.Failures...) {
+					t.Errorf("the harness failed: %v\nschedule: %s", f.Err, f.Trace)
+				}
+			})
+		}
+	}
+}
+
+// The split stateless search on a real scenario, briefly: the world, the
+// model and the scheduler share nothing between schedules, so CI's race
+// detector run finds no race in it (§11.2).
+func TestModelParallelSearchShares(t *testing.T) {
+	r := searchOn(t, smallScenarios["teardown, interleaving A"], apimodel.Bounds{Faults: 1, Jumps: testJumps, MaxRuns: 200}, false, true, 4)
+	if r.res.Runs < 200 || len(r.states) == 0 {
+		t.Errorf("%d schedules, %d terminal states", r.res.Runs, len(r.states))
+	}
+	for _, f := range r.res.Failures {
+		t.Errorf("the harness failed: %v\nschedule: %s", f.Err, f.Trace)
+	}
 }

@@ -882,3 +882,53 @@ differential test's 18 subtests), `TestModelStatelessSize` (behind
 The schedule count is the stateless search's leaf count exactly: a probe
 draws from the options that `Run` computes, and it computes them the same way
 for a probe as for the search.
+
+### 11.2 The split: the depth-first search by choice prefix
+
+`apimodel.ExploreParallel(b, workers, scenario)` runs the stateless search's
+schedules across workers. Only the stateless search is split; the stateful
+searches are 100 to 200 times smaller, and their visited set orders them.
+
+- **A worker owns a subtree:** a choice prefix and a floor, the depth above
+  which it doesn't backtrack. It searches the subtree depth first, exactly
+  as `Explore` does: replay the prefix, run to a leaf, then take the deepest
+  owned choice with an untried option.
+- **Splitting.** After each schedule, if the queue of subtrees is shorter
+  than the number of workers, the worker hands off every untried option at
+  the shallowest depth it owns that has one, each as a subtree of its own,
+  and raises its floor past that depth. The first subtree is the whole tree.
+  No schedule runs only to learn the tree's shape.
+- **Why it runs exactly the serial search's schedules.** A schedule is a
+  leaf of the choice tree, named by its choices, and replaying a prefix
+  gives the same options, since a scenario is deterministic (the scheduler
+  panics when a replay offers fewer). A hand-off splits a subtree into the
+  part the worker keeps (the subtree under its current choice at that depth)
+  and the parts it gives away (the subtrees under the untried choices), which
+  are disjoint and together the whole. So every leaf is in exactly one
+  subtree, and is run once. The stateless search has no memory between
+  schedules, so what it reports is a function of the set of leaves: the run
+  count, the usage, the terminal states and the violations are the serial
+  search's.
+- **What differs:** the order of schedules; which ten failures are kept when
+  there are more (the differential test turns violations into records, so
+  only harness errors are failures); and `MaxRuns`, which stops the split
+  search within a worker's run of the cap.
+- **Callbacks run concurrently.** The differential test's records take a
+  lock. Each schedule builds its own world, model and scheduler, and shares
+  nothing with another; a short split search on Teardown runs under CI's
+  race detector (`TestModelParallelSearchShares`).
+
+**The tests.**
+- `TestExploreParallelIsExplore`, in apimodel: on a scenario with calls, a
+  wait, a deadline to jump to, faults and preemptions, the multiset of
+  schedules, the run count and the usage equal `Explore`'s with 1, 2, 3 and
+  8 workers, at three bounds (562, 228 and 4,200 schedules), under the race
+  detector.
+- `TestModelParallelStatelessIsSerial`, behind
+  `CREDENTIALUSE_MODEL_PARALLEL_PROOF`: on every Teardown order at {0,1} and
+  {1,0}, where the serial search finishes, the serial and split searches
+  must report the same schedule count, the same terminal abstract states and
+  the same violations. It takes hours, because its serial half is the
+  serial search (0.62 to 1.95 million schedules per subtest).
+- The differential test's stateless leg splits across
+  `CREDENTIALUSE_MODEL_DIFF_WORKERS` workers; by default it is serial.
