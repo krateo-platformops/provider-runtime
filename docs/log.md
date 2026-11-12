@@ -12,7 +12,7 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.17.1: a deleted object is not an error
+## 2026-11-12 — v1.17.1: a deleted object is not an error
 - **A patch release. Only a log level changes.** When a reconcile's Get returns
   NotFound, the normal end of a deletion, the reconciler now logs "Managed
   resource is gone" at Debug, instead of "Cannot get managed resource" at
