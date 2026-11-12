@@ -340,7 +340,8 @@ func searchOn(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQu
 	// Every violation is recorded, on a pruned run too, and the search goes
 	// on: under a mutant, the searches are compared on every violation they
 	// find, not on the first ten. Only the harness's own errors are failures.
-	// The stateless search logs its progress every million schedules, so a
+	// The stateless search logs its progress every million schedules
+	// (CREDENTIALUSE_MODEL_PROGRESS_EVERY), so a
 	// long run's throughput and ETA can be read while it runs. The ETA is
 	// against an expected total, CREDENTIALUSE_MODEL_DIFF_EXPECT
 	// ("regexp=N;regexp=N", matched against the subtest's name; the first
@@ -348,10 +349,11 @@ func searchOn(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQu
 	var done atomic.Int64
 	start := time.Now()
 	expect := expectedTotal(t)
+	every := int64(envInt("CREDENTIALUSE_MODEL_PROGRESS_EVERY", 1_000_000))
 	run := func(s *apimodel.Sched) error {
 		err := inner(s)
 		if !stateful {
-			if n := done.Add(1); n%1_000_000 == 0 {
+			if n := done.Add(1); n%every == 0 {
 				el := time.Since(start)
 				rate := float64(n) / el.Seconds()
 				eta := "no expected total"
