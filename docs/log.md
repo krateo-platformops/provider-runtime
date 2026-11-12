@@ -12,7 +12,7 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## Unreleased — v1.18.0: create markers keep sub-second precision
+## 2026-11-12 — v1.18.0: create markers keep sub-second precision
 - **A minor release: the `krateo.io/external-create-pending`, `-succeeded` and
   `-failed` markers are now written with RFC3339Nano** (new export
   `meta.MarkerTimeLayout`). With second precision, a pending marker and its
