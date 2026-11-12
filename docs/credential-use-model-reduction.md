@@ -932,3 +932,47 @@ searches are 100 to 200 times smaller, and their visited set orders them.
   serial search (0.62 to 1.95 million schedules per subtest).
 - The differential test's stateless leg splits across
   `CREDENTIALUSE_MODEL_DIFF_WORKERS` workers; by default it is serial.
+
+### 11.3 What runs, and the pass rules (the user's decision, pre-registered)
+
+The measurement (hack/differential-credential-use-2/size-487543c/RESULTS.md)
+found 8 of the 18 subtests infeasible at T = 2, even on 128 cores. The user
+decided (2026-11-12): **the feasible set at T = 2, and a T = 1 reference for
+the rest.** In this order, each step only if the one before passes:
+
+1. **The split's proof on Teardown** (`TestModelParallelStatelessIsSerial`):
+   on the six Teardown subtests, the serial and split stateless searches run
+   side by side. **Pass:** for every subtest, both finish, with equal
+   schedule counts, equal usage, equal sets of terminal abstract states,
+   equal sets of violations, and no harness failure. Anything else stops the
+   work, and the parallel runs don't start.
+2. **The full reference at T = 2, split,** on the 10 feasible subtests:
+   Teardown ×3, acquire against release and deletions around the grace
+   (small), each at {0,1} and {1,0}. The differential test's three searches,
+   with the stateless one split (`CREDENTIALUSE_MODEL_DIFF_WORKERS`).
+   **Pass:** every search finishes; stateless against stateful and stateful
+   against reduced have equal sets of terminal abstract states and of
+   violations; every prune is audited, with 0 divergences; no harness
+   failure.
+3. **The four infeasible scenarios** (recreate, away and back, two
+   releasers, two processes, each small or shrunk), **reduced coverage:**
+   - **First, their size at T = 1,** measured as §11.1 does (Knuth's mean
+     from 20,000 probes, a 300,000-schedule capped search for the rate),
+     read by the same rules: calibrated on Teardown at T = 1, whose capped
+     searches finish; above 24h on 128 cores is infeasible. **If any is
+     infeasible at T = 1, it is reported before anything runs.**
+   - **Then the three-way comparison at T = 1,** stateless split. **Pass:**
+     as in step 2, at T = 1.
+   - **And the stateful against reduced comparison at T = 2**, with no
+     stateless leg (`CREDENTIALUSE_MODEL_DIFF_STATELESS=off`). **Pass:** both
+     finish; equal sets of terminal abstract states and of violations; every
+     prune audited, with 0 divergences; no harness failure.
+   - **What reduced coverage leaves unchecked, said in the results:** at
+     T = 2 these scenarios' stateful search is checked against a stateless
+     reference only through the merge audit, not exhaustively; the stateless
+     reference covers them at T = 1, so schedules that need a second jump
+     are compared stateful against reduced, not against the stateless
+     search.
+
+A failed rule is reported with its witness, as the differential test logs
+it. Nothing is rerun to pass.

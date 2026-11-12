@@ -19,23 +19,26 @@ import (
 // capped serial search with its rate and its position in the tree. It runs
 // only with CREDENTIALUSE_MODEL_SIZE set; CREDENTIALUSE_MODEL_SIZE_PROBES and
 // _CAP change N (20,000) and the cap (300,000), _ONLY (a regexp) picks
-// scenarios, and CREDENTIALUSE_MODEL_SEED replays the probes.
+// scenarios, _JUMPS sets T (2), and CREDENTIALUSE_MODEL_SEED replays the
+// probes.
 func TestModelStatelessSize(t *testing.T) {
 	if os.Getenv("CREDENTIALUSE_MODEL_SIZE") == "" {
 		t.Skip("a measurement, run on its own (CREDENTIALUSE_MODEL_SIZE)")
 	}
+	t.Parallel()
 	probes, limit := envInt("CREDENTIALUSE_MODEL_SIZE_PROBES", 20_000), envInt("CREDENTIALUSE_MODEL_SIZE_CAP", 300_000)
+	jumps := envInt("CREDENTIALUSE_MODEL_SIZE_JUMPS", testJumps) // T (§11.3)
 	only := regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_SIZE_ONLY"))
 	seed := walkSeed()
-	t.Logf("size: probes %d, cap %d, seed %d", probes, limit, seed)
+	t.Logf("size: probes %d, cap %d, T %d, seed %d", probes, limit, jumps, seed)
 	for name, sc := range smallScenarios {
 		if !only.MatchString(name) {
 			continue
 		}
-		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: testJumps}, {Preemptions: 1, Jumps: testJumps}} {
+		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: jumps}, {Preemptions: 1, Jumps: jumps}} {
 			t.Run(fmt.Sprintf("%s, %+v", name, b), func(t *testing.T) {
 				t.Parallel()
-				label := fmt.Sprintf("%s {%d,%d}", name, b.Preemptions, b.Faults)
+				label := fmt.Sprintf("%s {%d,%d} T=%d", name, b.Preemptions, b.Faults, b.Jumps)
 				knuth(t, label, sc, b, probes, seed)
 				capped(t, label, sc, b, limit)
 			})

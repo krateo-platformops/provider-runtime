@@ -258,8 +258,15 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	if raceEnabled || os.Getenv("CREDENTIALUSE_MODEL_BOUNDS") != "" {
 		t.Skip("the differential test runs in the model step, on its own bounds")
 	}
+	// For the measured runs of §11.3: CREDENTIALUSE_MODEL_DIFF_ONLY (a regexp)
+	// picks scenarios, and CREDENTIALUSE_MODEL_DIFF_JUMPS sets T.
+	only := regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY"))
+	jumps := envInt("CREDENTIALUSE_MODEL_DIFF_JUMPS", testJumps)
 	for name, sc := range smallScenarios {
-		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: testJumps}, {Preemptions: 1, Jumps: testJumps}} {
+		if !only.MatchString(name) {
+			continue
+		}
+		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: jumps}, {Preemptions: 1, Jumps: jumps}} {
 			t.Run(fmt.Sprintf("%s, %+v", name, b), func(t *testing.T) {
 				t.Parallel()
 				differential(t, sc, b)
@@ -349,8 +356,18 @@ func searchOn(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQu
 func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 	t.Helper()
 	// CREDENTIALUSE_MODEL_DIFF_WORKERS splits the stateless leg across that
-	// many workers (§11.2); by default it is the serial search.
-	plain := searchOn(t, sc, b, false, true, envInt("CREDENTIALUSE_MODEL_DIFF_WORKERS", 1))
+	// many workers (§11.2); by default it is the serial search. With
+	// CREDENTIALUSE_MODEL_DIFF_STATELESS=off there is no stateless leg, and
+	// only the stateful search and the reduced one are compared: §11.3's
+	// reduced coverage, where the stateless reference is infeasible.
+	withStateless := os.Getenv("CREDENTIALUSE_MODEL_DIFF_STATELESS") != "off"
+	var plain searchResult
+	if withStateless {
+		plain = searchOn(t, sc, b, false, true, envInt("CREDENTIALUSE_MODEL_DIFF_WORKERS", 1))
+	} else {
+		plain.res.Finished = true
+		t.Logf("no stateless leg (CREDENTIALUSE_MODEL_DIFF_STATELESS=off): stateful against reduced only")
+	}
 	if !plain.res.Finished {
 		for _, f := range plain.res.Failures {
 			t.Errorf("stateless: %v\nschedule: %s", f.Err, f.Trace)
@@ -373,7 +390,7 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 		plain.res.Runs, len(plain.states), len(plain.violations),
 		full.res.Runs, full.res.States, full.res.Pruned, len(full.states), len(full.violations), full.audits, full.divergences,
 		reduced.res.Runs, reduced.res.States, reduced.res.Pruned, len(reduced.states), len(reduced.violations), reduced.audits, reduced.divergences)
-	for _, v := range sortedSet(plain.violations) {
+	for _, v := range sortedSet(full.violations) {
 		t.Logf("violation: %s", v)
 	}
 	u := plain.res.Usage
@@ -418,7 +435,9 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 			t.Errorf("%s: violations differ: %v against %v", what, sortedSet(a.violations), sortedSet(b.violations))
 		}
 	}
-	compare("stateless against stateful", plain, full)
+	if withStateless {
+		compare("stateless against stateful", plain, full)
+	}
 	compare("unreduced against reduced", full, reduced)
 }
 
@@ -530,6 +549,7 @@ func TestModelParallelStatelessIsSerial(t *testing.T) {
 	if os.Getenv("CREDENTIALUSE_MODEL_PARALLEL_PROOF") == "" {
 		t.Skip("hours of serial search, run on its own (CREDENTIALUSE_MODEL_PARALLEL_PROOF)")
 	}
+	t.Parallel()
 	workers := envInt("CREDENTIALUSE_MODEL_PARALLEL_PROOF", 4)
 	for name, sc := range smallScenarios {
 		if !strings.HasPrefix(name, "teardown") {
@@ -538,12 +558,24 @@ func TestModelParallelStatelessIsSerial(t *testing.T) {
 		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: testJumps}, {Preemptions: 1, Jumps: testJumps}} {
 			t.Run(fmt.Sprintf("%s, %+v", name, b), func(t *testing.T) {
 				t.Parallel()
-				start := time.Now()
-				serial := searchOn(t, sc, b, false, true, 1)
-				ts := time.Since(start)
-				start = time.Now()
-				split := searchOn(t, sc, b, false, true, workers)
-				tp := time.Since(start)
+				// The two searches run side by side, each timed.
+				var serial, split searchResult
+				var ts, tp time.Duration
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					start := time.Now()
+					serial = searchOn(t, sc, b, false, true, 1)
+					ts = time.Since(start)
+				}()
+				go func() {
+					defer wg.Done()
+					start := time.Now()
+					split = searchOn(t, sc, b, false, true, workers)
+					tp = time.Since(start)
+				}()
+				wg.Wait()
 				t.Logf("serial: %d schedules, %d terminal states, %d violations, %s; split over %d workers: %d schedules, %d terminal states, %d violations, %s",
 					serial.res.Runs, len(serial.states), len(serial.violations), ts.Round(time.Second),
 					workers, split.res.Runs, len(split.states), len(split.violations), tp.Round(time.Second))
