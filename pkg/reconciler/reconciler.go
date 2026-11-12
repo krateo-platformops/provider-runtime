@@ -396,8 +396,9 @@ type ExternalObservation struct {
 	// true; report readiness on the Ready condition instead. Answer false
 	// only for a resource observed to be absent: a wrong false re-enters the
 	// create handshake once the creation grace period ends, and a wrong true
-	// means Create never runs. If the lookup itself cannot answer, return an
-	// error rather than guess. See docs/overview.md.
+	// means Create never runs. If the lookup itself cannot answer, never
+	// guess true; docs/overview.md says when false is still safe and when an
+	// error is correct.
 	ResourceExists bool
 
 	// ResourceUpToDate should be true if the corresponding external resource

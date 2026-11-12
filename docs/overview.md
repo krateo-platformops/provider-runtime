@@ -96,11 +96,15 @@ condition (for example `Unavailable().WithMessage(...)`), and keep
 `ResourceUpToDate: true` if no update would help, so the runtime waits in the
 observe path.
 
-Answer `false` only for a resource you observed to be absent. If your own
-lookup couldn't answer, because of a stale or wrong key or an unreadable
-prerequisite, neither value is a safe guess. Return an error if a retry can
-answer it; otherwise fix the lookup (see below). The two wrong answers fail
-differently:
+Answer `false` for a resource you observed to be absent. If your own lookup
+couldn't answer, because of a stale or wrong key or an unreadable
+prerequisite, never guess `true`; apply the duplication test below instead.
+It allows `false` when `Create` is idempotent for this resource and would hit
+the same failure, so the handshake closes as `external-create-failed`. A
+template that can never render is that case. It doesn't cover a lookup that
+keeps missing a resource `Create` did make: every `false` after the creation
+grace period starts the handshake again, so fix that lookup. The two wrong
+answers fail differently:
 
 - **A wrong `false`** is loud. After the creation grace period (30s by default,
   `WithCreationGracePeriod`) the runtime starts the create handshake again on
