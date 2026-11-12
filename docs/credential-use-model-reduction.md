@@ -989,6 +989,13 @@ That review found revision 1 unsound, with two counterexamples at P = 0, F = 0,
 T = 0 (CE1 and CE2). Each fix below is checked against both, and against the
 lemma.*
 
+*Revision 3a adds the re-review of revision 3's spec items
+([credential-use-model-reduction-review-12c.md](./credential-use-model-reduction-review-12c.md)),
+which found the rule unchanged and stage B ready: the recording context as a
+stack, three clock reads, the analyzer's five rules, the recorder API, the
+CE tests' fixtures, the detector's cost, stage B's bookkeeping, and
+corrections to the MSR-TR reading.*
+
 *Revision 3 answers the re-review of revision 2
 ([credential-use-model-reduction-review-12b.md](./credential-use-model-reduction-review-12b.md)):
 sound up to its assumptions as far as a hand search goes, not yet a proof. It
@@ -1036,8 +1043,9 @@ independent transition can change another's cost).
   Revision 1 dropped the companion, which is CE1.
 - **Musuvathi and Qadeer, "Partial-Order Reduction for Context-Bounded State
   Exploration" (MSR-TR-2007-12), read.**
-  - Their Figure 1 is our §12.1 example in their words. Sleep sets with
-    context bound 0 lose an execution that has context bound 0. They
+  - Their Figure 1 is the same phenomenon as §12.1's example, not the same
+    program (their T1 is disabled rather than still enabled). Sleep sets
+    with context bound 0 lose an execution that has context bound 0. They
     "believe that a similar issue would arise even with other partial-order
     reduction algorithms".
   - Their bound is ours. A context switch counts when the previous thread
@@ -1048,15 +1056,32 @@ independent transition can change another's cost).
     - Algorithm 1 visits each partial order with bound ≤ c, and every prefix
       of it, exactly once, by caching graphs;
     - Algorithm 2 visits each terminal partial order exactly once.
-    - Theorem 2's coverage is every reachable state s with CB(s) ≤ c. That
-      is our unreduced search's set of terminal states, since a partial
-      order is within the bound iff one of its linearizations is.
+    - Theorem 2's "state" is a happens-before graph, a trace, not a program
+      state: s is visited iff some execution reaches it with CB(s) ≤ c. It
+      maps to our terminal global states because a global state is
+      reachable within the bound iff one of its traces is, and every
+      linearization of a trace ends in the same global state.
   - It needs the same dependence relation as §12.2, plus a happens-before
-    graph per state. Computing a state's bound is NP-hard in general
-    (Theorem 5); they compute it incrementally.
+    graph per state. Deciding a state's bound is NP-complete (Theorem 5);
+    they compute it by dynamic programming, incrementally.
   - It is an alternative, not adopted here. The user chose sleep sets, and
     §12.3's rule needs only entries on the replay stack. It is recorded as
-    the fallback if §12.3 fails its proof or its gate.
+    the fallback if §12.3 fails its proof or its gate. As a fallback it
+    would need three things the report doesn't have:
+    - **§12.2's tick relation.** Their edges are reads and writes per
+      variable, with no commuting-write class. Our ticks as plain writes to
+      the clock would order every call after every other.
+    - **The last visible actor carried through jumps.** Their model has no
+      jumps and no quiet steps, so last(α) is always the previous step's
+      thread. With ours, the CB(s, t) recursion over the frontier must carry
+      the last visible actor through jumps, or CE2's mechanism comes back in
+      the bound's computation.
+    - **Per-state bounds for P only.** F and T are the same in every
+      linearization of a trace.
+
+    It is stateful and keyed on traces, independent of §10's abstract key,
+    which would make it a useful cross-check. It shares §12.2's footprints,
+    so the footprint work is a prerequisite either way.
 - We need more than local states: the differential test compares *global*
   terminal states and violations, so §12.3's lemma is about global states.
 
@@ -1087,6 +1112,27 @@ independent transition can change another's cost).
     the guards run with no running actor, and that is D3 again.
   - This is sound because the instrumentation's effect on the run, the
     ticks, is caught by the term and deadline diff.
+  - **The context is a stack** (the third review's Q2). Off scopes run
+    inside on scopes: a call's step is on, and its tick calls `pending()`,
+    `Deadlines()` and `Terms()`, which are off. Guard evaluation, which is
+    on, runs inside the scheduler's option loop. So every scope pushes and
+    pops, and the innermost decides. The stack must be empty between steps,
+    and an assertion checks it.
+  - **It lives on each `Sched`,** reached through the world, never in a
+    package variable. `ExploreParallel` runs Scheds concurrently, and a
+    global context would race and charge reads to another worker's
+    transition.
+  - **Guard reads are recorded at two points only:** the option loop's
+    evaluation of each actor's Wait, charged to that actor at that state,
+    and F1's evaluation of the last actor's guard. `liveActors` evaluates
+    guards too; that is off. So no guard read is charged to the previous
+    transition.
+- **One recorder API, in apimodel:** `Sched.Read(obj)`, `Sched.Write(obj)`
+  and `Sched.Tick()`, with one scheme for naming objects (model key, the
+  log, a process's cache, verified set, first sights and generation, a
+  world field, the clock). The harness's tracked accessors, the CE tests,
+  the generated differential's declared read and write sets, and the write
+  detector's snapshot components all use it.
 - **The model:**
   - each key, read or write;
   - every write also writes **the log**: it appends an event and takes the
@@ -1109,7 +1155,12 @@ independent transition can change another's cost).
   - every reading is a read: `Clock.Now` from an actor's code, the model's
     own timestamps on Create and Delete, the read monitor and the
     deliveries. **The model gets its own clock function (R6),** recorded in
-    the context. `Sched.Now` stays what its doc says: an unrecorded read for
+    the context. **Three actor-body reads that use `Sched.Now` today move to
+    it** (the third review's Q1), since each feeds a safety verdict: the
+    hold's time (`holds[id] = hold{at: …}`), the read monitor's time
+    (`w.onRead(…, w.s.Now(), …)`), and the release's `at` before
+    `onRelease`. The analyzer forbids `Sched.Now` anywhere but `Key`,
+    `Terms` and setup. `Sched.Now` stays what its doc says: an unrecorded read for
     the state hash;
   - a call's tick is a *tick*. Ticks commute with ticks and conflict with
     reads.
@@ -1290,12 +1341,37 @@ read side is closed by construction, and the audit is the backstop.
      its reads and writes in the recording context of §12.2. That covers
      the world's monitors and counters, each process's memory and caches,
      and the model.
-   - A small `go/analysis` check forbids any access to those fields outside
-     the accessors. It runs in CI with the model's tests.
-   - The same check forbids closure-captured variables shared between
-     actors (R5).
-2. **A deterministic write detector**, on every transition of every reduced
-   run in the tests and differentials:
+   - A small `go/analysis` check enforces five rules over the model
+     packages (the third review's Q3), in CI with the model's tests:
+     1. **No direct access, and no aliases.** Tracked fields are reached
+        only through their accessors, and accessors return values or
+        immutable copies, never an inner map, slice or pointer. A local that
+        stores a tracked container is flagged. Today's
+        `holds := w.holds[spec.name]`, kept for a holder's whole life, is
+        why.
+     2. **No package-level state written during a run.** `epochSeq`, the
+        package-global epoch counter, becomes a tracked per-world counter.
+        As it stands, two replays of one schedule get different epoch names,
+        so the read audit's concrete comparison would fail on every pair.
+     3. **A hook with a mode in every method of a tracked type.** Every
+        method calls the recorder with read or write on entry. `verified`'s
+        and `firstSight`'s methods call `onAccess` today, but without a
+        mode.
+     4. **No `reflect`, `unsafe`, or `fmt` verbs on tracked types,** except
+        in the write detector and the state encoder.
+     5. **No closure-shared state.** A variable captured by more than one
+        actor's code, including through helpers (specs passed to `w.holder`,
+        guard closures built in scenario code), is flagged unless it is
+        never written after `s.Run` begins.
+
+     With these, the read side is closed by construction within the model
+     packages. What remains is that each accessor names the right object,
+     which the audit checks.
+2. **A deterministic write detector.** It runs on every transition in the
+   unit tests, the generated differential and the Teardown factor run. On
+   the large differentials it runs on a seeded sample of schedules (1 in
+   100, logged), because it costs two deep snapshots per transition, on top
+   of a schedule's 270 KB of allocation. Each check:
    - before and after each transition, outside the recording context, a
      deep snapshot of the model (objects, log, resourceVersion and UID
      counters), every process's memory and caches, every `apimodel.Proc`
@@ -1304,8 +1380,10 @@ read side is closed by construction, and the audit is the backstop.
    - every object that changed must be in the transition's recorded write
      set. A change outside it fails the run.
 3. **CE1, CE2 and §12.1's example as exhaustive unit tests** in
-   sched_test.go: the reduced search's terminal states must equal the
-   unreduced one's.
+   sched_test.go, written with the recorder API's declared read and write
+   sets. Stage A records their unreduced terminal sets as fixtures, and
+   checks that the unreduced search reproduces them. Stage B adds the
+   reduced search, whose terminal sets must equal the fixtures.
 4. **A generated differential** (the re-review's item 5):
    - thousands of tiny random scenarios, with at most 4 actors and about 4
      steps each;
@@ -1363,13 +1441,27 @@ no proof effort is spent if the factor fails.
      without now (R2) and the model's own clock (R6);
    - the tracked accessor types and the analyzer (§12.4 item 1);
    - the write detector (item 2);
-   - CE1, CE2 and the lost-state example as unit tests (item 3).
+   - the recorder API, the context stack on each `Sched`, the model's own
+     clock with the three call sites moved, the per-world epoch counter;
+   - CE1, CE2 and the lost-state example as unit tests, with their
+     unreduced terminal sets as fixtures (item 3).
 
    **The gate's rule is pre-registered in the same commit as stage A**,
    before the factor is measured: what "clearly can't reach" the 1.25 to
    3.2 times that away and back and two releasers need means.
 3. **Stage B:** the rule of §12.3 with R3 to R5, in `Explore` and
-   `ExploreParallel`.
+   `ExploreParallel`, with these points of bookkeeping:
+   - a's options at s are contiguous (its fault variants), so "a's subtree
+     is searched" is the moment the DFS backtracks past a's last option at
+     that depth;
+   - the union is accumulated per depth from every run whose first steps
+     from s are a's uninterrupted complete segment;
+   - a deferred prune returns a status of its own, which `Explore` and
+     `ExploreParallel` count as neither a failure nor a terminal state;
+   - because F3 filters nothing, the options at every state, and so the
+     choice indices, are the same with and without the rule. Replay depends
+     on that, so it is stated and tested: a replay of any reduced schedule's
+     choices without the rule must offer the same options at every step.
 4. **Stage C:** the factor, measured on the six Teardown subtests at T = 2,
    reduced run counts against the known 616,721 to 1,951,942, and terminal
    sets against step 2's saved sets.
@@ -1387,17 +1479,18 @@ no proof effort is spent if the factor fails.
 
 | stage | work | days |
 |---|---|---|
-| A | footprints with R1, R2 and R6; the recording context; the tracked accessors and the analyzer, which refactor the harness's world and process fields; the write detector; the CE unit tests | 3 to 3.5 |
+| A | footprints with R1, R2 and R6; the recorder API and the context stack; the tracked accessors and the analyzer's five rules, which refactor the harness's world and process fields and the epoch counter; the write detector; the CE tests with fixtures | 3.5 to 4 |
 | B | the rule with F1 to F3 and R3 to R5; entries on the replay stack; the parallel hand-off | 1.5 |
 | C | the factor on Teardown | 0.25, plus about 2 to 4h of VM |
-| | **to the gate** | **about 5** |
+| | the write detector's VM cost: two deep snapshots per transition, on every transition of the Teardown factor run (about 2 to 3 times that run's time) and on 1 in 100 schedules elsewhere | in the VM times |
+| | **to the gate** | **about 5.5** |
 | past the gate | the proof, written out | 1.5 to 2 |
 | | the generated differential | 1.5 |
 | | the stratified read audit | 1 |
 | | the soundness differential and the T = 1 runs (VM time scales as the unreduced runs divided by the factor) | 0.5, plus VM |
 | | re-review cycles | 1 |
 | | **past the gate** | **about 5.5 to 6** |
-| | **total** | **about 10.5 to 11** |
+| | **total** | **about 11 to 11.5** |
 
 Every VM run here also pays the checker's allocation cost: about 450 KB per
 schedule, mostly the model's deep copies in instrumentation paths. In step 2
