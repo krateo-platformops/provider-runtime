@@ -2,12 +2,14 @@ package credentialuse
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,22 +54,34 @@ type keyEncoder struct {
 	// says the first pass had to order two or more unknown UIDs.
 	rep       func(time.Time) string
 	ambiguous bool
+	// termsOnly collects the terms and writes nothing: the scheduler's tick
+	// needs only the set of live terms, on every call (timeTerms).
+	termsOnly bool
 }
 
 func newKeyEncoder() *keyEncoder { return &keyEncoder{names: map[string]int{}} }
 
 func (e *keyEncoder) str(s string) {
+	if e.termsOnly {
+		return
+	}
 	e.b.WriteString(strconv.Quote(s))
 	e.b.WriteByte(' ')
 }
 
 func (e *keyEncoder) tok(s string) {
+	if e.termsOnly {
+		return
+	}
 	e.b.WriteString(s)
 	e.b.WriteByte(' ')
 }
 
 // name writes a renamed name of class (uid, rv, epoch).
 func (e *keyEncoder) name(class, v string) {
+	if e.termsOnly {
+		return
+	}
 	if v == "" {
 		e.tok(class + ":-")
 		return
@@ -109,6 +123,9 @@ func (e *keyEncoder) time(t time.Time) {
 		return
 	}
 	e.terms = append(e.terms, t)
+	if e.termsOnly {
+		return
+	}
 	e.b.WriteString("\x01" + strconv.Itoa(len(e.terms)-1) + "\x01 ")
 }
 
@@ -298,11 +315,24 @@ func (w *world) stateKey() string {
 }
 
 // timeTerms are the state's live time terms, for the scheduler's tick.
-func (w *world) timeTerms() []time.Time { return w.encode(nil).terms }
+// It walks the state as encode does, writing nothing: building the whole key
+// on every tick was most of a schedule's allocation, and the allocator's
+// lock serialized the split search's workers.
+func (w *world) timeTerms() []time.Time {
+	e := newKeyEncoder()
+	e.termsOnly = true
+	w.encodeTo(e)
+	return e.terms
+}
 
 func (w *world) encode(rep func(time.Time) string) *keyEncoder {
 	e := newKeyEncoder()
 	e.rep = rep
+	w.encodeTo(e)
+	return e
+}
+
+func (w *world) encodeTo(e *keyEncoder) {
 	e.tok("now")
 	e.time(w.s.Now())
 
@@ -405,7 +435,6 @@ func (w *world) encode(rep func(time.Time) string) *keyEncoder {
 		e.value(v)
 	}
 	e.tok("]")
-	return e
 }
 
 func sortedIDs[V any](m map[ID]V) []ID {
@@ -518,4 +547,56 @@ func (e *keyEncoder) timeRep() func(time.Time) string {
 		}
 		return "T" + strconv.FormatInt(r.n-minN, 10) + "." + strconv.Itoa(rank)
 	}
+}
+
+// timeTerms, the tick's terms-only walk, finds the same set of live terms as
+// the full encoding, at every tick of random schedules of every small
+// scenario.
+func TestTimeTermsMatchTheEncoding(t *testing.T) {
+	for name, sc := range smallScenarios {
+		checks := 0
+		res := apimodel.Walk(apimodel.Bounds{Preemptions: 1, Faults: 1, Jumps: testJumps}, 20, 1, func(s *apimodel.Sched) error {
+			w := newWorld(s)
+			sc(w)
+			s.Terms = func() []time.Time {
+				fast, full := w.timeTerms(), w.encode(nil).terms
+				checks++
+				if !sameTimes(fast, full) {
+					t.Fatalf("%s: timeTerms %v, the encoding %v", name, fast, full)
+				}
+				return fast
+			}
+			err := s.Run()
+			if errors.Is(err, apimodel.ErrPruned) {
+				return nil
+			}
+			return err
+		})
+		for _, f := range res.Failures {
+			t.Errorf("%s: %v", name, f.Err)
+		}
+		if checks == 0 {
+			t.Errorf("%s: no tick checked", name)
+		}
+	}
+}
+
+func sameTimes(a, b []time.Time) bool {
+	set := func(ts []time.Time) map[int64]bool {
+		m := map[int64]bool{}
+		for _, t := range ts {
+			m[t.UnixNano()] = true
+		}
+		return m
+	}
+	x, y := set(a), set(b)
+	if len(x) != len(y) {
+		return false
+	}
+	for k := range x {
+		if !y[k] {
+			return false
+		}
+	}
+	return true
 }
