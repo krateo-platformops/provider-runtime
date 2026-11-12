@@ -31,7 +31,11 @@ func TestModelStatelessSize(t *testing.T) {
 	only := regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_SIZE_ONLY"))
 	seed := walkSeed()
 	t.Logf("size: probes %d, cap %d, T %d, seed %d", probes, limit, jumps, seed)
-	for name, sc := range smallScenarios {
+	scenarios := smallScenarios
+	if os.Getenv("CREDENTIALUSE_MODEL_SIZE_SHRUNK") != "" {
+		scenarios = shrunkScenarios
+	}
+	for name, sc := range scenarios {
 		if !only.MatchString(name) {
 			continue
 		}
@@ -157,3 +161,79 @@ func capped(t *testing.T, label string, sc func(w *world), b apimodel.Bounds, li
 	}
 	report(" capped")
 }
+
+// shrunkScenarios are candidate shrinks of the three scenarios whose
+// stateless reference is out of reach even at T = 1 (§11.3), for sizing only
+// (CREDENTIALUSE_MODEL_SIZE_SHRUNK): each is its small scenario with one
+// deletion pass per holder instead of two, and nothing else changed.
+var shrunkScenarios = map[string]func(w *world){
+	"away and back, small, with a relist, one deletion pass": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		pb := newProcess("B", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		w.relister("relistA", &pa)
+		secret := SecretRef(w.ns, w.p.Name)
+		w.holder(holderSpec{
+			name: "h1",
+			refs: func(pass int) []Ref {
+				if pass == 1 {
+					return nil
+				}
+				return []Ref{secret}
+			},
+			livePasses: 3, deletionPasses: 1,
+		}, &pa)
+		w.releaser("releaserB", &pb, 1, true, nil)
+		w.deleter("teardown", keyOf(w.p), widgetKey(w.ns, "h1"))
+	}, "two releasers, one deletion pass": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		pb := newProcess("B", w.m, w.s.Now())
+		pc := newProcess("C", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		w.holder(holderSpec{name: "h1", livePasses: 1, deletionPasses: 1}, &pa)
+		w.releaser("releaserB", &pb, 1, true, nil)
+		w.releaser("releaserC", &pc, 1, true, nil)
+		w.deleter("teardown", keyOf(w.p), widgetKey(w.ns, "h1"))
+	}, "two processes, shrunk, one deletion pass each": func(w *world) {
+		seed(w.m, w.ns, w.p.Name, []string{"h1"}, true)
+		pa := newProcess("A", w.m, w.s.Now())
+		pb := newProcess("B", w.m, w.s.Now())
+		pc := newProcess("C", w.m, w.s.Now())
+		w.informer("informerA", &pa)
+		secret := SecretRef(w.ns, w.p.Name)
+		w.holder(holderSpec{name: "h1", actor: "h1@A", livePasses: 2, deletionPasses: 1, before: func(n int) func() bool {
+			if n != 1 {
+				return nil
+			}
+			return func() bool { return w.started["h1@B"] >= 2 }
+		}}, &pa)
+		w.holder(holderSpec{
+			name: "h1", actor: "h1@B",
+			refs: func(pass int) []Ref {
+				if pass == 0 {
+					return nil
+				}
+				return []Ref{secret}
+			},
+			livePasses: 2, deletionPasses: 1,
+			before: func(n int) func() bool {
+				switch n {
+				case 0:
+					return func() bool { return w.started["h1@A"] >= 1 }
+				case 1:
+					return func() bool { return w.batchesStarted["releaserC"] >= 1 }
+				}
+				return nil
+			},
+		}, &pb)
+		w.releaser("releaserC", &pc, 1, true, stableCond(func() bool { return w.livePasses["h1@B"] >= 1 }))
+		w.s.Go("teardown", apimodel.QuietStart, func(a *apimodel.Actor) {
+			a.WaitQuiet("live passes done", time.Time{}, func() bool {
+				return w.livePasses["h1@A"] >= 2 && w.livePasses["h1@B"] >= 2
+			})
+			w.call(a, "delete secret", func() error { return w.m.Delete(keyOf(w.p)) })
+			w.call(a, "delete h1", func() error { return w.m.Delete(widgetKey(w.ns, "h1")) })
+		})
+	}}
