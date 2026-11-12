@@ -12,6 +12,17 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — v1.17.1: a deleted object is not an error
+- **A patch release. Only a log level changes.** When a reconcile's Get returns
+  NotFound, the normal end of a deletion, the reconciler now logs "Managed
+  resource is gone" at Debug, instead of "Cannot get managed resource" at
+  ERROR. The pass still returns no error and no requeue, as before.
+- **Why:** every normal deletion logged an ERROR. It carried no trace id
+  (it comes before the reconcile span), inflated error counts and could trip
+  log-based alerts. Reported by acmp from alert-provider on krateo-057.
+- **Other Get failures** are still logged at ERROR and requeue.
+- `TestNotFoundIsNotAnError` pins it.
+
 ## 2026-11-11 — v1.17.0: a failed write leaves mg's version
 - **A minor release: one new export,
   `reconcilertest.AssertFailedWriteLeavesManaged`.** Behaviour is unchanged.

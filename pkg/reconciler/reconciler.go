@@ -864,8 +864,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		// otherwise outlive its object, and NotFound passes are rare enough that the
 		// lock costs nothing.
 		r.traces.forget(req.NamespacedName)
-		logging.WithContext(r.log.WithValues("request", req), ctx).Error(err, "Cannot get managed resource")
-		return reconcile.Result{}, errors.Wrap(resource.IgnoreNotFound(err), errGetManaged)
+		// A NotFound is the normal end of a deletion: the finalizer was
+		// released and the object went away. It isn't an error, so it's logged
+		// at Debug and the pass returns no error and no requeue. Other Get
+		// failures are still logged as errors below.
+		logging.WithContext(r.log.WithValues("request", req), ctx).Debug("Managed resource is gone")
+		return reconcile.Result{}, nil
 	}
 
 	spanCtx, pass := r.beginTrace(ctx, tp, req, managed, err == nil, started)
