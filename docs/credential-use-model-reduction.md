@@ -827,3 +827,58 @@ a projection both bases share.**
   jump. Teardown at {1,0}: 0 of 2,577 audited prunes diverged, and terminal
   states matched (246 = 246). The results across every scenario and both
   bounds are reported with the code.
+
+## 11. The stateless reference: measured, then split (the user's decision)
+
+*Pre-registered before the measurement runs.*
+
+**Why.** The differential test's first leg, the stateless unreduced search at
+T = 2, is its whole cost. On Teardown it is 0.62 to 1.95 million schedules per
+subtest, 100 to 200 times the stateful search's runs. On every other small
+scenario it didn't finish: 16.9h on a c3-standard-22, 10h for
+DeletionsAroundTheGrace on an n2-standard-32, one core per subtest
+(hack/differential-credential-use-2/). The user chose to keep the check as it
+is and make it parallel: measure each scenario's size first, then split the
+depth-first search by choice prefix across cores.
+
+### 11.1 The measurement, and how it is extrapolated
+
+For each small scenario of §10.5 at {0,1} and {1,0}, with T = 2 (the
+differential test's 18 subtests), `TestModelStatelessSize` (behind
+`CREDENTIALUSE_MODEL_SIZE`) reports three things, streamed as it goes:
+
+- **Knuth's estimate of the schedule count** (Knuth, "Estimating the
+  efficiency of backtrack programs", 1975). A probe is one schedule with every
+  choice drawn uniformly from the options the search would offer there, under
+  the same bounds. The product of the option counts along it is an unbiased
+  estimate of the number of schedules, which are the leaves of the choice
+  tree. The estimate is the mean over N probes, with its relative standard
+  error, computed in the log domain. N = 20,000 per subtest, from one logged
+  seed.
+- **A capped depth-first search**, the serial search itself, stopped at
+  300,000 schedules: the count reached, the time, the rate (schedules per
+  second on one core), and its position in the tree. Position is the fraction
+  of leaves before the current one if every subtree at a choice were the same
+  size, Σ_k (c_k/n_k)·∏_{j<k}(1/n_j), and runs/position is a second estimate
+  of the total. A subtest that finishes under the cap reports its exact
+  count.
+- **The rate**, from the capped search.
+
+**How it is read, fixed now:**
+- **Calibration first.** The serial search finishes on the six Teardown
+  subtests, so their counts are known (0.62 to 1.95 million). Both estimates
+  are reported against them, as ratios. Knuth's estimator is unbiased but
+  heavy-tailed: with too few probes it usually comes out low. If its Teardown
+  ratios fall outside [1/3, 3], the other estimates are reported as
+  unreliable, not adjusted.
+- **The projected total** for a subtest is Knuth's mean. The DFS-position
+  estimate is reported beside it and not mixed in.
+- **The projected time** is total/rate on one core, and total/(rate·C) on C
+  cores, for C = 22, 64 and 128. The split's load imbalance is unknown before
+  §11.2 is built, so the parallel times are lower bounds, labelled as such.
+- **A subtest is reported infeasible** if its projected time on 128 cores is
+  above 24h. That is reported to the user. Nothing is cut or reshaped here.
+
+The schedule count is the stateless search's leaf count exactly: a probe
+draws from the options that `Run` computes, and it computes them the same way
+for a probe as for the search.
