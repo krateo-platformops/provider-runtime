@@ -82,6 +82,10 @@ type Model struct {
 	uid  int64
 	log  []Event
 	now  func() time.Time
+	// sorted is objs' keys in order, rebuilt only when a key comes or goes:
+	// the instrumentation walks the model on every tick.
+	sorted   []Key
+	sortedOK bool
 
 	// OnEvent, if set, runs on every change the model makes, after it is
 	// stored: the harness's monitors follow the model through it.
@@ -159,6 +163,7 @@ func (m *Model) Create(k Key, meta metav1.ObjectMeta) error {
 	meta.DeletionTimestamp = nil
 	m.bump(&meta)
 	m.objs[k] = &meta
+	m.sortedOK = false
 	m.emit(watch.Added, k, &meta)
 	return nil
 }
@@ -190,10 +195,58 @@ func (m *Model) List(gk schema.GroupKind, namespace string) []metav1.PartialObje
 	return out
 }
 
+// sortedKeys returns objs' keys in order. The slice is the model's own:
+// callers only range over it, under m.mu.
 func (m *Model) sortedKeys() []Key {
-	keys := slices.Collect(maps.Keys(m.objs))
-	slices.SortFunc(keys, func(a, b Key) int { return strings.Compare(a.String(), b.String()) })
-	return keys
+	if !m.sortedOK {
+		m.sorted = slices.Collect(maps.Keys(m.objs))
+		sortKeys(m.sorted)
+		m.sortedOK = true
+	}
+	return m.sorted
+}
+
+// sortKeys sorts keys by their String, building each String once rather than
+// on every comparison: the same order, at a fraction of the allocation.
+func sortKeys(keys []Key) {
+	names := make(map[Key]string, len(keys))
+	for _, k := range keys {
+		names[k] = k.String()
+	}
+	slices.SortFunc(keys, func(a, b Key) int { return strings.Compare(names[a], names[b]) })
+}
+
+// Each calls fn on every object, sorted by key, without copying it: for the
+// instrumentation (the state hash, the scheduler's terms and deadlines), which
+// runs on every tick. fn must neither change nor keep what it is given. It
+// takes no guard: it is no actor's read.
+func (m *Model) Each(fn func(k Key, meta *metav1.ObjectMeta)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, k := range m.sortedKeys() {
+		fn(k, m.objs[k])
+	}
+}
+
+// EachIn is Each over the objects of gk in namespace.
+func (m *Model) EachIn(gk schema.GroupKind, namespace string, fn func(k Key, meta *metav1.ObjectMeta)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, k := range m.sortedKeys() {
+		if k.GK == gk && k.Namespace == namespace {
+			fn(k, m.objs[k])
+		}
+	}
+}
+
+// EachEventAfter calls fn on every event after sequence number seq, without
+// copying the log; as Each, for the instrumentation only.
+func (m *Model) EachEventAfter(seq int, fn func(ev *Event)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := min(seq, len(m.log)); i < len(m.log); i++ {
+		fn(&m.log[i])
+	}
 }
 
 // Snapshot returns every object, sorted, and the sequence number of the last
@@ -320,8 +373,12 @@ func (m *Model) Patch(k Key, pt types.PatchType, data []byte) (*metav1.PartialOb
 func (m *Model) store(k Key, meta *metav1.ObjectMeta) {
 	if meta.DeletionTimestamp != nil && len(meta.Finalizers) == 0 && k.GK != NamespaceKind {
 		delete(m.objs, k)
+		m.sortedOK = false
 		m.emit(watch.Deleted, k, meta)
 		return
+	}
+	if _, ok := m.objs[k]; !ok {
+		m.sortedOK = false
 	}
 	m.objs[k] = meta
 	m.emit(watch.Modified, k, meta)
@@ -382,6 +439,7 @@ func (m *Model) FinalizeNamespace(name string) error {
 		return fmt.Errorf("apimodel: namespace %s isn't being deleted", name)
 	}
 	delete(m.objs, k)
+	m.sortedOK = false
 	m.emit(watch.Deleted, k, cur)
 	return nil
 }

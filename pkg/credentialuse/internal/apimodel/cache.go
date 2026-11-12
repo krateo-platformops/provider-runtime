@@ -20,6 +20,9 @@ type Cache struct {
 	match func(Key, *metav1.PartialObjectMetadata) bool
 	seq   int
 	objs  map[Key]*metav1.PartialObjectMetadata
+	// sorted is objs' keys in order, rebuilt only when they change (Each).
+	sorted   []Key
+	sortedOK bool
 
 	// OnAccess, if set, runs on every read and every change of the cache:
 	// the harness's check that no lost unit of work touches it.
@@ -65,6 +68,7 @@ func (c *Cache) List() []Change {
 		changes = append(changes, Change{Key: k, Old: c.objs[k], New: next[k]})
 	}
 	c.objs, c.seq = next, seq
+	c.sortedOK = false
 	return changes
 }
 
@@ -94,7 +98,11 @@ func (c *Cache) Next() (Change, bool) {
 			return Change{}, false
 		}
 		delete(c.objs, ev.Key)
+		c.sortedOK = false
 		return Change{Key: ev.Key, Old: old}, true
+	}
+	if old == nil {
+		c.sortedOK = false
 	}
 	c.objs[ev.Key] = &obj
 	return Change{Key: ev.Key, Old: old, New: &obj}, true
@@ -104,13 +112,32 @@ func (c *Cache) Next() (Change, bool) {
 // the cache stands at: for the state hash, without the access hook.
 func (c *Cache) Objects() ([]Event, int) {
 	keys := slices.Collect(maps.Keys(c.objs))
-	slices.SortFunc(keys, func(a, b Key) int { return strings.Compare(a.String(), b.String()) })
+	sortKeys(keys)
 	out := make([]Event, 0, len(keys))
 	for _, k := range keys {
 		out = append(out, Event{Key: k, Obj: *c.objs[k]})
 	}
 	return out, c.seq
 }
+
+// Each calls fn on every cached object, sorted by key, without copying it,
+// and returns the log position the cache stands at: Objects for the
+// instrumentation, without the access hook. fn must neither change nor keep
+// what it is given.
+func (c *Cache) Each(fn func(k Key, o *metav1.PartialObjectMetadata)) int {
+	if !c.sortedOK {
+		c.sorted = slices.Collect(maps.Keys(c.objs))
+		sortKeys(c.sorted)
+		c.sortedOK = true
+	}
+	for _, k := range c.sorted {
+		fn(k, c.objs[k])
+	}
+	return c.seq
+}
+
+// Seq returns the log position the cache stands at, without the access hook.
+func (c *Cache) Seq() int { return c.seq }
 
 // Get returns the cached version of k.
 func (c *Cache) Get(k Key) (*metav1.PartialObjectMetadata, bool) {

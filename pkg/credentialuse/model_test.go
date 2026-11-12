@@ -342,9 +342,10 @@ func (w *world) onRelease(d ReleaseDecision, at time.Time) {
 // scenario declares. It reads first sights directly, as instrumentation.
 func (w *world) deadlines() []time.Time {
 	ds := slices.Clone(w.thresholds)
-	for _, o := range w.m.List(secretGroupKind, w.ns) {
+	// Read in place: this runs on every tick (Sched.pending).
+	w.m.EachIn(secretGroupKind, w.ns, func(_ apimodel.Key, o *metav1.ObjectMeta) {
 		if o.DeletionTimestamp == nil {
-			continue
+			return
 		}
 		dt := o.DeletionTimestamp.Time
 		ds = append(ds, GraceEnd(dt, dt, testGrace))
@@ -353,7 +354,7 @@ func (w *world) deadlines() []time.Time {
 				ds = append(ds, GraceEnd(dt, seen, testGrace))
 			}
 		}
-	}
+	})
 	return ds
 }
 

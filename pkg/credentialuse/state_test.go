@@ -235,6 +235,9 @@ func (e *keyEncoder) value(v any) {
 // uidOrder orders map keys that are UIDs canonically: names already renamed
 // by their index, the rest by their content, then renamed in that order.
 func (e *keyEncoder) uidOrder(keys []types.UID, content func(types.UID) string) []types.UID {
+	if e.termsOnly {
+		return keys // the set of terms doesn't depend on the order
+	}
 	type item struct {
 		uid     types.UID
 		idx     int
@@ -336,33 +339,29 @@ func (w *world) encodeTo(e *keyEncoder) {
 	e.tok("now")
 	e.time(w.s.Now())
 
-	// The model.
+	// The model, read in place: this runs on every tick (timeTerms), so it
+	// copies nothing (TestStateKeysAreStable pins the keys).
 	e.tok("model[")
-	for _, ev := range w.m.Objects() {
-		e.meta(&ev.Obj.ObjectMeta)
-	}
+	w.m.Each(func(_ apimodel.Key, meta *metav1.ObjectMeta) { e.meta(meta) })
 	e.tok("]")
 	// The caches, and the log they haven't consumed.
 	minSeq := w.m.LastSeq()
 	for _, p := range w.procOrder {
-		if _, seq := (*p).cache.Objects(); seq < minSeq {
+		if seq := (*p).cache.Seq(); seq < minSeq {
 			minSeq = seq
 		}
 	}
 	e.tok("log[")
-	for _, ev := range w.m.EventsAfter(minSeq) {
+	w.m.EachEventAfter(minSeq, func(ev *apimodel.Event) {
 		e.tok(string(ev.Type))
 		e.meta(&ev.Obj.ObjectMeta)
-	}
+	})
 	e.tok("]")
 	for _, p := range w.procOrder {
 		e.tok("proc")
 		e.str((*p).name)
-		objs, seq := (*p).cache.Objects()
-		e.tok("cache@" + strconv.Itoa(seq-minSeq) + "[")
-		for _, ev := range objs {
-			e.meta(&ev.Obj.ObjectMeta)
-		}
+		e.tok("cache@" + strconv.Itoa((*p).cache.Seq()-minSeq) + "[")
+		(*p).cache.Each(func(_ apimodel.Key, o *metav1.PartialObjectMetadata) { e.meta(&o.ObjectMeta) })
 		e.tok("]")
 		w.encodeProcessMemory(e, *p)
 	}
@@ -599,4 +598,59 @@ func sameTimes(a, b []time.Time) bool {
 		}
 	}
 	return true
+}
+
+// TestStateKeysAreStable pins the abstract state keys of fixed random
+// schedules of every small scenario, at every choice and at the end, to
+// testdata/statekeys.golden: a change to how the state is walked (such as
+// the copy-free instrumentation paths) must give exactly the same keys, so
+// that terminal sets saved by earlier runs stay comparable.
+// CREDENTIALUSE_MODEL_GOLDEN_WRITE=1 rewrites the file.
+func TestStateKeysAreStable(t *testing.T) {
+	var b strings.Builder
+	for _, name := range sortedKeys(smallScenarios) {
+		sc := smallScenarios[name]
+		b0 := apimodel.Bounds{Preemptions: 1, Faults: 1, Jumps: testJumps}
+		for seed := range int64(8) {
+			var end string
+			keys, err := apimodel.Replay(b0, nil, apimodel.Budget{Preemptions: 1, Faults: 1, Jumps: testJumps}, seed, 0, func(s *apimodel.Sched) error {
+				w := newWorld(s)
+				sc(w)
+				s.Key = w.stateKey
+				err := s.Run()
+				end = w.stateKey()
+				return err
+			})
+			if err != nil {
+				t.Fatalf("%s, seed %d: %v", name, seed, err)
+			}
+			for _, k := range keys {
+				fmt.Fprintf(&b, "%s %d %x\n", name, seed, k)
+			}
+			fmt.Fprintf(&b, "%s %d end %x\n", name, seed, end)
+		}
+	}
+	const golden = "testdata/statekeys.golden"
+	if os.Getenv("CREDENTIALUSE_MODEL_GOLDEN_WRITE") != "" {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(golden, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.String() != string(want) {
+		got, wl := strings.Split(b.String(), "\n"), strings.Split(string(want), "\n")
+		for i := range min(len(got), len(wl)) {
+			if got[i] != wl[i] {
+				t.Fatalf("state keys changed at line %d of %d:\n got  %s\n want %s", i+1, len(wl), got[i], wl[i])
+			}
+		}
+		t.Fatalf("state keys changed: %d lines against %d", len(got), len(wl))
+	}
 }

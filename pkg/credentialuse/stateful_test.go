@@ -742,3 +742,25 @@ func expectedTotal(t *testing.T) int64 {
 	}
 	return 0
 }
+
+// BenchmarkStatelessSchedule is one schedule of the stateless search, as the
+// differential's first leg runs it (rule R off, terminal states recorded), on
+// DeletionsAroundTheGrace's small variant at {0,1}: its time and allocation,
+// with -benchmem.
+func BenchmarkStatelessSchedule(b *testing.B) {
+	sc := smallScenarios["deletions around the grace, small"]
+	inner := runner(sc, func(*apimodel.Sched, string, []string) {}, quietMode{off: true})
+	b.ReportAllocs()
+	b.ResetTimer()
+	res := apimodel.Explore(apimodel.Bounds{Faults: 1, Jumps: testJumps, MaxRuns: b.N}, func(s *apimodel.Sched) error {
+		err := inner(s)
+		var v violation
+		if errors.As(err, &v) {
+			return nil
+		}
+		return err
+	})
+	if len(res.Failures) > 0 {
+		b.Fatal(res.Failures[0].Err)
+	}
+}
