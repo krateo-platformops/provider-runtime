@@ -976,3 +976,168 @@ the rest.** In this order, each step only if the one before passes:
 
 A failed rule is reported with its witness, as the differential test logs
 it. Nothing is rerun to pass.
+
+## 12. Sleep sets under the bounds (the user's decision; spec, for independent review, not implemented)
+
+*For away and back and two releasers, whose stateless reference at T = 1 is
+1.25 to 3.2 times too large for §11.3's rule. The two-process scenario is out
+of scope: it needs 150 to 570 times, and the user ruled out full DPOR.*
+
+### 12.1 Why plain sleep sets are not sound here
+
+Sleep sets (Godefroid) skip a transition t at a state once an earlier sibling
+subtree has explored t, until a transition dependent with t runs: every
+schedule that runs t later is equivalent, by swapping independent
+transitions, to one already explored. Under a preemption bound that
+equivalence doesn't carry the bound with it. In Coons, Musuvathi and
+McKinley's terms (Bounded Partial-Order Reduction, OOPSLA 2013, Def. 4.3 and
+4.4), the preemption bound is neither *stable* (equivalent sequences can cost
+different preemptions) nor *extensible* (an independent transition can change
+another's cost). Here:
+
+- At a state s, actors a and b are both enabled, and last is neither. Sleep
+  sets explore a's step t_a, then b's step t_b with t_a asleep. The pruned
+  schedule t_b · t_a · ρ is covered only by t_a · t_b · ρ'. But after t_a,
+  a is the last actor and may still be enabled, so t_b there is a
+  preemption. Under P = 0 the covering schedule isn't in the search at all.
+  Under P = 1 it can cost one more than the pruned one, and ρ's first step
+  sees a different last actor.
+- So step-level sleep sets lose schedules within the bound, at every bound
+  we use, including {0,1}.
+
+**What the paper proves, and what it doesn't** (checked against the paper's
+text and Coons's dissertation, §6.5):
+- BPOR is DPOR with *conservative backtrack points*: besides the point
+  before the most recent dependent transition, one before the most recent
+  point where the executing thread changed (Algorithm 3). It is proven to
+  reach every *local* state reachable within the bound (Theorems 1, 4, 8).
+- Sleep sets appear only as an optimization in its experiments, in a
+  limited form: no transition is put to sleep when exploring a conservative
+  backtrack point. The paper says its proofs "explicitly cover only the
+  unoptimized algorithms", that is, without sleep sets.
+- So no sleep-set theorem is imported from it. §12.3 derives a restricted
+  form, whose soundness rests on one lemma, stated for review. Its key idea
+  is the paper's ext(s, t): a thread run until it blocks, after which every
+  switch is free.
+- We need more than local states. The differential test compares *global*
+  terminal states and violations, so the lemma is about global states.
+
+### 12.2 Transitions, footprints and dependence
+
+- **A transition** is one scheduler step: an actor's call (with its fault)
+  or its resume from a Wait or from start; a quiet resume (rule R off, as in
+  the reference); or a jump, chosen or forced.
+- **A footprint** is the set of (object, mode) a transition touches, recorded
+  by hooks, at least as fine as these:
+  - the model: each key, read or write. Every write also writes **the log**:
+    it appends an event and takes the next resourceVersion. Every informer's
+    `Pending`/`Next` reads the log, and `List(kind, namespace)` reads every
+    key in that range;
+  - each process's cache, verified set and first sights: read or write, per
+    process;
+  - **the clock:** `Now()` is a read. A call's tick is a *tick*, which
+    commutes with ticks and conflicts with reads and with any transition
+    that changes the pending deadlines or the live terms (§10.2). Ticks
+    commute because a tick is a function of the gaps, and two ticks with no
+    term or deadline changed in between give the same sum in either order;
+  - the world's monitors and counters, each field apart;
+  - a crash writes everything of its process (memory, caches, the
+    generation of every actor in it);
+  - **guards:** the reads a Wait condition makes when `enabled` evaluates it
+    are the guard footprint of that actor's next transition.
+- **Dependence:** t and u are dependent if
+  - they are the same actor's;
+  - either is a jump;
+  - their footprints conflict (same object, at least one write; a tick
+    against a clock read or a deadline change);
+  - or one writes what the other's guard reads.
+- **Obligation (as M-a and §10.1's digest already require): every shared
+  access goes through a hook.** It is checked, not trusted, by a
+  **commutativity audit**: on a seeded sample of adjacent pairs of
+  independent transitions, both orders are replayed from the same prefix,
+  and the abstract state keys and the bound counters after both must be
+  equal. A mismatch fails the run.
+
+### 12.3 Segment sleep sets at free points
+
+- **A free point** is a state where the last actor is unset, done, or not
+  enabled. Every option there costs no preemption.
+- **A's segment from a free point s,** ext(s, a) as in the paper, is a's
+  run of steps from s until a is no longer enabled (it blocks at a Wait or
+  ends), with whatever faults the schedule chooses on its calls. A jump ends
+  a segment: jumps are dependent with everything.
+- **The rule:**
+  1. At a free point s, after a's subtree has been searched, a gets a
+     *sleep entry* in each later sibling's subtree. The entry carries the
+     union footprint of every variant of a's segment searched in a's
+     subtree, every fault choice within the budget it had.
+  2. In a later subtree, each transition u removes the entry if u is
+     dependent with that union footprint (a jump removes every entry).
+  3. At a free point s' in that subtree, an option of an actor with an
+     entry is not taken.
+  4. At points that aren't free, entries are never applied. a's step is
+     offered as usual, and taking it removes a's entry.
+- **Lemma (for review).**
+  - *Setting:* s is a free point. σ = B · A · ρ is a schedule of the
+    unreduced bounded search from s. B is a complete segment of b from s,
+    ending at a free point s1. A is a complete segment of a from s1. Every
+    transition of A is independent of every transition of B, guards
+    included.
+  - *Claim:* A · B · ρ is also a schedule of the unreduced search, with the
+    same preemptions, faults and jumps, and it ends in the same global
+    state, monitors included.
+  - *Proof sketch:*
+    - Independence lets A run from s with the same steps, faults and
+      results: its guard is unchanged, and so is everything it reads. B
+      then runs after A in the same way.
+    - Both segments end with their actor not enabled. So the switch into A
+      at s, the switch into B, and ρ's first step are all free in both
+      orders.
+    - After both segments the global state is the same, last included as
+      far as costs see it: in both orders the last actor is not enabled.
+      So ρ costs the same.
+  - By induction on the number of segments between s and s', every
+    schedule the rule prunes has an explored equivalent within the same
+    bounds. So the reduced search reaches the same set of terminal states
+    and the same violations: monitors are global state, written through
+    footprints, so swaps of independent segments keep them.
+- **What it gives up:** nothing within the bounds, by the lemma. It reduces
+  only the redundant orders of whole independent segments at free points. A
+  preemptive reordering is never pruned. Neither is a reordering involving
+  a dependent transition, or a jump.
+- **Quiet resumes** (rule R off) are length-one segments at free points,
+  with only a guard footprint, and they don't change the last actor. So
+  their redundant orders are the first thing the rule prunes.
+
+### 12.4 The plan, as the user decided
+
+1. **Footprints, the dependence relation and the commutativity audit;**
+   then the rule of §12.3 in the stateless search (`Explore` and
+   `ExploreParallel`). Sleep entries live on the replay DFS's stack, per
+   depth, with each searched option's union footprint, so a replay
+   recomputes nothing.
+2. **The factor,** measured on the six Teardown subtests at T = 2: the
+   reduced run counts against the known 616,721 to 1,951,942.
+3. **Soundness, by differential:** on the 10 feasible subtests at T = 2,
+   the reduced stateless search against the unreduced one's saved terminal
+   states and violations (e7724b1, from step 2's run). They must be
+   identical. The same holds under the four mutants, against unreduced
+   runs of the same mutants, with 0 commutativity-audit mismatches. A
+   failure stops the work.
+4. **Only then,** away and back and two releasers exhaustively at T = 1,
+   sized first with a capped reduced run and the Teardown factor (Knuth's
+   estimator doesn't apply to a pruned tree).
+
+**Cost:**
+- About 1.5 days for the footprints and the dependence relation, about 1 day
+  for the rule, about 1 day for the audit and tests, then a review cycle.
+- VM time: about 1 to 2h for the factor. The differential reuses step 2's
+  saved sets, so it costs one reduced run of the 10 feasible subtests.
+
+**Risks, stated before the code:**
+- The factor may be small. The rule only swaps complete independent
+  segments at free points, and the informer's deliveries read the log,
+  which every model write writes. If Teardown's factor doesn't reach the
+  1.25 to 3.2 times needed, that is reported, not worked around.
+- Footprint completeness is the soundness hinge. The commutativity audit is
+  the check, as the merge audit is for the stateful search.
