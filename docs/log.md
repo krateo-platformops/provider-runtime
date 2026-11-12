@@ -12,6 +12,26 @@ timestamp: 2026-11-11T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## Unreleased — v1.18.0: create markers keep sub-second precision
+- **A minor release: the `krateo.io/external-create-pending`, `-succeeded` and
+  `-failed` markers are now written with RFC3339Nano** (new export
+  `meta.MarkerTimeLayout`). With second precision, a pending marker and its
+  terminal marker set within one second tied, and `ExternalCreateIncomplete`
+  returned "complete" by default on the tie rather than by ordering (#88,
+  reported by oasgen-provider from a live azuredevops-provider-kog
+  measurement: 25 resources tied).
+- **Compatible with existing objects.** Parsing accepts values with or
+  without a fractional second, so markers written by earlier releases still
+  read back. A second-precision value is truncated, so it can only be earlier
+  than the event it records: mixed old and new markers still order correctly.
+- **Consumers checked:** core-provider and oasgen-provider (with the
+  rest-dynamic-controller and the kog providers it generates) don't read these
+  annotations outside provider-runtime's `meta` helpers.
+- **Also:** the reconciler comment that called the pending-to-terminal window
+  "~2s" now says it measures well under a second.
+- `TestExternalCreateMarkersSubSecond` pins it; it fails with second-precision
+  markers.
+
 ## 2026-11-12 — v1.17.1: a deleted object is not an error
 - **A patch release. Only a log level changes.** When a reconcile's Get returns
   NotFound, the normal end of a deletion, the reconciler now logs "Managed
