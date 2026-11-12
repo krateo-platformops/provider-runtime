@@ -1472,9 +1472,8 @@ no proof effort is spent if the factor fails.
    - CE1, CE2 and the lost-state example as unit tests, with their
      unreduced terminal sets as fixtures (item 3).
 
-   **The gate's rule is pre-registered in the same commit as stage A**,
-   before the factor is measured: what "clearly can't reach" the 1.25 to
-   3.2 times that away and back and two releasers need means.
+   **The gate's rule, pre-registered here in stage A's first commit,
+   before any factor is measured** (§12.6).
 3. **Stage B:** the rule of §12.3 with R3 to R5, in `Explore` and
    `ExploreParallel`, with these points of bookkeeping:
    - a's options at s are contiguous (its fault variants), so "a's subtree
@@ -1508,6 +1507,63 @@ no proof effort is spent if the factor fails.
    - the read audit (item 5);
    - the soundness differential (item 6);
    - then away and back and two releasers exhaustively at T = 1.
+
+### 12.6 The gate's rule (pre-registered with stage A's first commit)
+
+**What each target needs.** A target is one subtest of away and back or two
+releasers (small) at {0,1} or {1,0}, T = 1. Its need is the factor that
+brings its unreduced cost under §11.3's rule (24h on 128 cores, 3,072
+core-hours), from the T = 1 measurement (proof-749ccb4/RESULTS.md):
+
+| target | unreduced core-hours | need |
+|---|---|---|
+| away and back {0,1} | 9,700 | 3.16 |
+| away and back {1,0} | 3,820 | 1.24 |
+| two releasers {0,1} | 3,800 | 1.24 |
+| two releasers {1,0} | 7,880 | 2.57 |
+
+**The overhead correction.** The reduced search pays for its footprints,
+F1's extra guard evaluations and its entries, so a reduced schedule costs
+more than an unreduced one. Stage C measures that ratio, c ≥ 1, on
+Teardown: reduced CPU per schedule over unreduced CPU per schedule, on the
+same machine and layout. Every need is multiplied by c.
+
+**The two measurements:**
+1. **Teardown's whole-tree factors.** f_i is the unreduced schedule count
+   over the reduced one (deferred prunes counted as schedules, since they
+   run a partial schedule), on the six Teardown subtests at T = 2. They are
+   exact, because both searches finish. F_max is the largest.
+2. **The targets' subtree factors.** For each target, 20 seeded random
+   subtrees, chosen as follows:
+   - draw a uniform random schedule (the seed is logged);
+   - take its shortest prefix whose unreduced subtree finishes within
+     200,000 schedules;
+   - search that subtree both ways. The reduced search's entries come only
+     from inside the subtree;
+   - f_j is the subtree's unreduced count over its reduced count.
+
+   The estimate is the geometric mean of the 20 f_j. U is its one-sided 95%
+   upper confidence bound: exp(mean + t(0.95, 19) · sd / √20), over log f_j.
+   - This estimate is biased low: an entry made outside a subtree, which
+     the whole search would have, is missing inside it. That is why it is
+     paired with Teardown's whole-tree factors and not used alone.
+
+**The rule.** For each target:
+- **clearly can't reach** its need if *both* U < c · need *and* F_max <
+  c · need. The gate fails for that target;
+- otherwise the gate passes for it.
+
+If the gate fails for all four targets, the work stops and is reported to
+the user before the proof, the generated differential, the read audit, the
+soundness differential or any T = 1 run. If it fails for some, the report
+says which, and the user decides whether to go on for the rest. If it passes
+for all four, the work goes on as §12.5 orders.
+
+**What the gate does not decide.** It is about cost only. The factor is
+measured with an unproven rule, so passing it says nothing about soundness,
+which only the steps after it establish. A target that passes still runs
+only after the soundness differential, and its run is re-sized from the
+measured factor first.
 
 **Cost:**
 

@@ -212,6 +212,9 @@ type Sched struct {
 	// or forced; and what the schedule used, for Result.
 	callsSinceJump int
 	usage          Usage
+
+	// rec is the recording context's stack of scopes (footprint.go).
+	rec []recScope
 }
 
 // Usage is what one schedule, or the most of any schedule in a search, used
