@@ -1,0 +1,22 @@
+commit 19e986c, parts 3
+  load at the start: 15:37:44 up 35 min,  0 user,  load average: 14.43, 14.60, 12.58
+  load at the end:   08:00:00 up 16:57,  0 user,  load average: 35.16, 35.12, 35.03
+DISAGREE     a deletion pass may skip A2 (982.3 min)
+  NONE teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+       stateless 610556 schedules, 674 terminal, 0 violations; stateful 4442 runs, 7688 states, 674 terminal, 0 violations, 3471 audits, 0 divergences; reduced 2526 runs, 6029 states, 674 terminal, 0 violations, 1555 audits, 0 divergences
+       capacity: 19 calls between jumps, 2 jumps, smallest tick 944ns
+  NONE teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+       stateless 534086 schedules, 416 terminal, 0 violations; stateful 4284 runs, 7106 states, 416 terminal, 0 violations, 3534 audits, 0 divergences; reduced 2542 runs, 5711 states, 416 terminal, 0 violations, 1792 audits, 0 divergences
+       capacity: 15 calls between jumps, 2 jumps, smallest tick 942ns
+  NONE teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+       stateless 750000 schedules, 840 terminal, 0 violations; stateful 5287 runs, 9499 states, 840 terminal, 0 violations, 4086 audits, 0 divergences; reduced 2932 runs, 7415 states, 840 terminal, 0 violations, 1731 audits, 0 divergences
+       capacity: 20 calls between jumps, 2 jumps, smallest tick 943ns
+  NONE teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+       stateless 1797053 schedules, 967 terminal, 0 violations; stateful 9544 runs, 16762 states, 967 terminal, 0 violations, 7894 audits, 0 divergences; reduced 5363 runs, 13316 states, 967 terminal, 0 violations, 3713 audits, 0 divergences
+       capacity: 19 calls between jumps, 2 jumps, smallest tick 941ns
+  NONE teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+       stateless 676185 schedules, 674 terminal, 0 violations; stateful 4465 runs, 7730 states, 674 terminal, 0 violations, 3494 audits, 0 divergences; reduced 2526 runs, 6050 states, 674 terminal, 0 violations, 1555 audits, 0 divergences
+       capacity: 20 calls between jumps, 2 jumps, smallest tick 944ns
+
+DISAGREE=1 of 1 run here
+tree restored
