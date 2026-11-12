@@ -1353,16 +1353,37 @@ read side is closed by construction, and the audit is the backstop.
         package-global epoch counter, becomes a tracked per-world counter.
         As it stands, two replays of one schedule get different epoch names,
         so the read audit's concrete comparison would fail on every pair.
-     3. **A hook with a mode in every method of a tracked type.** Every
-        method calls the recorder with read or write on entry. `verified`'s
-        and `firstSight`'s methods call `onAccess` today, but without a
-        mode.
+     3. **A hook with a mode in every method of a tracked type.** A
+        single-object method calls the recorder with read or write on entry.
+        `verified`'s and `firstSight`'s methods call `onAccess` today, but
+        without a mode. **A multi-object method records per object, inside
+        the method,** with each object's own mode, because one mode on entry
+        can't describe it:
+        - `Model.Create` reads the namespace's key and the UID counter, and
+          writes its key and the log;
+        - `Cache.List` reads every model key and the log position, and
+          writes the cache;
+        - `Cache.Next` reads the log and writes the cache;
+        - `Cache.Pending` reads the log and the cache's position.
+
+        The analyzer can't check that such a method names the right objects.
+        Stage A adds one deterministic unit test per `Model` and `Cache`
+        method, asserting that the recorded footprint equals a hand-written
+        expected set.
      4. **No `reflect`, `unsafe`, or `fmt` verbs on tracked types,** except
         in the write detector and the state encoder.
      5. **No closure-shared state.** A variable captured by more than one
         actor's code, including through helpers (specs passed to `w.holder`,
         guard closures built in scenario code), is flagged unless it is
         never written after `s.Run` begins.
+
+     6. **The in-place accessors are on the instrumentation allowlist.**
+        `Model.Each`, `EachIn` and `EachEventAfter`, and `Cache.Each` and
+        `Seq` (81f15f9) hand out inner pointers and take no hook. Like
+        `Sched.Now`, they may be called only from `Key`, `Terms`,
+        `Deadlines` and the write detector, and the analyzer forbids them
+        everywhere else. They are not exempt wholesale: that would let
+        actor code read the model unrecorded.
 
      With these, the read side is closed by construction within the model
      packages. What remains is that each accessor names the right object,
@@ -1371,7 +1392,12 @@ read side is closed by construction, and the audit is the backstop.
    unit tests, the generated differential and the Teardown factor run. On
    the large differentials it runs on a seeded sample of schedules (1 in
    100, logged), because it costs two deep snapshots per transition, on top
-   of a schedule's 270 KB of allocation. Each check:
+   of a schedule's 270 KB of allocation. **The sample is accepted on one
+   condition:** the full-detector runs (the unit tests, the generated
+   differential and the Teardown factor run) must reach every tracked
+   accessor method and every object kind. Those runs log a per-method count
+   of detector-checked transitions, and fail if any method or kind has
+   zero. Each check:
    - before and after each transition, outside the recording context, a
      deep snapshot of the model (objects, log, resourceVersion and UID
      counters), every process's memory and caches, every `apimodel.Proc`
@@ -1455,7 +1481,15 @@ no proof effort is spent if the factor fails.
      is searched" is the moment the DFS backtracks past a's last option at
      that depth;
    - the union is accumulated per depth from every run whose first steps
-     from s are a's uninterrupted complete segment;
+     from s are a's uninterrupted complete segment. Its slot is per
+     (depth, actor), and it resets when the DFS backtracks above that depth,
+     so an entry carries the union of the current state's subtree only;
+   - in `ExploreParallel`, a worker makes an entry for a at depth d only if
+     it searched all of a's subtree there itself. If any of a's options, or
+     any choice inside A's runs, was handed off to another worker, it makes
+     none. Otherwise a union that is missing the handed-off variants could
+     stop a correct run on the realized ⊆ union assertion. Fewer entries
+     are always sound;
    - a deferred prune returns a status of its own, which `Explore` and
      `ExploreParallel` count as neither a failure nor a terminal state;
    - because F3 filters nothing, the options at every state, and so the
