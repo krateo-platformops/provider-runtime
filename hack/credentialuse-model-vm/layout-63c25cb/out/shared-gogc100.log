@@ -1,0 +1,175 @@
+=== RUN   TestModelSplitThroughput
+=== RUN   TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+=== PAUSE TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+=== RUN   TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+=== PAUSE TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+=== RUN   TestModelSplitThroughput/acquire_against_release,_{0,1}
+=== PAUSE TestModelSplitThroughput/acquire_against_release,_{0,1}
+=== RUN   TestModelSplitThroughput/acquire_against_release,_{1,0}
+=== PAUSE TestModelSplitThroughput/acquire_against_release,_{1,0}
+=== CONT  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+=== CONT  TestModelSplitThroughput/acquire_against_release,_{0,1}
+=== CONT  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+=== CONT  TestModelSplitThroughput/acquire_against_release,_{1,0}
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 50000 schedules in 29s, 1724/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 50000 schedules in 29s, 1700/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 50000 schedules in 40s, 1260/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 50000 schedules in 41s, 1219/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 100000 schedules in 58s, 1720/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 100000 schedules in 58s, 1716/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 100000 schedules in 1m19s, 1265/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 100000 schedules in 1m21s, 1228/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 150000 schedules in 1m27s, 1731/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 150000 schedules in 1m27s, 1722/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 200000 schedules in 1m54s, 1749/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 200000 schedules in 1m55s, 1732/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 150000 schedules in 1m58s, 1273/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 150000 schedules in 2m1s, 1241/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 250000 schedules in 2m22s, 1761/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 250000 schedules in 2m24s, 1740/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 200000 schedules in 2m36s, 1282/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 200000 schedules in 2m40s, 1250/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 300000 schedules in 2m49s, 1771/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 300000 schedules in 2m52s, 1747/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 250000 schedules in 3m14s, 1288/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 350000 schedules in 3m17s, 1776/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 250000 schedules in 3m18s, 1260/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 350000 schedules in 3m20s, 1754/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 400000 schedules in 3m44s, 1783/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 400000 schedules in 3m47s, 1762/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 300000 schedules in 3m52s, 1292/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 300000 schedules in 3m57s, 1266/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 450000 schedules in 4m11s, 1793/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 450000 schedules in 4m15s, 1768/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 350000 schedules in 4m29s, 1299/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 350000 schedules in 4m35s, 1273/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 500000 schedules in 4m38s, 1799/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 500000 schedules in 4m42s, 1773/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 550000 schedules in 5m5s, 1806/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 400000 schedules in 5m7s, 1303/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 550000 schedules in 5m10s, 1777/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 400000 schedules in 5m13s, 1276/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 600000 schedules in 5m31s, 1813/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 600000 schedules in 5m37s, 1780/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 450000 schedules in 5m44s, 1307/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 450000 schedules in 5m51s, 1281/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 650000 schedules in 5m58s, 1818/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 650000 schedules in 6m4s, 1784/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 500000 schedules in 6m21s, 1312/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 700000 schedules in 6m24s, 1823/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 500000 schedules in 6m29s, 1285/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 700000 schedules in 6m31s, 1788/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 750000 schedules in 6m51s, 1826/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 550000 schedules in 6m58s, 1317/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 750000 schedules in 6m59s, 1791/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 550000 schedules in 7m7s, 1288/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 800000 schedules in 7m17s, 1831/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 800000 schedules in 7m25s, 1796/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 600000 schedules in 7m34s, 1321/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 850000 schedules in 7m43s, 1837/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 600000 schedules in 7m45s, 1292/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 850000 schedules in 7m52s, 1801/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 900000 schedules in 8m9s, 1841/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 650000 schedules in 8m10s, 1325/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 900000 schedules in 8m19s, 1805/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 650000 schedules in 8m22s, 1296/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 950000 schedules in 8m35s, 1845/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 950000 schedules in 8m45s, 1810/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 700000 schedules in 8m46s, 1331/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 700000 schedules in 8m58s, 1300/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 1000000 schedules in 9m1s, 1848/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 1000000 schedules in 9m11s, 1813/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 750000 schedules in 9m22s, 1335/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 1050000 schedules in 9m27s, 1853/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    stateful_test.go:363: stateless progress: 750000 schedules in 9m35s, 1305/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    stateful_test.go:363: stateless progress: 1050000 schedules in 9m38s, 1817/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    stateful_test.go:363: stateless progress: 1100000 schedules in 9m53s, 1856/s, no expected total
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    stateful_test.go:363: stateless progress: 800000 schedules in 9m58s, 1339/s, no expected total
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1}
+    size_test.go:339: throughput: deletions around the grace, small, {0,1}: 1092516 schedules in 10m0s with 22 workers, 1821/s
+=== NAME  TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0}
+    size_test.go:339: throughput: deletions around the grace, small, {1,0}: 1114022 schedules in 10m0s with 22 workers, 1857/s
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{0,1}
+    size_test.go:339: throughput: acquire against release, {0,1}: 803297 schedules in 10m0s with 22 workers, 1339/s
+=== NAME  TestModelSplitThroughput/acquire_against_release,_{1,0}
+    size_test.go:339: throughput: acquire against release, {1,0}: 785482 schedules in 10m0s with 22 workers, 1309/s
+--- PASS: TestModelSplitThroughput (0.00s)
+    --- PASS: TestModelSplitThroughput/deletions_around_the_grace,_small,_{0,1} (600.01s)
+    --- PASS: TestModelSplitThroughput/deletions_around_the_grace,_small,_{1,0} (600.01s)
+    --- PASS: TestModelSplitThroughput/acquire_against_release,_{0,1} (600.01s)
+    --- PASS: TestModelSplitThroughput/acquire_against_release,_{1,0} (600.01s)
+PASS
