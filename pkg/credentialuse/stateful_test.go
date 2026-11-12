@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -259,12 +260,36 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	if raceEnabled || os.Getenv("CREDENTIALUSE_MODEL_BOUNDS") != "" {
 		t.Skip("the differential test runs in the model step, on its own bounds")
 	}
+	t.Parallel()
 	// For the measured runs of §11.3: CREDENTIALUSE_MODEL_DIFF_ONLY (a regexp)
-	// picks scenarios, and CREDENTIALUSE_MODEL_DIFF_JUMPS sets T.
-	only := regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY"))
-	jumps := envInt("CREDENTIALUSE_MODEL_DIFF_JUMPS", testJumps)
+	// picks scenarios, and CREDENTIALUSE_MODEL_DIFF_JUMPS sets T; or
+	// CREDENTIALUSE_MODEL_DIFF_PLAN, "regexp=T;regexp=T", gives each matching
+	// scenario its own T (the first match wins).
+	type entry struct {
+		re    *regexp.Regexp
+		jumps int
+	}
+	plan := []entry{{regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY")), envInt("CREDENTIALUSE_MODEL_DIFF_JUMPS", testJumps)}}
+	if v := os.Getenv("CREDENTIALUSE_MODEL_DIFF_PLAN"); v != "" {
+		plan = nil
+		for _, part := range strings.Split(v, ";") {
+			re, n, ok := strings.Cut(part, "=")
+			jumps, err := strconv.Atoi(n)
+			if !ok || err != nil {
+				t.Fatalf("CREDENTIALUSE_MODEL_DIFF_PLAN=%q: %q isn't regexp=T", v, part)
+			}
+			plan = append(plan, entry{regexp.MustCompile(re), jumps})
+		}
+	}
 	for name, sc := range smallScenarios {
-		if !only.MatchString(name) {
+		jumps := -1
+		for _, e := range plan {
+			if e.re.MatchString(name) {
+				jumps = e.jumps
+				break
+			}
+		}
+		if jumps < 0 {
 			continue
 		}
 		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: jumps}, {Preemptions: 1, Jumps: jumps}} {
