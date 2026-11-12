@@ -310,3 +310,34 @@ func statefulSize(t *testing.T, label string, sc func(w *world), b apimodel.Boun
 	t.Logf("size: %s stateful %s runs=%d states=%d pruned=%d audits=%d divergences=%d elapsed=%s",
 		label, state, res.Runs, res.States, res.Pruned, audits, divergences, time.Since(start).Round(time.Second))
 }
+
+// TestModelSplitThroughput measures the split stateless search's throughput
+// for a fixed time, for choosing how a long run is laid out: one process for
+// every subtest, or a process each (the allocation's GC is per process).
+// Behind CREDENTIALUSE_MODEL_THROUGHPUT=<duration>;
+// CREDENTIALUSE_MODEL_THROUGHPUT_ONLY is a regexp over "scenario, {P,F}" with
+// T = 2, and CREDENTIALUSE_MODEL_DIFF_WORKERS the workers per search.
+func TestModelSplitThroughput(t *testing.T) {
+	limit, err := time.ParseDuration(os.Getenv("CREDENTIALUSE_MODEL_THROUGHPUT"))
+	if err != nil || limit <= 0 {
+		t.Skip("a measurement, run on its own (CREDENTIALUSE_MODEL_THROUGHPUT=<duration>)")
+	}
+	only := regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_THROUGHPUT_ONLY"))
+	workers := envInt("CREDENTIALUSE_MODEL_DIFF_WORKERS", 1)
+	for name, sc := range smallScenarios {
+		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: testJumps}, {Preemptions: 1, Jumps: testJumps}} {
+			label := fmt.Sprintf("%s, {%d,%d}", name, b.Preemptions, b.Faults)
+			if !only.MatchString(label) {
+				continue
+			}
+			t.Run(label, func(t *testing.T) {
+				t.Parallel()
+				start := time.Now()
+				b.Deadline = start.Add(limit)
+				r := searchOn(t, sc, b, false, true, workers)
+				el := time.Since(start)
+				t.Logf("throughput: %s: %d schedules in %s with %d workers, %.0f/s", label, r.res.Runs, el.Round(time.Second), workers, float64(r.res.Runs)/el.Seconds())
+			})
+		}
+	}
+}

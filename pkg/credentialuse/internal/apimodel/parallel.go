@@ -3,6 +3,7 @@ package apimodel
 import (
 	"slices"
 	"sync"
+	"time"
 )
 
 // ExploreParallel is Explore, the stateless search, split across workers by
@@ -11,7 +12,8 @@ import (
 // Runs, the same Usage, and the same set of schedules handed to scenario. It
 // differs only in which failures it keeps when there are more than ten, and
 // in that scenario runs on several goroutines at once, so it must be safe
-// for concurrent use. MaxRuns stops it within a worker's run of the cap.
+// for concurrent use. MaxRuns and Deadline stop it within a worker's run of
+// the cap.
 //
 // A worker owns a subtree: a prefix and a floor, the depth above which it
 // doesn't backtrack. It searches it depth first, as Explore does. When the
@@ -65,7 +67,7 @@ func ExploreParallel(b Bounds, workers int, scenario func(s *Sched) error) Resul
 		if err != nil {
 			res.Failures = append(res.Failures, Failure{Err: err, Trace: s.Trace()})
 		}
-		if len(res.Failures) >= 10 || (b.MaxRuns > 0 && res.Runs >= b.MaxRuns) {
+		if len(res.Failures) >= 10 || (b.MaxRuns > 0 && res.Runs >= b.MaxRuns) || (!b.Deadline.IsZero() && time.Now().After(b.Deadline)) {
 			stopped = true
 			cond.Broadcast()
 		}
