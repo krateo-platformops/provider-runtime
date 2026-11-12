@@ -390,6 +390,12 @@ type ExternalObservation struct {
 	// external resource of the expected kind whose unique identifier matches
 	// the managed resource's external name. The Provider Runtime uses this information to
 	// determine whether it needs to create or delete the external resource.
+	//
+	// It answers whether the resource is there, not whether it is ready. A
+	// resource that exists but is still provisioning or rolling out is true;
+	// report readiness on the Ready condition instead. Answering false for it
+	// re-enters the create handshake once the creation grace period ends. See
+	// docs/overview.md.
 	ResourceExists bool
 
 	// ResourceUpToDate should be true if the corresponding external resource
