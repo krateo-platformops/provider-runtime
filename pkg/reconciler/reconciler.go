@@ -392,10 +392,12 @@ type ExternalObservation struct {
 	// determine whether it needs to create or delete the external resource.
 	//
 	// It answers whether the resource is there, not whether it is ready. A
-	// resource that exists but is still provisioning or rolling out is true;
-	// report readiness on the Ready condition instead. Answering false for it
-	// re-enters the create handshake once the creation grace period ends. See
-	// docs/overview.md.
+	// resource that was observed but is still provisioning or rolling out is
+	// true; report readiness on the Ready condition instead. Answer false
+	// only for a resource observed to be absent: a wrong false re-enters the
+	// create handshake once the creation grace period ends, and a wrong true
+	// means Create never runs. If the lookup itself cannot answer, return an
+	// error rather than guess. See docs/overview.md.
 	ResourceExists bool
 
 	// ResourceUpToDate should be true if the corresponding external resource

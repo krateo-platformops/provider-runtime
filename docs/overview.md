@@ -90,20 +90,32 @@ error. An `Observe` error ends the reconcile before both the guard and
 the unresolved handshake, because the guard needs `Observe`'s answer.
 
 **`ResourceExists` answers "is it there", not "is it ready".** A resource
-that exists but isn't usable yet — still provisioning, still rolling out, or
-looked up at a stale version — is `ResourceExists: true`. Report readiness on
-the `Ready` condition (for example `Unavailable().WithMessage(...)`), and keep
+you did observe but that isn't usable yet, because it is still provisioning or
+still rolling out, is `ResourceExists: true`. Report readiness on the `Ready`
+condition (for example `Unavailable().WithMessage(...)`), and keep
 `ResourceUpToDate: true` if no update would help, so the runtime waits in the
-observe path. Answering `false` tells the runtime the resource is gone. After
-the creation grace period (30s by default, `WithCreationGracePeriod`) the
-runtime starts the create handshake again on a resource that was already
-created. It re-sets `external-create-pending` and calls `Create`, and while
-`Observe` keeps saying `false` the pass ends in "cannot determine creation
-result". oasgen-provider measured this twice: `-pending` re-set 75s and 97s
-after `-succeeded`. In one case a Deployment was still rolling out, and in the
-other a CRD was looked up at the wrong version. A runtime upgrade doesn't fix
-this; only `Observe` can. The signature is a `Waiting for external resource
-existence to be confirmed` event followed by a second create event.
+observe path.
+
+Answer `false` only for a resource you observed to be absent. If your own
+lookup couldn't answer, because of a stale or wrong key or an unreadable
+prerequisite, neither value is a safe guess. Return an error if a retry can
+answer it; otherwise fix the lookup (see below). The two wrong answers fail
+differently:
+
+- **A wrong `false`** is loud. After the creation grace period (30s by default,
+  `WithCreationGracePeriod`) the runtime starts the create handshake again on
+  a resource that was already created. It re-sets `external-create-pending`
+  and calls `Create`, and while `Observe` keeps saying `false` the pass ends
+  in "cannot determine creation result". The signature is a `Waiting for
+  external resource existence to be confirmed` event followed by a second
+  create event. oasgen-provider measured this twice: `-pending` re-set 75s and
+  97s after `-succeeded`. In one case a Deployment was still rolling out; in
+  the other a CRD was looked up at the wrong version, and the fix was the
+  lookup.
+- **A wrong `true`** is quiet and worse. `Create` never runs, so the resource
+  is never created and nothing reports a failure.
+
+A runtime upgrade fixes neither; only `Observe` can.
 
 **The common trap is not a mishandled "not found".** It is an error return
 *earlier* in `Observe`, on a prerequisite the provider reads before it can
