@@ -1,0 +1,163 @@
+=== RUN   TestModelStatelessSize
+=== PAUSE TestModelStatelessSize
+=== CONT  TestModelStatelessSize
+    size_test.go:33: size: probes 5000, cap 1, T 1, seed 1794486284547281534
+=== RUN   TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=500 mean=2.564e+09 rse=0.645 elapsed=2s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=500 mean=8.676e+08 rse=0.409 elapsed=2s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=500 mean=1.276e+09 rse=0.612 elapsed=2s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=500 mean=1.405e+09 rse=0.525 elapsed=3s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=500 mean=7.746e+10 rse=0.624 elapsed=4s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=500 mean=1.384e+11 rse=0.284 elapsed=4s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=1000 mean=1.466e+09 rse=0.565 elapsed=4s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=1000 mean=8.829e+08 rse=0.253 elapsed=5s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=1000 mean=7.179e+08 rse=0.545 elapsed=5s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=1000 mean=9.352e+08 rse=0.403 elapsed=5s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=1500 mean=1.181e+09 rse=0.471 elapsed=7s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=1500 mean=5.967e+08 rse=0.443 elapsed=7s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=1500 mean=6.928e+08 rse=0.219 elapsed=7s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=1500 mean=1.278e+09 rse=0.359 elapsed=8s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=1000 mean=5.386e+10 rse=0.455 elapsed=8s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=1000 mean=1.471e+12 rse=0.909 elapsed=9s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=2000 mean=1.148e+09 rse=0.405 elapsed=9s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=2000 mean=5.03e+08 rse=0.396 elapsed=9s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=2000 mean=6.494e+08 rse=0.199 elapsed=9s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=2000 mean=1.267e+09 rse=0.295 elapsed=10s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=2500 mean=1.049e+09 rse=0.364 elapsed=11s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=2500 mean=1.565e+09 rse=0.549 elapsed=12s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=2500 mean=4.626e+08 rse=0.349 elapsed=12s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=1500 mean=5.906e+10 rse=0.317 elapsed=12s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=2500 mean=1.114e+09 rse=0.269 elapsed=13s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=1500 mean=1.044e+12 rse=0.855 elapsed=13s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=3000 mean=4.126e+09 rse=0.782 elapsed=13s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=3000 mean=1.934e+09 rse=0.396 elapsed=14s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=3000 mean=4.217e+08 rse=0.321 elapsed=14s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=3000 mean=9.801e+08 rse=0.256 elapsed=15s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=3500 mean=3.617e+09 rse=0.764 elapsed=15s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=2000 mean=5.172e+10 rse=0.275 elapsed=16s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=3500 mean=1.713e+09 rse=0.384 elapsed=16s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=3500 mean=3.815e+08 rse=0.304 elapsed=16s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=2000 mean=8.092e+11 rse=0.827 elapsed=17s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=3500 mean=1.425e+09 rse=0.263 elapsed=18s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=4000 mean=3.233e+09 rse=0.748 elapsed=18s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=4000 mean=1.584e+09 rse=0.365 elapsed=18s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=4000 mean=4.067e+08 rse=0.261 elapsed=19s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=2500 mean=4.475e+10 rse=0.255 elapsed=20s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=4500 mean=2.922e+09 rse=0.736 elapsed=20s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=4000 mean=1.39e+09 rse=0.245 elapsed=20s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=4500 mean=1.442e+09 rse=0.356 elapsed=21s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=4500 mean=4.741e+08 rse=0.266 elapsed=21s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=2500 mean=6.716e+11 rse=0.797 elapsed=22s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {0,1} T=1 knuth probes=5000 mean=2.801e+09 rse=0.692 elapsed=22s
+    size_test.go:124: size: two releasers, one deletion pass {0,1} T=1 knuth final probes=5000 mean=2.801e+09 rse=0.692 rate=227.2/s
+    size_test.go:139: size: two releasers, one deletion pass {0,1} T=1 dfs capped runs=1 elapsed=0s rate=185.8/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=4500 mean=1.294e+09 rse=0.234 elapsed=22s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth probes=5000 mean=1.363e+09 rse=0.340 elapsed=23s
+    size_test.go:124: size: away and back, small, with a relist, one deletion pass {0,1} T=1 knuth final probes=5000 mean=1.363e+09 rse=0.340 rate=218.7/s
+    size_test.go:139: size: away and back, small, with a relist, one deletion pass {0,1} T=1 dfs capped runs=1 elapsed=0s rate=191.0/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth probes=5000 mean=5.075e+08 rse=0.245 elapsed=23s
+    size_test.go:124: size: away and back, small, with a relist, one deletion pass {1,0} T=1 knuth final probes=5000 mean=5.075e+08 rse=0.245 rate=218.4/s
+    size_test.go:139: size: away and back, small, with a relist, one deletion pass {1,0} T=1 dfs capped runs=1 elapsed=0s rate=200.6/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=3000 mean=4.44e+10 rse=0.222 elapsed=23s
+=== NAME  TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two releasers, one deletion pass {1,0} T=1 knuth probes=5000 mean=1.215e+09 rse=0.225 elapsed=24s
+    size_test.go:124: size: two releasers, one deletion pass {1,0} T=1 knuth final probes=5000 mean=1.215e+09 rse=0.225 rate=207.1/s
+    size_test.go:139: size: two releasers, one deletion pass {1,0} T=1 dfs capped runs=1 elapsed=0s rate=329.5/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=3000 mean=6.367e+11 rse=0.708 elapsed=25s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=3500 mean=4.213e+10 rse=0.205 elapsed=25s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=3500 mean=5.615e+11 rse=0.689 elapsed=27s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=4000 mean=4.24e+10 rse=0.189 elapsed=27s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=4000 mean=5.342e+11 rse=0.636 elapsed=29s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=4500 mean=4.39e+10 rse=0.172 elapsed=29s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=4500 mean=5.062e+11 rse=0.597 elapsed=31s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth probes=5000 mean=4.369e+10 rse=0.157 elapsed=31s
+    size_test.go:124: size: two processes, shrunk, one deletion pass each {0,1} T=1 knuth final probes=5000 mean=4.369e+10 rse=0.157 rate=159.0/s
+    size_test.go:139: size: two processes, shrunk, one deletion pass each {0,1} T=1 dfs capped runs=1 elapsed=0s rate=253.3/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:117: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth probes=5000 mean=5.023e+11 rse=0.542 elapsed=33s
+    size_test.go:124: size: two processes, shrunk, one deletion pass each {1,0} T=1 knuth final probes=5000 mean=5.023e+11 rse=0.542 rate=151.0/s
+    size_test.go:139: size: two processes, shrunk, one deletion pass each {1,0} T=1 dfs capped runs=1 elapsed=0s rate=273.8/s position=0 est=NaN
+--- PASS: TestModelStatelessSize (0.00s)
+    --- PASS: TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (22.02s)
+    --- PASS: TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (22.87s)
+    --- PASS: TestModelStatelessSize/away_and_back,_small,_with_a_relist,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (22.90s)
+    --- PASS: TestModelStatelessSize/two_releasers,_one_deletion_pass,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (24.15s)
+    --- PASS: TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (31.46s)
+    --- PASS: TestModelStatelessSize/two_processes,_shrunk,_one_deletion_pass_each,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (33.11s)
+PASS
+ok  	github.com/krateo-platformops/provider-runtime/pkg/credentialuse	33.122s
