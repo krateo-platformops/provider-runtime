@@ -1000,8 +1000,8 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	// it was guessing at a question it never asked.
 	//
 	// Instead, carry the unresolved handshake forward and let Observe answer it below. The window
-	// between SetExternalCreatePending and the terminal annotation is ~2s of pure bookkeeping, so
-	// the overwhelmingly common interruption is one where the external work actually completed.
+	// between SetExternalCreatePending and the terminal annotation is pure bookkeeping, measured at
+	// well under a second on live resources (#88), so the overwhelmingly common interruption is one where the external work actually completed.
 	// The marker the decision says to write now (its window closed, or the window is 0): past the
 	// pause and Orphan checks, before anything acts and before pristine is taken (§6.2).
 	if res, stop := r.writeMarkerIf(ctx, log, managed, pass, tracing.Now); stop {

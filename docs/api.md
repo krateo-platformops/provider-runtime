@@ -54,7 +54,7 @@ types, by package:
 
 ## `pkg/meta`
 
-Annotation keys (`AnnotationKeyExternalName`, `…ExternalCreatePending/Succeeded/Failed`, `…ReconciliationPaused`, `…ConnectorVerbose`, `…ManagementPolicy`, `…DeletionPolicy`, and, unreleased, `…TraceparentContinued`), policy constants (`ManagementPolicyDefault/ObserveCreateUpdate/ObserveDelete/Observe`, `DeletionPolicyDelete/Orphan`), and helpers: finalizers (`AddFinalizer`, `RemoveFinalizer`, `FinalizerExists`), labels/annotations (`AddLabels`, `RemoveLabels`, `AddAnnotations`, `RemoveAnnotations`), lifecycle (`WasDeleted`, `WasCreated`), external-name and external-create accessors, `ExternalCreateIncomplete`, `ExternalCreateSucceededDuring`, `IsPaused`, `IsVerbose`, and policy predicates `IsActionAllowed`, `ShouldDelete`, `ShouldOnlyObserve`, `ShouldCreate`, `ShouldUpdate`.
+Annotation keys (`AnnotationKeyExternalName`, `…ExternalCreatePending/Succeeded/Failed`, `…ReconciliationPaused`, `…ConnectorVerbose`, `…ManagementPolicy`, `…DeletionPolicy`, and, unreleased, `…TraceparentContinued`), policy constants (`ManagementPolicyDefault/ObserveCreateUpdate/ObserveDelete/Observe`, `DeletionPolicyDelete/Orphan`), and helpers: finalizers (`AddFinalizer`, `RemoveFinalizer`, `FinalizerExists`), labels/annotations (`AddLabels`, `RemoveLabels`, `AddAnnotations`, `RemoveAnnotations`), lifecycle (`WasDeleted`, `WasCreated`), external-name and external-create accessors (unreleased: the markers are written with `MarkerTimeLayout`, RFC3339Nano, and both layouts parse), `ExternalCreateIncomplete`, `ExternalCreateSucceededDuring`, `IsPaused`, `IsVerbose`, and policy predicates `IsActionAllowed`, `ShouldDelete`, `ShouldOnlyObserve`, `ShouldCreate`, `ShouldUpdate`.
 
 ## `pkg/controller`
 
