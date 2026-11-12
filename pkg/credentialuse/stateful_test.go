@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -340,15 +341,24 @@ func searchOn(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQu
 	// on: under a mutant, the searches are compared on every violation they
 	// find, not on the first ten. Only the harness's own errors are failures.
 	// The stateless search logs its progress every million schedules, so a
-	// long run's throughput and ETA can be read while it runs.
+	// long run's throughput and ETA can be read while it runs. The ETA is
+	// against an expected total, CREDENTIALUSE_MODEL_DIFF_EXPECT
+	// ("regexp=N;regexp=N", matched against the subtest's name; the first
+	// match wins), such as the measured Knuth estimate.
 	var done atomic.Int64
 	start := time.Now()
+	expect := expectedTotal(t)
 	run := func(s *apimodel.Sched) error {
 		err := inner(s)
 		if !stateful {
 			if n := done.Add(1); n%1_000_000 == 0 {
 				el := time.Since(start)
-				t.Logf("stateless progress: %d schedules in %s, %.0f/s", n, el.Round(time.Second), float64(n)/el.Seconds())
+				rate := float64(n) / el.Seconds()
+				eta := "no expected total"
+				if expect > 0 {
+					eta = fmt.Sprintf("ETA %s against an expected %.3g", time.Duration(math.Max(float64(expect-n), 0)/rate*float64(time.Second)).Round(time.Minute), float64(expect))
+				}
+				t.Logf("stateless progress: %d schedules in %s, %.0f/s, %s", n, el.Round(time.Second), rate, eta)
 			}
 		}
 		var v violation
@@ -715,4 +725,20 @@ func TestSaveTerminal(t *testing.T) {
 	if string(got) != want {
 		t.Errorf("saved:\n%s\nwant:\n%s", got, want)
 	}
+}
+
+// expectedTotal is the subtest's expected schedule count from
+// CREDENTIALUSE_MODEL_DIFF_EXPECT, or 0.
+func expectedTotal(t *testing.T) int64 {
+	for _, part := range strings.Split(os.Getenv("CREDENTIALUSE_MODEL_DIFF_EXPECT"), ";") {
+		re, n, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseFloat(n, 64)
+		if err == nil && regexp.MustCompile(re).MatchString(t.Name()) {
+			return int64(v)
+		}
+	}
+	return 0
 }
