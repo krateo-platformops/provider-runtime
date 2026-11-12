@@ -31,6 +31,10 @@ if [ ! -x /usr/local/go/bin/go ]; then
   echo "$want  go1.26.10.linux-amd64.tar.gz" | sha256sum -c -
   sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.26.10.linux-amd64.tar.gz
 fi
+# GCE's Debian 12 image has no /usr/bin/time: the first run exited 127.
+if [ ! -x /usr/bin/time ]; then
+  sudo apt-get update -qq && sudo apt-get install -y -qq time > /dev/null
+fi
 export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local
 dir="$HOME/src-${tarf%.tar}"
 mkdir -p "$dir" && tar -C "$dir" -xf "$HOME/$tarf"
