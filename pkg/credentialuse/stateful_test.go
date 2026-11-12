@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -368,6 +369,9 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 		plain.res.Finished = true
 		t.Logf("no stateless leg (CREDENTIALUSE_MODEL_DIFF_STATELESS=off): stateful against reduced only")
 	}
+	if withStateless && plain.res.Finished {
+		saveTerminal(t, plain)
+	}
 	if !plain.res.Finished {
 		for _, f := range plain.res.Failures {
 			t.Errorf("stateless: %v\nschedule: %s", f.Err, f.Trace)
@@ -609,5 +613,49 @@ func TestModelParallelSearchShares(t *testing.T) {
 	}
 	for _, f := range r.res.Failures {
 		t.Errorf("the harness failed: %v\nschedule: %s", f.Err, f.Trace)
+	}
+}
+
+// saveTerminal writes the stateless search's terminal abstract states and
+// violations to CREDENTIALUSE_MODEL_DIFF_SAVE/<subtest>.stateless.txt, if
+// that is set: the unreduced reference a later reduction of the stateless
+// search (sleep sets, §12) is compared with, without searching it again. The
+// states are the hashed keys, hex-encoded and sorted; they are comparable
+// only with keys from the same state encoding (state_test.go).
+func saveTerminal(t *testing.T, r searchResult) {
+	dir := os.Getenv("CREDENTIALUSE_MODEL_DIFF_SAVE")
+	if dir == "" {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n# stateless: %d schedules, %d terminal states, %d violations\n", t.Name(), r.res.Runs, len(r.states), len(r.violations))
+	for _, k := range sortedSet(r.states) {
+		fmt.Fprintf(&b, "%x\n", k)
+	}
+	for _, v := range sortedSet(r.violations) {
+		fmt.Fprintf(&b, "violation: %s\n", v)
+	}
+	name := regexp.MustCompile(`[^A-Za-z0-9_.-]+`).ReplaceAllString(t.Name(), "_")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("saving the terminal states: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".stateless.txt"), []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("saving the terminal states: %v", err)
+	}
+}
+
+func TestSaveTerminal(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CREDENTIALUSE_MODEL_DIFF_SAVE", dir)
+	r := searchResult{states: map[string]bool{"\x01\x02": true, "\xff": true}, violations: map[string]bool{"SAFETY: x": true}}
+	r.res.Runs = 7
+	saveTerminal(t, r)
+	got, err := os.ReadFile(filepath.Join(dir, "TestSaveTerminal.stateless.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# TestSaveTerminal\n# stateless: 7 schedules, 2 terminal states, 1 violations\n0102\nff\nviolation: SAFETY: x\n"
+	if string(got) != want {
+		t.Errorf("saved:\n%s\nwant:\n%s", got, want)
 	}
 }
