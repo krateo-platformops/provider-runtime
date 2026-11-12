@@ -1,0 +1,14 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [38, 39, 40]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+NOT-APPLIED ([0] matches)  equal times skip
+          mutant 39 started 2026-11-11 19:38:19
+KILLED    recordSince restarts on every event
+          killed in: TestAcquireSkipsInTheSteadyState, TestCanSkip/a_later_version_in_the_same_run_keeps_the_first_time
+          mutant 39: 2026-11-11 19:38:19 to 2026-11-11 21:05:49
+          mutant 40 started 2026-11-11 21:05:49
+KILLED    a version without P doesn't end the run
+          killed in: TestCanSkip/an_unparseable_record_ends_the_run, TestCanSkip/away_and_back,_both_delivered, TestCanSkip/the_record_dropped_P_(A1),_delivered, TestHolderEventEndsObserved
+          mutant 40: 2026-11-11 21:05:49 to 2026-11-11 22:13:23
+
+KILLED=2 NOT-APPLIED=1 of 3 run here, of 46
+tree restored

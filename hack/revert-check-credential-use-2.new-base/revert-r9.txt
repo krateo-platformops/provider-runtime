@@ -1,0 +1,17 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [29, 30, 31]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 29 started 2026-11-11 19:38:19
+KILLED    a missing epoch isn't restored
+          killed in: TestReleaseRestoresAMissingEpoch
+          mutant 29: 2026-11-11 19:38:19 to 2026-11-11 20:55:03
+          mutant 30 started 2026-11-11 20:55:03
+KILLED    R2 measures the grace after its reads
+          killed in: TestReleaseMeasuresTheGraceBeforeTheReads
+          mutant 30: 2026-11-11 20:55:03 to 2026-11-11 22:21:12
+          mutant 31 started 2026-11-11 22:21:12
+KILLED    the grace runs out early
+          killed in: TestReleaseGraceFromFirstSight, TestReleaseMeasuresTheGraceBeforeTheReads, TestReleasePrunesFirstSight, TestReleaseRows/deleting,_in_the_grace,_a_user:_requeued, TestReleaseTreatsAMissingNamespaceAsDeleting
+          mutant 31: 2026-11-11 22:21:12 to 2026-11-11 23:12:58
+
+KILLED=3 of 3 run here, of 46
+tree restored

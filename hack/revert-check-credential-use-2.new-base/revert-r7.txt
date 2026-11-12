@@ -1,0 +1,17 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [23, 24, 25]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 23 started 2026-11-11 19:38:19
+KILLED    §6.1's exclusion isn't applied
+          killed in: TestReleaseRows/a_user_without_the_owner_finalizer,_deleting,_doesn't_count
+          mutant 23: 2026-11-11 19:38:19 to 2026-11-11 20:56:10
+          mutant 24 started 2026-11-11 20:56:10
+KILLED    deleting users aren't counted
+          killed in: TestReleaseRows/deleting,_after_the_grace,_a_deleting_user:_kept
+          mutant 24: 2026-11-11 20:56:10 to 2026-11-11 22:15:08
+          mutant 25 started 2026-11-11 22:15:08
+KILLED    written isn't dropped on a release
+          killed in: TestReleaseDropsWritten
+          mutant 25: 2026-11-11 22:15:08 to 2026-11-11 23:24:09
+
+KILLED=3 of 3 run here, of 46
+tree restored

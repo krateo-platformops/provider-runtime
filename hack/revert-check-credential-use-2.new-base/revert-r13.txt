@@ -1,0 +1,17 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [41, 42, 43]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 41 started 2026-11-11 19:38:19
+KILLED    a version that ends the run keeps observed (H1)
+          killed in: TestHolderEventEndsObserved
+          mutant 41: 2026-11-11 19:38:19 to 2026-11-11 20:52:40
+          mutant 42 started 2026-11-11 20:52:40
+KILLED    a holder's deletion keeps what was delivered
+          killed in: TestCanSkip/a_deleted_holder
+          mutant 42: 2026-11-11 20:52:40 to 2026-11-11 22:08:34
+          mutant 43 started 2026-11-11 22:08:34
+KILLED    a recreate keeps written
+          killed in: TestProtectedEvent/recreated
+          mutant 43: 2026-11-11 22:08:34 to 2026-11-11 23:17:54
+
+KILLED=3 of 3 run here, of 46
+tree restored

@@ -1,0 +1,6 @@
+baseline passed, commit 19e986c, load 17:17:07 up  2:14,  0 user,  load average: 33.99, 35.28, 35.70
+
+KILLED    a deletion pass may skip A2
+          killed in: TestAcquireSkipsInTheSteadyState
+EQUIVALENT a ref this pass's A1 added may skip A2
+          equivalent: t_obs >= observed = A1's return, so a skip needs a write issued after A1 returned, and A1's response delivered
