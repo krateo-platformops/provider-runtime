@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -338,8 +339,18 @@ func searchOn(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQu
 	// Every violation is recorded, on a pruned run too, and the search goes
 	// on: under a mutant, the searches are compared on every violation they
 	// find, not on the first ten. Only the harness's own errors are failures.
+	// The stateless search logs its progress every million schedules, so a
+	// long run's throughput and ETA can be read while it runs.
+	var done atomic.Int64
+	start := time.Now()
 	run := func(s *apimodel.Sched) error {
 		err := inner(s)
+		if !stateful {
+			if n := done.Add(1); n%1_000_000 == 0 {
+				el := time.Since(start)
+				t.Logf("stateless progress: %d schedules in %s, %.0f/s", n, el.Round(time.Second), float64(n)/el.Seconds())
+			}
+		}
 		var v violation
 		if errors.As(err, &v) {
 			mu.Lock()
