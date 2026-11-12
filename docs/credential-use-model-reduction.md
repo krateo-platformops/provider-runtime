@@ -1096,9 +1096,20 @@ text and Coons's dissertation, §6.5):
     - After both segments the global state is the same, last included as
       far as costs see it: in both orders the last actor is not enabled.
       So ρ costs the same.
-  - By induction on the number of segments between s and s', every
-    schedule the rule prunes has an explored equivalent within the same
-    bounds. So the reduced search reaches the same set of terminal states
+  - *The general case, which the rule needs:* the path π from s to the
+    free point s' where a is pruned need not be whole segments. It can
+    contain preemptions, as long as every transition of π is independent
+    of A. Then A · π · ρ is in the search with π · A · ρ's costs:
+    - A ends with a not enabled, so π's first step is free after A, as it
+      is at s;
+    - every later step of π sees the same last actor, and the same enabled
+      actors (A changes no guard);
+    - ρ's first step is free at s' in π · A · ρ, after A, and also at s' in
+      A · π · ρ, which is free.
+
+    So every schedule the rule prunes has an explored equivalent within the
+    same bounds: in a's subtree at s, by the rule's own induction on the
+    depth of s. So the reduced search reaches the same set of terminal states
     and the same violations: monitors are global state, written through
     footprints, so swaps of independent segments keep them.
 - **What it gives up:** nothing within the bounds, by the lemma. It reduces
