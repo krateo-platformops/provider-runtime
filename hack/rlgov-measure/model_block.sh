@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: model_block.sh <prefix> <cpu limit, e.g. 500m or 1000m> <workers> <rounds> <image tag>
+# Usage: model_block.sh <prefix> <cpu limit, e.g. 500m or 1000m> <workers> <rounds> <image tag> [cpu target]
 #
 # The capacity model's acceptance block (docs/design-capacity-model.md §10):
 # is the CPU pressure step with the capacity model better than the step alone?
@@ -9,18 +9,20 @@
 # Greetings polled every 1s) with the probe incident-provider ships:
 #   off    saturation unset;
 #   step   SATURATION=true SAT_CPU=50 (v1.19.0's step alone);
-#   model  SATURATION=true SAT_CPU=50 CAPACITY_MODEL=true.
+#   model  SATURATION=true SAT_CPU=50 CAPACITY_MODEL=true, and CPU_TARGET=<cpu
+#          target> when one is given (the library's default, 0.9, otherwise).
 #
 # The settings and the bars are written to results/<prefix>-settings.txt and
 # committed before run 1. A run prun.sh discards stays in the count; a failed
 # setup stops the block with exit code 2. Results are committed after each
-# round, by explicit path. model_report.py <prefix> reads them.
+# round, by explicit path. model_report.py <prefix> [cpu target] reads them.
 cd "$(dirname "$0")" || exit 1
 P=${1:?usage: model_block.sh <prefix> <cpu limit> <workers> <rounds> <image tag>}
 export RLGOV_CPU=${2:?cpu limit}
 export RLGOV_WORKERS=${3:?workers}
 ROUNDS=${4:?rounds}
 TAG=${5:?image tag}
+TARGET=${6:-}
 bash setup.sh || { echo "BLOCK-STOPPED: cluster setup failed"; exit 2; }
 export RLGOV_PROBE=incident-provider
 SECS=360
@@ -47,7 +49,7 @@ arm() { # name round
   case $a in
     off)   ;;
     step)  env="SATURATION=true SAT_CPU=50" ;;
-    model) env="SATURATION=true SAT_CPU=50 CAPACITY_MODEL=true" ;;
+    model) env="SATURATION=true SAT_CPU=50 CAPACITY_MODEL=true${TARGET:+ CPU_TARGET=$TARGET}" ;;
   esac
   # shellcheck disable=SC2086
   bash prun.sh "$P-$a-$i" cpu "$SECS" "$TAG" $env || { echo "BLOCK-STOPPED at $P-$a-$i"; bash nodeid.sh "$P-stopped"; exit 2; }
@@ -60,11 +62,12 @@ cat > "results/$P-settings.txt" <<SETTINGS
 Capacity model block $P, started $(date -u +%Y-%m-%dT%H:%M:%SZ)
 question (docs/design-capacity-model.md §10): is the CPU pressure step with the capacity model better than the step alone? If it is not, the model does not ship.
 image: $(cat "results/image-$TAG.txt")
-arms: off (SATURATION unset), step (SATURATION=true SAT_CPU=50), model (SATURATION=true SAT_CPU=50 CAPACITY_MODEL=true); $ROUNDS runs each, order rotating each round, one run at a time
+arms: off (SATURATION unset), step (SATURATION=true SAT_CPU=50), model (SATURATION=true SAT_CPU=50 CAPACITY_MODEL=true${TARGET:+ CPU_TARGET=$TARGET});
+the model's CPU target: ${TARGET:-0.9, the library's default}${TARGET:+. Block m5 ran this workload at the default 0.9 and missed the throughput bar (86.8% of the step arm's against 95) with the other four met; the user chose on 2026-11-13 to rerun at this target with the bars unchanged}; $ROUNDS runs each, order rotating each round, one run at a time
 workload: cpu mode, $RLGOV_CPU limit, 512Mi, 64 Greetings, $RLGOV_WORKERS workers, poll 1s, ${SECS}s per run; each Observe spends 20ms of CPU measured on its own thread, then waits 400ms. The memory input is off in every arm. The workers are $RLGOV_WORKERS, not the step block's 16, so that the ungoverned arm asks for more CPU than the limit at 1 CPU too: $RLGOV_WORKERS workers at about 22ms of CPU per 420ms want about $(python3 -c "print(round($RLGOV_WORKERS*22/420,2))") cores.
 liveness probe: incident-provider's (httpGet /healthz, periodSeconds 10, timeoutSeconds 1, failureThreshold 3)
 
-the knee, computed by model_report.py from the off arm's own figures: 0.9 x limit / c x (c + 0.4s), c the off arm's CPU per Observe (cpu_ms/s over obs/s, median of its runs). With c about 22ms that is about $(python3 -c "l=float('$RLGOV_CPU'.rstrip('m'))/1000; print(round(0.9*l/0.022*0.422,1))") slots.
+the knee, computed by model_report.py from the off arm's own figures: ${TARGET:-0.9} x limit / c x (c + 0.4s), c the off arm's CPU per Observe (cpu_ms/s over obs/s, median of its runs). With c about 22ms that is about $(python3 -c "l=float('$RLGOV_CPU'.rstrip('m'))/1000; print(round(${TARGET:-0.9}*l/0.022*0.422,1))") slots.
 
 the bars, decided by the user on 2026-11-13 ("a latency win at near-equal throughput"), written before run 1; figures from 40s on, medians over the runs:
 - wall time: the model arm's wall time for a call's 20ms of CPU is at least 20% lower than the step arm's;

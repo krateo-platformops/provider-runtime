@@ -1,7 +1,7 @@
 """The capacity model's acceptance block, from the raw logs: every run, each
 arm, then the bars of results/<prefix>-settings.txt.
 
-Usage: model_report.py <prefix>
+Usage: model_report.py <prefix> [cpu target]   (default 0.9, for the knee)
 
 Reads results/<prefix>-{off,step,model}-*.log, written by model_block.sh.
 Figures are from 40s on, after the startup ramp.
@@ -10,7 +10,8 @@ import glob, os, re, statistics, sys
 
 R = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 PREFIX = sys.argv[1]
-SETTING_MS, WAIT_S, TARGET = 20.0, 0.4, 0.9
+SETTING_MS, WAIT_S = 20.0, 0.4
+TARGET = float(sys.argv[2]) if len(sys.argv) > 2 else 0.9
 
 
 def nums(rows, key):
