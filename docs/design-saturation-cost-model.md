@@ -1,13 +1,20 @@
 ---
 type: Architecture
 title: provider-runtime — size local capacity from what reconciles cost
-description: Design, not built, for replacing the saturation input's halve-and-recover step with a per-reconcile cost model that computes how many reconciles fit in the container's CPU and memory limits, with CPU pressure as a safety check that only blocks increases.
+description: Design, not pursued (stopped 2026-11-13), for replacing the saturation input's halve-and-recover step with a per-reconcile cost model that computes how many reconciles fit in the container's CPU and memory limits, with CPU pressure as a safety check that only blocks increases.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, saturation, cgroup, gc]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Size local capacity from what reconciles cost
+
+**Not pursued.** The user stopped this design on 2026-11-13, after
+[its review](https://github.com/krateo-platformops/provider-runtime/pull/57#issuecomment-6856212229):
+at CPU limits of 100m to 125m the implementation's own calibration lowered the
+target to about 78% of the limit. The halve-and-recover step was fixed instead
+([design-rate-limit-governor](./design-rate-limit-governor.md) §11 item 19).
+The text below is kept as the record.
 
 **Status:** design, revised after its fifth independent review (§15; §16 lists what every part costs), for
 re-review. Nothing is built. The open questions were decided by the user on

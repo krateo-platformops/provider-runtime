@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-10T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Usage
@@ -295,10 +295,11 @@ For Krateo, that's core-provider#310.
     workers: the queue's order is the order work runs in, and nothing is popped
     that can't run. The slot covers the whole reconcile, so expensive work is
     bounded wherever the provider does it. It reads `cpu.pressure`
-    (`some avg10`) once a second. `local` starts at 1 and rises by 1 every 2s
-    until its first cut, so 16 workers take about 30s. A saturated sample
-    halves it, never below 1, and after any cut it rises by 1 per clean
-    `RecoveryInterval` (30s), the same as API limits. Controllers sharing the
+    (`some total`) once a second, and measures the share of the last 10s in
+    which some task waited for CPU. `local` starts at 1 and rises by 1 every
+    clean 2s, so 16 workers take about 30s. Pressure over the threshold for a
+    whole 10s halves it, never below 1 and at most once per 10s; it then
+    rises by 1 per clean 2s again. Controllers sharing the
     governor share `local`; an idle controller holds none of it.
   - *Nothing is written on the object for it.* The controller's own saturation
     isn't a state of the object: the item waits in the queue, with no
@@ -362,7 +363,7 @@ For Krateo, that's core-provider#310.
     rate-limited by the server; next attempt 2026-11-05T10:00:31Z`, or says
     it is waiting for capacity. A deferral by the local capacity names the
     cause and no key, for example `reconciliation deferred: controller
-    saturated: CPU pressure 63% (some avg10); waiting for capacity (1
+    saturated: CPU pressure 63% (some, over 10s); waiting for capacity (1
     call(s) in flight allowed); no server deadline was given`, or
     `reconciliation deferred: controller recovering its local concurrency
     limit (2 call(s) in flight allowed); waiting for capacity; no server

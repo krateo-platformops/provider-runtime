@@ -4,7 +4,7 @@ title: provider-runtime — automatic slow-down under rate limits and controller
 description: Design, implemented in provider-runtime, for a governor that slows reconciles when an external API signals a rate limit or the controller's own CPU is saturated, with an experimental memory input, aligned with unstructured-runtime's design.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, reconciler, workqueue]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Automatic slow-down under rate limits and controller saturation
@@ -239,7 +239,7 @@ container:
 
 | Input | File | Meaning |
 |---|---|---|
-| CPU pressure | `cpu.pressure`, `some avg10` | Share of the last 10s in which a runnable task waited for CPU. It covers throttling by the CPU limit and contention on the node alike. |
+| CPU pressure | `cpu.pressure`, the change of `some total` over 10s | Share of the last 10s in which a runnable task waited for CPU. It covers throttling by the CPU limit and contention on the node alike. The kernel's `some avg10` isn't used: it is an exponential average that still holds most of a stall 10s after it ended (§11 item 19). |
 | Memory working set (**experimental, off by default**) | `memory.current` minus `inactive_file` from `memory.stat`, against `memory.max` | The same working set kubelet uses for eviction and the OOM killer acts on. Page cache the kernel can drop is excluded, so a large but reclaimable cache does not slow anything down. It did not prevent OOMKills when measured (§11). |
 
 `memory.pressure` (`full avg10`) is not an input. It was in this design to
@@ -270,24 +270,26 @@ unstructured-runtime#72. The design of the fix is
 - One sampler goroutine reads the files every second (default) and publishes
   the result atomically. Neither `Acquire` nor the queues do I/O. A faster
   period only matters to the experimental memory input. It doesn't make CPU
-  pressure react faster: `avg10` is already a 10-second average.
+  pressure react faster: it is measured over a 10-second window.
 - A call inside the reconcile needs a slot in its keys only. A call without a
   key isn't gated in the reconciler at all.
 - *Slow start:* `local` starts at 1, not at the ceiling, and rises by 1 per
-  `StartupRampInterval` (2s by default, not tied to the sample period) until
-  its first cut, so 16 workers are all admitted after about 30s.
-- *Saturated* (any input over its threshold for one sample): `local`
-  halves, with a minimum of 1. One reconcile always keeps going, so a saturated
-  controller still finishes deletions and still makes progress. Halving is
-  rate-limited to once per sample period, so one bad second can't drive
-  capacity to 1. Reconciles already running keep their slots.
-- *Recovery:* one rule, whichever input made the cut. After any cut, +1 per
-  clean `RecoveryInterval` (30s by default), up to the ceiling: the same as §2
-  for API limits. A saturated sample during recovery halves again and restarts
-  the interval, and one at the floor counts as a cut too. A rise is granted to
-  a waiting worker at once.
+  clean `StartupRampInterval` (2s by default, not tied to the sample period),
+  so 16 workers are all admitted after about 30s.
+- *CPU-saturated* (§11 item 19): CPU pressure over its threshold for a whole
+  10s window halves `local`, with a minimum of 1, at most once per window. The
+  next cut needs a whole window measured after the last one, so no cut is made
+  twice on the same stall. Pressure over the threshold that doesn't cut (in a
+  governor's first 10s, or within 10s of the last cut) holds `local`: it isn't
+  a clean sample. One reconcile always keeps going, so a saturated controller
+  still finishes deletions and still makes progress. Reconciles already running
+  keep their slots.
+- *Recovery after a CPU cut:* +1 per clean `StartupRampInterval`, up to the
+  ceiling. A rise is granted to a waiting worker at once.
+- *Recovery after a cut by the experimental memory input:* +1 per clean
+  `RecoveryInterval` (30s by default), the same as §2 for API limits.
 - *Experimental memory input, soft ratio:* at 80% of `memory.max` by default
-  (provisional), `local` halves.
+  (provisional), `local` halves, once per sample.
 - *Experimental memory input, hard ratio:* at 90% of `memory.max` by default
   (provisional), `local` drops to 1 at once rather than halving. The one-reconcile
   floor still applies, and that reconcile can be the OOMKill (§11).
@@ -381,7 +383,7 @@ Tests, each written so it fails without the behaviour it checks:
 | Recovery is additive | Capacity returns to the ceiling in N steps of `RecoveryInterval`, not one. |
 | Off by default | With no governor: no gate, no deferrals, and the existing suite passes unchanged. |
 | Providers really report | A conformance helper in `pkg/reconciler/reconcilertest`, alongside `AssertObserveSetsReady`: feed the provider's client a recorded 429 and a recorded Azure DevOps advisory 200, and assert that a `Signal` was reported. |
-| Saturation halves, floors at 1, recovers additively | Feed cgroup fixtures (testdata copies of `cpu.pressure`, `memory.current`, `memory.stat`, `memory.max`). Pressure over the threshold halves `local` once per sample, never below 1, including mid-ramp. A fresh governor's `local` is 1 and reaches N after N-1 clean samples. |
+| Saturation halves, floors at 1, recovers additively | Feed cgroup fixtures (testdata copies of `cpu.pressure`, `memory.current`, `memory.stat`, `memory.max`). The working set over its soft ratio halves `local` once per sample, never below 1. CPU pressure is fed as a cumulative stall: over the threshold for a whole window it halves `local` once per window, never below 1, and `local` then rises by 1 per ramp interval. A fresh governor's `local` is 1 and reaches N after N-1 clean samples. |
 | The working set excludes reclaimable cache | A fixture with `memory.current` at 98% of the limit, mostly `inactive_file`, does not slow down. The same total with no `inactive_file` does. |
 | The hard memory ratio drops to 1 at once | At 90% working set, `local` goes from N to 1 in one sample. |
 | A missing input is disabled, not saturated | With no PSI file, or `memory.max` set to `max`, the controller ramps to full capacity, and the metric says the input is disabled. |
@@ -665,3 +667,33 @@ gates are met.
     the controller's own saturation. It changes user-visible behaviour of an
     off-by-default feature, so it is a minor release. Both measurement blocks of
     item 16 measured the old gate and are repeated on the combined code.
+19. **Built: CPU pressure over a 10s window, one cut per window. Decided by the
+    user on 2026-11-13.** Measured on GKE on 2026-11-08 (250m, 16 workers), the
+    step of item 16 took `local` from 16 to 1 on one stall and settled at about
+    70% of the CPU limit, with 31% less throughput. The cause: it halved on
+    every 1s sample of `some avg10`, an exponential average with a 10s time
+    constant, so it kept cutting on a stall its first cut had already answered,
+    and then recovered at +1 per 30s.
+    - **The signal is the change of `cpu.pressure`'s cumulative `some total`
+      over the last 10s** (`CPUPressureWindow`), not `avg10`. A window that
+      starts after a cut holds nothing from before it.
+    - **A cut needs a whole window of evidence, and the next cut a whole window
+      measured after the last one.** Pressure over the threshold that doesn't
+      cut holds `local`.
+    - **After a CPU cut, +1 per clean `StartupRampInterval` (2s).** The memory
+      input keeps item 16's rules: the soft ratio halves once per sample, the
+      hard ratio drops to 1 at once, and recovery is +1 per `RecoveryInterval`.
+    - **The bars for the re-measurement** (the user, 2026-11-08): at least 90%
+      of the CPU limit used, pressure about 50, throughput at least 90% of the
+      unthrottled run, no restarts. Not measured yet.
+    - **This replaces the cost model**
+      ([design-saturation-cost-model](./design-saturation-cost-model.md)),
+      which was stopped after its review: at CPU limits of 100m to 125m its own
+      calibration lowered the target to about 78% of the limit, and the design
+      had grown far past this step
+      ([the review](https://github.com/krateo-platformops/provider-runtime/pull/57#issuecomment-6856212229)).
+    - `CPUPressureThreshold` keeps its name and its default, 50, still
+      provisional. Its meaning moves from `avg10` to the window's share, and
+      the `saturation.input` metric reports the same value. It changes
+      user-visible behaviour of an off-by-default feature, so it is a minor
+      release.
