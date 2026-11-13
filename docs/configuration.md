@@ -172,8 +172,9 @@ protection.** The user decided what follows from the kind measurements below
   with the step before it, which read the kernel's `some avg10` and halved on
   every 1s sample over the threshold. On GKE that step took `local` from 16 to
   1 on one stall and settled at about 70% of the CPU limit, because `avg10`
-  still holds most of a stall 10s after it ended. The new step has not been
-  re-measured yet.
+  still holds most of a stall 10s after it ended.
+  [The new step was measured on 2026-11-13](#cpu-step-re-measured-2026-11-13)
+  and met the user's bars.
 - The memory working set is a separate, experimental input, off by default. It
   [did not prevent OOMKills](#re-measurement-of-the-memory-input) in 0 of 19
   runs on an overcommitted workload, so turning it on does not protect a
@@ -192,6 +193,41 @@ protection.** The user decided what follows from the kind measurements below
 
 Keep workers times the largest call well under the memory limit. The governor
 can't rescue a controller whose workers can overrun it.
+
+#### CPU step, re-measured 2026-11-13
+
+The step of the 2026-11-13 change against the one before it, on GKE
+(e2-standard-4, Kubernetes 1.36): 250m limit, 64 Greetings polled every 1s, 16
+workers, each Observe spending 20ms of CPU and then waiting 400ms. Five 360s
+runs per arm, order rotating, none discarded; figures from 40s on. The settings
+and the bars were committed before the first run
+(`hack/rlgov-measure/results/s1-settings.txt`), and
+`hack/rlgov-measure/step_report.py s1` prints every run.
+
+| Arm | CPU used (of 250ms/s) | CPU pressure (`some avg10`) | Observes/s | Mean `local` | Wall time of a call's 20ms of CPU | Restarts |
+|---|---|---|---|---|---|---|
+| governor off | 99.9% | 59.1 | 11.31 | — | 526ms | 0 |
+| the step before (threshold 50) | 72.2% | 17.0 | 7.86 | 3.9 | 59ms | 0 |
+| the new step (threshold 50) | 93.4% | 41.7 | 10.29 | 6.3 | 144ms | 0 |
+
+The user's bars of 2026-11-08, for the new step:
+
+| Bar | Measured | Met |
+|---|---|---|
+| CPU used at least 90% of the limit | 93.4% (median of 5) | yes |
+| Pressure about 50 (read as 40 to 60) | 41.7 (mean of 5) | yes |
+| Throughput at least 90% of governor off | 91.0% | yes |
+| No restarts | 0 | yes |
+
+- The five runs of the new step agree closely: 93% of the limit, 10.2 to 10.3
+  Observes a second, pressure 41 to 42. The margins on pressure and throughput
+  are thin.
+- The step before it reproduces 2026-11-08: about 72% of the limit and 31% less
+  throughput.
+- Running nearer the limit costs latency: a call's CPU takes 144ms of wall time
+  under the new step against 59ms under the old one, and 526ms with the
+  governor off.
+- One workload at one limit. The threshold stays provisional.
 
 #### CPU at the final code
 

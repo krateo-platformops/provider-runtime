@@ -685,7 +685,10 @@ gates are met.
       hard ratio drops to 1 at once, and recovery is +1 per `RecoveryInterval`.
     - **The bars for the re-measurement** (the user, 2026-11-08): at least 90%
       of the CPU limit used, pressure about 50, throughput at least 90% of the
-      unthrottled run, no restarts. Not measured yet.
+      unthrottled run, no restarts. **Met on 2026-11-13** on GKE at 250m: 93.4%
+      of the limit, pressure 41.7, 91.0% of the throughput, no restarts, where
+      the step before it read 72.2%, 17.0 and 69.5%
+      ([configuration](./configuration.md#cpu-step-re-measured-2026-11-13)).
     - **This replaces the cost model**
       ([design-saturation-cost-model](./design-saturation-cost-model.md)),
       which was stopped after its review: at CPU limits of 100m to 125m its own
