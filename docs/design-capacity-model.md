@@ -309,11 +309,17 @@ On the harness of `hack/rlgov-measure` (20ms of CPU and a 400ms wait per
 Observe, 16 workers), at 500m and at 1 CPU, three arms: governor off, the step
 alone (v1.19.0), the step with the law. Bars, written before the first run:
 
-- with the law, `local` settles within 20% of the knee computed from the
-  ungoverned arm's cost (`target × limit ÷ CPU per reconcile × (CPU + wait)`);
-- CPU used and throughput are not worse than the step alone;
-- a call's wall time is lower than under the step alone;
+- a call's wall time is at least 20% lower than under the step alone;
+- throughput is at least 95% of the step alone's;
+- CPU used is at least 85% of the limit;
+- `local` settles within 20% of the knee computed from the ungoverned arm's
+  cost (`target × limit ÷ CPU per reconcile × (CPU + wait)`);
 - no restarts.
+
+The user chose these on 2026-11-13, "a latency win at near-equal throughput":
+the law aims at 90% of the limit, and the step alone runs hotter (93.4% at
+250m) at the cost of latency, so "not worse on CPU" would fail a law that does
+what it is for.
 
 A second workload with two controllers, one with a backlog of long reconciles
 and one light, checks §6: the light controller's queue wait stays under one

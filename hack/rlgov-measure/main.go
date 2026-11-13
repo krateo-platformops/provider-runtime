@@ -17,6 +17,8 @@
 //	SAT_CPU             CPU pressure threshold (default: the library's)
 //	SAT_SOFT, SAT_HARD  working-set ratios (default: the library's)
 //	SAT_PERIOD_MS       sample period (default: the library's)
+//	CAPACITY_MODEL      true turns the capacity model on (needs SATURATION)
+//	CPU_TARGET          the model's target share of the CPU limit (default: the library's)
 //	SAMPLER_OVERHEAD    "true" measures the sampler's cost and nothing else
 //	PHASE_S             length of each overhead phase (default 60)
 //	GOGC_PERCENT        GOGC (default 100)
@@ -363,7 +365,7 @@ func main() {
 			inactive := statValue("inactive_file")
 			limit := readFile("memory.max")
 			ws := cur - min(cur, inactive)
-			local, sat := "-", "-"
+			local, sat, model := "-", "-", ""
 			rec.mu.Lock()
 			def := fmt.Sprint(rec.deferrals)
 			rec.mu.Unlock()
@@ -379,11 +381,12 @@ func main() {
 					}
 				}
 				sat = strings.Join(parts, ",")
+				model = modelStat(s)
 			}
-			fmt.Printf("STAT t=%.0f cpu_ms/s=%.0f obs/s=%d burn_cpu_ms/call=%s burn_wall_ms/call=%s inflight=%d local=%s cpu_some=%s mem_full=%s mem_some=%s ws_mib=%d max=%s throttled_usec=%s node_load=%s %s deferrals=%s inputs=%s\n",
+			fmt.Printf("STAT t=%.0f cpu_ms/s=%.0f obs/s=%d burn_cpu_ms/call=%s burn_wall_ms/call=%s inflight=%d local=%s cpu_some=%s mem_full=%s mem_some=%s ws_mib=%d max=%s throttled_usec=%s node_load=%s %s deferrals=%s inputs=%s %s\n",
 				time.Since(start).Seconds(), cpuMs, n-last, burnCPU, burnWall, inFlight.Load(), local,
 				avg10("cpu.pressure", "some"), avg10("memory.pressure", "full"), avg10("memory.pressure", "some"),
-				ws>>20, limit, statField("cpu.stat", "throttled_usec"), nodeLoad(), goStats(), def, sat)
+				ws>>20, limit, statField("cpu.stat", "throttled_usec"), nodeLoad(), goStats(), def, sat, model)
 			last = n
 		}
 	}()
