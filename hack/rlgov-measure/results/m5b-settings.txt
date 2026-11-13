@@ -1,0 +1,24 @@
+Capacity model block m5b, started 2026-11-13T21:32:42Z
+question (docs/design-capacity-model.md §10): is the CPU pressure step with the capacity model better than the step alone? If it is not, the model does not ship.
+image: cm1 d3284f32b1e793ceccf9bc425992a1b33072c937 sha256:3f3670ba04d2193aea4b47a1300a86e52b0148f08c1826d5512a120186933396
+arms: off (SATURATION unset), step (SATURATION=true SAT_CPU=50), model (SATURATION=true SAT_CPU=50 CAPACITY_MODEL=true CPU_TARGET=0.95);
+the model's CPU target: 0.95; 5 runs each, order rotating each round, one run at a time
+workload: cpu mode, 500m limit, 512Mi, 64 Greetings, 32 workers, poll 1s, 360s per run; each Observe spends 20ms of CPU measured on its own thread, then waits 400ms. The memory input is off in every arm. The workers are 32, not the step block's 16, so that the ungoverned arm asks for more CPU than the limit at 1 CPU too: 32 workers at about 22ms of CPU per 420ms want about 1.68 cores.
+liveness probe: incident-provider's (httpGet /healthz, periodSeconds 10, timeoutSeconds 1, failureThreshold 3)
+
+the knee, computed by model_report.py from the off arm's own figures: 0.95 x limit / c x (c + 0.4s), c the off arm's CPU per Observe (cpu_ms/s over obs/s, median of its runs). With c about 22ms that is about 9.1 slots.
+
+the bars, decided by the user on 2026-11-13 ("a latency win at near-equal throughput"), written before run 1; figures from 40s on, medians over the runs:
+- wall time: the model arm's wall time for a call's 20ms of CPU is at least 20% lower than the step arm's;
+- throughput: the model arm's Observes per second are at least 95% of the step arm's;
+- CPU used: the model arm uses at least 85% of the limit;
+- local: the model arm's mean local is within 20% of the knee;
+- no restarts in any run of the model arm.
+All five decide.
+
+validity, checked per run and reported, never used to drop a run: the median burn_cpu_ms/call is 20.0 to 20.5; in the off arm, CPU is at least 90% of the limit. If the off arm doesn't saturate, the block shows nothing, and that is the result; the workload is not retuned.
+
+expected, written before run 1: the step alone moves local between a cut and the ceiling, as at 250m (mean 6.3 around a knee of about 5, wall 144ms). The model should hold local near the knee with few cuts, so with a lower wall time and about the same CPU and throughput. The risk to it: at 90% of the limit the 10s stall share may still pass 50, so the step keeps cutting and the model changes little; the cuts per run show that.
+
+also reported per arm: local (mean, minimum, standard deviation), cuts, the model's M, calls in flight, failed probes, liveness kills.
+driver power: Now drawing from 'AC Power'
