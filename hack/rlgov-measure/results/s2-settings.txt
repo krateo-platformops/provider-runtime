@@ -1,4 +1,4 @@
-CPU step block s2, started 2026-11-13T16:52:36Z
+CPU step block s2, started 2026-11-13T16:55:35Z
 question: does provider-runtime#95's CPU step meet the user's bars of 2026-11-08, where the step before it settled at about 70% of the CPU limit with 31% less throughput?
 old image: old 0ec188ff0443809b77fa99aad43332e861467b84 sha256:b9097470ad5e3b7ef17994d5e82217248c91a914ac109e99bb50fcdbab9f0389 (main fb25bf9 plus the harness commit 3ad9055, cherry-picked: local branch measure/old-step-harness)
 new image: new95 3ad90554bbfa8944eb87a4b04c89f895eb5329ed sha256:b09e489c7a9694eb660c5187d7532fa557c86a019d37b315a54118ab810d4ab6
