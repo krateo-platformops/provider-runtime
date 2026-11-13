@@ -71,6 +71,13 @@ and is evaluated with what it has. The completions only choose the window's
 length: a controller whose reconciles are slow is measured over a longer
 window, not never. The next window starts where the last one ended.
 
+An interval in which nothing was in flight (`N` is 0) never enters a window. It
+feeds `B` and nothing else: it neither starts a window nor is added to one in
+progress, and it doesn't count towards the 30. So a window holds only intervals
+in which something ran, its length is the sum of theirs, and a burst after idle
+time is judged on its own intervals instead of being averaged with the idle
+ones before it.
+
 Over the window:
 
 - `U` = Δ`usage` ÷ Δt, the CPU used, in cores;
@@ -86,7 +93,10 @@ Over the window:
 **CPU barely used.** If `U − B` is under 5% of `limit`, `r` divides by almost
 nothing and is not usable, but the direction is certain: CPU does not bind. Then
 `wanted = 2 × M`, the rise cap, and rule 3 is skipped. It is still a rise, so
-rules 2 and 4 to 6 apply.
+rules 2 and 4 to 6 apply. One case where "does not bind" is not certain: with a
+background within 5% of `limit` under the target, doubling can take CPU use
+over the target, by up to 5% of `limit`. The law then falls back at the next
+window.
 
 The capacity in force (rule 2) and the arrival rate (§7) are taken over the
 same window.
@@ -109,6 +119,8 @@ The model's capacity `M` moves to `wanted` under these rules, in this order:
    least 0.9 × the capacity in force over the window, which is the published
    `local` averaged over its time: with slots standing idle, more of them would
    have changed nothing, and the window says nothing about what more would cost.
+   At a small capacity that is a high bar: at `local` 1 the one slot must be in
+   use for 9 seconds in 10.
 3. **Tolerance.** `M` is unchanged if `r` is within 5% of 1, that is if
    `|r − 1| ≤ 0.05`: CPU use that close to the target moves nothing. Skipped
    with the CPU barely used, where there is no `r`. It is the
@@ -150,6 +162,11 @@ completed, and CPU barely used is a rise, not "no move" (one reconcile at
 used (rule 2), which is not a shortage: nothing waits for a slot then. It also
 stays while the background alone holds CPU use at the target or over it, where
 there is nothing to rise into.
+
+**How old the measurements are.** `U`, `B`, the cost per reconcile and the
+required CPU (§7) are those of the last window that ended. With slow reconciles
+a window is up to 30 busy intervals, and with idle time between them longer
+still, so the gauges are as old as that.
 
 **What it does not see.** A reconcile that waits on a slow external API uses
 little CPU, so the law allows more of them. That is correct for the container's
@@ -268,8 +285,10 @@ saturation is on.
   with the slots idle; the rise cap; a limit change.
 - **The window:** at 5 completions per interval `M` moves at the fourth
   interval, over all four; a window that never holds 20 is evaluated at 30
-  intervals with what it has; one with nothing in flight moves nothing; a limit
-  change inside a window discards it.
+  intervals with what it has; a limit change inside a window discards it; after
+  idle intervals a busy interval pinned at the limit falls at its own
+  evaluation; idle intervals inside a window dilute neither `N` nor `U` and
+  don't count towards its length.
 - **With the step:** `local` is the lower of the two; a cut halves `local` and
   pulls `M` down; `P` climbing past `M` changes nothing; after a cut `local`
   rises again with slow reconciles, and from 1 on a 1 CPU limit.

@@ -52,11 +52,12 @@ const (
 	backgroundWindow = 10 * time.Minute
 )
 
-// modelInterval is what one window measured: one ModelInterval, or as many
-// whole ones as it took to see minCompletions completions, up to
-// maxWindowIntervals.
+// modelInterval is what one window measured: one ModelInterval in which
+// something was in flight, or as many of them as it took to see minCompletions
+// completions, up to maxWindowIntervals. Intervals with nothing in flight are
+// not part of it.
 type modelInterval struct {
-	// elapsed is the window's length.
+	// elapsed is the window's length: the sum of its intervals'.
 	elapsed time.Duration
 	// cpuUsed is the change of cpu.stat's usage_usec.
 	cpuUsed time.Duration
@@ -192,17 +193,23 @@ type capacityModel struct {
 	capacity float64
 	moved    bool
 
-	// open reports that a window is being measured: it began at start, and
-	// last is its latest sample. A window is made of whole ModelIntervals:
-	// interval is where the current one began, and intervals how many have
-	// ended.
-	open                  bool
-	start, interval, last modelPoint
-	intervals             int
-	// limit is the CPU limit at the window's first sample.
-	limit        float64
-	limitChanged bool
-	capacityTime time.Duration
+	// open reports that an interval is being measured: it began at interval,
+	// and last is its latest sample. intervalLimit is the CPU limit at its
+	// first sample, intervalLimitChanged reports that a later sample's
+	// differed, and intervalCapacityTime is the published local capacity
+	// summed over its time.
+	open                 bool
+	interval, last       modelPoint
+	intervalLimit        float64
+	intervalLimitChanged bool
+	intervalCapacityTime time.Duration
+
+	// window is the sum of the intervals of the window being measured, which
+	// are the intervals in which something was in flight; intervals is how
+	// many, and arrivals the items that became ready to run in them.
+	window    modelInterval
+	intervals int
+	arrivals  int64
 
 	// idle holds U for the intervals of the last backgroundWindow in which no
 	// reconcile was in flight, oldest first.
@@ -241,64 +248,79 @@ func (c *capacityModel) cutTo(local, ceiling int) {
 // now, the queues' totals at now, and inForce, the local capacity published
 // since the sample before.
 //
-// The law is applied over a window of whole ModelIntervals. At the end of each
-// interval the window ends if it holds minCompletions completions, if the limit
-// changed in it, or if it is maxWindowIntervals long; otherwise it grows by
-// another interval, so that slow reconciles are measured over enough of them.
-// The completions only choose the window's length: the law is applied to every
-// window that ends, and decides that one with a limit change, or with nothing
-// in flight, moves nothing (rule 1). The next window starts at this sample.
+// The law is applied over a window of whole ModelIntervals in which something
+// was in flight. An interval with nothing in flight feeds the background and
+// nothing else: it neither starts a window nor joins one, so a burst after idle
+// time is judged on its own intervals. At the end of an interval that joined
+// it, the window ends if it holds minCompletions completions, if the limit
+// changed in it, or if it is maxWindowIntervals long; otherwise it goes on, so
+// that slow reconciles are measured over enough of them. The completions only
+// choose the window's length: the law is applied to every window that ends.
 //
-// A usage counter that went backwards belongs to another cgroup, and starts
-// the window again.
+// A usage counter that went backwards belongs to another cgroup: the window
+// and the interval start again.
 func (c *capacityModel) observe(now time.Time, usage time.Duration, limit float64, inForce int, work workTotals, ceiling int) {
 	p := modelPoint{at: now, usage: usage, work: work}
 	if !c.open || usage < c.last.usage {
-		c.begin(p, limit)
+		c.open = true
+		c.window, c.intervals, c.arrivals = modelInterval{}, 0, 0
+		c.beginInterval(p, limit)
 		return
 	}
 	if !now.After(c.last.at) {
 		return
 	}
-	c.capacityTime += time.Duration(inForce) * now.Sub(c.last.at)
-	if limit != c.limit {
-		c.limitChanged = true
+	c.intervalCapacityTime += time.Duration(inForce) * now.Sub(c.last.at)
+	if limit != c.intervalLimit {
+		c.intervalLimitChanged = true
 	}
 	c.last = p
-	if now.Sub(c.interval.at) < c.every {
+	elapsed := now.Sub(c.interval.at)
+	if elapsed < c.every {
 		return
 	}
-	if p.work.slotTime == c.interval.work.slotTime {
-		idle := (p.usage - c.interval.usage).Seconds() / now.Sub(c.interval.at).Seconds()
-		c.idle = append(c.idle, idleUse{at: now, used: idle})
+
+	cpuUsed := p.usage - c.interval.usage
+	slotTime := p.work.slotTime - c.interval.work.slotTime
+	idle := slotTime == 0
+	if idle {
+		c.idle = append(c.idle, idleUse{at: now, used: cpuUsed.Seconds() / elapsed.Seconds()})
 	}
-	c.interval = p
-	c.intervals++
-	if p.work.completions-c.start.work.completions < minCompletions && !c.limitChanged && c.intervals < maxWindowIntervals {
+	if !idle {
+		w := &c.window
+		if c.intervals == 0 {
+			w.limit = c.intervalLimit
+		}
+		if c.intervalLimitChanged || c.intervalLimit != w.limit {
+			w.limitChanged = true
+		}
+		w.elapsed += elapsed
+		w.cpuUsed += cpuUsed
+		w.slotTime += slotTime
+		w.capacityTime += c.intervalCapacityTime
+		w.completions += p.work.completions - c.interval.work.completions
+		c.arrivals += p.work.arrivals - c.interval.work.arrivals
+		c.intervals++
+	}
+	c.beginInterval(p, limit)
+
+	if c.intervals == 0 || (c.window.completions < minCompletions && !c.window.limitChanged && c.intervals < maxWindowIntervals) {
 		return
 	}
-	c.closeWindow(ceiling)
-	c.begin(p, limit)
+	c.closeWindow(now, ceiling)
+	c.window, c.intervals, c.arrivals = modelInterval{}, 0, 0
 }
 
-func (c *capacityModel) begin(p modelPoint, limit float64) {
-	c.open, c.start, c.interval, c.last, c.intervals = true, p, p, p, 0
-	c.limit, c.limitChanged, c.capacityTime = limit, false, 0
+func (c *capacityModel) beginInterval(p modelPoint, limit float64) {
+	c.interval, c.last = p, p
+	c.intervalLimit, c.intervalLimitChanged, c.intervalCapacityTime = limit, false, 0
 }
 
-// closeWindow applies the law to the window from start to last, and records
-// what it measured for metrics.
-func (c *capacityModel) closeWindow(ceiling int) {
-	iv := modelInterval{
-		elapsed:      c.last.at.Sub(c.start.at),
-		cpuUsed:      c.last.usage - c.start.usage,
-		slotTime:     c.last.work.slotTime - c.start.work.slotTime,
-		capacityTime: c.capacityTime,
-		completions:  c.last.work.completions - c.start.work.completions,
-		limit:        c.limit,
-		limitChanged: c.limitChanged,
-		background:   c.background(c.last.at),
-	}
+// closeWindow applies the law to the window, at now, and records what it
+// measured for metrics.
+func (c *capacityModel) closeWindow(now time.Time, ceiling int) {
+	iv := c.window
+	iv.background = c.background(now)
 
 	before := c.current(ceiling)
 	if after := modelCapacity(before, iv, c.cpuTarget, ceiling); after != before {
@@ -315,8 +337,7 @@ func (c *capacityModel) closeWindow(ceiling int) {
 		r.hasPerReconcile = true
 	}
 	if r.hasPerReconcile {
-		arrivals := float64(c.last.work.arrivals-c.start.work.arrivals) / seconds
-		r.required = (iv.background + r.perReconcile*arrivals) / c.cpuTarget
+		r.required = (iv.background + r.perReconcile*float64(c.arrivals)/seconds) / c.cpuTarget
 	}
 	c.report = r
 }
