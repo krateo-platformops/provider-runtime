@@ -98,15 +98,21 @@ func TestLawARiseNeedsTheSlotsUsed(t *testing.T) {
 	}
 }
 
-// Rule 3: wanted within 10% of M moves nothing. From 13.5 the worked example's
-// 14.3 is 6% away.
+// Rule 3: the tolerance is on the ratio r = (target − B) ÷ (U − B). With CPU use
+// within 5% of the target nothing moves, whatever M is.
 func TestLawToleranceMovesNothing(t *testing.T) {
-	if got := modelCapacity(13.5, lawInterval(12, 12, 0.38), DefaultCPUTarget, lawCeiling); got != 13.5 {
-		t.Errorf("wanted 14.3 from 13.5: M = %v, want 13.5 unchanged", got)
+	// 440m of a 450m target: r is 430 ÷ 420 = 1.024. Wanted is 12.3, from 10.
+	if got := modelCapacity(10, lawInterval(12, 12, 0.44), DefaultCPUTarget, lawCeiling); got != 10 {
+		t.Errorf("r 1.024, wanted 12.3 from 10: M = %v, want 10 unchanged", got)
 	}
-	// Over the target and within the tolerance: 12 × 430 ÷ 460 = 11.2.
-	if got := modelCapacity(12, lawInterval(12, 12, 0.48), DefaultCPUTarget, lawCeiling); got != 12 {
-		t.Errorf("wanted 11.2 from 12: M = %v, want 12 unchanged", got)
+	// 460m: r is 430 ÷ 440 = 0.977. Wanted is 11.7, from 16.
+	if got := modelCapacity(16, lawInterval(12, 16, 0.46), DefaultCPUTarget, lawCeiling); got != 16 {
+		t.Errorf("r 0.977, wanted 11.7 from 16: M = %v, want 16 unchanged", got)
+	}
+	// 420m: r is 430 ÷ 400 = 1.075, outside the band.
+	got := modelCapacity(10, lawInterval(12, 12, 0.42), DefaultCPUTarget, lawCeiling)
+	if want := 12 * 0.43 / 0.40; !near(got, want) {
+		t.Errorf("r 1.075: M = %v, want %v", got, want)
 	}
 }
 
@@ -156,6 +162,17 @@ func TestLawPinnedAtTheLimitFallsSlowly(t *testing.T) {
 	}
 	if got < 0.89*12 || got > 0.9*12 {
 		t.Errorf("M = %v from 12, want a fall of about 10%%", got)
+	}
+	// With no background and every slot used, r is the target itself, 0.9:
+	// outside the tolerance, so M falls by 10% at every evaluation. A tolerance
+	// of 10% on the capacity would sit exactly on this case.
+	m := 12.0
+	for i, want := range []float64{10.8, 9.72, 8.748} {
+		iv := lawInterval(m, m, 0.5)
+		iv.background = 0
+		if m = modelCapacity(m, iv, DefaultCPUTarget, lawCeiling); !near(m, want) {
+			t.Fatalf("evaluation %d pinned at the limit with no background: M = %v, want %v", i+1, m, want)
+		}
 	}
 }
 
@@ -229,6 +246,102 @@ func (c *modelClock) seconds(n int, used, inFlight float64, inForce int, perSeco
 	}
 }
 
+// interval takes one ModelInterval of samples, with the given completions, and
+// as many arrivals, counted at its last sample.
+func (c *modelClock) interval(used, inFlight float64, inForce int, completions int64) {
+	c.seconds(9, used, inFlight, inForce, 0)
+	c.work.completions += completions
+	c.work.arrivals += completions
+	c.seconds(1, used, inFlight, inForce, 0)
+}
+
+// Slow reconciles are evidence too: the window grows by whole intervals until
+// it holds 20 completions, and the law is applied over all of it. At 5 a
+// interval that is the fourth.
+func TestModelWindowGrowsUntilItHoldsEnoughCompletions(t *testing.T) {
+	c := newModelClock()
+	for i := 1; i <= 3; i++ {
+		c.interval(0.5, 16, 32, 5)
+		if got := c.m.current(lawCeiling); got != lawCeiling {
+			t.Fatalf("after %d interval(s), %d completions: M = %v, want the ceiling unchanged", i, 5*i, got)
+		}
+		if c.m.reported(lawCeiling).measured {
+			t.Fatalf("a window was measured after %d interval(s)", i)
+		}
+	}
+	// The fourth interval had 8 in flight: over all four the mean is 14, and
+	// pinned at the limit the law wants 14 × 0.9. Over the last alone it
+	// would be 7.2.
+	c.interval(0.5, 8, 32, 5)
+	if got, want := c.m.current(lawCeiling), 14*0.45/0.5; !near(got, want) {
+		t.Fatalf("after the fourth interval M = %v, want %v: the law over the whole window", got, want)
+	}
+	if r := c.m.reported(lawCeiling); !r.measured || !near(r.used, 0.5) || !near(r.perReconcile, 0.5*40/20) {
+		t.Errorf("the window's report = %+v, want U 0.5 and 1s of CPU per reconcile over 40s", r)
+	}
+	// The next window starts from nothing.
+	before := c.m.current(lawCeiling)
+	for range 3 {
+		c.interval(0.5, 4, 32, 5)
+	}
+	if got := c.m.current(lawCeiling); got != before {
+		t.Errorf("M = %v three intervals into the next window, want %v unchanged", got, before)
+	}
+}
+
+// A window that never holds 20 completions is discarded after 30 intervals: it
+// moves nothing, and the next one starts from nothing.
+func TestModelAWindowWithoutEnoughCompletionsIsDiscarded(t *testing.T) {
+	c := newModelClock()
+	for i := range maxWindowIntervals {
+		completions := int64(1)
+		if i >= minCompletions-1 {
+			completions = 0 // 19 in all
+		}
+		c.interval(0.5, 16, 32, completions)
+		if got := c.m.current(lawCeiling); got != lawCeiling {
+			t.Fatalf("after %d interval(s) M = %v, want the ceiling unchanged", i+1, got)
+		}
+	}
+	// Had the window gone on, its 19 completions and the next interval's 5
+	// would be enough at once. It restarted, so it takes four intervals.
+	for i := 1; i <= 3; i++ {
+		c.interval(0.5, 16, 32, 5)
+		if got := c.m.current(lawCeiling); got != lawCeiling {
+			t.Fatalf("%d interval(s) after the window was discarded M = %v, want the ceiling: the window restarted", i, got)
+		}
+	}
+	c.interval(0.5, 16, 32, 5)
+	if got, want := c.m.current(lawCeiling), 16*0.45/0.5; !near(got, want) {
+		t.Errorf("four intervals after the window was discarded M = %v, want %v", got, want)
+	}
+}
+
+// A limit change inside a window discards it at the end of that interval, and
+// the next window is judged against the new limit.
+func TestModelALimitChangeDiscardsTheWindow(t *testing.T) {
+	c := newModelClock()
+	c.interval(0.5, 16, 32, 5)
+	c.seconds(5, 0.5, 16, 32, 0)
+	c.limit = 1
+	c.seconds(4, 0.5, 16, 32, 0)
+	c.work.completions += 5
+	c.seconds(1, 0.5, 16, 32, 0)
+	// Had the window gone on, it would hold 20 completions two intervals
+	// from now, and be worth nothing. It restarted, so the fourth interval at
+	// the new limit moves M: 16 in flight at 960m of 1 CPU want 15.
+	for i := 1; i <= 3; i++ {
+		c.interval(0.96, 16, 32, 5)
+		if got := c.m.current(lawCeiling); got != lawCeiling {
+			t.Fatalf("%d interval(s) after the limit changed M = %v, want the ceiling unchanged", i, got)
+		}
+	}
+	c.interval(0.96, 16, 32, 5)
+	if got, want := c.m.current(lawCeiling), 16*0.9/0.96; !near(got, want) {
+		t.Errorf("four intervals after the limit changed M = %v, want %v", got, want)
+	}
+}
+
 // M starts at the ceiling, and follows it until the law has moved it.
 func TestModelStartsAtTheCeiling(t *testing.T) {
 	c := newModelClock()
@@ -264,64 +377,79 @@ func TestModelBackground(t *testing.T) {
 	c.seconds(10, 0.03, 0, 12, 0) // idle, 30m
 	c.seconds(10, 0.02, 0, 12, 0) // idle, 20m
 	c.seconds(10, 0.04, 0, 12, 0) // idle, 40m
-	if r := c.m.reported(lawCeiling); !near(r.background, 0.02) {
-		t.Fatalf("B = %v, want the lowest idle U, 0.02", r.background)
+	if b := c.m.background(c.now); !near(b, 0.02) {
+		t.Fatalf("B = %v, want the lowest idle U, 0.02", b)
 	}
-	// A busy interval is judged with it: the worked example.
+	// The idle intervals completed nothing, so they are in the window the next
+	// busy interval ends: 3 in flight on average under a capacity of 12. The
+	// slots were not used, and nothing rises.
 	c.m.capacity, c.m.moved = 12, true
+	c.seconds(10, 0.38, 12, 12, 20)
+	if got := c.m.current(lawCeiling); got != 12 {
+		t.Fatalf("M = %v after a window that was idle for three intervals of four, want 12 unchanged", got)
+	}
+	if r := c.m.reported(lawCeiling); !near(r.used, (0.03+0.02+0.04+0.38)/4) || !near(r.background, 0.02) {
+		t.Fatalf("the window's report = %+v, want U over all four intervals and B 0.02", r)
+	}
+	// A busy window is judged with B: the worked example.
 	c.seconds(10, 0.38, 12, 12, 20)
 	if got, want := c.m.current(lawCeiling), 12*0.43/0.36; !near(got, want) {
 		t.Errorf("M = %v, want %v with B 0.02", got, want)
 	}
 	// An interval with any slot time is not idle, however little CPU it used.
 	c.seconds(10, 0.001, 0.1, 12, 0)
-	if r := c.m.reported(lawCeiling); !near(r.background, 0.02) {
-		t.Errorf("B = %v after a quiet interval with a reconcile in flight, want 0.02", r.background)
+	if b := c.m.background(c.now); !near(b, 0.02) {
+		t.Errorf("B = %v after a quiet interval with a reconcile in flight, want 0.02", b)
 	}
 	// The idle intervals ended 20s, 30s and 40s in. At 640s the first two are
 	// over ten minutes old, and at 650s the third is.
-	c.seconds(580, 0.38, 12, 12, 20)
-	if r := c.m.reported(lawCeiling); !near(r.background, 0.04) {
-		t.Errorf("B = %v after the 20m and 30m intervals aged out, want 0.04", r.background)
+	c.seconds(570, 0.38, 12, 12, 20)
+	if b := c.m.background(c.now); !near(b, 0.04) {
+		t.Errorf("B = %v after the 20m and 30m intervals aged out, want 0.04", b)
 	}
 	c.seconds(10, 0.38, 12, 12, 20)
-	if r := c.m.reported(lawCeiling); r.background != 0 {
-		t.Errorf("B = %v with every idle interval over 10 minutes old, want 0", r.background)
+	if b := c.m.background(c.now); b != 0 {
+		t.Errorf("B = %v with every idle interval over 10 minutes old, want 0", b)
 	}
 }
 
-// What the model reports: CPU per reconcile is (U − B) ÷ X over the last
-// interval with completions, and the required limit is what the arrivals would
-// need to run at the target.
+// What the model reports, over the last window: CPU per reconcile is
+// (U − B) ÷ X, and the required limit is what the arrivals would need to run at
+// the target.
 func TestModelReportsCostAndRequiredCPU(t *testing.T) {
 	c := newModelClock()
-	c.seconds(10, 0.02, 0, 12, 0) // idle: B is 20m
-	if r := c.m.reported(lawCeiling); r.hasPerReconcile {
-		t.Fatalf("CPU per reconcile reported before any reconcile completed: %+v", r)
+	c.seconds(10, 0.02, 0, 12, 0) // idle: B is 20m, and the window goes on
+	if r := c.m.reported(lawCeiling); r.measured || r.hasPerReconcile {
+		t.Fatalf("a window was reported before any reconcile completed: %+v", r)
 	}
-	// 380m used, 20 reconciles a second: 18ms each.
+	// 380m used for 10s, 200 reconciles: over the window's 20s that is 200m
+	// used, 180m above the background, at 10 reconciles a second: 18ms each.
 	c.seconds(10, 0.38, 12, 12, 20)
 	r := c.m.reported(lawCeiling)
-	if !r.hasPerReconcile || !near(r.perReconcile, 0.018) {
-		t.Fatalf("CPU per reconcile = %v (known %v), want 0.018s", r.perReconcile, r.hasPerReconcile)
+	if !r.hasPerReconcile || !near(r.perReconcile, 0.018) || !near(r.used, 0.2) {
+		t.Fatalf("CPU per reconcile = %v (known %v), U = %v; want 0.018s and 0.2", r.perReconcile, r.hasPerReconcile, r.used)
 	}
-	// 20 arrive a second: (0.02 + 0.018 × 20) ÷ 0.9.
-	if want := (0.02 + 0.018*20) / 0.9; !near(r.required, want) {
+	// 10 arrive a second: (0.02 + 0.018 × 10) ÷ 0.9.
+	if want := (0.02 + 0.018*10) / 0.9; !near(r.required, want) {
 		t.Errorf("required CPU = %v, want %v", r.required, want)
 	}
-	// An interval with arrivals and no completion keeps the last cost, and
-	// requires CPU for what arrived: 50 a second.
+	// A window whose first interval only saw arrivals, 50 a second: the rate
+	// is over the whole window, (500 + 200) ÷ 20s.
 	for range 10 {
 		c.now = c.now.Add(time.Second)
 		c.usage += 20 * time.Millisecond
 		c.work.arrivals += 50
 		c.m.observe(c.now, c.usage, c.limit, 12, c.work, lawCeiling)
 	}
+	if got := c.m.reported(lawCeiling); got != r {
+		t.Fatalf("the report changed before the window ended: %+v", got)
+	}
+	c.seconds(10, 0.38, 12, 12, 20)
 	r = c.m.reported(lawCeiling)
 	if !near(r.perReconcile, 0.018) {
-		t.Errorf("CPU per reconcile = %v after an interval with no completion, want the last one, 0.018", r.perReconcile)
+		t.Errorf("CPU per reconcile = %v, want 0.018", r.perReconcile)
 	}
-	if want := (0.02 + 0.018*50) / 0.9; !near(r.required, want) {
+	if want := (0.02 + 0.018*35) / 0.9; !near(r.required, want) {
 		t.Errorf("required CPU = %v, want %v", r.required, want)
 	}
 }
@@ -380,7 +508,6 @@ func TestModelCutPullsMDown(t *testing.T) {
 // reset forgets M, the interval and the background.
 func TestModelReset(t *testing.T) {
 	c := newModelClock()
-	c.seconds(10, 0.02, 0, 12, 0)
 	c.seconds(10, 0.5, 12, 12, 20)
 	if c.m.current(lawCeiling) == lawCeiling {
 		t.Fatal("M did not move")

@@ -247,7 +247,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 	if m.rateLimitCPUUsed, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.used",
-		metric.WithDescription("CPU the container used over the capacity model's last interval."), metric.WithUnit("{cpu}")); err != nil {
+		metric.WithDescription("CPU the container used over the capacity model's last window."), metric.WithUnit("{cpu}")); err != nil {
 		return nil, err
 	}
 	if m.rateLimitCPUBackground, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.background",
@@ -255,7 +255,7 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, err
 	}
 	if m.rateLimitCPUPerReconcile, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.per_reconcile",
-		metric.WithDescription("CPU time one reconcile used, over the capacity model's last interval with completions."), metric.WithUnit("s")); err != nil {
+		metric.WithDescription("CPU time one reconcile used, over the capacity model's last window with completions."), metric.WithUnit("s")); err != nil {
 		return nil, err
 	}
 	if m.rateLimitCPURequired, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.required",

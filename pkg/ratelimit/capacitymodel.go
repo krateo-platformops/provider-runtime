@@ -24,28 +24,35 @@ const (
 
 // The law's fixed values (design §3).
 const (
-	// minCompletions is the fewest reconciles an interval must have completed
-	// to be evidence.
+	// minCompletions is the fewest reconciles a window must have completed to
+	// be evidence.
 	minCompletions = 20
+	// maxWindowIntervals is how many ModelIntervals a window grows to while it
+	// waits for minCompletions. A window that long without them is discarded.
+	maxWindowIntervals = 30
 	// minReconcileCPUShare is the least CPU above the background, as a share
-	// of the limit, an interval must show to be evidence.
+	// of the limit, a window must show to be evidence.
 	minReconcileCPUShare = 0.05
 	// usedSlotsShare is the share of the capacity in force that must have been
 	// in flight for a rise.
 	usedSlotsShare = 0.9
-	// modelTolerance is how far, as a share of the model's capacity, the
-	// wanted capacity must be from it to move it.
-	modelTolerance = 0.10
-	// maxRiseFactor caps one interval's rise.
+	// modelTolerance is how far from 1 the ratio (target − B) ÷ (U − B) must be
+	// to move the model's capacity: the tolerance of the Horizontal Pod
+	// Autoscaler, on the same ratio. It is on the ratio, not on the capacity,
+	// so that a container pinned at its limit is always outside it: there the
+	// ratio is CPUTarget or less.
+	modelTolerance = 0.05
+	// maxRiseFactor caps one evaluation's rise.
 	maxRiseFactor = 2
 	// backgroundWindow is how far back the idle intervals that set the
 	// background are kept.
 	backgroundWindow = 10 * time.Minute
 )
 
-// modelInterval is what one interval measured.
+// modelInterval is what one window measured: one ModelInterval, or as many
+// whole ones as it took to see minCompletions completions.
 type modelInterval struct {
-	// elapsed is the interval's length.
+	// elapsed is the window's length.
 	elapsed time.Duration
 	// cpuUsed is the change of cpu.stat's usage_usec.
 	cpuUsed time.Duration
@@ -74,10 +81,10 @@ func (iv modelInterval) inFlight() float64 { return iv.slotTime.Seconds() / iv.e
 // inForce is the mean local capacity over the interval.
 func (iv modelInterval) inForce() float64 { return iv.capacityTime.Seconds() / iv.elapsed.Seconds() }
 
-// modelCapacity is the law: the model's capacity M after an interval, from M
-// before it and what the interval measured. It is a pure function.
+// modelCapacity is the law: the model's capacity M after a window, from M
+// before it and what the window measured. It is a pure function.
 //
-//	wanted = N × (target − B) ÷ (U − B),  target = cpuTarget × limit
+//	wanted = N × r,  r = (target − B) ÷ (U − B),  target = cpuTarget × limit
 //
 // Below the limit CPU use grows in proportion to the reconciles in flight, so
 // the concurrency that uses the target is the current one scaled by how far U
@@ -95,7 +102,8 @@ func modelCapacity(m float64, iv modelInterval, cpuTarget float64, ceiling int) 
 	if iv.completions < minCompletions || reconcileCPU < minReconcileCPUShare*iv.limit || iv.limitChanged {
 		return m
 	}
-	wanted := inFlight * (target - iv.background) / reconcileCPU
+	ratio := (target - iv.background) / reconcileCPU
+	wanted := inFlight * ratio
 
 	// Rule 2. A rise needs the slots to have been used: with slots standing
 	// idle, more of them would have changed nothing.
@@ -103,8 +111,9 @@ func modelCapacity(m float64, iv modelInterval, cpuTarget float64, ceiling int) 
 		return m
 	}
 
-	// Rule 3. Tolerance.
-	if math.Abs(wanted-m) <= modelTolerance*m {
+	// Rule 3. Tolerance, on the ratio: CPU use within 5% of the target moves
+	// nothing.
+	if math.Abs(ratio-1) <= modelTolerance {
 		return m
 	}
 
@@ -149,20 +158,20 @@ type idleUse struct {
 type modelReport struct {
 	// capacity is M.
 	capacity float64
-	// measured reports that an interval has closed; used is its U and
-	// background the B it was judged with.
+	// measured reports that a window has ended; used is its U and background
+	// the B it was judged with.
 	measured         bool
 	used, background float64
 	// perReconcile is the CPU seconds one reconcile used, over the last
-	// interval with completions; hasPerReconcile is false until there was one.
+	// window with completions; hasPerReconcile is false until there was one.
 	perReconcile    float64
 	hasPerReconcile bool
 	// required is the CPU limit, in cores, at which the work that arrived in
-	// the last interval would run at the target. It needs perReconcile.
+	// the last window would run at the target. It needs perReconcile.
 	required float64
 }
 
-// capacityModel keeps the model's capacity M and the interval it is measuring.
+// capacityModel keeps the model's capacity M and the window it is measuring.
 // Only the sampler goroutine uses it.
 type capacityModel struct {
 	cpuTarget float64
@@ -173,11 +182,14 @@ type capacityModel struct {
 	capacity float64
 	moved    bool
 
-	// open reports that an interval is being measured: it began at start, and
-	// last is its latest sample.
-	open        bool
-	start, last modelPoint
-	// limit is the CPU limit at the interval's first sample.
+	// open reports that a window is being measured: it began at start, and
+	// last is its latest sample. A window is made of whole ModelIntervals:
+	// interval is where the current one began, and intervals how many have
+	// ended.
+	open                  bool
+	start, interval, last modelPoint
+	intervals             int
+	// limit is the CPU limit at the window's first sample.
 	limit        float64
 	limitChanged bool
 	capacityTime time.Duration
@@ -202,7 +214,7 @@ func (c *capacityModel) current(ceiling int) float64 {
 }
 
 // reset forgets everything: the law stopped applying, so M is the ceiling
-// again and the next interval starts from nothing.
+// again and the next window starts from nothing.
 func (c *capacityModel) reset() {
 	*c = capacityModel{cpuTarget: c.cpuTarget, every: c.every}
 }
@@ -217,11 +229,17 @@ func (c *capacityModel) cutTo(local, ceiling int) {
 
 // observe takes one sample: the cumulative CPU usage and the CPU limit read at
 // now, the queues' totals at now, and inForce, the local capacity published
-// since the sample before. When the sample ends an interval, it applies the law
-// and starts the next interval at this sample.
+// since the sample before.
+//
+// The law is applied over a window of whole ModelIntervals. At the end of each
+// interval the window ends if it holds minCompletions completions, if the limit
+// changed in it, or if it is maxWindowIntervals long; otherwise it grows by
+// another interval, so that slow reconciles are evidence too. The law decides
+// what a window that ended is worth: one without the completions, or with a
+// limit change, moves nothing (rule 1). The next window starts at this sample.
 //
 // A usage counter that went backwards belongs to another cgroup, and starts
-// the interval again.
+// the window again.
 func (c *capacityModel) observe(now time.Time, usage time.Duration, limit float64, inForce int, work workTotals, ceiling int) {
 	p := modelPoint{at: now, usage: usage, work: work}
 	if !c.open || usage < c.last.usage {
@@ -236,21 +254,30 @@ func (c *capacityModel) observe(now time.Time, usage time.Duration, limit float6
 		c.limitChanged = true
 	}
 	c.last = p
-	if now.Sub(c.start.at) < c.every {
+	if now.Sub(c.interval.at) < c.every {
 		return
 	}
-	c.closeInterval(ceiling)
+	if p.work.slotTime == c.interval.work.slotTime {
+		idle := (p.usage - c.interval.usage).Seconds() / now.Sub(c.interval.at).Seconds()
+		c.idle = append(c.idle, idleUse{at: now, used: idle})
+	}
+	c.interval = p
+	c.intervals++
+	if p.work.completions-c.start.work.completions < minCompletions && !c.limitChanged && c.intervals < maxWindowIntervals {
+		return
+	}
+	c.closeWindow(ceiling)
 	c.begin(p, limit)
 }
 
 func (c *capacityModel) begin(p modelPoint, limit float64) {
-	c.open, c.start, c.last = true, p, p
+	c.open, c.start, c.interval, c.last, c.intervals = true, p, p, p, 0
 	c.limit, c.limitChanged, c.capacityTime = limit, false, 0
 }
 
-// closeInterval applies the law to the interval from start to last, and
-// records what it measured for metrics.
-func (c *capacityModel) closeInterval(ceiling int) {
+// closeWindow applies the law to the window from start to last, and records
+// what it measured for metrics.
+func (c *capacityModel) closeWindow(ceiling int) {
 	iv := modelInterval{
 		elapsed:      c.last.at.Sub(c.start.at),
 		cpuUsed:      c.last.usage - c.start.usage,
@@ -259,8 +286,8 @@ func (c *capacityModel) closeInterval(ceiling int) {
 		completions:  c.last.work.completions - c.start.work.completions,
 		limit:        c.limit,
 		limitChanged: c.limitChanged,
+		background:   c.background(c.last.at),
 	}
-	iv.background = c.background(c.last.at, iv)
 
 	before := c.current(ceiling)
 	if after := modelCapacity(before, iv, c.cpuTarget, ceiling); after != before {
@@ -283,16 +310,13 @@ func (c *capacityModel) closeInterval(ceiling int) {
 	c.report = r
 }
 
-// background returns B at now: the lowest U among the intervals of the last
-// backgroundWindow in which no reconcile was in flight, iv included when it is
-// one, and 0 while there is none. Too low a B charges background CPU to
-// reconciles, which lowers the law's result: the safe side.
-func (c *capacityModel) background(now time.Time, iv modelInterval) float64 {
+// background returns B at now: the lowest U among the ModelIntervals of the
+// last backgroundWindow in which no reconcile was in flight, and 0 while there
+// is none. Too low a B charges background CPU to reconciles, which lowers the
+// law's result: the safe side.
+func (c *capacityModel) background(now time.Time) float64 {
 	for len(c.idle) > 0 && now.Sub(c.idle[0].at) > backgroundWindow {
 		c.idle = c.idle[1:]
-	}
-	if iv.slotTime == 0 {
-		c.idle = append(c.idle, idleUse{at: now, used: iv.used()})
 	}
 	if len(c.idle) == 0 {
 		return 0

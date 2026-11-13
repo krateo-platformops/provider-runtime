@@ -99,10 +99,13 @@ func (f *modelFeed) appliesLines() int {
 func (f *modelFeed) stepCapacity() int { return f.g.LocalCapacity() + f.g.sat.stepAbove }
 
 // settle ramps the step to the ceiling of 16 over 30 idle seconds, which also
-// measure a background of 20m, and then runs one interval pinned at the limit
-// with every slot used. The law gives 16 × 430 ÷ 480 = 14.3.
+// measure a background of 20m, and then runs two intervals pinned at the limit
+// with every slot used. The first ends the window the idle seconds began, which
+// is under the target over its 40s and lowers nothing. The second is a window
+// of its own, and the law gives 16 × 430 ÷ 480 = 14.3.
 func (f *modelFeed) settle() int {
 	f.seconds(30, idleLoad)
+	f.seconds(10, pinned(16, 0))
 	return f.seconds(10, pinned(16, 0))
 }
 
@@ -123,9 +126,14 @@ func TestLocalIsTheLowerOfTheStepAndTheModel(t *testing.T) {
 			t.Fatalf("with no evidence yet M = %v (reported %v), want the ceiling 16", m, ok)
 		}
 	}
+	// The idle seconds completed nothing, so their window ends with the first
+	// busy interval: under the target over its 40s, it lowers nothing.
+	if got := f.seconds(10, pinned(16, 0)); got != 16 {
+		t.Fatalf("local capacity = %d after the window that began idle, want 16", got)
+	}
 	for i := 1; i < 10; i++ {
 		if got := f.seconds(1, pinned(16, 0)); got != 16 {
-			t.Fatalf("%ds into the interval local capacity = %d, want 16: M moves when the interval ends", i, got)
+			t.Fatalf("%ds into the interval local capacity = %d, want 16: M moves when the window ends", i, got)
 		}
 	}
 	if got := f.seconds(1, pinned(16, 0)); got != 14 {
@@ -276,6 +284,7 @@ func TestTheLawAppliesOnlyWhereItsPremiseHolds(t *testing.T) {
 				busy.used = f.limit.cores
 				busy.perSecond = 30
 			}
+			f.seconds(10, busy) // ends the window the idle seconds began
 			got := f.seconds(10, busy)
 			_, reported := f.modelCapacity()
 			cpu := f.g.Snapshot().CPU
@@ -309,7 +318,7 @@ func TestTheLawAppliesOnlyWhereItsPremiseHolds(t *testing.T) {
 				wantLines = 1
 			}
 			if n := f.appliesLines(); n != wantLines {
-				t.Errorf("%d capacity model log lines over 41 samples, want %d: %v", n, wantLines, f.logs.lines)
+				t.Errorf("%d capacity model log lines over 51 samples, want %d: %v", n, wantLines, f.logs.lines)
 			}
 		})
 	}

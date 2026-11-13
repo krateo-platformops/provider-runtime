@@ -139,9 +139,10 @@ type SaturationOptions struct {
 	// ExperimentalMemoryWorkingSet. Defaults to 0.90 (provisional).
 	WorkingSetHardRatio float64
 
-	// CapacityModel turns on the capacity model: every ModelInterval, local
-	// capacity is sized from the CPU the container used and the reconciles
-	// that were in flight, so that CPU use settles at CPUTarget of the limit.
+	// CapacityModel turns on the capacity model: local capacity is sized from
+	// the CPU the container used and the reconciles that were in flight, over
+	// a window of ModelIntervals, so that CPU use settles at CPUTarget of the
+	// limit.
 	// The CPU pressure step stays, and may only lower what the model allows.
 	// Off by default. It needs Enabled, and is ignored without it. The model
 	// runs only while cpu.max gives a CPU limit of at least MinCPULimit and
@@ -156,10 +157,12 @@ type SaturationOptions struct {
 	// doesn't run. Defaults to 0.5. Read only with CapacityModel.
 	MinCPULimit float64
 
-	// ModelInterval is how often the capacity model recomputes its capacity.
-	// Defaults to 10s. A recomputation happens on the first sample after the
-	// interval has passed, so a SamplePeriod above it sets the pace. Read only
-	// with CapacityModel.
+	// ModelInterval is the length of one interval of the window the capacity
+	// model recomputes its capacity over. Defaults to 10s. The window ends at
+	// the end of the first interval by which 20 reconciles have completed in
+	// it, and is discarded after 30 intervals without them. An interval ends
+	// on the first sample after it has passed, so a SamplePeriod above it sets
+	// the pace. Read only with CapacityModel.
 	ModelInterval time.Duration
 }
 

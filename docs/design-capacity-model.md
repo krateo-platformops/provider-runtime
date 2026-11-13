@@ -53,14 +53,25 @@ One sample per `SamplePeriod` (1s), by the sampler goroutine that already reads
 
 The queues already know when a slot is granted and when `Done` gives it back,
 so the two counts need no change to the reconciler. Each queue keeps its own
-pair, for the metrics of §7.
+arrivals and completions, for the metrics of §7. The Governor, which grants
+every slot and takes it back, adds up `slotSeconds` once for the process: the
+slots in flight summed over time. That stays exact when a queue shuts down with
+reconciles still running.
 
 Nothing is read from `GOMAXPROCS`: since Go 1.25 it is at least 2 whatever the
 limit, so it says nothing about the quota.
 
 ## 3. The law
 
-Every `ModelInterval` (10s), over the samples of the last interval:
+The law is evaluated over a window of whole `ModelInterval`s (10s each). At
+the end of each interval the window ends, and the law is evaluated over all of
+it, if it holds at least `minCompletions` (20) completions. Otherwise it grows
+by another interval, up to `maxWindow` (30 intervals, 5 minutes): a window that
+long without the completions is discarded, and moves nothing. So a controller
+whose reconciles are slow is measured over as long as it takes to see 20 of
+them, not never. The next window starts where the last one ended.
+
+Over the window:
 
 - `U` = Δ`usage` ÷ Δt, the CPU used, in cores;
 - `N` = Σ`slotSeconds` ÷ Δt, the mean number of reconciles in flight;
@@ -70,7 +81,10 @@ Every `ModelInterval` (10s), over the samples of the last interval:
   side;
 - `target` = `CPUTarget` × `limit`, `CPUTarget` 0.9 by default.
 
-`wanted = N × (target − B) ÷ (U − B)`
+`r = (target − B) ÷ (U − B)`, and `wanted = N × r`
+
+The capacity in force (rule 2) and the arrival rate (§7) are taken over the
+same window.
 
 This is the utilization law: below the limit, CPU use grows in proportion to
 the reconciles in flight, so the concurrency that uses `target` is the current
@@ -82,16 +96,21 @@ applies to replicas.
 
 The model's capacity `M` moves to `wanted` under these rules, in this order:
 
-1. **No evidence, no move.** `M` is unchanged if the interval had fewer than
+1. **No evidence, no move.** `M` is unchanged if the window had fewer than
    `minCompletions` (20) completions, if `U − B` is under 5% of `limit`, or if
-   `limit` changed during the interval.
+   `limit` changed during the window. A limit change ends the window at the end
+   of the interval it happened in, so the next window is all at the new limit.
 2. **A rise needs the slots to have been used.** `M` rises only if `N` is at
-   least 0.9 × the capacity in force over the interval: with slots standing
-   idle, more of them would have changed nothing, and the interval says nothing
-   about what more would cost.
-3. **Tolerance.** `M` is unchanged if `wanted` is within 10% of it.
-4. **Direction.** `M` rises only if `U` is under `target`, and falls only if
-   `U` is over it.
+   least 0.9 × the capacity in force over the window, which is the published
+   `local` averaged over its time: with slots standing idle, more of them would
+   have changed nothing, and the window says nothing about what more would cost.
+3. **Tolerance.** `M` is unchanged if `r` is within 5% of 1, that is if
+   `|r − 1| ≤ 0.05`: CPU use that close to the target moves nothing. It is the
+   Horizontal Pod Autoscaler's tolerance, on the same ratio. It is on the ratio
+   and not on `M`, because a tolerance of 10% on `M` sits exactly on the case
+   of a container pinned at its limit, where `wanted` is 0.9 × `M`.
+4. **Direction.** `M` rises only if `U` is under `target` and `wanted` is above
+   `M`, and falls only if `U` is over `target` and `wanted` is below `M`.
 5. **Rise cap.** A rise is at most to `2 × M`, and at most to the ceiling. A
    fall is not capped.
 6. **Bounds.** `M` is at least 1 and at most the ceiling.
@@ -99,12 +118,15 @@ The model's capacity `M` moves to `wanted` under these rules, in this order:
 `M` starts at the ceiling, so until the law has evidence the step alone
 governs, exactly as in v1.19.0.
 
-`M` is a real number. `local` takes its floor, at least 1 (§4).
+`M` is a real number. `local` takes its floor, at least 1 (§4). At a small `M`
+the floor costs up to one slot (an `M` of 1.9 runs 1): that is the safe side,
+because the slot it withholds would take CPU use over the target.
 
-**At the limit.** When `U` is pinned at `limit`, the law gives `N × (target −
-B) ÷ (limit − B)`, a fall of about 10% per interval: correct in direction and
-slow. The step is what answers saturation (§4); the law then finds the level
-from below.
+**At the limit.** When `U` is pinned at `limit`, `r` is `(target − B) ÷ (limit
+− B)`: `CPUTarget` (0.9) with no background, and less with one. That is outside
+the tolerance, so `M` falls to `N × r`, by 10% or a little more at every
+evaluation: correct in direction and slow. The step is what answers saturation
+(§4); the law then finds the level from below.
 
 **What it does not see.** A reconcile that waits on a slow external API uses
 little CPU, so the law allows more of them. That is correct for the container's
@@ -123,7 +145,9 @@ cut is a cut of what is running.
 - After a CPU cut `P` climbs by one per `StartupRampInterval` towards the
   ceiling and stops mattering once it passes `M`.
 - A cut also sets `M` to the new `local` if `M` was above it, so the law
-  resumes from what the cut left and must find evidence to rise.
+  resumes from what the cut left and must find evidence to rise. This holds for
+  any cut by the step, the experimental memory input's included. A cut counts
+  (§7, `local.cuts`) when it lowered `local`.
 
 ## 5. Where it applies
 
@@ -140,7 +164,8 @@ step measured there: 88.5% of the limit at 100m, 93.4% at 250m
 ([configuration](./configuration.md#cpu-step-re-measured-2026-11-13)).
 
 A limit that changes while the process runs (an in-place resize) is picked up
-at the next sample. The interval it changes in moves nothing (§3 rule 1).
+at the next sample. The window it changes in moves nothing (§3 rule 1). When
+the law stops applying it forgets what it knew, the background included.
 
 ## 6. A share per controller
 
@@ -177,14 +202,19 @@ New instruments, beside `ratelimit.local.capacity` and `saturation.input`:
 | `provider_runtime.ratelimit.local.waiting` | gauge | `controller` | Items ready to run and waiting for a slot: the demand the capacity holds back |
 | `provider_runtime.ratelimit.local.cuts` | counter | `input` | Cuts by the step |
 | `provider_runtime.ratelimit.cpu.limit` | gauge (cores) | none | The limit read from `cpu.max`; no data point with none |
-| `provider_runtime.ratelimit.cpu.used` | gauge (cores) | none | `U` over the last interval |
-| `provider_runtime.ratelimit.cpu.background` | gauge (cores) | none | `B` |
-| `provider_runtime.ratelimit.cpu.per_reconcile` | gauge (seconds) | none | `(U − B) ÷ X` over the last interval with completions |
+| `provider_runtime.ratelimit.cpu.used` | gauge (cores) | none | `U` over the last window that ended |
+| `provider_runtime.ratelimit.cpu.background` | gauge (cores) | none | `B`, as that window was judged with |
+| `provider_runtime.ratelimit.cpu.per_reconcile` | gauge (seconds) | none | `(U − B) ÷ X` over the last window with completions, for a throughput `X` |
 | `provider_runtime.ratelimit.local.arrivals` | counter | `controller` | Items that became ready to run (an item re-added while it waits counts once) |
-| `provider_runtime.ratelimit.cpu.required` | gauge (cores) | none | `B + per_reconcile × arrivals per second ÷ CPUTarget`, over the last interval: the limit at which the work arriving now would run at the target. An estimate from the same proportionality as the law; not measured |
+| `provider_runtime.ratelimit.cpu.required` | gauge (cores) | none | `(B + per_reconcile × arrivals per second) ÷ CPUTarget`, over the last window: the limit at which the work arriving now would run at the target. An estimate from the same proportionality as the law; not measured |
 
 `cpu.required` above `cpu.limit` is the statement no autoscaler can make from
 CPU use: this controller would use more if it had it.
+
+The two counters are observable counters, read from the Governor's snapshot
+like the gauges. The instruments that depend on the law (`model_capacity`,
+`cpu.used`, `cpu.background`, `cpu.per_reconcile`, `cpu.required`) have no data
+point while the law doesn't apply (§5).
 
 ## 8. Options
 
@@ -195,7 +225,7 @@ In `SaturationOptions`:
 | `CapacityModel` | `false` | Turns the law on. Needs `Enabled` |
 | `CPUTarget` | `0.9` | The share of the limit the law aims at, in (0, 1] |
 | `MinCPULimit` | `0.5` | Cores. Under it the law doesn't run |
-| `ModelInterval` | `10s` | How often `M` is recomputed |
+| `ModelInterval` | `10s` | The length of one interval of the window `M` is recomputed over (§3) |
 
 The share per controller (§6) and the instruments that don't depend on the law
 (§7: `in_flight`, `guaranteed`, `waiting`, `arrivals`, `cuts`, `cpu.limit`) apply whenever
@@ -203,11 +233,15 @@ saturation is on.
 
 ## 9. Tests
 
-- **The law**, as a pure function of an interval's values: each rule of §3
+- **The law**, as a pure function of a window's values: each rule of §3
   removed in turn fails a test. Cases: the worked example (12 in flight, 380m
-  of 500m, `B` 20m gives 14.3); at the target; over it; pinned at the limit;
-  slots idle; too few completions; `U` barely above `B`; the rise cap; a limit
-  change.
+  of 500m, `B` 20m gives 14.3); at the target; within 5% of it on either side;
+  over it; pinned at the limit, with no background and every slot used, falling
+  10% per evaluation; slots idle; too few completions; `U` barely above `B`;
+  the rise cap; a limit change.
+- **The window:** at 5 completions per interval `M` moves at the fourth
+  interval, over all four; a window that never holds 20 moves nothing and
+  restarts; a limit change inside a window discards it.
 - **With the step:** `local` is the lower of the two; a cut halves `local` and
   pulls `M` down; `P` climbing past `M` changes nothing.
 - **Where it applies:** no limit, a limit under 500m, `cpu.stat` missing: `M`
