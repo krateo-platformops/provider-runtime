@@ -692,10 +692,11 @@ func (g *Governor) NeedLeaderElection() bool { return false }
 // it directly instead). The files are read before g.mu is taken, so Acquire and
 // the gated queues never wait on I/O.
 func (g *Governor) sample() {
-	smp := g.sat.read()
+	now := g.now()
+	smp := g.sat.read(now)
 	g.mu.Lock()
 	cur := g.local.Load()
-	next := g.sat.step(g.now(), smp, *cur, g.ceilingLocked(), g.recovery)
+	next := g.sat.step(now, smp, *cur, g.ceilingLocked(), g.recovery)
 	if next != *cur {
 		g.local.Store(&next)
 	}

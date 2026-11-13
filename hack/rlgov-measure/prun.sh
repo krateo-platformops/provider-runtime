@@ -50,7 +50,9 @@ setup_failed() {
 case $mode in
   ramp)  cpu=2; mem=256Mi; load="WORKERS=16 LOAD_ALLOC_MIB=16 LOAD_HOLD_MS=1000 POLL_MS=500" ;;
   burst) cpu=2; mem=256Mi; load="WORKERS=16 LOAD_ALLOC_MIB=16 LOAD_HOLD_MS=300 POLL_MS=1000" ;;
-  cpu)   cpu=250m; mem=512Mi; load="WORKERS=16 LOAD_CPU_MS=20 LOAD_HOLD_MS=400 POLL_MS=1000" ;;
+  # RLGOV_CPU overrides the limit for the step block's second limit
+  # (step_block.sh); the log's header line records the one used.
+  cpu)   cpu=${RLGOV_CPU:-250m}; mem=512Mi; load="WORKERS=16 LOAD_CPU_MS=20 LOAD_HOLD_MS=400 POLL_MS=1000" ;;
   overhead) cpu=1; mem=128Mi; load="SAMPLER_OVERHEAD=true" ;;
 esac
 started=$(date +%Y-%m-%dT%H:%M:%S)

@@ -4,7 +4,7 @@ title: provider-runtime — api
 description: The exported Go API surface of provider-runtime, package by package, plus the OTLP metric instruments it emits.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-api, reconciler, metrics]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # API
@@ -65,7 +65,7 @@ Annotation keys (`AnnotationKeyExternalName`, `…ExternalCreatePending/Succeede
 - `Signal` (`Key`, `RetryAfter`, `ResetAt`, `Remaining`, `Limit`, `HasQuota`, `Throttled`; same names and meaning as unstructured-runtime's) with `Deadline(now)`; `Classify(s, now) SignalKind` (`SignalThrottled`, `SignalAdvisory`, `SignalNone`).
 - `Report(ctx, Signal)` (a no-op without a sink; drops a keyless signal), `Sink` (`Observe(Signal)`), `WithSink(ctx, Sink)`.
 - `Governor`, `New(Options) (*Governor, error)`. Methods: `Acquire(ctx, key) (release func(), *Deferral)` (never blocks, no I/O; an empty key gates nothing; per key only), `SaturationEnabled()`, `RegisterGatedController()` (called by `controller.Options.ForControllerRuntime`), `Observe(Signal)`, `Capacity(key)`, `LocalCapacity()`, `Ceiling()`, `RegisterReconciler()`, `Snapshot()`, `Start(ctx)` / `NeedLeaderElection()` (a `manager.Runnable` running the saturation sampler).
-- `Options` (`MaxConcurrentReconciles`, `IgnoreSignals`, `RecoveryInterval`, `Saturation`, `Logger`, `Metrics`), `SaturationOptions` (`Enabled` (CPU only), `ExperimentalMemoryWorkingSet` (experimental, off, not OOM protection), `CgroupDir`, `SamplePeriod` (default 1s), `StartupRampInterval` (default 2s), `CPUPressureThreshold` (default 50, provisional), `WorkingSetSoftRatio` and `WorkingSetHardRatio` (0.80 and 0.90, provisional, experimental input only)) and the `Default…` constants.
+- `Options` (`MaxConcurrentReconciles`, `IgnoreSignals`, `RecoveryInterval`, `Saturation`, `Logger`, `Metrics`), `SaturationOptions` (`Enabled` (CPU only), `ExperimentalMemoryWorkingSet` (experimental, off, not OOM protection), `CgroupDir`, `SamplePeriod` (default 1s), `StartupRampInterval` (default 2s), `CPUPressureThreshold` (default 50, provisional), `WorkingSetSoftRatio` and `WorkingSetHardRatio` (0.80 and 0.90, provisional, experimental input only)) and the `Default…` constants, and `CPUPressureWindow` (10s: the span CPU pressure is measured over, and the least time between two CPU cuts).
 - `NewGatedQueue[T](g, name, rateLimiter) priorityqueue.PriorityQueue[T]`: a controller queue whose workers take a local slot before they pop and give it back in `Done`; `controller.Options.ForControllerRuntime` builds one per controller when saturation is on.
 - `Deferral` (`Key`, `Reason`, `Until`, `RequeueAfter`, `Capacity`) with `Message()`; `DeferReason` (`DeferThrottled`, `DeferAtCapacity`) with `Cause()`. Removed: `Deferral.Local`, `Deferral.Cause`, `DeferSaturated` and `DeferRamping`, because the local capacity no longer defers a call.
 - `MetricsRecorder` (satisfied by `*telemetry.Metrics`), `Snapshot` (its `SaturationEnabled` says whether `LocalCapacity` is enforced; metrics report the local capacity only then), `KeySnapshot`, `InputSnapshot`, and the input names `InputCPUPressure` and `InputMemoryWorkingSet`. `memory.pressure` is not an input (see the design's §11).

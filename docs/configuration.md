@@ -4,7 +4,7 @@ title: provider-runtime — configuration
 description: Everything provider-runtime reads — build tags, environment consumed via the OTel SDK, option structs and their defaults (including the rate-limit governor), and the annotation switches honored at runtime.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, configuration, otel, annotations]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Configuration
@@ -124,9 +124,9 @@ example provider declares `--rate-limit-governor` /
 | `--rate-limit-max-hold` / `<NAME>_PROVIDER_RATE_LIMIT_MAX_HOLD` | `RateLimit.MaxHold` (`*time.Duration`) | `1h` (`nil`) | yes | The longest a server's refusal holds its key. A `Retry-After` or reset time past it is cut to it; after the cut hold one call goes through, and if the server still refuses, the key is held again. `0` means no cap: the server's deadline holds in full. Negative is an error. A pointer, so that unset (`1h`) and `0` (no cap) differ. The first cut for a key is logged at Info with the key, the deadline the server asked for and the cap; not again until the key has gone a whole `RecoveryInterval` clean. Every cut is counted in `ratelimit.hold_clamped`. |
 | `--saturation-governor` / `<NAME>_PROVIDER_SATURATION_GOVERNOR` | `RateLimit.Saturation.Enabled` | `false` | yes (off) | Turns on the local input: the controller's own CPU saturation, read from its container's cgroup v2 files. CPU only: memory is the separate experimental row below. Independent of `RateLimit.Enabled`. With it on, each controller's queue takes a local slot before every reconcile and gives it back when the reconcile returns, so low capacity behaves like fewer workers ([design](./design-local-slot-before-pop.md)). Needs the controller built with `ForControllerRuntime`, and `UsePriorityQueue` left unset or true. |
 | `--saturation-experimental-memory` / `<NAME>_PROVIDER_SATURATION_EXPERIMENTAL_MEMORY` | `RateLimit.Saturation.ExperimentalMemoryWorkingSet` | `false` | yes (off) | **Experimental, and not OOM protection.** Adds the memory working set to the local input. It [did not prevent OOMKills](#re-measurement-of-the-memory-input): 0 of 19 runs clean on an overcommitted workload. |
-| `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. Local capacity halves at most once per sample. A shorter period only matters to the experimental memory input: CPU pressure's `avg10` is already a 10-second average, so sampling it faster gains nothing and costs CPU in the container it protects. |
-| `--saturation-startup-ramp-interval` / `<NAME>_PROVIDER_SATURATION_STARTUP_RAMP_INTERVAL` | `RateLimit.Saturation.StartupRampInterval` | `2s` | yes | Local capacity starts at 1 and rises by one per this interval until its first cut, so 16 workers are all admitted after about 30s. Not tied to the sample period. After any cut, `RecoveryInterval` applies instead. A call deferred on the ramp requeues in 1s to the time the ramp still needs, capped at `RecoveryInterval`. |
-| `--saturation-cpu-pressure-threshold` / `<NAME>_PROVIDER_SATURATION_CPU_PRESSURE_THRESHOLD` | `RateLimit.Saturation.CPUPressureThreshold` | `50` (**provisional**) | yes | `cpu.pressure` `some avg10` percentage above which the controller counts as saturated. |
+| `--saturation-sample-period` / `<NAME>_PROVIDER_SATURATION_SAMPLE_PERIOD` | `RateLimit.Saturation.SamplePeriod` | `1s` | yes | How often the sampler reads the cgroup files. A shorter period only matters to the experimental memory input: CPU pressure is measured over a 10s window (`CPUPressureWindow`), so sampling it faster gains little and costs CPU in the container it protects. |
+| `--saturation-startup-ramp-interval` / `<NAME>_PROVIDER_SATURATION_STARTUP_RAMP_INTERVAL` | `RateLimit.Saturation.StartupRampInterval` | `2s` | yes | Local capacity starts at 1 and rises by one per this interval, from the start and after a CPU cut, so 16 workers are all admitted after about 30s. Not tied to the sample period. After a cut by the experimental memory input, `RecoveryInterval` applies instead. A call deferred on the ramp requeues in 1s to the time the ramp still needs, capped at `RecoveryInterval`. |
+| `--saturation-cpu-pressure-threshold` / `<NAME>_PROVIDER_SATURATION_CPU_PRESSURE_THRESHOLD` | `RateLimit.Saturation.CPUPressureThreshold` | `50` (**provisional**) | yes | CPU pressure percentage above which the controller counts as saturated: the share of the last 10s (`CPUPressureWindow`) in which some task of the container waited for CPU, from the change of `cpu.pressure`'s `some total`. Over the threshold for a whole window, local capacity halves, at most once per window. |
 | `--saturation-working-set-soft-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_SOFT_RATIO` | `RateLimit.Saturation.WorkingSetSoftRatio` | `0.80` (**provisional**) | yes | Experimental memory input only. Working set (`memory.current` minus `inactive_file`) as a share of `memory.max` at which local capacity halves. |
 | `--saturation-working-set-hard-ratio` / `<NAME>_PROVIDER_SATURATION_WORKING_SET_HARD_RATIO` | `RateLimit.Saturation.WorkingSetHardRatio` | `0.90` (**provisional**) | yes | Experimental memory input only. Working-set share at which local capacity drops straight to 1. |
 | none | `RateLimit.Saturation.CgroupDir` | the process's own cgroup (`/sys/fs/cgroup` joined with the path in `/proc/self/cgroup`, else `/sys/fs/cgroup`) | yes | The cgroup v2 directory to read. Tests point it at fixtures. |
@@ -167,13 +167,22 @@ protection.** The user decided what follows from the kind measurements below
 
 - Saturation reads CPU pressure only, on a 1s sample. The threshold, 50%, stays
   provisional: core-provider is validating it.
+- **Since the 2026-11-13 change (the user), CPU pressure is measured over a 10s
+  window and cuts at most once per window.** The tables below were measured
+  with the step before it, which read the kernel's `some avg10` and halved on
+  every 1s sample over the threshold. On GKE that step took `local` from 16 to
+  1 on one stall and settled at about 70% of the CPU limit, because `avg10`
+  still holds most of a stall 10s after it ended.
+  [The new step was measured on 2026-11-13](#cpu-step-re-measured-2026-11-13)
+  and met the user's bars.
 - The memory working set is a separate, experimental input, off by default. It
   [did not prevent OOMKills](#re-measurement-of-the-memory-input) in 0 of 19
   runs on an overcommitted workload, so turning it on does not protect a
   controller from them. 0.80 and 0.90 are its provisional ratios.
-- `local` starts at 1 and rises by 1 per `StartupRampInterval` (2s) until its
-  first cut. After any cut, it rises by 1 per clean `RecoveryInterval` (30s),
-  the same as API limits.
+- `local` starts at 1 and rises by 1 per clean `StartupRampInterval` (2s),
+  from the start and after a CPU cut. After a cut by the experimental memory
+  input, it rises by 1 per clean `RecoveryInterval` (30s), the same as API
+  limits.
 - `local` never goes below 1: one reconcile always keeps going.
 - `local` is taken before the pop and covers the whole reconcile, so nothing is
   written on the object for it: the item waits in the queue. This replaced the
@@ -184,6 +193,41 @@ protection.** The user decided what follows from the kind measurements below
 
 Keep workers times the largest call well under the memory limit. The governor
 can't rescue a controller whose workers can overrun it.
+
+#### CPU step, re-measured 2026-11-13
+
+The step of the 2026-11-13 change against the one before it, on GKE
+(e2-standard-4, Kubernetes 1.36): 250m limit, 64 Greetings polled every 1s, 16
+workers, each Observe spending 20ms of CPU and then waiting 400ms. Five 360s
+runs per arm, order rotating, none discarded; figures from 40s on. The settings
+and the bars were committed before the first run
+(`hack/rlgov-measure/results/s1-settings.txt`), and
+`hack/rlgov-measure/step_report.py s1` prints every run.
+
+| Arm | CPU used (of 250ms/s) | CPU pressure (`some avg10`) | Observes/s | Mean `local` | Wall time of a call's 20ms of CPU | Restarts |
+|---|---|---|---|---|---|---|
+| governor off | 99.9% | 59.1 | 11.31 | — | 526ms | 0 |
+| the step before (threshold 50) | 72.2% | 17.0 | 7.86 | 3.9 | 59ms | 0 |
+| the new step (threshold 50) | 93.4% | 41.7 | 10.29 | 6.3 | 144ms | 0 |
+
+The user's bars of 2026-11-08, for the new step:
+
+| Bar | Measured | Met |
+|---|---|---|
+| CPU used at least 90% of the limit | 93.4% (median of 5) | yes |
+| Pressure about 50 (read as 40 to 60) | 41.7 (mean of 5) | yes |
+| Throughput at least 90% of governor off | 91.0% | yes |
+| No restarts | 0 | yes |
+
+- The five runs of the new step agree closely: 93% of the limit, 10.2 to 10.3
+  Observes a second, pressure 41 to 42. The margins on pressure and throughput
+  are thin.
+- The step before it reproduces 2026-11-08: about 72% of the limit and 31% less
+  throughput.
+- Running nearer the limit costs latency: a call's CPU takes 144ms of wall time
+  under the new step against 59ms under the old one, and 526ms with the
+  governor off.
+- One workload at one limit. The threshold stays provisional.
 
 #### CPU at the final code
 
@@ -402,7 +446,7 @@ Recorded when `RateLimit.Metrics` is set (meter
 | `provider_runtime.ratelimit.capacity` | observable gauge | `key` | Current concurrency the governor allows for the key: the number operators used to tune by hand. |
 | `provider_runtime.ratelimit.seconds_to_reset` | observable gauge | `key` | Seconds until a throttled key's hold lifts; 0 when it isn't held. |
 | `provider_runtime.ratelimit.local.capacity` | observable gauge | none | Current process-wide capacity the controller's own saturation allows. With saturation on it starts at 1 and ramps up per clean sample. With saturation off it reports nothing: no local capacity is enforced then. |
-| `provider_runtime.ratelimit.saturation.input` | observable gauge (`%`) | `input` (`cpu_pressure`, `memory_working_set`) | Each enabled input's last value: `some avg10` for `cpu_pressure`, the share of `memory.max` for `memory_working_set`. A disabled input has no data point: 0 would read as healthy. |
+| `provider_runtime.ratelimit.saturation.input` | observable gauge (`%`) | `input` (`cpu_pressure`, `memory_working_set`) | Each enabled input's last value: the share of the last 10s in which some task waited for CPU for `cpu_pressure` (from `cpu.pressure`'s `some total`; over a shorter span in a governor's first 10s), the share of `memory.max` for `memory_working_set`. A disabled input has no data point: 0 would read as healthy. |
 | `provider_runtime.ratelimit.saturation.input.enabled` | observable gauge | `input` | 1 when the input is read, 0 when it is disabled (no cgroup v2, no PSI, `memory.max` is `max`, saturation off, or, for `memory_working_set`, the experimental option unset). |
 
 A missing input disables that input only. It is logged once at Info, and the
