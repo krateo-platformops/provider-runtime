@@ -1,0 +1,4 @@
+source src-e5d5af9.tar, machine n2-highcpu-8, 8 vCPU
+start 2026-11-13 11:18:45 UTC;  11:18:45 up 0 min,  0 user,  load average: 0.28, 0.06, 0.02
+env: CREDENTIALUSE_MODEL_DIFF_STATELESS=off CREDENTIALUSE_MODEL_DIFF_PLAN=^deletions around the grace=2
+end 2026-11-13 11:31:43 UTC;  11:31:43 up 13 min,  0 user,  load average: 2.47, 3.36, 2.70; go test exit 1
