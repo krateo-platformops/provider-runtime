@@ -9,7 +9,8 @@ timestamp: 2026-11-13T00:00:00Z
 
 # Local capacity from measured CPU use
 
-**Status:** design, decided by the user on 2026-11-13; not built. It adds to
+**Status:** built, not measured on a cluster. Decided by the user on
+2026-11-13. It adds to
 the saturation input of [design-rate-limit-governor](./design-rate-limit-governor.md)
 (§7 and §11 item 19). It replaces
 [design-saturation-cost-model](./design-saturation-cost-model.md), which was
