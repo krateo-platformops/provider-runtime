@@ -178,3 +178,6 @@
 2026-11-13T15:22:30Z after-s1-off-1 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
 2026-11-13T15:28:56Z after-s1-old-1 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
 2026-11-13T15:35:20Z after-s1-new-1 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
+2026-11-13T15:41:48Z after-s1-old-2 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
+2026-11-13T15:48:13Z after-s1-new-2 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
+2026-11-13T15:54:40Z after-s1-off-2 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
