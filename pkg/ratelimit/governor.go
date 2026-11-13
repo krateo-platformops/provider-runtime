@@ -114,8 +114,9 @@ type MetricsRecorder interface {
 	// deadline was past MaxHold and was cut to it.
 	IncRateLimitHoldClamped(ctx context.Context, key string)
 	// ObserveRateLimit registers snapshot as the source of the governor's
-	// gauges: per-key capacity and seconds to reset, local capacity, and each
-	// saturation input.
+	// gauges and observable counters: per-key capacity and seconds to reset,
+	// local capacity, each saturation input, each controller's use of the
+	// local capacity, the cuts, and the capacity model's measurements.
 	ObserveRateLimit(snapshot func() Snapshot)
 }
 
@@ -216,6 +217,11 @@ type Governor struct {
 	// localInFlight counts the local slots gated queues hold: one per reconcile
 	// a worker popped and hasn't called Done for.
 	localInFlight int
+	// slotTime is the time local slots have been held, summed over the slots,
+	// up to slotTimeAt: localInFlight added up over time. See
+	// advanceSlotTimeLocked.
+	slotTime   time.Duration
+	slotTimeAt time.Time
 	// queues are the gated queues waiting on local capacity, and nextQueue is
 	// where the next round-robin grant starts.
 	queues    []gatedQueueRef
@@ -225,6 +231,11 @@ type Governor struct {
 	// gatedControllers is how many controllers' queues ForControllerRuntime
 	// gated; see Start.
 	gatedControllers int
+
+	// arrivals counts the items that became ready to run in any gated queue,
+	// and completions the reconciles that gave their slot back. The queues add
+	// to them under their own locks, without mu.
+	arrivals, completions atomic.Int64
 
 	// local is written under mu and read without it.
 	local atomic.Pointer[localState]
@@ -394,32 +405,74 @@ func (g *Governor) releaseLocal() {
 	if g.localInFlight == 0 {
 		reportBrokenBooks(g.log, "a local slot was released with none in flight")
 	} else {
+		g.advanceSlotTimeLocked(g.now())
 		g.localInFlight--
 	}
 	g.dispatchLocked()
 }
 
+// advanceSlotTimeLocked adds to slotTime the time the slots in flight were
+// held since it was last called. Calling it before every change of
+// localInFlight, and at every sample, makes slotTime exact at now. The caller
+// holds g.mu.
+func (g *Governor) advanceSlotTimeLocked(now time.Time) {
+	if !now.After(g.slotTimeAt) {
+		return
+	}
+	if !g.slotTimeAt.IsZero() {
+		g.slotTime += time.Duration(g.localInFlight) * now.Sub(g.slotTimeAt)
+	}
+	g.slotTimeAt = now
+}
+
+// guaranteedLocked is G, the share of the local capacity each gated queue is
+// guaranteed: the capacity divided equally, at least 1. With the capacity
+// under the number of queues it is 1 each, and they can't all be met. The
+// caller holds g.mu.
+func (g *Governor) guaranteedLocked() int {
+	return max(1, g.local.Load().capacity/max(1, len(g.queues)))
+}
+
 // dispatchLocked hands free local slots, one at a time, to queues with an idle
-// worker and an item to give it, round-robin from where the last grant left
-// off. Inside a queue the order is the queue's; across queues a queue waits at
-// most one grant per other queue with work. The caller holds g.mu.
+// worker and an item to give it. A slot goes first to a queue that is owed:
+// one that holds fewer slots than its guaranteed share. With none owed it goes
+// to any queue with work, which is the lending: a queue may hold more than its
+// share while the others don't need theirs. Both are round-robin from where
+// the last grant left off. Nothing is taken back: a lent slot returns when its
+// reconcile ends, and an owed queue is then first in line. Inside a queue the
+// order is the queue's. The caller holds g.mu.
+//
+// A queue in the middle of a pop is skipped in both passes, owed or not, so a
+// dispatch never waits on a queue's lock (design-local-slot-before-pop §4,
+// "Containment"). A slot freed in that moment can be lent although that queue
+// is owed; the queue dispatches again when its pop ends, and is first in line
+// for the next slot.
 func (g *Governor) dispatchLocked() {
 	for g.localInFlight < g.local.Load().capacity {
-		n := len(g.queues)
-		granted := false
-		for i := range n {
-			idx := (g.nextQueue + i) % n
-			if g.queues[idx].tryGrant() {
-				g.localInFlight++
-				g.nextQueue = (idx + 1) % n
-				granted = true
-				break
-			}
-		}
+		share := g.guaranteedLocked()
+		granted := g.grantLocked(func(q gatedQueueRef) bool { return q.tryGrantOwed(share) }) ||
+			g.grantLocked(gatedQueueRef.tryGrant)
 		if !granted {
 			return
 		}
 	}
+}
+
+// grantLocked gives one slot to the first queue, round-robin from nextQueue,
+// that try grants one to, and reports whether there was one. The caller holds
+// g.mu.
+func (g *Governor) grantLocked(try func(gatedQueueRef) bool) bool {
+	n := len(g.queues)
+	for i := range n {
+		idx := (g.nextQueue + i) % n
+		if try(g.queues[idx]) {
+			g.advanceSlotTimeLocked(g.now())
+			g.localInFlight++
+			g.nextQueue = (idx + 1) % n
+			return true
+		}
+	}
+	return false
 }
 
 // Ceiling reports the capacity every key and the local capacity recover to.
@@ -696,14 +749,20 @@ func (g *Governor) sample() {
 	smp := g.sat.read(now)
 	g.mu.Lock()
 	cur := g.local.Load()
-	next := g.sat.step(now, smp, *cur, g.ceilingLocked(), g.recovery)
+	g.advanceSlotTimeLocked(now)
+	work := workTotals{slotTime: g.slotTime, completions: g.completions.Load(), arrivals: g.arrivals.Load()}
+	next, cutBy := g.sat.advance(now, smp, *cur, g.ceilingLocked(), g.recovery, work)
 	if next != *cur {
 		g.local.Store(&next)
 	}
 	g.dispatchLocked()
 	g.mu.Unlock()
-	if next.capacity < cur.capacity {
+	switch {
+	case next.capacity >= cur.capacity:
+	case cutBy != "":
 		g.log.Info("Controller saturated: lowering local capacity", "from", cur.capacity, "to", next.capacity, "cause", next.cause)
+	default:
+		g.log.Info("Capacity model: lowering local capacity to what the measured CPU use allows", "from", cur.capacity, "to", next.capacity)
 	}
 }
 
@@ -729,6 +788,56 @@ type InputSnapshot struct {
 	Percent float64
 }
 
+// ControllerSnapshot is one controller's use of the local capacity, for
+// metrics: what its gated queue holds, is guaranteed and is waiting for.
+type ControllerSnapshot struct {
+	// Controller is the gated queue's name.
+	Controller string
+	// InFlight is the local slots the queue holds now.
+	InFlight int
+	// Guaranteed is the share of the local capacity the queue is guaranteed.
+	Guaranteed int
+	// Waiting is the items ready to run and waiting for a slot: the demand
+	// the local capacity holds back.
+	Waiting int
+	// Arrivals counts the items that became ready to run, cumulative. An item
+	// added again while it waits counts once.
+	Arrivals int64
+	// Completions counts the reconciles that gave their slot back, cumulative.
+	Completions int64
+}
+
+// CutSnapshot is the number of cuts one saturation input made, for metrics.
+type CutSnapshot struct {
+	// Input is cpu_pressure or memory_working_set.
+	Input string
+	// Cuts counts the times the input's step lowered the local capacity,
+	// cumulative.
+	Cuts int64
+}
+
+// CPUSnapshot is what the saturation input measured of the container's CPU,
+// for metrics. A nil field has no value: zero would read as a measurement.
+type CPUSnapshot struct {
+	// Limit is the CPU limit read from cpu.max, in cores. Nil with no limit,
+	// or with saturation off.
+	Limit *float64
+	// ModelCapacity is the capacity model's capacity M. Nil while the law
+	// doesn't apply; so are the fields below.
+	ModelCapacity *float64
+	// Used is U, the CPU used over the last interval, in cores, and
+	// Background is B, the CPU used with no reconcile in flight. Nil until an
+	// interval has been measured.
+	Used, Background *float64
+	// PerReconcile is the CPU seconds one reconcile used, over the last
+	// interval with completions. Nil until there was one.
+	PerReconcile *float64
+	// Required is the CPU limit, in cores, at which the work that arrived in
+	// the last interval would run at the target: an estimate, not a
+	// measurement. Nil until PerReconcile is known.
+	Required *float64
+}
+
 // Snapshot is the governor's state, for metrics.
 type Snapshot struct {
 	Keys []KeySnapshot
@@ -737,9 +846,16 @@ type Snapshot struct {
 	LocalCapacity     int
 	SaturationEnabled bool
 	Inputs            []InputSnapshot
+	// Controllers has one entry per gated queue name, sorted by name. It is
+	// empty with saturation off: nothing is gated then.
+	Controllers []ControllerSnapshot
+	// Cuts has one entry per saturation input, with saturation on.
+	Cuts []CutSnapshot
+	// CPU is what the saturation input measured of the container's CPU.
+	CPU CPUSnapshot
 }
 
-// Snapshot returns the governor's current state.
+// Snapshot returns the governor's current state. It takes no queue's lock.
 func (g *Governor) Snapshot() Snapshot {
 	g.mu.Lock()
 	now := g.now()
@@ -752,13 +868,50 @@ func (g *Governor) Snapshot() Snapshot {
 		}
 		keys = append(keys, ks)
 	}
+	guaranteed := g.guaranteedLocked()
+	queues := make([]*queueCounts, 0, len(g.queues))
+	for _, q := range g.queues {
+		queues = append(queues, q.counts())
+	}
 	g.mu.Unlock()
 	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
 
-	return Snapshot{
+	snap := Snapshot{
 		Keys:              keys,
 		LocalCapacity:     g.LocalCapacity(),
 		SaturationEnabled: g.SaturationEnabled(),
 		Inputs:            g.sat.inputs(),
 	}
+	if g.sat == nil {
+		return snap
+	}
+	snap.Controllers = controllerSnapshots(queues, guaranteed)
+	snap.Cuts = g.sat.cuts()
+	snap.CPU = g.sat.cpu()
+	return snap
+}
+
+// controllerSnapshots returns one entry per queue name, sorted by name. Queues
+// that share a name are one controller to a reader of the metrics, so their
+// counts are added up.
+func controllerSnapshots(queues []*queueCounts, guaranteed int) []ControllerSnapshot {
+	byName := map[string]*ControllerSnapshot{}
+	for _, q := range queues {
+		cs, ok := byName[q.name]
+		if !ok {
+			cs = &ControllerSnapshot{Controller: q.name}
+			byName[q.name] = cs
+		}
+		cs.InFlight += int(q.held.Load())
+		cs.Guaranteed += guaranteed
+		cs.Waiting += int(q.waiting.Load())
+		cs.Arrivals += q.arrivals.Load()
+		cs.Completions += q.completions.Load()
+	}
+	out := make([]ControllerSnapshot, 0, len(byName))
+	for _, cs := range byName {
+		out = append(out, *cs)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Controller < out[j].Controller })
+	return out
 }

@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"k8s.io/utils/ptr"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/errors"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -81,6 +84,13 @@ const (
 // the experimental memory input it rises by one per clean RecoveryInterval.
 //
 // Memory is not part of this unless ExperimentalMemoryWorkingSet is set.
+//
+// With CapacityModel set, and a CPU limit of MinCPULimit or more, local
+// capacity is also held at what the container's measured CPU use allows
+// (docs/design-capacity-model.md): it is the lower of the two.
+//
+// Each controller's queue has a guaranteed share of the local capacity, which
+// it lends while it doesn't use it.
 type SaturationOptions struct {
 	// Enabled turns the local input on, independently of the rate-limit input.
 	// It reads CPU pressure only.
@@ -128,6 +138,29 @@ type SaturationOptions struct {
 	// local capacity drops straight to 1. Read only with
 	// ExperimentalMemoryWorkingSet. Defaults to 0.90 (provisional).
 	WorkingSetHardRatio float64
+
+	// CapacityModel turns on the capacity model: every ModelInterval, local
+	// capacity is sized from the CPU the container used and the reconciles
+	// that were in flight, so that CPU use settles at CPUTarget of the limit.
+	// The CPU pressure step stays, and may only lower what the model allows.
+	// Off by default. It needs Enabled, and is ignored without it. The model
+	// runs only while cpu.max gives a CPU limit of at least MinCPULimit and
+	// cpu.stat is readable; otherwise the step alone governs.
+	CapacityModel bool
+
+	// CPUTarget is the share of the CPU limit the capacity model aims at, in
+	// (0, 1]. Defaults to 0.9. Read only with CapacityModel.
+	CPUTarget float64
+
+	// MinCPULimit is the CPU limit, in cores, under which the capacity model
+	// doesn't run. Defaults to 0.5. Read only with CapacityModel.
+	MinCPULimit float64
+
+	// ModelInterval is how often the capacity model recomputes its capacity.
+	// Defaults to 10s. A recomputation happens on the first sample after the
+	// interval has passed, so a SamplePeriod above it sets the pace. Read only
+	// with CapacityModel.
+	ModelInterval time.Duration
 }
 
 func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
@@ -146,6 +179,15 @@ func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 	if o.WorkingSetHardRatio == 0 {
 		o.WorkingSetHardRatio = DefaultWorkingSetHardRatio
 	}
+	if o.CPUTarget == 0 {
+		o.CPUTarget = DefaultCPUTarget
+	}
+	if o.MinCPULimit == 0 {
+		o.MinCPULimit = DefaultMinCPULimit
+	}
+	if o.ModelInterval == 0 {
+		o.ModelInterval = DefaultModelInterval
+	}
 	switch {
 	case o.SamplePeriod < 0:
 		return o, errors.Errorf("ratelimit: saturation SamplePeriod must be positive, got %s", o.SamplePeriod)
@@ -156,6 +198,12 @@ func (o SaturationOptions) withDefaults() (SaturationOptions, error) {
 	case o.WorkingSetSoftRatio < 0 || o.WorkingSetHardRatio > 1 || o.WorkingSetSoftRatio > o.WorkingSetHardRatio:
 		return o, errors.Errorf("ratelimit: saturation working-set ratios must satisfy 0 < soft (%v) <= hard (%v) <= 1",
 			o.WorkingSetSoftRatio, o.WorkingSetHardRatio)
+	case math.IsNaN(o.CPUTarget) || o.CPUTarget < 0 || o.CPUTarget > 1:
+		return o, errors.Errorf("ratelimit: saturation CPUTarget must be a share in (0, 1], got %v", o.CPUTarget)
+	case math.IsNaN(o.MinCPULimit) || o.MinCPULimit < 0:
+		return o, errors.Errorf("ratelimit: saturation MinCPULimit must be positive, got %v cores", o.MinCPULimit)
+	case o.ModelInterval < 0:
+		return o, errors.Errorf("ratelimit: saturation ModelInterval must be positive, got %s", o.ModelInterval)
 	}
 	return o, nil
 }
@@ -182,6 +230,27 @@ type cgroupSample struct {
 	// CPUPressureWindow.
 	cpuStall     time.Duration
 	cpuConfirmed bool
+	// cpuLimit is the CPU limit cpu.max gives, and cpuUsage cpu.stat's
+	// cumulative usage_usec. cpuUsage is read only for the capacity model.
+	cpuLimit cpuLimit
+	cpuUsage cpuUsage
+}
+
+// cpuLimit is the container's CPU limit in one sample.
+type cpuLimit struct {
+	// set is false when there is no limit, or cpu.max can't be read; why then
+	// says which.
+	set   bool
+	cores float64
+	why   string
+}
+
+// cpuUsage is the container's cumulative CPU usage in one sample.
+type cpuUsage struct {
+	// ok is false when cpu.stat wasn't read, or can't be; why then says which.
+	ok    bool
+	total time.Duration
+	why   string
 }
 
 // stallPoint is cpu.pressure's cumulative stall at one sample.
@@ -227,6 +296,22 @@ type saturation struct {
 	// memoryCut reports that the last cut was the experimental memory
 	// input's: recovery is then one step per RecoveryInterval.
 	memoryCut bool
+	// stepAbove is how far the step's own capacity P is above the published
+	// local capacity. It is 0 unless the capacity model holds local under P:
+	// with the model off, or not binding, P is the published capacity itself.
+	stepAbove int
+	// model is the capacity model; nil unless CapacityModel is set.
+	model *capacityModel
+	// modelApplies and modelWhy are what was last logged about whether the
+	// law runs; modelLogged is false until something was.
+	modelApplies, modelLogged bool
+	modelWhy                  string
+
+	// cpuCuts and memoryCuts count the cuts by the step that lowered local
+	// capacity, by input. modelReport is the model's state while the law
+	// applies, nil otherwise. They are for metrics, read by any goroutine.
+	cpuCuts, memoryCuts atomic.Int64
+	modelReport         atomic.Pointer[modelReport]
 }
 
 func newSaturation(o SaturationOptions, log logging.Logger) (*saturation, error) {
@@ -238,13 +323,17 @@ func newSaturation(o SaturationOptions, log logging.Logger) (*saturation, error)
 	if dir == "" {
 		dir = ownCgroupDir(procSelfDir, defaultCgroupMount)
 	}
-	return &saturation{
+	s := &saturation{
 		opts:           o,
 		dir:            dir,
-		reader:         cgroupFiles{dir: dir, memory: o.ExperimentalMemoryWorkingSet},
+		reader:         cgroupFiles{dir: dir, memory: o.ExperimentalMemoryWorkingSet, usage: o.CapacityModel},
 		log:            log,
 		loggedDisabled: map[string]bool{},
-	}, nil
+	}
+	if o.CapacityModel {
+		s.model = newCapacityModel(o.CPUTarget, o.ModelInterval)
+	}
+	return s, nil
 }
 
 // read takes one sample from the cgroup files at now, turns the cumulative
@@ -285,8 +374,91 @@ func (s *saturation) stallShare(now time.Time, total time.Duration) (percent flo
 	return min(100, 100*float64(total-start.total)/float64(span)), span >= CPUPressureWindow
 }
 
-// step returns the local state that follows cur after sample smp, taken at
-// now. The sampler's first call only starts the clock.
+// advance returns the local state that follows cur after sample smp, taken at
+// now, and the input whose cut lowered it, if one did.
+//
+// The step keeps its own capacity P (see step), the capacity model its
+// capacity M (see capacityModel), and
+//
+//	local = min(P, floor(M)), at least 1
+//
+// so the step may only lower what the model allows. While the law doesn't
+// apply, M is the ceiling and local is P: the step alone governs. A cut by the
+// step also pulls M down to the local capacity it left.
+func (s *saturation) advance(now time.Time, smp cgroupSample, cur localState, ceiling int, recovery time.Duration, work workTotals) (next localState, cutBy string) {
+	p, cause, cutBy := s.step(now, smp, cur.capacity, cur.capacity+s.stepAbove, ceiling, recovery)
+	next = localState{capacity: p, cause: cause}
+	if s.observeModel(now, smp, cur.capacity, ceiling, work) {
+		next.capacity = max(capacityFloor, min(p, int(math.Floor(s.model.current(ceiling)))))
+		if cutBy != "" {
+			s.model.cutTo(next.capacity, ceiling)
+		}
+		r := s.model.reported(ceiling)
+		s.modelReport.Store(&r)
+	}
+	s.stepAbove = p - next.capacity
+	if next.capacity >= cur.capacity {
+		return next, ""
+	}
+	switch cutBy {
+	case InputCPUPressure:
+		s.cpuCuts.Add(1)
+	case InputMemoryWorkingSet:
+		s.memoryCuts.Add(1)
+	}
+	return next, cutBy
+}
+
+// observeModel feeds the sample to the capacity model when the law applies
+// (design §5), and reports whether it does: CapacityModel is set, cpu.max gives
+// a limit of at least MinCPULimit, and cpu.stat is readable. When it doesn't,
+// the model forgets what it knew, so M is the ceiling. Each change of whether
+// it applies, or of why not, is logged once.
+func (s *saturation) observeModel(now time.Time, smp cgroupSample, inForce, ceiling int, work workTotals) bool {
+	if s.model == nil {
+		return false
+	}
+	var why string
+	switch {
+	case !smp.cpuLimit.set:
+		why = smp.cpuLimit.why
+	case smp.cpuLimit.cores < s.opts.MinCPULimit:
+		why = "the CPU limit of " + formatCores(smp.cpuLimit.cores) + " cores is under MinCPULimit, " + formatCores(s.opts.MinCPULimit)
+	case !smp.cpuUsage.ok:
+		why = smp.cpuUsage.why
+	}
+	applies := why == ""
+	if !s.modelLogged || applies != s.modelApplies || why != s.modelWhy {
+		s.modelLogged, s.modelApplies, s.modelWhy = true, applies, why
+		if applies {
+			s.log.Info("Capacity model applies: local capacity is the lower of the model's and the CPU pressure step's",
+				"cpuLimit", formatCores(smp.cpuLimit.cores), "cpuTarget", s.opts.CPUTarget, "cgroup", s.dir)
+		} else {
+			s.log.Info("Capacity model does not apply: the CPU pressure step alone governs", "reason", why, "cgroup", s.dir)
+		}
+	}
+	if !applies {
+		s.model.reset()
+		s.modelReport.Store(nil)
+		return false
+	}
+	before := s.model.current(ceiling)
+	s.model.observe(now, smp.cpuUsage.total, smp.cpuLimit.cores, inForce, work, ceiling)
+	if after := s.model.current(ceiling); after != before {
+		s.log.Debug("Capacity model moved its capacity", "from", before, "to", after,
+			"cpuUsed", s.model.report.used, "cpuBackground", s.model.report.background, "cpuLimit", smp.cpuLimit.cores)
+	}
+	return true
+}
+
+func formatCores(c float64) string {
+	return strconv.FormatFloat(c, 'f', -1, 64)
+}
+
+// step returns the step's capacity P that follows p after sample smp, taken at
+// now, with local the published local capacity; cause, which names what made
+// the sample saturated; and cutBy, the input that cut, if one did. The
+// sampler's first call only starts the clock.
 //
 //   - Working set at or above the hard ratio (experimental memory input): a cut,
 //     capacity 1 at once.
@@ -302,43 +474,42 @@ func (s *saturation) stallShare(now time.Time, total time.Duration) (percent flo
 //     controller eases into its backlog. After a cut by the memory input it is
 //     the RecoveryInterval, the same rule as for API limits.
 //
-// cause names what made the last sample saturated, and is cleared by a clean
-// one. A saturated sample restarts the clean interval even when it doesn't
-// cut.
-func (s *saturation) step(now time.Time, smp cgroupSample, cur localState, ceiling int, recovery time.Duration) localState {
+// What halves is the published local capacity, not P, so a cut is a cut of
+// what is running. The two differ only while the capacity model holds local
+// under P.
+//
+// cause is empty for a clean sample. A saturated sample restarts the clean
+// interval even when it doesn't cut.
+func (s *saturation) step(now time.Time, smp cgroupSample, local, p, ceiling int, recovery time.Duration) (next int, cause, cutBy string) {
 	if s.lastStep.IsZero() {
 		s.lastStep = now
 	}
 	hard, memory, cpu, cause := s.evaluate(smp)
-	next := cur
+	next = p
 	switch {
 	case hard:
-		next.capacity = capacityFloor
-		next.cause = cause
+		next, cutBy = capacityFloor, InputMemoryWorkingSet
 		s.memoryCut, s.lastStep = true, now
 	case memory:
-		next.capacity = max(capacityFloor, cur.capacity/2)
-		next.cause = cause
+		next, cutBy = max(capacityFloor, local/2), InputMemoryWorkingSet
 		s.memoryCut, s.lastStep = true, now
 	case cpu:
-		next.cause = cause
 		s.lastStep = now
 		if smp.cpuConfirmed && (s.lastCPUCut.IsZero() || now.Sub(s.lastCPUCut) >= CPUPressureWindow) {
-			next.capacity = max(capacityFloor, cur.capacity/2)
+			next, cutBy = max(capacityFloor, local/2), InputCPUPressure
 			s.memoryCut, s.lastCPUCut = false, now
 		}
 	default:
-		next.cause = ""
 		wait := s.opts.StartupRampInterval
 		if s.memoryCut {
 			wait = recovery
 		}
-		if cur.capacity < ceiling && now.Sub(s.lastStep) >= wait {
-			next.capacity = cur.capacity + 1
+		if p < ceiling && now.Sub(s.lastStep) >= wait {
+			next = p + 1
 			s.lastStep = now
 		}
 	}
-	return next
+	return next, cause, cutBy
 }
 
 // evaluate reports whether smp is over the hard working-set ratio, over the
@@ -394,13 +565,47 @@ func (s *saturation) inputs() []InputSnapshot {
 	return out
 }
 
+// cuts returns the cuts each input's step made, for metrics.
+func (s *saturation) cuts() []CutSnapshot {
+	return []CutSnapshot{
+		{Input: InputCPUPressure, Cuts: s.cpuCuts.Load()},
+		{Input: InputMemoryWorkingSet, Cuts: s.memoryCuts.Load()},
+	}
+}
+
+// cpu returns the CPU limit of the last sample and, while the law applies,
+// what the capacity model measured, for metrics.
+func (s *saturation) cpu() CPUSnapshot {
+	var out CPUSnapshot
+	if smp := s.last.Load(); smp != nil && smp.cpuLimit.set {
+		out.Limit = ptr.To(smp.cpuLimit.cores)
+	}
+	r := s.modelReport.Load()
+	if r == nil {
+		return out
+	}
+	out.ModelCapacity = ptr.To(r.capacity)
+	if r.measured {
+		out.Used, out.Background = ptr.To(r.used), ptr.To(r.background)
+	}
+	if r.hasPerReconcile {
+		out.PerReconcile, out.Required = ptr.To(r.perReconcile), ptr.To(r.required)
+	}
+	return out
+}
+
 // cgroupFiles reads the cgroup v2 interface files in dir. The memory files are
 // read only when memory is set: the experimental input is off by default, and
-// reading memory.stat is most of a sample's cost.
+// reading memory.stat is most of a sample's cost. cpu.stat is read only when
+// usage is set, for the capacity model. cpu.max is read at every sample: an
+// in-place resize changes the limit under a running process.
 type cgroupFiles struct {
 	dir    string
 	memory bool
+	usage  bool
 }
+
+const capacityModelOff = "the capacity model is off (SaturationOptions.CapacityModel)"
 
 const memoryInputOff = "the experimental memory input is off (SaturationOptions.ExperimentalMemoryWorkingSet)"
 
@@ -408,16 +613,67 @@ func (c cgroupFiles) read() cgroupSample {
 	root, err := os.OpenRoot(c.dir)
 	if err != nil {
 		why := "no cgroup v2 directory at " + c.dir + ": " + err.Error()
-		return cgroupSample{cpuPressure: disabled(why), workingSet: disabled(why)}
+		return cgroupSample{cpuPressure: disabled(why), workingSet: disabled(why), cpuLimit: cpuLimit{why: why}, cpuUsage: cpuUsage{why: why}}
 	}
 	defer func() { _ = root.Close() }()
 
-	smp := cgroupSample{workingSet: disabled(memoryInputOff)}
+	smp := cgroupSample{workingSet: disabled(memoryInputOff), cpuUsage: cpuUsage{why: capacityModelOff}}
 	smp.cpuPressure, smp.cpuStall = readPressure(root, "cpu.pressure", "some")
 	if c.memory {
 		smp.workingSet = readWorkingSet(root)
 	}
+	smp.cpuLimit = readCPULimit(root)
+	if c.usage {
+		smp.cpuUsage = readCPUUsage(root)
+	}
 	return smp
+}
+
+// readCPULimit returns the CPU limit of cpu.max, quota ÷ period, in cores:
+//
+//	50000 100000
+//
+// A quota of "max" is no limit.
+func readCPULimit(root *os.Root) cpuLimit {
+	b, err := root.ReadFile("cpu.max")
+	if err != nil {
+		return cpuLimit{why: unreadableWhy("cpu.max", err)}
+	}
+	text := strings.TrimSpace(string(b))
+	fields := strings.Fields(text)
+	if len(fields) != 2 {
+		return cpuLimit{why: "cpu.max: cannot parse " + strconv.Quote(text)}
+	}
+	if fields[0] == "max" {
+		return cpuLimit{why: "no CPU limit (cpu.max is max)"}
+	}
+	quota, qerr := strconv.ParseUint(fields[0], 10, 64)
+	period, perr := strconv.ParseUint(fields[1], 10, 64)
+	if qerr != nil || perr != nil || quota == 0 || period == 0 {
+		return cpuLimit{why: "cpu.max: cannot parse " + strconv.Quote(text)}
+	}
+	return cpuLimit{set: true, cores: float64(quota) / float64(period)}
+}
+
+// readCPUUsage returns usage_usec of cpu.stat: the CPU time the container has
+// used, cumulative.
+func readCPUUsage(root *os.Root) cpuUsage {
+	b, err := root.ReadFile("cpu.stat")
+	if err != nil {
+		return cpuUsage{why: unreadableWhy("cpu.stat", err)}
+	}
+	us, ok := statValue(b, "usage_usec")
+	if !ok || us > uint64(maxStall/time.Microsecond) {
+		return cpuUsage{why: "cpu.stat: no usage_usec value"}
+	}
+	return cpuUsage{ok: true, total: time.Duration(us) * time.Microsecond}
+}
+
+func unreadableWhy(file string, err error) string {
+	if errors.Is(err, fs.ErrNotExist) {
+		return file + " not found"
+	}
+	return file + ": " + err.Error()
 }
 
 // readPressure returns total, the cumulative stall in microseconds, of the
