@@ -227,7 +227,23 @@ The user's bars of 2026-11-08, for the new step:
 - Running nearer the limit costs latency: a call's CPU takes 144ms of wall time
   under the new step against 59ms under the old one, and 526ms with the
   governor off.
-- One workload at one limit. The threshold stays provisional.
+- The threshold stays provisional.
+
+**At a 100m limit** (block `s2`, three runs per arm, the same workload; the
+user set no bar there, so this is information). One call's 20ms of CPU is two
+periods of quota at 100m.
+
+| Arm | CPU used (of 100ms/s) | CPU pressure (`some avg10`) | Observes/s | Mean `local` | Wall time of a call's 20ms of CPU | Failed probes |
+|---|---|---|---|---|---|---|
+| governor off | 99.7% | 62.9 | 4.34 | — | 2204ms | 2 |
+| the step before (threshold 50) | 72.8% | 34.8 | 2.95 | 2.0 | 187ms | 0 |
+| the new step (threshold 50) | 88.5% | 48.2 | 3.67 | 2.9 | 293ms | 0 |
+
+- The new step is better than the one before it here too, 84.4% of the
+  ungoverned throughput against 68%, but it is under two of the 250m bars: CPU
+  used (88.5% against 90%) and throughput (84.4% against 90%).
+- No arm restarted. Only the ungoverned arm had failed liveness probes, one in
+  each of two runs.
 
 #### CPU at the final code
 
