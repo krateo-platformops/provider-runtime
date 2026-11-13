@@ -4,13 +4,40 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-11T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-13 — v1.19.0: the CPU slow-down cuts once per 10s window
+- **A minor release: it changes the behaviour of an opt-in feature**
+  (`--saturation-governor`, off by default). Providers that haven't enabled it
+  see no change (#95).
+- **What was wrong.** The CPU step halved local capacity on every 1s sample of
+  `cpu.pressure`'s `some avg10`, an average that still holds most of a stall
+  10s after it ended, so one stall cut capacity several times. On GKE at a 250m
+  limit it settled at about 72% of the limit with 31% less throughput.
+- **What changed.** CPU pressure is now the share of the last 10s in which some
+  task waited for CPU, from the cumulative `some total`. A cut needs a whole
+  window of evidence, and the next cut a whole window measured after the last
+  one. After a CPU cut, capacity rises by one per `StartupRampInterval` (2s).
+  The experimental memory input is unchanged.
+- **Measured on GKE (250m, 16 workers, 5 runs per arm):** 93.4% of the CPU
+  limit used, pressure 41.7, 91.0% of the ungoverned throughput, no restarts.
+  That meets the four bars the user set on 2026-11-08; the margins on pressure
+  and throughput are thin, and it is one workload at one limit
+  ([configuration](./configuration.md#cpu-step-re-measured-2026-11-13)).
+- **For consumers that enable it:** `CPUPressureThreshold` keeps its name and
+  default (50, still provisional), but now reads the 10s share, not `avg10`;
+  the `saturation.input` metric reports the same value; the log text says
+  `CPU pressure N% (some, over 10s)`; new export `ratelimit.CPUPressureWindow`.
+- **The cost model was stopped.** The per-reconcile cost model (#57) is closed
+  unmerged after its review: at CPU limits of 100m to 125m it could not tell
+  its target from saturation. Its design documents are kept, marked not
+  pursued.
 
 ## 2026-11-12 — v1.18.0: create markers keep sub-second precision
 - **A minor release: the `krateo.io/external-create-pending`, `-succeeded` and
