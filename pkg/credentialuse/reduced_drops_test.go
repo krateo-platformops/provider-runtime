@@ -1,7 +1,6 @@
 package credentialuse
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -16,20 +15,16 @@ import (
 // differential and in its reproduction at e5d5af9.
 func reducedDrops(t *testing.T) map[apimodel.Bounds][][]string {
 	t.Helper()
-	f, err := os.Open("testdata/reduced-drops.txt")
+	data, err := os.ReadFile("testdata/reduced-drops.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
 	bounds := map[string]apimodel.Bounds{
 		"p0f1": {Faults: 1, Jumps: 2},
 		"p1f0": {Preemptions: 1, Jumps: 2},
 	}
 	drops := map[apimodel.Bounds][][]string{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(nil, 1<<20)
-	for sc.Scan() {
-		line := sc.Text()
+	for _, line := range strings.Split(string(data), "\n") {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -39,9 +34,6 @@ func reducedDrops(t *testing.T) map[apimodel.Bounds][][]string {
 			t.Fatalf("testdata/reduced-drops.txt: unknown bound %q", fields[0])
 		}
 		drops[b] = append(drops[b], fields[1:])
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatal(err)
 	}
 	return drops
 }
