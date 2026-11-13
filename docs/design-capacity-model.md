@@ -48,6 +48,7 @@ One sample per `SamplePeriod` (1s), by the sampler goroutine that already reads
 | `limit` | `cpu.max`, quota ÷ period | The CPU limit in cores; `max` means none. Read at every sample: an in-place resize changes it under a running process |
 | `slotSeconds` | the gated queues | Time local slots were held since the last sample, summed over the slots |
 | `completions` | the gated queues | Reconciles that gave their slot back since the last sample |
+| `arrivals` | the gated queues | Items that became ready to run since the last sample, for §7 |
 
 The queues already know when a slot is granted and when `Done` gives it back,
 so the two counts need no change to the reconciler. Each queue keeps its own
@@ -178,7 +179,8 @@ New instruments, beside `ratelimit.local.capacity` and `saturation.input`:
 | `provider_runtime.ratelimit.cpu.used` | gauge (cores) | none | `U` over the last interval |
 | `provider_runtime.ratelimit.cpu.background` | gauge (cores) | none | `B` |
 | `provider_runtime.ratelimit.cpu.per_reconcile` | gauge (seconds) | none | `(U − B) ÷ X` over the last interval with completions |
-| `provider_runtime.ratelimit.cpu.required` | gauge (cores) | none | `B + (U − B) × (N + waiting) ÷ N ÷ CPUTarget`: the limit at which the work now running and waiting would all run at the target. An estimate from the same proportionality as the law; not measured |
+| `provider_runtime.ratelimit.local.arrivals` | counter | `controller` | Items that became ready to run (an item re-added while it waits counts once) |
+| `provider_runtime.ratelimit.cpu.required` | gauge (cores) | none | `B + per_reconcile × arrivals per second ÷ CPUTarget`, over the last interval: the limit at which the work arriving now would run at the target. An estimate from the same proportionality as the law; not measured |
 
 `cpu.required` above `cpu.limit` is the statement no autoscaler can make from
 CPU use: this controller would use more if it had it.
@@ -195,7 +197,7 @@ In `SaturationOptions`:
 | `ModelInterval` | `10s` | How often `M` is recomputed |
 
 The share per controller (§6) and the instruments that don't depend on the law
-(§7: `in_flight`, `guaranteed`, `waiting`, `cuts`, `cpu.limit`) apply whenever
+(§7: `in_flight`, `guaranteed`, `waiting`, `arrivals`, `cuts`, `cpu.limit`) apply whenever
 saturation is on.
 
 ## 9. Tests
