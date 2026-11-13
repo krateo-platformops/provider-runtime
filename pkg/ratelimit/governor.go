@@ -222,10 +222,12 @@ type Governor struct {
 	// advanceSlotTimeLocked.
 	slotTime   time.Duration
 	slotTimeAt time.Time
-	// queues are the gated queues waiting on local capacity, and nextQueue is
-	// where the next round-robin grant starts.
-	queues    []gatedQueueRef
-	nextQueue int
+	// queues are the gated queues waiting on local capacity. nextOwed is where
+	// the next round-robin grant to an owed queue starts, and nextLent where
+	// the next lent one does: each pass keeps its own place, so a grant to an
+	// owed queue doesn't move where lending goes on from.
+	queues             []gatedQueueRef
+	nextOwed, nextLent int
 	// reconcilers is how many reconcilers registered; see ceilingLocked.
 	reconcilers int
 	// gatedControllers is how many controllers' queues ForControllerRuntime
@@ -383,8 +385,10 @@ func (g *Governor) removeQueue(q gatedQueueRef) {
 	defer g.mu.Unlock()
 	if i := slices.Index(g.queues, q); i >= 0 {
 		g.queues = slices.Delete(g.queues, i, i+1)
-		if g.nextQueue > i {
-			g.nextQueue--
+		for _, next := range []*int{&g.nextOwed, &g.nextLent} {
+			if *next > i {
+				*next--
+			}
 		}
 	}
 }
@@ -437,8 +441,8 @@ func (g *Governor) guaranteedLocked() int {
 // worker and an item to give it. A slot goes first to a queue that is owed:
 // one that holds fewer slots than its guaranteed share. With none owed it goes
 // to any queue with work, which is the lending: a queue may hold more than its
-// share while the others don't need theirs. Both are round-robin from where
-// the last grant left off. Nothing is taken back: a lent slot returns when its
+// share while the others don't need theirs. Each is round-robin from where its
+// own last grant left off. Nothing is taken back: a lent slot returns when its
 // reconcile ends, and an owed queue is then first in line. Inside a queue the
 // order is the queue's. The caller holds g.mu.
 //
@@ -450,25 +454,25 @@ func (g *Governor) guaranteedLocked() int {
 func (g *Governor) dispatchLocked() {
 	for g.localInFlight < g.local.Load().capacity {
 		share := g.guaranteedLocked()
-		granted := g.grantLocked(func(q gatedQueueRef) bool { return q.tryGrantOwed(share) }) ||
-			g.grantLocked(gatedQueueRef.tryGrant)
+		granted := g.grantLocked(&g.nextOwed, func(q gatedQueueRef) bool { return q.tryGrantOwed(share) }) ||
+			g.grantLocked(&g.nextLent, gatedQueueRef.tryGrant)
 		if !granted {
 			return
 		}
 	}
 }
 
-// grantLocked gives one slot to the first queue, round-robin from nextQueue,
-// that try grants one to, and reports whether there was one. The caller holds
-// g.mu.
-func (g *Governor) grantLocked(try func(gatedQueueRef) bool) bool {
+// grantLocked gives one slot to the first queue, round-robin from *next, that
+// try grants one to, moves *next past it, and reports whether there was one.
+// The caller holds g.mu.
+func (g *Governor) grantLocked(next *int, try func(gatedQueueRef) bool) bool {
 	n := len(g.queues)
 	for i := range n {
-		idx := (g.nextQueue + i) % n
+		idx := (*next + i) % n
 		if try(g.queues[idx]) {
 			g.advanceSlotTimeLocked(g.now())
 			g.localInFlight++
-			g.nextQueue = (idx + 1) % n
+			*next = (idx + 1) % n
 			return true
 		}
 	}
@@ -744,10 +748,15 @@ func (g *Governor) NeedLeaderElection() bool { return false }
 // grants any slot a rise freed. Only the sampler goroutine calls it (tests call
 // it directly instead). The files are read before g.mu is taken, so Acquire and
 // the gated queues never wait on I/O.
+//
+// The instant the sample is judged at is taken again under g.mu: grants and
+// releases stamp the slot time with their own instants under that lock, and one
+// that ran between the read and the lock would otherwise leave the slot time
+// covering time past the sample's.
 func (g *Governor) sample() {
-	now := g.now()
-	smp := g.sat.read(now)
+	smp := g.sat.read(g.now())
 	g.mu.Lock()
+	now := g.now()
 	cur := g.local.Load()
 	g.advanceSlotTimeLocked(now)
 	work := workTotals{slotTime: g.slotTime, completions: g.completions.Load(), arrivals: g.arrivals.Load()}

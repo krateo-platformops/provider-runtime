@@ -39,33 +39,79 @@ func TestLawWorkedExample(t *testing.T) {
 	}
 }
 
-// Rule 1, completions: 19 completions are no evidence, 20 are.
-func TestLawTooFewCompletionsMoveNothing(t *testing.T) {
-	iv := lawInterval(12, 12, 0.38)
-	iv.completions = minCompletions - 1
-	if got := modelCapacity(12, iv, DefaultCPUTarget, lawCeiling); got != 12 {
-		t.Errorf("with %d completions M = %v, want 12 unchanged", iv.completions, got)
+// Rule 1, nothing in flight: a window with no reconcile in it says nothing
+// about what reconciles cost. Without the rule, CPU over the target with
+// nothing in flight would want a capacity of 0. The completions don't enter
+// the law: they only choose the window's length.
+func TestLawNothingInFlightMovesNothing(t *testing.T) {
+	if got := modelCapacity(12, lawInterval(0, 12, 0.5), DefaultCPUTarget, lawCeiling); got != 12 {
+		t.Errorf("nothing in flight, 500m used: M = %v, want 12 unchanged", got)
 	}
-	iv.completions = minCompletions
-	if got := modelCapacity(12, iv, DefaultCPUTarget, lawCeiling); got == 12 {
-		t.Errorf("with %d completions M stayed at 12, want it to move", iv.completions)
+	iv := lawInterval(12, 12, 0.38)
+	iv.completions = 1
+	if got, want := modelCapacity(12, iv, DefaultCPUTarget, lawCeiling), 12*0.43/0.36; !near(got, want) {
+		t.Errorf("one completion in the window: M = %v, want %v: a window is evidence whatever it completed", got, want)
 	}
 }
 
-// Rule 1, CPU: with U barely above B the ratio divides by almost nothing. Under
-// 5% of the limit above the background, nothing moves.
-func TestLawCPUBarelyAboveBackgroundMovesNothing(t *testing.T) {
+// CPU barely used: with U − B under 5% of the limit the ratio divides by almost
+// nothing, but the direction is certain, so the law asks for the rise cap,
+// twice M. It is still a rise: it needs the slots used, and the bounds hold.
+func TestLawCPUBarelyUsedAsksForTheRiseCap(t *testing.T) {
 	// 24m above the background, of a 500m limit: under the 25m that is 5%.
-	if got := modelCapacity(12, lawInterval(12, 12, 0.044), DefaultCPUTarget, lawCeiling); got != 12 {
-		t.Errorf("U 24m above B: M = %v, want 12 unchanged", got)
+	if got := modelCapacity(12, lawInterval(12, 12, 0.044), DefaultCPUTarget, lawCeiling); got != 24 {
+		t.Errorf("U 24m above B, every slot used: M = %v, want 24", got)
 	}
-	// 26m above it is evidence: wanted is 12 × 430 ÷ 26, capped at twice M.
+	// U under B is barely used too, not a negative capacity.
+	if got := modelCapacity(12, lawInterval(12, 12, 0.01), DefaultCPUTarget, lawCeiling); got != 24 {
+		t.Errorf("U under B, every slot used: M = %v, want 24", got)
+	}
+	// Rule 2 holds: with half the slots idle nothing rises.
+	if got := modelCapacity(12, lawInterval(6, 12, 0.044), DefaultCPUTarget, lawCeiling); got != 12 {
+		t.Errorf("U 24m above B, half the slots idle: M = %v, want 12 unchanged", got)
+	}
+	// Rule 6 holds: the ceiling.
+	if got := modelCapacity(20, lawInterval(20, 20, 0.044), DefaultCPUTarget, lawCeiling); got != lawCeiling {
+		t.Errorf("U 24m above B from 20: M = %v, want the ceiling %d", got, lawCeiling)
+	}
+	// Rule 4 holds: a background that alone takes CPU use over the target
+	// leaves nothing to rise into.
+	iv := lawInterval(12, 12, 0.46)
+	iv.background = 0.44
+	if got := modelCapacity(12, iv, DefaultCPUTarget, lawCeiling); got != 12 {
+		t.Errorf("U 20m above a background of 440m, over the target: M = %v, want 12 unchanged", got)
+	}
+	// 26m above the background the ratio is used: 12 × 430 ÷ 26, capped at
+	// twice M.
 	if got := modelCapacity(12, lawInterval(12, 12, 0.046), DefaultCPUTarget, lawCeiling); got != 24 {
 		t.Errorf("U 26m above B: M = %v, want 24", got)
 	}
-	// U under B is no evidence either, and not a negative capacity.
-	if got := modelCapacity(12, lawInterval(12, 12, 0.01), DefaultCPUTarget, lawCeiling); got != 12 {
-		t.Errorf("U under B: M = %v, want 12 unchanged", got)
+}
+
+// The case that would otherwise stick: local capacity 1 on a 1 CPU limit,
+// after a cut. One reconcile in flight uses 48m, 4.8% of the limit. M doubles
+// at the evaluation, and from 2 the ratio takes over.
+func TestLawOneSlotOnALargeLimitRises(t *testing.T) {
+	window := func(inFlight, used float64) modelInterval {
+		return modelInterval{
+			elapsed:      10 * time.Second,
+			cpuUsed:      time.Duration(used * 10 * float64(time.Second)),
+			slotTime:     time.Duration(inFlight * 10 * float64(time.Second)),
+			capacityTime: time.Duration(max(1, inFlight)) * 10 * time.Second,
+			completions:  3,
+			limit:        1,
+		}
+	}
+	if got := modelCapacity(1, window(1, 0.048), DefaultCPUTarget, lawCeiling); got != 2 {
+		t.Fatalf("one slot in use at 4.8%% of the limit: M = %v, want 2", got)
+	}
+	// 96m with two in flight: 2 × 900 ÷ 96 = 18.8, capped at twice M.
+	if got := modelCapacity(2, window(2, 0.096), DefaultCPUTarget, lawCeiling); got != 4 {
+		t.Errorf("two slots in use at 9.6%%: M = %v, want 4", got)
+	}
+	// The slot in use half the time is not evidence that more would be used.
+	if got := modelCapacity(1, window(0.5, 0.024), DefaultCPUTarget, lawCeiling); got != 1 {
+		t.Errorf("one slot in use half the time: M = %v, want 1 unchanged", got)
 	}
 }
 
@@ -289,31 +335,34 @@ func TestModelWindowGrowsUntilItHoldsEnoughCompletions(t *testing.T) {
 	}
 }
 
-// A window that never holds 20 completions is discarded after 30 intervals: it
-// moves nothing, and the next one starts from nothing.
-func TestModelAWindowWithoutEnoughCompletionsIsDiscarded(t *testing.T) {
+// A window that never holds 20 completions ends after 30 intervals, and is
+// evaluated with what it has. One in which nothing was in flight moves nothing.
+func TestModelAWindowEndsAtThirtyIntervals(t *testing.T) {
 	c := newModelClock()
-	for i := range maxWindowIntervals {
+	for i := 1; i < maxWindowIntervals; i++ {
 		completions := int64(1)
-		if i >= minCompletions-1 {
+		if i >= minCompletions {
 			completions = 0 // 19 in all
 		}
 		c.interval(0.5, 16, 32, completions)
 		if got := c.m.current(lawCeiling); got != lawCeiling {
-			t.Fatalf("after %d interval(s) M = %v, want the ceiling unchanged", i+1, got)
+			t.Fatalf("after %d interval(s) M = %v, want the ceiling unchanged", i, got)
 		}
 	}
-	// Had the window gone on, its 19 completions and the next interval's 5
-	// would be enough at once. It restarted, so it takes four intervals.
-	for i := 1; i <= 3; i++ {
-		c.interval(0.5, 16, 32, 5)
-		if got := c.m.current(lawCeiling); got != lawCeiling {
-			t.Fatalf("%d interval(s) after the window was discarded M = %v, want the ceiling: the window restarted", i, got)
-		}
-	}
-	c.interval(0.5, 16, 32, 5)
+	c.interval(0.5, 16, 32, 0)
 	if got, want := c.m.current(lawCeiling), 16*0.45/0.5; !near(got, want) {
-		t.Errorf("four intervals after the window was discarded M = %v, want %v", got, want)
+		t.Fatalf("after 30 intervals with 19 completions M = %v, want %v: the window is evaluated with what it has", got, want)
+	}
+	if r := c.m.reported(lawCeiling); !r.measured || !near(r.used, 0.5) {
+		t.Errorf("the window's report = %+v, want U 0.5", r)
+	}
+	// Thirty intervals with nothing in flight, CPU still used: nothing moves.
+	before := c.m.current(lawCeiling)
+	for range maxWindowIntervals {
+		c.interval(0.5, 0, 32, 0)
+	}
+	if got := c.m.current(lawCeiling); got != before {
+		t.Errorf("M = %v after a window with nothing in flight, want %v unchanged", got, before)
 	}
 }
 

@@ -160,7 +160,7 @@ type SaturationOptions struct {
 	// ModelInterval is the length of one interval of the window the capacity
 	// model recomputes its capacity over. Defaults to 10s. The window ends at
 	// the end of the first interval by which 20 reconciles have completed in
-	// it, and is discarded after 30 intervals without them. An interval ends
+	// it, and at 30 intervals whatever it completed. An interval ends
 	// on the first sample after it has passed, so a SamplePeriod above it sets
 	// the pace. Read only with CapacityModel.
 	ModelInterval time.Duration

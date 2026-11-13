@@ -66,10 +66,10 @@ limit, so it says nothing about the quota.
 The law is evaluated over a window of whole `ModelInterval`s (10s each). At
 the end of each interval the window ends, and the law is evaluated over all of
 it, if it holds at least `minCompletions` (20) completions. Otherwise it grows
-by another interval, up to `maxWindow` (30 intervals, 5 minutes): a window that
-long without the completions is discarded, and moves nothing. So a controller
-whose reconciles are slow is measured over as long as it takes to see 20 of
-them, not never. The next window starts where the last one ended.
+by another interval, up to `maxWindow` (30 intervals, 5 minutes), where it ends
+and is evaluated with what it has. The completions only choose the window's
+length: a controller whose reconciles are slow is measured over a longer
+window, not never. The next window starts where the last one ended.
 
 Over the window:
 
@@ -82,6 +82,11 @@ Over the window:
 - `target` = `CPUTarget` × `limit`, `CPUTarget` 0.9 by default.
 
 `r = (target − B) ÷ (U − B)`, and `wanted = N × r`
+
+**CPU barely used.** If `U − B` is under 5% of `limit`, `r` divides by almost
+nothing and is not usable, but the direction is certain: CPU does not bind. Then
+`wanted = 2 × M`, the rise cap, and rule 3 is skipped. It is still a rise, so
+rules 2 and 4 to 6 apply.
 
 The capacity in force (rule 2) and the arrival rate (§7) are taken over the
 same window.
@@ -96,16 +101,17 @@ applies to replicas.
 
 The model's capacity `M` moves to `wanted` under these rules, in this order:
 
-1. **No evidence, no move.** `M` is unchanged if the window had fewer than
-   `minCompletions` (20) completions, if `U − B` is under 5% of `limit`, or if
-   `limit` changed during the window. A limit change ends the window at the end
-   of the interval it happened in, so the next window is all at the new limit.
+1. **The window.** `M` is unchanged if nothing was in flight in the window
+   (`N` is 0), or if `limit` changed during it. A limit change ends the window
+   at the end of the interval it happened in, so the next window is all at the
+   new limit.
 2. **A rise needs the slots to have been used.** `M` rises only if `N` is at
    least 0.9 × the capacity in force over the window, which is the published
    `local` averaged over its time: with slots standing idle, more of them would
    have changed nothing, and the window says nothing about what more would cost.
 3. **Tolerance.** `M` is unchanged if `r` is within 5% of 1, that is if
-   `|r − 1| ≤ 0.05`: CPU use that close to the target moves nothing. It is the
+   `|r − 1| ≤ 0.05`: CPU use that close to the target moves nothing. Skipped
+   with the CPU barely used, where there is no `r`. It is the
    Horizontal Pod Autoscaler's tolerance, on the same ratio. It is on the ratio
    and not on `M`, because a tolerance of 10% on `M` sits exactly on the case
    of a container pinned at its limit, where `wanted` is 0.9 × `M`.
@@ -128,6 +134,23 @@ the tolerance, so `M` falls to `N × r`, by 10% or a little more at every
 evaluation: correct in direction and slow. The step is what answers saturation
 (§4); the law then finds the level from below.
 
+**After a cut.** A cut by the step sets `M` to the `local` it left (§4), and
+from there `M` rises only by the law: at most one doubling per evaluated
+window. With 20 completions per interval or more a window is 10s, so from 1 to
+16 takes four windows, 40s, against the step's own 30s at +1 per
+`StartupRampInterval`. With slow reconciles a window is as long as 20
+completions take, at most 30 intervals: from 1 to 16 is then up to four windows
+of 5 minutes, 20 minutes, where the step alone would take 30s. That is the
+price of asking for evidence before each rise. Two things keep a cut from
+pinning `local` for good: the window is evaluated at 30 intervals whatever it
+completed, and CPU barely used is a rise, not "no move" (one reconcile at
+`local` 1 on a 1 CPU limit can use under 5% of it).
+
+**What does not rise.** `M` stays where it is while the slots it allows are not
+used (rule 2), which is not a shortage: nothing waits for a slot then. It also
+stays while the background alone holds CPU use at the target or over it, where
+there is nothing to rise into.
+
 **What it does not see.** A reconcile that waits on a slow external API uses
 little CPU, so the law allows more of them. That is correct for the container's
 CPU and wrong for the API: the rate-limit input (per-key capacity) is what
@@ -147,7 +170,8 @@ cut is a cut of what is running.
 - A cut also sets `M` to the new `local` if `M` was above it, so the law
   resumes from what the cut left and must find evidence to rise. This holds for
   any cut by the step, the experimental memory input's included. A cut counts
-  (§7, `local.cuts`) when it lowered `local`.
+  (§7, `local.cuts`) when it lowered `local`. How long the rise back can
+  take, and why a cut cannot pin `local` for good, is in §3, "After a cut".
 
 ## 5. Where it applies
 
@@ -178,6 +202,8 @@ Each gated queue gets a guaranteed share `G = max(1, floor(local ÷ queues))`.
 - A freed slot goes first to an owed queue, round-robin among them; with none
   owed, to any queue with work, round-robin, as today. That second case is the
   lending: a queue may hold more than `G` while the others don't need theirs.
+  Each of the two has its own place in the round: a grant to an owed queue does
+  not move where lending goes on from.
 - Nothing is preempted. A lent slot comes back when its reconcile ends, and the
   owed queue is then first in line. The wait is at most the lender's longest
   reconcile.
@@ -237,18 +263,22 @@ saturation is on.
   removed in turn fails a test. Cases: the worked example (12 in flight, 380m
   of 500m, `B` 20m gives 14.3); at the target; within 5% of it on either side;
   over it; pinned at the limit, with no background and every slot used, falling
-  10% per evaluation; slots idle; too few completions; `U` barely above `B`;
-  the rise cap; a limit change.
+  10% per evaluation; slots idle; nothing in flight; CPU barely used, which
+  doubles `M` (one slot in use on a 1 CPU limit at 4.8% of it), and doesn't
+  with the slots idle; the rise cap; a limit change.
 - **The window:** at 5 completions per interval `M` moves at the fourth
-  interval, over all four; a window that never holds 20 moves nothing and
-  restarts; a limit change inside a window discards it.
+  interval, over all four; a window that never holds 20 is evaluated at 30
+  intervals with what it has; one with nothing in flight moves nothing; a limit
+  change inside a window discards it.
 - **With the step:** `local` is the lower of the two; a cut halves `local` and
-  pulls `M` down; `P` climbing past `M` changes nothing.
+  pulls `M` down; `P` climbing past `M` changes nothing; after a cut `local`
+  rises again with slow reconciles, and from 1 on a 1 CPU limit.
 - **Where it applies:** no limit, a limit under 500m, `cpu.stat` missing: `M`
   is the ceiling and `local` behaves exactly as v1.19.0 (the existing tests
   pass unchanged with the option off).
-- **Shares:** a deep-backlog queue and a light one: the light one gets a slot
-  within one completion; with one queue idle the other takes every slot; with
+- **Shares:** lent slots alternate between two deep queues while a third takes
+  its share between them; a deep-backlog queue and a light one: the light one
+  gets a slot within one completion; with one queue idle the other takes every slot; with
   `local` under the number of queues every queue still runs; drain and shutdown
   give every slot back (the existing queue tests, with shares).
 - **Stress and race:** the existing gated-queue stress tests, with several

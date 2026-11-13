@@ -24,14 +24,17 @@ const (
 
 // The law's fixed values (design §3).
 const (
-	// minCompletions is the fewest reconciles a window must have completed to
-	// be evidence.
+	// minCompletions is how many completed reconciles a window waits for
+	// before it ends. It only sets the window's length.
 	minCompletions = 20
 	// maxWindowIntervals is how many ModelIntervals a window grows to while it
-	// waits for minCompletions. A window that long without them is discarded.
+	// waits for minCompletions. A window that long is evaluated with what it
+	// has.
 	maxWindowIntervals = 30
 	// minReconcileCPUShare is the least CPU above the background, as a share
-	// of the limit, a window must show to be evidence.
+	// of the limit, a window must show for the ratio to be usable. Under it
+	// the CPU is barely used: the ratio divides by almost nothing, but the
+	// direction is certain, and the law asks for the rise cap.
 	minReconcileCPUShare = 0.05
 	// usedSlotsShare is the share of the capacity in force that must have been
 	// in flight for a rise.
@@ -50,7 +53,8 @@ const (
 )
 
 // modelInterval is what one window measured: one ModelInterval, or as many
-// whole ones as it took to see minCompletions completions.
+// whole ones as it took to see minCompletions completions, up to
+// maxWindowIntervals.
 type modelInterval struct {
 	// elapsed is the window's length.
 	elapsed time.Duration
@@ -88,8 +92,9 @@ func (iv modelInterval) inForce() float64 { return iv.capacityTime.Seconds() / i
 //
 // Below the limit CPU use grows in proportion to the reconciles in flight, so
 // the concurrency that uses the target is the current one scaled by how far U
-// is from the target. M moves to wanted under six rules, applied in this
-// order.
+// is from the target. With the CPU barely used, U − B under 5% of the limit,
+// the ratio is not usable and wanted is the rise cap, 2 × M. M moves to wanted
+// under six rules, applied in this order.
 func modelCapacity(m float64, iv modelInterval, cpuTarget float64, ceiling int) float64 {
 	if iv.elapsed <= 0 {
 		return m
@@ -98,12 +103,17 @@ func modelCapacity(m float64, iv modelInterval, cpuTarget float64, ceiling int) 
 	target := cpuTarget * iv.limit
 	reconcileCPU := used - iv.background
 
-	// Rule 1. No evidence, no move.
-	if iv.completions < minCompletions || reconcileCPU < minReconcileCPUShare*iv.limit || iv.limitChanged {
+	// Rule 1. The window: one with nothing in flight, or with a limit change
+	// in it, moves nothing.
+	if inFlight == 0 || iv.limitChanged {
 		return m
 	}
-	ratio := (target - iv.background) / reconcileCPU
-	wanted := inFlight * ratio
+	barelyUsed := reconcileCPU < minReconcileCPUShare*iv.limit
+	ratio, wanted := 0.0, maxRiseFactor*m
+	if !barelyUsed {
+		ratio = (target - iv.background) / reconcileCPU
+		wanted = inFlight * ratio
+	}
 
 	// Rule 2. A rise needs the slots to have been used: with slots standing
 	// idle, more of them would have changed nothing.
@@ -112,8 +122,8 @@ func modelCapacity(m float64, iv modelInterval, cpuTarget float64, ceiling int) 
 	}
 
 	// Rule 3. Tolerance, on the ratio: CPU use within 5% of the target moves
-	// nothing.
-	if math.Abs(ratio-1) <= modelTolerance {
+	// nothing. With the CPU barely used there is no ratio to judge.
+	if !barelyUsed && math.Abs(ratio-1) <= modelTolerance {
 		return m
 	}
 
@@ -234,9 +244,10 @@ func (c *capacityModel) cutTo(local, ceiling int) {
 // The law is applied over a window of whole ModelIntervals. At the end of each
 // interval the window ends if it holds minCompletions completions, if the limit
 // changed in it, or if it is maxWindowIntervals long; otherwise it grows by
-// another interval, so that slow reconciles are evidence too. The law decides
-// what a window that ended is worth: one without the completions, or with a
-// limit change, moves nothing (rule 1). The next window starts at this sample.
+// another interval, so that slow reconciles are measured over enough of them.
+// The completions only choose the window's length: the law is applied to every
+// window that ends, and decides that one with a limit change, or with nothing
+// in flight, moves nothing (rule 1). The next window starts at this sample.
 //
 // A usage counter that went backwards belongs to another cgroup, and starts
 // the window again.

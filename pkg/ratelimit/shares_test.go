@@ -186,6 +186,72 @@ func TestALightQueueGetsASlotWithinOneCompletion(t *testing.T) {
 	}
 }
 
+// Lending is round-robin of its own: a grant to an owed queue must not move
+// where lending goes on from. Queues A, B and C, a local capacity of 3, so a
+// share of 1 each; A and B have deep backlogs and C is light. Each time C gives
+// its slot back with nothing to run, the slot is lent, and the lent slots must
+// alternate between A and B. (From an independent review of the first build,
+// where one cursor served both passes and every lent slot went to A.)
+func TestLendingIsRoundRobinAcrossOwedGrants(t *testing.T) {
+	g, _ := saturationGovernor(t, 8, "healthy", false)
+	g.setLocalCapacity(0)
+	a, b, c := gated(t, g, "rv-a"), gated(t, g, "rv-b"), gated(t, g, "rv-c")
+	heldA, _ := boundWorkers(a, 3)
+	heldB, _ := boundWorkers(b, 3)
+	heldC, _ := boundWorkers(c, 1)
+	eventually(t, "workers waiting", func() bool {
+		return idleWorkers(a) == 3 && idleWorkers(b) == 3 && idleWorkers(c) == 1
+	})
+	backlog(a, "a", 60)
+	backlog(b, "b", 60)
+	g.setLocalCapacity(2)
+	runA := []heldItem{receiveHeld(t, heldA, "A's share")}
+	runB := []heldItem{receiveHeld(t, heldB, "B's share")}
+	c.Add("x")
+	g.setLocalCapacity(3)
+	runC := receiveHeld(t, heldC, "C's share")
+	lent := map[string]int{}
+	var order []string
+	for round := range 12 {
+		finish(t, runC)
+		eventually(t, "C's worker waiting", func() bool { return idleWorkers(c) == 1 })
+		select {
+		case h := <-heldA:
+			runA = append(runA, h)
+			lent["a"]++
+			order = append(order, "a")
+		case h := <-heldB:
+			runB = append(runB, h)
+			lent["b"]++
+			order = append(order, "b")
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: lent to nobody", round)
+		}
+		c.Add("x" + strconv.Itoa(round))
+		if len(runA) == 2 {
+			finish(t, runA[0])
+			runA = runA[1:]
+		} else {
+			finish(t, runB[0])
+			runB = runB[1:]
+		}
+		runC = receiveHeld(t, heldC, "C, owed")
+	}
+	if lent["a"] == 0 || lent["b"] == 0 {
+		t.Errorf("of 12 lent slots A got %d, B got %d: %v", lent["a"], lent["b"], order)
+	}
+	for i := 1; i < len(order); i++ {
+		if order[i] == order[i-1] {
+			t.Errorf("lent slots went to %v: not round-robin at %d", order, i)
+			break
+		}
+	}
+	finish(t, runC)
+	for _, h := range append(runA, runB...) {
+		finish(t, h)
+	}
+}
+
 // With local capacity under the number of queues, each queue's share is 1 and
 // they can't all be met: the owed queues are served round-robin, so each still
 // runs, and none holds two slots while another with work holds none.

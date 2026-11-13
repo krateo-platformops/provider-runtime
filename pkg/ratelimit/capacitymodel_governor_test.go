@@ -229,6 +229,64 @@ func TestTheStepClimbingPastTheModelChangesNothing(t *testing.T) {
 	}
 }
 
+// A cut must not pin local for good. The cut sets M to what it left, and M
+// rises only by the law: with slow reconciles, one a second here, the law still
+// finds its evidence, over a window that grows until it holds enough of them.
+// (From an independent review of the first build, where M never rose again
+// while the step climbed back to the ceiling.)
+func TestSlowReconcilesRecoverAfterACut(t *testing.T) {
+	f := newModelFeed(t, modelOn())
+	f.settle()
+	var cut int
+	for range 40 {
+		cut = f.seconds(1, pinned(float64(f.g.LocalCapacity()), 1))
+	}
+	var local int
+	for range 600 {
+		local = f.g.LocalCapacity()
+		local = f.seconds(1, load{used: 0.12, inFlight: float64(local), perSecond: 1})
+	}
+	m, _ := f.modelCapacity()
+	if local <= cut {
+		t.Errorf("local still %d ten minutes after the cut to %d (M %v, P %d)", local, cut, m, f.stepCapacity())
+	}
+}
+
+// The same at local capacity 1 on a 1 CPU limit, where one slow reconcile uses
+// under 5% of the limit: three completions a minute, 48m of CPU. M doubles at
+// each window, which here is the longest there is, 30 intervals.
+func TestOneSlotOnALargeLimitRecoversAfterACut(t *testing.T) {
+	f := newModelFeed(t, modelOn())
+	f.limit.cores = 1
+	f.seconds(30, load{})
+	// A stall cuts local to 1.
+	for f.g.LocalCapacity() > 1 {
+		f.seconds(1, load{used: 1, stalled: 1, inFlight: float64(f.g.LocalCapacity()), perSecond: 30})
+	}
+	if m, _ := f.modelCapacity(); m != 1 {
+		t.Fatalf("M = %v after the cuts to 1, want 1", m)
+	}
+	// One reconcile in flight all the time, completing every 20s.
+	slow := func(seconds int) int {
+		for i := range seconds {
+			l := load{used: 0.048 * float64(f.g.LocalCapacity()), inFlight: float64(f.g.LocalCapacity())}
+			if i%20 == 19 {
+				l.perSecond = 1
+			}
+			f.seconds(1, l)
+		}
+		return f.g.LocalCapacity()
+	}
+	if got := slow(2 * maxWindowIntervals * 10); got < 2 {
+		m, _ := f.modelCapacity()
+		t.Fatalf("local capacity = %d two windows after the cut to 1 (M %v, P %d), want it to have risen", got, m, f.stepCapacity())
+	}
+	if got := slow(4 * maxWindowIntervals * 10); got != 16 {
+		m, _ := f.modelCapacity()
+		t.Errorf("local capacity = %d six windows after the cut (M %v, P %d), want the ceiling 16", got, m, f.stepCapacity())
+	}
+}
+
 // A cut by the experimental memory input is a cut by the step too.
 func TestAMemoryCutPullsTheModelDown(t *testing.T) {
 	f := newModelFeed(t, SaturationOptions{CapacityModel: true, ExperimentalMemoryWorkingSet: true})
