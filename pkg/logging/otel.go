@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
-	logglobal "go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -106,7 +106,7 @@ func ServiceNameAttr(serviceName string) []slog.Attr {
 // NewOTelHandler returns the recommended slog.Handler for a service: it tees each record to (a) the
 // OTel-model JSON stream on w (stderr by default, for log scrapers) and (b) the OTel LoggerProvider
 // via the otelslog bridge, so records are exported over OTLP once the binary's main has installed
-// an OTLP LoggerProvider with go.opentelemetry.io/otel/log/global.SetLoggerProvider. This package
+// an OTLP LoggerProvider with go.opentelemetry.io/otel.SetLoggerProvider. This package
 // installs none (see the note at the end of this file). With no LoggerProvider installed the bridge
 // is a no-op and only the JSON stream is written, so this is always safe to use.
 //
@@ -116,7 +116,7 @@ func ServiceNameAttr(serviceName string) []slog.Attr {
 // over this handler) for the records to correlate with the trace.
 func NewOTelHandler(level slog.Leveler, w io.Writer, serviceName string) slog.Handler {
 	jsonH := NewOTelJSONHandler(level, w, ServiceNameAttr(serviceName)...)
-	bridge := otelslog.NewHandler(serviceName, otelslog.WithLoggerProvider(logglobal.GetLoggerProvider()))
+	bridge := otelslog.NewHandler(serviceName, otelslog.WithLoggerProvider(otel.GetLoggerProvider()))
 	return &teeHandler{handlers: []slog.Handler{jsonH, bridge}}
 }
 
@@ -165,7 +165,7 @@ func (t *teeHandler) WithGroup(name string) slog.Handler {
 
 // The OTLP LoggerProvider (SDK + exporter) is installed by the BINARY next to its trace/metric
 // setup: build the LoggerProvider with go.opentelemetry.io/otel/sdk/log + an otlplog exporter and
-// register it with go.opentelemetry.io/otel/log/global.SetLoggerProvider. This package
+// register it with go.opentelemetry.io/otel.SetLoggerProvider. This package
 // intentionally does not import the log SDK, keeping non-exporting consumers SDK-free.
 //
 // The order of the first install and NewOTelHandler does not matter. Before any SetLoggerProvider,
