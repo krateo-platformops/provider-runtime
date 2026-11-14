@@ -249,3 +249,4 @@
 2026-11-14T07:57:58Z after-m10b-model-3 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
 2026-11-14T08:04:30Z after-m10b-off-3 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
 2026-11-14T08:11:00Z after-m10b-step-3 gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
+2026-11-14T08:11:01Z m10b-end gke-rlgov-step-default-pool-dc6c5ebf-sn2f bf7e4f38-b3c7-407f-9725-7a2c56f90a31 v1.36.4-gke.2377000 6.12.110+
