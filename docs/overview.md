@@ -243,10 +243,12 @@ Don't write `Ready` from `Create`, and don't persist status from inside it. A
 provider that updates the object's status itself before returning does reach
 the API server, and the runtime's own status write replaces the value within
 the same reconcile, so anything watching the conditions can see the reason
-appear and vanish. This was measured on a kind with no create verb: the
-provider set `Ready=False` with a reason of its own, and the settled object
-read `Ready=False/Creating` and `Synced=False/ReconcileError` with the
-provider's error as the message.
+appear and vanish. That follows from the order of the writes; it has not been
+measured on a provider built on this library.
+
+This is this library's contract. Controllers built on unstructured-runtime
+(rest-dynamic-controller, composition-dynamic-controller) follow that
+runtime's rules, which differ.
 
 What readers see while the resource can't be observed:
 
