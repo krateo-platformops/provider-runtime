@@ -4,13 +4,47 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-13T00:00:00Z
+timestamp: 2026-11-14T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-14 — v1.20.0: an opt-in capacity model, and a share per controller
+- **A minor release. Everything new is behind the saturation input**
+  (`--saturation-governor`, off by default), and the capacity model behind an
+  option of its own, also off. Providers that haven't enabled saturation see no
+  change (#98).
+- **A capacity model, opt-in** (`RateLimit.Saturation.CapacityModel`; needs a
+  CPU limit of 500m or more). It sizes local capacity from the CPU the
+  container used and the reconciles in flight, so CPU use settles at
+  `CPUTarget` (0.9) of the limit, and it leaves v1.19.0's pressure step as a
+  veto that can only lower it ([design](./design-capacity-model.md)).
+- **It is a trade, measured on GKE.** At a 500m limit, where the test workload
+  saturates, it gave 86.8% of the step alone's throughput for calls 16 times
+  faster (23ms against 366ms), holding local capacity at the computed knee with
+  no pressure cut. It missed the bar of 95% of the throughput set before the
+  run, and the user chose to ship it as this trade. At 1 CPU, where the
+  workload doesn't saturate, it settled at the knee in two runs of three and
+  never moved in the third: under its target it lowers nothing
+  ([configuration](./configuration.md#capacity-model-measured-2026-11-13-and-14)).
+- **A guaranteed share per controller, whenever saturation is on.** A freed
+  slot goes first to a controller under its equal share of the local capacity,
+  and otherwise is lent to any controller with work; nothing is preempted. A
+  single controller behaves as before. Covered by unit and stress tests and an
+  independent review; not yet measured on a cluster with several controllers.
+- **New instruments for sizing a controller from outside:** per controller, the
+  slots in flight, the guaranteed share, the items waiting and the arrivals;
+  the cuts by the step; the CPU limit; and, with the model on, its capacity,
+  the CPU used, the background, the CPU per reconcile and a required-CPU
+  estimate (a lower bound while a backlog stands).
+- **Known limits:** when one slot is a large share of the limit, a target
+  between two slot levels can settle on either; after a cut, recovery with very
+  slow reconciles is one doubling per window of up to 5 minutes.
+- **Docs only, since v1.19.0:** during `Create` the `Ready` condition is the
+  runtime's (#102, #103), and the CPU step's measurement at a 100m limit (#97).
 
 ## 2026-11-13 — v1.19.0: the CPU slow-down cuts once per 10s window
 - **A minor release: it changes the behaviour of an opt-in feature**
