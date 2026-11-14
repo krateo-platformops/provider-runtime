@@ -4,13 +4,14 @@ title: provider-runtime — local capacity from measured CPU use
 description: Design for sizing the saturation input's local capacity from the container's measured CPU use at CPU limits of 500m and above, with the CPU pressure step as a veto and a guaranteed share of the capacity per controller.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, rate-limiting, saturation, cgroup]
-timestamp: 2026-11-13T00:00:00Z
+timestamp: 2026-11-14T00:00:00Z
 ---
 
 # Local capacity from measured CPU use
 
-**Status:** built, not measured on a cluster. Decided by the user on
-2026-11-13. It adds to
+**Status:** built and measured
+([configuration](./configuration.md#capacity-model-measured-2026-11-13-and-14)):
+a trade of throughput for latency, opt-in. Decided by the user on 2026-11-13. It adds to
 the saturation input of [design-rate-limit-governor](./design-rate-limit-governor.md)
 (§7 and §11 item 19). It replaces
 [design-saturation-cost-model](./design-saturation-cost-model.md), which was
@@ -306,7 +307,7 @@ saturation is on.
 ## 10. Acceptance, on a cluster
 
 On the harness of `hack/rlgov-measure` (20ms of CPU and a 400ms wait per
-Observe, 16 workers), at 500m and at 1 CPU, three arms: governor off, the step
+Observe, 32 workers), at 500m and at 1 CPU, three arms: governor off, the step
 alone (v1.19.0), the step with the law. Bars, written before the first run:
 
 - a call's wall time is at least 20% lower than under the step alone;
@@ -322,7 +323,23 @@ the law aims at 90% of the limit, and the step alone runs hotter (93.4% at
 what it is for.
 
 A second workload with two controllers, one with a backlog of long reconciles
-and one light, checks §6: the light controller's queue wait stays under one
-long reconcile.
+and one light, was to check §6 on a cluster. It has not been run: the shares
+rest on their unit and stress tests and on the independent review.
 
-If the law is no better than the step alone, it does not ship.
+**Outcome (2026-11-13 and 14).** At 500m the law met four bars and missed the
+throughput one: 86.8% of the step alone's throughput at the default target,
+89.6% at 0.95, for calls 16 times faster. The user decided to ship it as that
+trade, opt-in, with the default target at 0.9. Two properties showed in the
+runs and are part of what ships:
+
+- **A target between two slot levels can settle on either.** When one slot is
+  a large share of the limit (a tenth, at 500m on that workload) and two
+  levels are both within the 5% tolerance, the law keeps whichever it reached.
+  At 0.9 only one level was.
+- **Under the target the law lowers nothing.** At 1 CPU the workload used 85%
+  of the limit ungoverned; the law settled at the knee only when the startup
+  backlog took CPU use over the target, and in one run of three it never moved.
+
+The rule before the run was that a law no better than the step alone does not
+ship. It is better on latency and worse on throughput, and the user chose to
+ship it on those terms.

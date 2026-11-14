@@ -4,7 +4,7 @@ title: provider-runtime — index
 description: The map of the provider-runtime documentation bundle, the Go library every Krateo provider controller is built on.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, managed-resource, reconciler]
-timestamp: 2026-11-13T00:00:00Z
+timestamp: 2026-11-14T00:00:00Z
 ---
 
 # provider-runtime
@@ -29,6 +29,6 @@ It is consumed as a plain Go module — no image, no chart, no CRDs shipped.
 - [design: scale to zero](./design-scale-to-zero.md) — a helper owners call to run a per-Kind controller Deployment at 0 replicas while its Kind is empty (implemented, unreleased)
 - [design: rate-limit governor](./design-rate-limit-governor.md) — automatic slow-down under server-side rate limits and controller CPU saturation (implemented, off by default; CPU threshold provisional; memory input experimental)
 - [design: saturation cost model](./design-saturation-cost-model.md) — sizing local capacity from what reconciles cost against the container's CPU and memory limits, to replace the halve-and-recover step (not pursued: stopped on 2026-11-13 after its review; the step was fixed instead)
-- [design: capacity model](./design-capacity-model.md) — local capacity sized from the container's measured CPU use at CPU limits of 500m and above, with the CPU pressure step as a veto, and a guaranteed share of the capacity per controller (built, not measured on a cluster; the model is off by default)
+- [design: capacity model](./design-capacity-model.md) — local capacity sized from the container's measured CPU use at CPU limits of 500m and above, with the CPU pressure step as a veto, and a guaranteed share of the capacity per controller (built and measured: a trade of throughput for latency; the model is off by default)
 - [design: tracing](./design-tracing.md) — a reconcile root span with connect/observe/create/update/delete children, the `krateo.io/traceparent` parent-or-link rule, and W3C propagation on outbound HTTP, from `telemetry.Setup` (built in v1.14.0; D8, every reconcile its own trace, in v1.14.1)
 - [design: status write conflicts](./design-status-write-conflict.md) — options for a handler that writes the managed object mid-reconcile, making the runtime's status write conflict (#80; options only, not decided)
