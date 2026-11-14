@@ -308,6 +308,13 @@ type ExternalClient interface {
 	// external resource does not exist. Create implementations may update
 	// managed resource annotations, and those updates will be persisted.
 	// All other updates will be discarded.
+	//
+	// During Create the Ready condition is the runtime's: on every outcome,
+	// success or failure, it writes Ready=False with reason Creating, and a
+	// Ready that Create set is replaced. A reason of the provider's own goes
+	// in the error Create returns, which becomes the message of
+	// Synced=False/ReconcileError, or in a condition of a type of its own.
+	// Create must not persist the object's status itself (docs/overview.md).
 	Create(ctx context.Context, mg resource.Managed) error
 
 	// Update the external resource represented by the supplied Managed
