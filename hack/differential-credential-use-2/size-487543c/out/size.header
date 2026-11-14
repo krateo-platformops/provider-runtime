@@ -1,0 +1,4 @@
+source src-487543c.tar, machine c3-highcpu-22, 22 vCPU
+start 2026-11-12 08:46:36 UTC;  08:46:36 up 1 min,  0 user,  load average: 0.32, 0.11, 0.04
+env: CREDENTIALUSE_MODEL_SIZE=1
+end 2026-11-12 09:55:09 UTC;  09:55:09 up  1:09,  0 user,  load average: 1.86, 3.96, 6.29; go test exit 0

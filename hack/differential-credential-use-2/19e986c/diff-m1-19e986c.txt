@@ -1,0 +1,16 @@
+commit 19e986c, parts 1
+  load at the start: 15:37:44 up 35 min,  0 user,  load average: 14.43, 14.60, 12.58
+  load at the end:   08:00:00 up 16:57,  0 user,  load average: 35.16, 35.12, 35.03
+DISAGREE     H1's skip without the exact version: a skip needs no delivered version (982.3 min)
+  NONE teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+       stateless 693798 schedules, 419 terminal, 0 violations; stateful 4171 runs, 6675 states, 419 terminal, 0 violations, 3278 audits, 0 divergences; reduced 2255 runs, 5016 states, 419 terminal, 0 violations, 1362 audits, 0 divergences
+       capacity: 19 calls between jumps, 2 jumps, smallest tick 944ns
+  NONE teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+       stateless 616721 schedules, 240 terminal, 0 violations; stateful 4094 runs, 6487 states, 240 terminal, 0 violations, 3558 audits, 0 divergences; reduced 2352 runs, 5092 states, 240 terminal, 0 violations, 1816 audits, 0 divergences
+       capacity: 15 calls between jumps, 2 jumps, smallest tick 942ns
+  NONE teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+       stateless 844875 schedules, 514 terminal, 0 violations; stateful 4976 runs, 8229 states, 514 terminal, 0 violations, 3878 audits, 0 divergences; reduced 2621 runs, 6145 states, 514 terminal, 0 violations, 1523 audits, 0 divergences
+       capacity: 20 calls between jumps, 2 jumps, smallest tick 943ns
+
+DISAGREE=1 of 1 run here
+tree restored

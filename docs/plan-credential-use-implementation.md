@@ -208,8 +208,8 @@ escaping right, and is the marker removed only with K's last finalizer?
   R1, then one consistent paginated metadata list of K in N, with no
   selector), §5's decision, R3, a failed test going back to R1 (A3), and the
   `written` drop when R3 succeeds;
-- `verified.go`: the `written`, `recordSince` and `observed` maps, the skip
-  predicate, and the relist time (A20);
+- `verified.go`: the `written`, `delivered`, `recordSince` and `observed`
+  maps, the skip predicate, and the relist time (A20);
 - `handlers.go`: the holder and protected event logic as pure functions of
   (old, new, delivery time), so that PR 3's informers and the model call the
   same code;
@@ -259,6 +259,15 @@ re-reads), §6.1 to §6.8, and §14's unit tests for the races.
 The model's self-write filter schedule (§14 "the epoch-only and label-only
 self-write filter") lands with the filter in PR 4.
 
+**The model's state-space reduction** (after #59's review): the two-process
+scenario's searches are too large for CI as it stands, 2.6 million schedules
+with one fault. A sound reduction of the scheduler is specified in
+[credential-use-model-reduction](./credential-use-model-reduction.md). That
+is a spec under soundness review, not implemented. It rests on changes to
+the model's base semantics, which the user has decided (event-driven time
+with up to two jumps to deadlines; crashes that lose only units that have
+made a call). They go in first, behind a gate against the old base.
+
 **Reviewer attack** (§14): the `written`/`observed` skip, and any way
 `t_obs < t_issue` can hold for a record that wasn't visible when the write was
 issued (clock source, leader change, away and back); R3's tests (the epoch,
@@ -294,7 +303,13 @@ call yield to the scheduler, does any production path bypass `server` or
   `deletionTimestamp` part, L5). The Namespace informer's sync gates `Run`
   (§7.5, L3);
 - `listwatch.go`: the ListerWatcher wrapper that records when each list or
-  relist completes, for both a List and a watch-list stream (A20);
+  relist completes, for both a List and a watch-list stream (A20). **An
+  obligation the exact-version skip rule rests on** (the re-review of #59):
+  on a relist, `lastList` is recorded no later than the relisted versions
+  reach the holder handler. A version delivered by a relist, with
+  `lastList` still older, could otherwise start a "run" whose earlier,
+  coalesced versions the handler never saw, and a pass from that version
+  could skip;
 - `server.go`: the client-go `server`, built on the metadata client, the
   dynamic client and the RESTMapper;
 - `releaseloop.go`: a workqueue of (K, N) batches; enqueue from holder
@@ -340,7 +355,8 @@ unreleased and nothing imports it, so neither is visible to anyone.
 - **a forced relist of the holder informer** (the wrapped watch returns a 410)
   resets `recordSince`, and the next passes write (L2). It runs on the
   watch-list path, and again with watch-list refused so that the reflector
-  falls back to List (#52's review);
+  falls back to List (#52's review). It asserts that `lastList` is recorded
+  before the handler sees any relisted version;
 - the write loops' `Start` rescans the protected stores and enqueues every
   (K, N) batch; events seen before `Run` are buffered, deduplicated, and
   drained once it runs (M1 of #52's review);

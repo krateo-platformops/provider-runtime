@@ -1,0 +1,109 @@
+=== RUN   TestModelStatelessSize
+=== PAUSE TestModelStatelessSize
+=== CONT  TestModelStatelessSize
+    size_test.go:33: size: probes 300000, cap 1, T 2, seed 1022
+=== RUN   TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== RUN   TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== RUN   TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== RUN   TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=30000 mean=3.08e+08 rse=0.301 elapsed=3m32s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=30000 mean=3.979e+08 rse=0.285 elapsed=4m2s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=30000 mean=4.412e+08 rse=0.678 elapsed=4m5s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=30000 mean=2.643e+08 rse=0.241 elapsed=4m52s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=60000 mean=2.163e+08 rse=0.219 elapsed=7m0s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=60000 mean=3.866e+08 rse=0.180 elapsed=8m7s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=60000 mean=3.447e+08 rse=0.449 elapsed=8m14s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=60000 mean=3.55e+08 rse=0.234 elapsed=9m40s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=90000 mean=2.508e+08 rse=0.263 elapsed=10m24s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=90000 mean=3.326e+08 rse=0.143 elapsed=12m3s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=90000 mean=3.375e+08 rse=0.333 elapsed=12m8s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=120000 mean=3.151e+08 rse=0.202 elapsed=13m44s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=90000 mean=3.377e+08 rse=0.204 elapsed=14m24s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=120000 mean=2.939e+08 rse=0.289 elapsed=15m54s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=120000 mean=3.273e+08 rse=0.117 elapsed=15m56s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=150000 mean=2.927e+08 rse=0.176 elapsed=17m1s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=120000 mean=3.688e+08 rse=0.209 elapsed=18m56s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=150000 mean=2.555e+08 rse=0.267 elapsed=19m41s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=150000 mean=4.089e+08 rse=0.151 elapsed=19m44s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=180000 mean=9.265e+08 rse=0.657 elapsed=20m18s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=150000 mean=3.439e+08 rse=0.184 elapsed=23m30s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=180000 mean=2.584e+08 rse=0.236 elapsed=23m30s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=210000 mean=8.234e+08 rse=0.633 elapsed=23m32s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=180000 mean=3.93e+08 rse=0.135 elapsed=23m32s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=240000 mean=7.527e+08 rse=0.606 elapsed=26m42s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=210000 mean=2.506e+08 rse=0.213 elapsed=27m12s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=210000 mean=3.891e+08 rse=0.120 elapsed=27m19s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=180000 mean=3.444e+08 rse=0.161 elapsed=27m58s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=270000 mean=6.878e+08 rse=0.590 elapsed=29m59s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=240000 mean=2.388e+08 rse=0.197 elapsed=31m0s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=240000 mean=3.786e+08 rse=0.109 elapsed=31m7s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=210000 mean=3.27e+08 rse=0.149 elapsed=32m22s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {0,1} T=2 knuth probes=300000 mean=6.456e+08 rse=0.566 elapsed=33m11s
+    size_test.go:124: size: deletions around the grace, small {0,1} T=2 knuth final probes=300000 mean=6.456e+08 rse=0.566 rate=150.7/s
+    size_test.go:139: size: deletions around the grace, small {0,1} T=2 dfs capped runs=1 elapsed=0s rate=514.6/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=270000 mean=2.279e+08 rse=0.185 elapsed=34m20s
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=270000 mean=3.675e+08 rse=0.101 elapsed=34m31s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=240000 mean=3.096e+08 rse=0.139 elapsed=35m58s
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {1,0} T=2 knuth probes=300000 mean=2.237e+08 rse=0.175 elapsed=37m4s
+    size_test.go:124: size: acquire against release {1,0} T=2 knuth final probes=300000 mean=2.237e+08 rse=0.175 rate=134.9/s
+    size_test.go:139: size: acquire against release {1,0} T=2 dfs capped runs=1 elapsed=0s rate=172.4/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: deletions around the grace, small {1,0} T=2 knuth probes=300000 mean=3.579e+08 rse=0.094 elapsed=37m10s
+    size_test.go:124: size: deletions around the grace, small {1,0} T=2 knuth final probes=300000 mean=3.579e+08 rse=0.094 rate=134.5/s
+    size_test.go:139: size: deletions around the grace, small {1,0} T=2 dfs capped runs=1 elapsed=0s rate=403.7/s position=0 est=NaN
+=== NAME  TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=270000 mean=3.04e+08 rse=0.131 elapsed=37m56s
+    size_test.go:117: size: acquire against release {0,1} T=2 knuth probes=300000 mean=3.366e+08 rse=0.160 elapsed=39m6s
+    size_test.go:124: size: acquire against release {0,1} T=2 knuth final probes=300000 mean=3.366e+08 rse=0.160 rate=127.9/s
+    size_test.go:139: size: acquire against release {0,1} T=2 dfs capped runs=1 elapsed=0s rate=843.1/s position=0 est=NaN
+--- PASS: TestModelStatelessSize (0.00s)
+    --- PASS: TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (1991.29s)
+    --- PASS: TestModelStatelessSize/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (2224.44s)
+    --- PASS: TestModelStatelessSize/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (2230.14s)
+    --- PASS: TestModelStatelessSize/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (2346.26s)
+PASS

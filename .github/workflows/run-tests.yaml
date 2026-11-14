@@ -40,6 +40,15 @@ jobs:
           assets="$("$(go env GOPATH)/bin/setup-envtest" use -p path 1.36.2)"
           test -n "$assets"
           KUBEBUILDER_ASSETS="$assets" go test -race -count=1 -run '^TestPremise' ./pkg/credentialuse/
+      # The credential-use protocol's schedules, searched exhaustively within
+      # their bounds (pkg/credentialuse/model_test.go). Under -race the run
+      # above walks random schedules only: the model runs one coroutine at a
+      # time, so the race detector finds nothing there and only slows it.
+      # The searches with one preemption and one fault together are about a
+      # million schedules, so the step can take tens of minutes; -v logs each
+      # search's size and time, and the random walks' seed.
+      - name: Credential-use model, exhaustive schedules
+        run: go test -v -count=1 -timeout 90m -run '^TestModel' ./pkg/credentialuse/
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:

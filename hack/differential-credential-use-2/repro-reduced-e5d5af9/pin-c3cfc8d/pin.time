@@ -1,0 +1,24 @@
+Command exited with non-zero status 1
+	Command being timed: "go test -count=1 -v -timeout 2h -run ^TestModelReducedKeepsDroppedTerminals$ ./pkg/credentialuse/"
+	User time (seconds): 742.03
+	System time (seconds): 16.73
+	Percent of CPU this job got: 268%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:42.30
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 906592
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 542
+	Minor (reclaiming a frame) page faults: 1219405
+	Voluntary context switches: 1031095
+	Involuntary context switches: 81462
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 143824
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 1

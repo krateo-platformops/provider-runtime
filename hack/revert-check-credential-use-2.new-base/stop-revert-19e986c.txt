@@ -1,0 +1,7 @@
+mutant 2 done at Wed Nov 11 19:51:29 UTC 2026
+KILLED    a deletion pass may skip A2
+          killed in: TestAcquireSkipsInTheSteadyState
+EQUIVALENT a ref this pass's A1 added may skip A2
+          equivalent: t_obs >= observed = A1's return, so a skip needs a write issued after A1 returned, and A1's response delivered
+after stop: Wed Nov 11 19:51:39 UTC 2026
+    PID COMMAND
