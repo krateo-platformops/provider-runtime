@@ -4,7 +4,7 @@ title: provider-runtime — overview
 description: Package design and the managed-resource reconcile flow provider-runtime drives for every Krateo provider.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, reconciler, architecture]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-14T00:00:00Z
 ---
 
 # Overview
@@ -226,6 +226,27 @@ Warning event with reason `ReadyNotSetAfterObserve`
 resource being deleted is never reported (since v1.8.1). The event goes through
 the throttled recorder, like the runtime's other error events. `Synced` is
 not affected.
+
+**During `Create`, `Ready` is the runtime's.** On every outcome of a create,
+success or failure, the runtime writes `Ready=False` with reason `Creating`,
+next to `Synced` (`ReconcileSuccess`, or `ReconcileError` with the error).
+Conditions are replaced by type, so a `Ready` that `Create` set on the managed
+resource is overwritten, whatever its reason, and nothing reports it. A
+provider that has something of its own to say about a failed create has two
+places for it:
+
+- the error `Create` returns: its text becomes the message of
+  `Synced=False/ReconcileError` (`create failed: <the provider's error>`);
+- a condition of a type of its own, which the runtime never touches.
+
+Don't write `Ready` from `Create`, and don't persist status from inside it. A
+provider that updates the object's status itself before returning does reach
+the API server, and the runtime's own status write replaces the value within
+the same reconcile, so anything watching the conditions can see the reason
+appear and vanish. This was measured on a kind with no create verb: the
+provider set `Ready=False` with a reason of its own, and the settled object
+read `Ready=False/Creating` and `Synced=False/ReconcileError` with the
+provider's error as the message.
 
 What readers see while the resource can't be observed:
 
