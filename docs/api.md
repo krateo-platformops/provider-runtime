@@ -4,7 +4,7 @@ title: provider-runtime — api
 description: The exported Go API surface of provider-runtime, package by package, plus the OTLP metric instruments it emits.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-api, reconciler, metrics]
-timestamp: 2026-11-13T00:00:00Z
+timestamp: 2026-11-14T00:00:00Z
 ---
 
 # API
@@ -65,10 +65,10 @@ Annotation keys (`AnnotationKeyExternalName`, `…ExternalCreatePending/Succeede
 - `Signal` (`Key`, `RetryAfter`, `ResetAt`, `Remaining`, `Limit`, `HasQuota`, `Throttled`; same names and meaning as unstructured-runtime's) with `Deadline(now)`; `Classify(s, now) SignalKind` (`SignalThrottled`, `SignalAdvisory`, `SignalNone`).
 - `Report(ctx, Signal)` (a no-op without a sink; drops a keyless signal), `Sink` (`Observe(Signal)`), `WithSink(ctx, Sink)`.
 - `Governor`, `New(Options) (*Governor, error)`. Methods: `Acquire(ctx, key) (release func(), *Deferral)` (never blocks, no I/O; an empty key gates nothing; per key only), `SaturationEnabled()`, `RegisterGatedController()` (called by `controller.Options.ForControllerRuntime`), `Observe(Signal)`, `Capacity(key)`, `LocalCapacity()`, `Ceiling()`, `RegisterReconciler()`, `Snapshot()`, `Start(ctx)` / `NeedLeaderElection()` (a `manager.Runnable` running the saturation sampler).
-- `Options` (`MaxConcurrentReconciles`, `IgnoreSignals`, `RecoveryInterval`, `Saturation`, `Logger`, `Metrics`), `SaturationOptions` (`Enabled` (CPU only), `ExperimentalMemoryWorkingSet` (experimental, off, not OOM protection), `CgroupDir`, `SamplePeriod` (default 1s), `StartupRampInterval` (default 2s), `CPUPressureThreshold` (default 50, provisional), `WorkingSetSoftRatio` and `WorkingSetHardRatio` (0.80 and 0.90, provisional, experimental input only)) and the `Default…` constants, and `CPUPressureWindow` (10s: the span CPU pressure is measured over, and the least time between two CPU cuts).
-- `NewGatedQueue[T](g, name, rateLimiter) priorityqueue.PriorityQueue[T]`: a controller queue whose workers take a local slot before they pop and give it back in `Done`; `controller.Options.ForControllerRuntime` builds one per controller when saturation is on.
+- `Options` (`MaxConcurrentReconciles`, `IgnoreSignals`, `RecoveryInterval`, `Saturation`, `Logger`, `Metrics`), `SaturationOptions` (`Enabled` (CPU only), `ExperimentalMemoryWorkingSet` (experimental, off, not OOM protection), `CgroupDir`, `SamplePeriod` (default 1s), `StartupRampInterval` (default 2s), `CPUPressureThreshold` (default 50, provisional), `WorkingSetSoftRatio` and `WorkingSetHardRatio` (0.80 and 0.90, provisional, experimental input only), `CapacityModel` (off; the capacity model of [design-capacity-model](./design-capacity-model.md), built, a trade of throughput for latency, measured in configuration.md; needs `Enabled`), `CPUTarget` (default 0.9), `MinCPULimit` (default 0.5 cores) and `ModelInterval` (default 10s)) and the `Default…` constants, and `CPUPressureWindow` (10s: the span CPU pressure is measured over, and the least time between two CPU cuts).
+- `NewGatedQueue[T](g, name, rateLimiter) priorityqueue.PriorityQueue[T]`: a controller queue whose workers take a local slot before they pop and give it back in `Done`; `controller.Options.ForControllerRuntime` builds one per controller when saturation is on. Each queue is guaranteed an equal share of the local capacity (at least 1) and lends what it doesn't use: a freed slot goes first to a queue holding less than its share.
 - `Deferral` (`Key`, `Reason`, `Until`, `RequeueAfter`, `Capacity`) with `Message()`; `DeferReason` (`DeferThrottled`, `DeferAtCapacity`) with `Cause()`. Removed: `Deferral.Local`, `Deferral.Cause`, `DeferSaturated` and `DeferRamping`, because the local capacity no longer defers a call.
-- `MetricsRecorder` (satisfied by `*telemetry.Metrics`), `Snapshot` (its `SaturationEnabled` says whether `LocalCapacity` is enforced; metrics report the local capacity only then), `KeySnapshot`, `InputSnapshot`, and the input names `InputCPUPressure` and `InputMemoryWorkingSet`. `memory.pressure` is not an input (see the design's §11).
+- `MetricsRecorder` (satisfied by `*telemetry.Metrics`), `Snapshot` (its `SaturationEnabled` says whether `LocalCapacity` is enforced; metrics report the local capacity only then), `KeySnapshot`, `InputSnapshot`, `ControllerSnapshot` (per gated queue: `Controller`, `InFlight`, `Guaranteed`, `Waiting`, `Arrivals`, `Completions`), `CutSnapshot` (`Input`, `Cuts`), `CPUSnapshot` (`Limit`, `ModelCapacity`, `Used`, `Background`, `PerReconcile`, `Required`; a nil field has no value), in `Snapshot.Controllers`, `Snapshot.Cuts` and `Snapshot.CPU`, and the input names `InputCPUPressure` and `InputMemoryWorkingSet`. `memory.pressure` is not an input (see the design's §11).
 
 ## `pkg/ratelimit/httpsignal` (unreleased)
 
@@ -146,6 +146,10 @@ Unreleased: tracing. `Config` gains `TracingEnabled`, `ServiceVersion` and `Depl
 | `provider_runtime.ratelimit.{deferrals,signals}` | counter |
 | `provider_runtime.ratelimit.{capacity,seconds_to_reset,local.capacity}` | observable gauge |
 | `provider_runtime.ratelimit.saturation.{input,input.enabled}` | observable gauge |
+| `provider_runtime.ratelimit.local.{in_flight,guaranteed,waiting}` | observable gauge |
+| `provider_runtime.ratelimit.local.{arrivals,cuts}` | observable counter |
+| `provider_runtime.ratelimit.local.model_capacity` | observable gauge |
+| `provider_runtime.ratelimit.cpu.{limit,used,background,per_reconcile,required}` | observable gauge |
 
 ## `pkg/ratelimiter`, `pkg/workqueue`, `pkg/context`, `pkg/errors`, `pkg/test`
 

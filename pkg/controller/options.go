@@ -88,7 +88,11 @@ type RateLimitOptions struct {
 	// Saturation turns on and tunes the local input, the controller's own CPU
 	// saturation, independently of Enabled. Default off, and its threshold
 	// defaults to a provisional value. Memory is a separate, experimental
-	// option in it, also off by default.
+	// option in it, also off by default. So is the capacity model
+	// (CapacityModel, with CPUTarget, MinCPULimit and ModelInterval), which
+	// sizes the local capacity from the container's measured CPU use
+	// (docs/design-capacity-model.md). With saturation on, each controller's
+	// queue has a guaranteed share of the local capacity.
 	Saturation ratelimit.SaturationOptions
 
 	// Metrics records the governor's metrics, for example *telemetry.Metrics.

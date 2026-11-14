@@ -65,6 +65,19 @@ type Metrics struct {
 	rateLimitLocalCapacity     metric.Int64ObservableGauge
 	rateLimitSaturationInput   metric.Float64ObservableGauge
 	rateLimitSaturationEnabled metric.Int64ObservableGauge
+	// The local capacity per controller and the capacity model
+	// (docs/design-capacity-model.md §7).
+	rateLimitModelCapacity   metric.Float64ObservableGauge
+	rateLimitLocalInFlight   metric.Int64ObservableGauge
+	rateLimitLocalGuaranteed metric.Int64ObservableGauge
+	rateLimitLocalWaiting    metric.Int64ObservableGauge
+	rateLimitLocalCuts       metric.Int64ObservableCounter
+	rateLimitLocalArrivals   metric.Int64ObservableCounter
+	rateLimitCPULimit        metric.Float64ObservableGauge
+	rateLimitCPUUsed         metric.Float64ObservableGauge
+	rateLimitCPUBackground   metric.Float64ObservableGauge
+	rateLimitCPUPerReconcile metric.Float64ObservableGauge
+	rateLimitCPURequired     metric.Float64ObservableGauge
 	// rateLimitSnapshot is the governor's state, set by ObserveRateLimit.
 	rateLimitSnapshot atomic.Pointer[func() ratelimit.Snapshot]
 }
@@ -205,13 +218,60 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("1 when a saturation input is read, 0 when it is disabled (no cgroup v2, no PSI, no memory limit, or saturation off).")); err != nil {
 		return nil, err
 	}
+	if m.rateLimitModelCapacity, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.local.model_capacity",
+		metric.WithDescription("The capacity the capacity model computed from the measured CPU use; local capacity is the lower of it and the CPU pressure step's. No value while the model doesn't apply.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitLocalInFlight, err = meter.Int64ObservableGauge("provider_runtime.ratelimit.local.in_flight",
+		metric.WithDescription("Local slots a controller's queue holds now.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitLocalGuaranteed, err = meter.Int64ObservableGauge("provider_runtime.ratelimit.local.guaranteed",
+		metric.WithDescription("The share of the local capacity a controller's queue is guaranteed.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitLocalWaiting, err = meter.Int64ObservableGauge("provider_runtime.ratelimit.local.waiting",
+		metric.WithDescription("Items ready to run and waiting for a local slot, by controller: the demand the local capacity holds back.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitLocalCuts, err = meter.Int64ObservableCounter("provider_runtime.ratelimit.local.cuts",
+		metric.WithDescription("Times a saturation input's step lowered the local capacity, by input.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitLocalArrivals, err = meter.Int64ObservableCounter("provider_runtime.ratelimit.local.arrivals",
+		metric.WithDescription("Items that became ready to run, by controller. An item added again while it waits counts once.")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitCPULimit, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.limit",
+		metric.WithDescription("The container's CPU limit, read from cpu.max. No value with no limit."), metric.WithUnit("{cpu}")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitCPUUsed, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.used",
+		metric.WithDescription("CPU the container used over the capacity model's last window."), metric.WithUnit("{cpu}")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitCPUBackground, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.background",
+		metric.WithDescription("CPU the container uses with no reconcile in flight: the lowest use among the idle intervals of the last 10 minutes, 0 while there is none."), metric.WithUnit("{cpu}")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitCPUPerReconcile, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.per_reconcile",
+		metric.WithDescription("CPU time one reconcile used, over the capacity model's last window with completions."), metric.WithUnit("s")); err != nil {
+		return nil, err
+	}
+	if m.rateLimitCPURequired, err = meter.Float64ObservableGauge("provider_runtime.ratelimit.cpu.required",
+		metric.WithDescription("The CPU limit at which the work arriving now would run at the capacity model's target. An estimate, not a measurement."), metric.WithUnit("{cpu}")); err != nil {
+		return nil, err
+	}
 
 	_, err = meter.RegisterCallback(func(_ context.Context, observer metric.Observer) error {
 		observer.ObserveInt64(m.reconcileInFlight, m.reconcileInFlightCount.Load())
 		m.observeRateLimit(observer)
 		return nil
 	}, m.reconcileInFlight, m.rateLimitCapacity, m.rateLimitSecondsToReset, m.rateLimitLocalCapacity,
-		m.rateLimitSaturationInput, m.rateLimitSaturationEnabled)
+		m.rateLimitSaturationInput, m.rateLimitSaturationEnabled,
+		m.rateLimitModelCapacity, m.rateLimitLocalInFlight, m.rateLimitLocalGuaranteed, m.rateLimitLocalWaiting,
+		m.rateLimitLocalCuts, m.rateLimitLocalArrivals, m.rateLimitCPULimit, m.rateLimitCPUUsed,
+		m.rateLimitCPUBackground, m.rateLimitCPUPerReconcile, m.rateLimitCPURequired)
 	if err != nil {
 		return nil, err
 	}
@@ -505,5 +565,33 @@ func (m *Metrics) observeRateLimit(observer metric.Observer) {
 			observer.ObserveFloat64(m.rateLimitSaturationInput, in.Percent, attrs)
 		}
 		observer.ObserveInt64(m.rateLimitSaturationEnabled, enabled, attrs)
+	}
+	// The snapshot has controllers and cuts only with saturation on.
+	for _, c := range snap.Controllers {
+		attrs := metric.WithAttributes(attribute.String("controller", c.Controller))
+		observer.ObserveInt64(m.rateLimitLocalInFlight, int64(c.InFlight), attrs)
+		observer.ObserveInt64(m.rateLimitLocalGuaranteed, int64(c.Guaranteed), attrs)
+		observer.ObserveInt64(m.rateLimitLocalWaiting, int64(c.Waiting), attrs)
+		observer.ObserveInt64(m.rateLimitLocalArrivals, c.Arrivals, attrs)
+	}
+	for _, c := range snap.Cuts {
+		observer.ObserveInt64(m.rateLimitLocalCuts, c.Cuts, metric.WithAttributes(attribute.String("input", c.Input)))
+	}
+	// A value the governor doesn't have reports nothing: zero would read as
+	// a measurement.
+	for _, v := range []struct {
+		gauge metric.Float64ObservableGauge
+		value *float64
+	}{
+		{m.rateLimitCPULimit, snap.CPU.Limit},
+		{m.rateLimitModelCapacity, snap.CPU.ModelCapacity},
+		{m.rateLimitCPUUsed, snap.CPU.Used},
+		{m.rateLimitCPUBackground, snap.CPU.Background},
+		{m.rateLimitCPUPerReconcile, snap.CPU.PerReconcile},
+		{m.rateLimitCPURequired, snap.CPU.Required},
+	} {
+		if v.value != nil {
+			observer.ObserveFloat64(v.gauge, *v.value)
+		}
 	}
 }

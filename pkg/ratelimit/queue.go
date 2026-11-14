@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +28,9 @@ import (
 // A worker asks for a slot only when the queue has an item it can hand out, so
 // an idle worker holds nothing, and one controller's idle workers can't take
 // capacity from another controller's backlog on the same Governor. When several
-// queues have work, the Governor grants freed slots round-robin.
+// queues have work, the Governor grants a freed slot first to a queue that holds
+// less than its guaranteed share of the local capacity, and otherwise round-robin
+// (docs/design-capacity-model.md §6).
 //
 // It keeps controller-runtime's priority queue inside for ordering and
 // de-duplication, and owns the delays and the rate limiting itself. Every call
@@ -53,6 +56,26 @@ type gatedQueueRef interface {
 	// item the queue can hand out, and reports whether it did. The Governor
 	// calls it holding g.mu; it takes the queue's lock.
 	tryGrant() bool
+	// tryGrantOwed is tryGrant for a queue that holds fewer than share slots:
+	// it grants nothing to a queue that already holds its guaranteed share.
+	tryGrantOwed(share int) bool
+	// counts returns what the queue reports for metrics.
+	counts() *queueCounts
+}
+
+// queueCounts is what a gated queue reports to the Governor, for metrics. The
+// queue writes it under its own lock and anything reads it without one, so a
+// reader never waits on a pop.
+type queueCounts struct {
+	// name is the queue's name: the controller's.
+	name string
+	// held is the local slots the queue holds: granted and not yet popped, or
+	// being processed. waiting is the items it could hand out that have no
+	// slot yet.
+	held, waiting atomic.Int64
+	// arrivals counts items that became ready to run, and completions
+	// reconciles that gave their slot back.
+	arrivals, completions atomic.Int64
 }
 
 // popStuckAfter is how long a pop may wait inside the inner queue before it is
@@ -102,6 +125,8 @@ type gatedQueue[T comparable] struct {
 	// readyLen is len(ready), stored with every change to ready, so Len never
 	// waits for mu.
 	readyLen atomic.Int64
+	// stats is what the queue reports for metrics; see publishLocked.
+	stats *queueCounts
 
 	// mu guards everything below, and every call into inner is made holding
 	// it, except ShutDown's (see stopping). Lock order: the Governor's lock,
@@ -143,6 +168,7 @@ func newGatedQueue[T comparable](g *Governor, name string, rateLimiter workqueue
 		inner:       priorityqueue.New(name, func(o *priorityqueue.Opts[T]) { o.Log = logr.Discard() }),
 		rateLimiter: rateLimiter,
 		clock:       clk,
+		stats:       &queueCounts{name: name},
 		ready:       map[T]struct{}{},
 		processing:  map[T]struct{}{},
 		waiting:     map[T]*waitingItem{},
@@ -198,8 +224,31 @@ func (q *gatedQueue[T]) addReadyLocked(key T, priority int) bool {
 	if _, busy := q.processing[key]; busy {
 		return false
 	}
-	q.free++
+	q.arrivedLocked()
 	return true
+}
+
+// arrivedLocked records that one more item can be handed out: it became ready
+// to run. An item added again while it waits was counted when it first became
+// ready; one added while it is processed is counted when its Done makes it
+// ready.
+func (q *gatedQueue[T]) arrivedLocked() {
+	q.free++
+	q.stats.arrivals.Add(1)
+	q.gov.arrivals.Add(1)
+	q.publishLocked()
+}
+
+// heldLocked is the local slots the queue holds: those granted to a worker
+// that hasn't popped yet, and those of the items being processed.
+func (q *gatedQueue[T]) heldLocked() int { return q.granted + len(q.processing) }
+
+// publishLocked stores, for readers without the lock, the slots the queue
+// holds and the items waiting for one. It is called after every change to
+// granted, processing or free.
+func (q *gatedQueue[T]) publishLocked() {
+	q.stats.held.Store(int64(q.heldLocked()))
+	q.stats.waiting.Store(int64(q.free - q.granted))
 }
 
 // addWaitingLocked schedules key to become ready after a delay. A key already
@@ -299,6 +348,7 @@ func (q *gatedQueue[T]) GetWithPriority() (_ T, priority int, shutdown bool) {
 		if release {
 			q.granted--
 			q.popping.Store(false)
+			q.publishLocked()
 		} else {
 			q.idle--
 		}
@@ -310,6 +360,7 @@ func (q *gatedQueue[T]) GetWithPriority() (_ T, priority int, shutdown bool) {
 	}
 	q.granted--
 	key, priority, ok := q.popLocked()
+	q.publishLocked()
 	// In this order: clear popping, unlock, then dispatch if a grant was
 	// skipped meanwhile (design §4, "Containment").
 	q.popping.Store(false)
@@ -387,19 +438,32 @@ func (q *gatedQueue[T]) Done(key T) {
 		q.inner.Done(key)
 	}
 	delete(q.processing, key)
+	q.stats.completions.Add(1)
+	q.gov.completions.Add(1)
 	if _, ok := q.ready[key]; ok {
-		q.free++
+		q.arrivedLocked()
 	}
+	q.publishLocked()
 	q.mu.Unlock()
 	q.gov.releaseLocal()
 }
 
-// tryGrant implements gatedQueueRef. A queue with a grant whose pop hasn't
-// finished is skipped without taking its lock, so the Governor never waits on
-// it; the skip is recorded, and that pop dispatches again when it is done. One
-// grant at a time per queue: pops are one at a time under the queue's lock
-// anyway.
-func (q *gatedQueue[T]) tryGrant() bool {
+// tryGrant implements gatedQueueRef: a grant whatever the queue already holds.
+func (q *gatedQueue[T]) tryGrant() bool { return q.grant(math.MaxInt) }
+
+// tryGrantOwed implements gatedQueueRef.
+func (q *gatedQueue[T]) tryGrantOwed(share int) bool { return q.grant(share) }
+
+// counts implements gatedQueueRef.
+func (q *gatedQueue[T]) counts() *queueCounts { return q.stats }
+
+// grant hands one local slot to an idle worker, for an item the queue can hand
+// out, if the queue holds fewer than under slots. A queue with a grant whose
+// pop hasn't finished is skipped without taking its lock, so the Governor never
+// waits on it; the skip is recorded, and that pop dispatches again when it is
+// done. One grant at a time per queue: pops are one at a time under the queue's
+// lock anyway.
+func (q *gatedQueue[T]) grant(under int) bool {
 	if q.popping.Load() {
 		if hook := skipRaceHook.Load(); hook != nil {
 			(*hook)()
@@ -411,11 +475,12 @@ func (q *gatedQueue[T]) tryGrant() bool {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.shutdown || q.idle == 0 || q.free-q.granted <= 0 {
+	if q.shutdown || q.idle == 0 || q.free-q.granted <= 0 || q.heldLocked() >= under {
 		return false
 	}
 	q.idle--
 	q.granted++
+	q.publishLocked()
 	q.popping.Store(true)
 	q.cond.Signal()
 	return true
