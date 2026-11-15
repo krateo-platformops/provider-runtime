@@ -82,6 +82,26 @@ A handshake whose outcome was never recorded (`ExternalCreateIncomplete`:
 - **Managed resource being deleted, external resource absent**: deletion
   proceeds.
 
+**What the retry assumes.** Retrying after the grace period is safe only when
+one of these holds for the kind:
+
+- `Observe` finds the resource by a key the managed resource carries **before**
+  `Create` returns: its name, a spec field, a name derived from them. A create
+  that landed is then seen and adopted, not repeated.
+- `Create` is idempotent on that key: a second call applies in place, or fails
+  with "already exists" without making a second object.
+
+If neither holds, the retry can duplicate. The case is a backend that assigns
+the identifier and a provider that can look the resource up only by it: when
+the create lands and the identifier is never written back, `Observe` reports
+the resource absent, and after the grace period `Create` makes a second one.
+For such a kind, give `Observe` a lookup that needs no assigned identifier (a
+name, a label or a tag that `Create` sets from the managed resource). Raising
+`WithCreateRecoveryGracePeriod` only delays the retry.
+
+A key whose derivation changes between releases needs the same care: a
+resource created under the old rule is not found under the new one.
+
 **The contract this puts on `Observe`:** when the external resource does not
 exist, return `ExternalObservation{ResourceExists: false}` with a **nil**
 error. An `Observe` error ends the reconcile before both the guard and

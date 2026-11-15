@@ -683,6 +683,12 @@ func WithCreationGracePeriod(d time.Duration) ReconcilerOption {
 // Once it elapses with the resource still absent, refusing further would strand the resource
 // forever — see the recovery branch in Reconcile. Defaults to 2 minutes.
 //
+// The retry assumes that Observe finds the resource by a key the managed resource carries before
+// Create returns, or that Create is idempotent on that key. Where Observe can find the resource
+// only by an identifier the backend assigns, a create that landed without the identifier being
+// written back is reported absent and is created a second time; a longer period only delays that.
+// See "What the retry assumes" in docs/overview.md.
+//
 // Providers whose external API is slower to converge should raise this. Setting it to zero makes
 // recovery retry immediately, which is only safe when the external API is strongly consistent.
 func WithCreateRecoveryGracePeriod(d time.Duration) ReconcilerOption {
