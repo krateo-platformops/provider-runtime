@@ -1033,7 +1033,8 @@ func NewShared(c Clients, o SharedOptions) *Shared
 func (s *Shared) Run(ctx context.Context) error
 
 // Track adds a holder kind. It can be called before or after Run, for kinds
-// discovered at runtime (§7.3). It is idempotent per holder GroupKind.
+// discovered at runtime (§7.3). It is idempotent per holder GroupKind, and
+// a second Track with equal Options rebinds Enqueue, Logger and Metrics.
 func (s *Shared) Track(o Options) (*Tracker, error)
 
 func (t *Tracker) Acquire(ctx context.Context, obj metav1.Object) (Acquired, error)
@@ -1140,8 +1141,21 @@ exported for diagnostics and tests.
 
 ### 7.3 Setup: idempotent, after start, refuses to start on error
 
-- **Idempotent per holder kind** (L8). A second `Track` with equal Options
-  returns the existing tracker. With different Options it returns an error.
+- **Idempotent per holder kind** (L8). Two Options are equal when every
+  field that isn't a function or a sink is: `Holder`, the durations and
+  counts, `MaxDepth`, and `OwnerFinalizers` and `Protected` as sets. A
+  second `Track` with equal Options returns the existing tracker and
+  rebinds its sinks, `Enqueue`, `Logger` and `Metrics`, to the new call's,
+  atomically: once `Track` returns, no event reaches the old ones. With
+  different Options it returns an error. `Refs` stays bound to the first
+  `Track`: it is part of the kind's identity, since changing it would mean
+  re-indexing every holder, and a second `Track` with another `Refs` is the
+  caller's mistake, documented and not detected. This is the user's
+  decision of 2026-11-18: rediscovery rebuilds a kind's controller and its
+  queue (a CompositionDefinition deleted and created again), and the latest
+  registration's queue must get the events. `Track`s of one kind run one at
+  a time, and none holds a lock across an API call, so a slow `Track` of
+  one kind never delays another's.
   The core keeps its own indexers on its own informers, so nothing registers
   a controller-runtime field index, and nothing can register one twice or
   after the cache has started.

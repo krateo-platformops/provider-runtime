@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,9 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/metadata"
 	metadatafake "k8s.io/client-go/metadata/fake"
 	clienttesting "k8s.io/client-go/testing"
 	testingclock "k8s.io/utils/clock/testing"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 var (
@@ -73,6 +77,53 @@ type fakeRig struct {
 	// denied are the "verb resource" pairs the access reviews refuse;
 	// forbidList, the resources whose lists the API server forbids.
 	denied, forbidList sync.Map
+	// listGate, if set, runs before each list, outside the fake client:
+	// its reactors run under one lock, so a reactor that blocks blocks
+	// every call.
+	listGate atomic.Pointer[func(resource string)]
+}
+
+// gatedMetadata is the fake metadata client, with the rig's list gate.
+type gatedMetadata struct {
+	*metadatafake.FakeMetadataClient
+	r *fakeRig
+}
+
+func (g gatedMetadata) Resource(gvr schema.GroupVersionResource) metadata.Getter {
+	return gatedGetter{Getter: g.FakeMetadataClient.Resource(gvr), resource: gvr.Resource, r: g.r}
+}
+
+type gatedGetter struct {
+	metadata.Getter
+	resource string
+	r        *fakeRig
+}
+
+func (g gatedGetter) List(ctx context.Context, opts metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
+	if f := g.r.listGate.Load(); f != nil {
+		(*f)(g.resource)
+	}
+	return g.Getter.List(ctx, opts)
+}
+
+// gateList makes the first list of resource wait until release is closed,
+// and closes entered when it starts waiting.
+func (r *fakeRig) gateList(resource string) (entered, release chan struct{}) {
+	entered, release = make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f := func(res string) {
+		if res != resource {
+			return
+		}
+		var first bool
+		once.Do(func() { first = true })
+		if first {
+			close(entered)
+			<-release
+		}
+	}
+	r.listGate.Store(&f)
+	return entered, release
 }
 
 func crdOf(gk schema.GroupKind) *unstructured.Unstructured {
@@ -112,7 +163,7 @@ func newFakeRig(t *testing.T, objs ...runtime.Object) *fakeRig {
 		_ = unstructured.SetNestedField(obj.Object, !denied, "status", "allowed")
 		return true, obj, nil
 	})
-	r.s = newShared(Clients{Metadata: r.md, Dynamic: r.dyn, Mapper: mapper}, SharedOptions{}, r.clk)
+	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper}, SharedOptions{}, r.clk)
 	r.s.syncTimeout = 20 * time.Second
 	return r
 }
@@ -291,6 +342,85 @@ func TestConcurrentTracksWaitForTheSync(t *testing.T) {
 	}
 }
 
+// A slow Track of one kind doesn't delay a Track of another: no lock is
+// held across an API call (the re-review of #109).
+func TestTrackOfOneKindDoesntWaitForAnother(t *testing.T) {
+	r := newFakeRig(t)
+	r.run(t)
+	entered, release := r.gateList("gadgets")
+	gadget := make(chan error, 1)
+	go func() {
+		_, err := r.s.Track(r.options(gadgetGK))
+		gadget <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the Gadget's Track never listed its holders")
+	}
+	widget := make(chan error, 1)
+	go func() {
+		_, err := r.s.Track(r.options(widgetGK))
+		widget <- err
+	}()
+	select {
+	case err := <-widget:
+		if err != nil {
+			t.Errorf("Track(Widget) = %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Error("Track(Widget) waited for the slow Track(Gadget)")
+	}
+	close(release)
+	if err := <-gadget; err != nil {
+		t.Errorf("Track(Gadget) = %v", err)
+	}
+}
+
+// A Track after start that waits for a protected informer RunInformers
+// should start stops waiting as soon as RunInformers fails, not after its
+// timeout (the re-review of #109).
+func TestTrackStopsWaitingWhenRunInformersFails(t *testing.T) {
+	r := newFakeRig(t)
+	r.s.syncTimeout = 10 * time.Minute
+	r.track(t, widgetGK) // the Secret informer is RunInformers'
+	// RunInformers' first list of the Secrets waits, and is then
+	// forbidden, which fails RunInformers.
+	entered, release := r.gateList("secrets")
+	r.forbidList.Store("secrets", true)
+	run := make(chan error, 1)
+	go func() { run <- r.s.RunInformers(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("RunInformers never listed the Secrets")
+	}
+	tracked := make(chan error, 1)
+	go func() {
+		_, err := r.s.Track(r.options(gadgetGK))
+		tracked <- err
+	}()
+	secrets := r.protectedOf(secretGroupKind)
+	eventually(t, "the Gadget's Track to join the Secret informer", func() bool {
+		return len(secrets.snapshot()) == 2
+	})
+	close(release)
+	if err := <-run; err == nil {
+		t.Fatal("RunInformers succeeded without namespaces")
+	}
+	select {
+	case err := <-tracked:
+		if err == nil || !strings.Contains(err.Error(), "RunInformers has ended") {
+			t.Errorf("Track = %v, want it stopped by RunInformers' end", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Track kept waiting after RunInformers failed")
+	}
+	if r.tracked(gadgetGK) {
+		t.Error("the failed Track left its tracker")
+	}
+}
+
 // D3: a Track after Run that fails rolls back everything it created, on
 // each way it can fail: the holder informer can't sync, a protected
 // informer it created can't sync, and the RBAC check before they start
@@ -314,6 +444,11 @@ func TestFailedTrackLeavesNothing(t *testing.T) {
 		allow:     func(r *fakeRig) { r.forbidList.Delete("configmaps") },
 		want:      "forbidden",
 	}, {
+		name:  "the holders' RBAC check",
+		fail:  func(r *fakeRig) { r.denied.Store("watch gadgets", true) },
+		allow: func(r *fakeRig) { r.denied.Delete("watch gadgets") },
+		want:  "grant list and watch on gadgets",
+	}, {
 		name:      "the RBAC check",
 		protected: []ProtectedKind{{GVK: secretGVK}, {GVK: configMapGVK}},
 		fail:      func(r *fakeRig) { r.denied.Store("watch configmaps", true) },
@@ -331,16 +466,20 @@ func TestFailedTrackLeavesNothing(t *testing.T) {
 			// informers it runs.
 			var mu sync.Mutex
 			var started []interface{ IsStopped() bool }
-			catch := func(clienttesting.Action) (bool, runtime.Object, error) {
+			catch := func(a clienttesting.Action) (bool, runtime.Object, error) {
 				r.s.mu.Lock()
 				defer r.s.mu.Unlock()
 				mu.Lock()
 				defer mu.Unlock()
-				if g := r.s.trackers[gadgetGK]; g != nil {
-					started = append(started, g.holders)
-				}
-				if p := r.s.protected[configMapGK]; p != nil {
-					started = append(started, p.inf)
+				switch a.GetResource().Resource {
+				case "gadgets":
+					if g := r.s.tracking[gadgetGK]; g != nil && g.t != nil {
+						started = append(started, g.t.holders)
+					}
+				case "configmaps":
+					if p := r.s.protected[configMapGK]; p != nil {
+						started = append(started, p.inf)
+					}
 				}
 				return false, nil, nil
 			}
@@ -773,4 +912,170 @@ func TestPublishConfig(t *testing.T) {
 			t.Errorf("published %q after only conflicts", got)
 		}
 	})
+}
+
+// N1, the user's decision of 2026-11-18: Options are equal when every field
+// that isn't a function or a sink is. A field added to Options stops this
+// unkeyed literal compiling, so that it is put in compared or left out of it
+// here, as a function or a sink: Refs, Enqueue, Logger and Metrics.
+var _ = Options{
+	schema.GroupVersionKind{}, []string(nil), RefsFunc(nil), []ProtectedKind(nil), 0,
+	func(types.NamespacedName) {}, 0, 0, 0, 0, 0, logging.Logger(nil), MetricsRecorder(nil),
+}
+
+func TestEqualOptionsComparesEveryOtherField(t *testing.T) {
+	compared := []string{"Holder", "OwnerFinalizers", "Protected", "MaxDepth",
+		"DeletionGrace", "ProbeInterval", "DisownInterval", "DisownPasses", "TimeoutBound"}
+	r := newFakeRig(t)
+	base, err := r.s.validate(r.options(widgetGK, ProtectedKind{GVK: secretGVK}, ProtectedKind{GVK: configMapGVK}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.OwnerFinalizers = []string{"a", "b"}
+	same := base
+	same.OwnerFinalizers = []string{"b", "a"}
+	same.Protected = []ProtectedKind{{GVK: configMapGVK}, {GVK: secretGVK}}
+	same.Refs = func(metav1.Object) ([]Ref, error) { return nil, errors.New("another") }
+	same.Enqueue = func(types.NamespacedName) {}
+	same.Logger, same.Metrics = nil, NopMetrics{}
+	if !equalOptions(base, same) {
+		t.Error("Options differing in order and in functions and sinks only aren't equal")
+	}
+	changes := map[string]func(o *Options){
+		"Holder":          func(o *Options) { o.Holder.Version = "v2" },
+		"OwnerFinalizers": func(o *Options) { o.OwnerFinalizers = []string{"a"} },
+		"Protected":       func(o *Options) { o.Protected = o.Protected[:1] },
+		"MaxDepth":        func(o *Options) { o.MaxDepth++ },
+		"DeletionGrace":   func(o *Options) { o.DeletionGrace++ },
+		"ProbeInterval":   func(o *Options) { o.ProbeInterval++ },
+		"DisownInterval":  func(o *Options) { o.DisownInterval++ },
+		"DisownPasses":    func(o *Options) { o.DisownPasses++ },
+		"TimeoutBound":    func(o *Options) { o.TimeoutBound++ },
+	}
+	for _, f := range compared {
+		o := base
+		o.OwnerFinalizers = slices.Clone(base.OwnerFinalizers)
+		o.Protected = slices.Clone(base.Protected)
+		changes[f](&o)
+		if equalOptions(base, o) {
+			t.Errorf("Options differing in %s are equal", f)
+		}
+	}
+}
+
+// N1: a Track with equal Options rebinds Enqueue, Logger and Metrics, while
+// events flow; once it returns, no event reaches the old Enqueue, and the
+// new Metrics has the held gauge. Run under -race.
+func TestTrackRebindsTheSinks(t *testing.T) {
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	p := r.protectedOf(secretGroupKind)
+	h := &protectedHandler{s: r.s, p: p, t: tr}
+	holderNaming := &metav1.PartialObjectMetadata{}
+	holderNaming.Namespace, holderNaming.Name = "ns", "h"
+	rec, err := EncodeRecord([]ID{secretID("ns", "s")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderNaming.Annotations = map[string]string{AnnotationRefs: rec}
+	if err := tr.holders.GetIndexer().Add(holderNaming); err != nil {
+		t.Fatal(err)
+	}
+	held := heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns")
+	h.OnAdd(held, false)
+
+	// Events flow: the object leaves and comes back, enqueueing its
+	// holder and moving the gauge, until the test ends.
+	stop := make(chan struct{})
+	flowing := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var once sync.Once
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			h.OnDelete(held)
+			h.OnAdd(held, false)
+			once.Do(func() { close(flowing) })
+		}
+	}()
+	<-flowing
+
+	var violations atomic.Int32
+	for i := range 20 {
+		var retired atomic.Bool
+		var calls atomic.Int32
+		o := r.options(widgetGK)
+		m := &countingMetrics{}
+		o.Metrics = m
+		o.Enqueue = func(types.NamespacedName) {
+			calls.Add(1)
+			if retired.Load() {
+				violations.Add(1)
+			}
+		}
+		got, err := r.s.Track(o)
+		if err != nil || got != tr {
+			t.Fatalf("rebind %d: Track = %p, %v; want the tracker %p", i, got, err, tr)
+		}
+		if _, set := m.heldGauge(kindLabel(widgetGK)); !set {
+			t.Errorf("rebind %d: the new Metrics didn't get the held gauge", i)
+		}
+		eventually(t, "an event to reach the new Enqueue", func() bool { return calls.Load() > 0 })
+		// The next Track retires this Enqueue: from its return on, a call
+		// to it is a violation.
+		o2 := r.options(widgetGK)
+		o2.Enqueue = func(types.NamespacedName) {}
+		if _, err := r.s.Track(o2); err != nil {
+			t.Fatal(err)
+		}
+		retired.Store(true)
+	}
+	close(stop)
+	wg.Wait()
+	if n := violations.Load(); n != 0 {
+		t.Errorf("%d events reached an Enqueue after the Track that replaced it returned", n)
+	}
+}
+
+// N1: the rebind waits for a call to the old Enqueue that is running, so
+// that once Track returns none is. The old Enqueue holds its call for two
+// seconds: a rebind that waits returns after that call ends, and one that
+// doesn't returns first.
+func TestRebindWaitsForCallsInFlight(t *testing.T) {
+	r := newFakeRig(t)
+	entered := make(chan struct{})
+	var mu sync.Mutex
+	var order []string
+	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
+	var once sync.Once
+	o := r.options(widgetGK)
+	o.Enqueue = func(types.NamespacedName) {
+		once.Do(func() {
+			close(entered)
+			time.Sleep(2 * time.Second)
+			note("the old call ended")
+		})
+	}
+	tr, err := r.s.Track(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go tr.enqueue(types.NamespacedName{Namespace: "ns", Name: "h"})
+	<-entered
+	o2 := r.options(widgetGK)
+	o2.Enqueue = func(types.NamespacedName) {}
+	if _, err := r.s.Track(o2); err != nil {
+		t.Fatal(err)
+	}
+	note("Track returned")
+	eventually(t, "the old call to end", func() bool { mu.Lock(); defer mu.Unlock(); return len(order) == 2 })
+	if want := []string{"the old call ended", "Track returned"}; !slices.Equal(order, want) {
+		t.Errorf("order %q, want %q", order, want)
+	}
 }

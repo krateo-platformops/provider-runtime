@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 // A Tracker holds the protected objects one holder kind reads, for as long
@@ -40,6 +42,93 @@ type Tracker struct {
 	heldMu sync.Mutex
 	heldBy map[schema.GroupKind]int // the held gauge, by protected kind
 	gone   bool                     // a failed Track dropped t
+
+	// sinkMu guards sink. Every call to a sink holds it for reading, so
+	// that rebind, which holds it for writing, returns only once no call to
+	// the old sinks is running, and none starts after (N1 of the review of
+	// #109). A sink must not call Track.
+	sinkMu sync.RWMutex
+	sink   sinks
+}
+
+// sinks are where a tracker's events go: the kind's queue, its logger and
+// its metrics. A Track with equal Options rebinds them.
+type sinks struct {
+	enqueue func(types.NamespacedName)
+	logger  logging.Logger
+	metrics MetricsRecorder
+}
+
+func sinksOf(o Options) sinks { return sinks{o.Enqueue, o.Logger, o.Metrics} }
+
+// rebind makes o's sinks t's, and reports the held gauge to the new
+// metrics.
+func (t *Tracker) rebind(o Options) {
+	t.sinkMu.Lock()
+	t.sink = sinksOf(o)
+	t.sinkMu.Unlock()
+	t.reportHeld()
+}
+
+// enqueue adds holder nn to the kind's queue.
+func (t *Tracker) enqueue(nn types.NamespacedName) {
+	t.sinkMu.RLock()
+	defer t.sinkMu.RUnlock()
+	t.sink.enqueue(nn)
+}
+
+func (t *Tracker) warn(msg string, keysAndValues ...any) {
+	t.sinkMu.RLock()
+	defer t.sinkMu.RUnlock()
+	t.sink.logger.Warn(msg, keysAndValues...)
+}
+
+func (t *Tracker) withMetrics(f func(MetricsRecorder)) {
+	t.sinkMu.RLock()
+	defer t.sinkMu.RUnlock()
+	f(t.sink.metrics)
+}
+
+// sinkMetrics is a tracker's MetricsRecorder: whichever its sinks hold.
+type sinkMetrics struct{ t *Tracker }
+
+var _ MetricsRecorder = sinkMetrics{}
+
+func (m sinkMetrics) HeldObjects(k string, n int) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.HeldObjects(k, n) })
+}
+func (m sinkMetrics) WaitingObjects(k string, n int) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.WaitingObjects(k, n) })
+}
+func (m sinkMetrics) IndexFillRatio(k string, x float64) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.IndexFillRatio(k, x) })
+}
+func (m sinkMetrics) Degraded(k, reason string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.Degraded(k, reason) })
+}
+func (m sinkMetrics) RefsNotHeld(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.RefsNotHeld(k) })
+}
+func (m sinkMetrics) ConsentWithdrawn(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.ConsentWithdrawn(k) })
+}
+func (m sinkMetrics) RefsReadDenied(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.RefsReadDenied(k) })
+}
+func (m sinkMetrics) IndexTampered(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.IndexTampered(k) })
+}
+func (m sinkMetrics) UnrecordedReads(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.UnrecordedReads(k) })
+}
+func (m sinkMetrics) AdmissionDenied(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.AdmissionDenied(k) })
+}
+func (m sinkMetrics) ReleaseRejected(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.ReleaseRejected(k) })
+}
+func (m sinkMetrics) CRDWriteStarved(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.CRDWriteStarved(k) })
 }
 
 func (s *Shared) newTracker(o Options) (*Tracker, error) {
@@ -56,6 +145,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		s: s, o: o, gk: gk, gvr: m.Resource, prefix: prefix, ver: newVerified(gk),
 		regs:   map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
 		heldBy: map[schema.GroupKind]int{},
+		sink:   sinksOf(o),
 	}
 	t.proto = &protocol{
 		holder:          gk,
@@ -66,7 +156,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		views:           trackerViews{t},
 		ver:             t.ver,
 		seen:            s.seen,
-		reports:         coreReports{metrics: o.Metrics, events: s.events},
+		reports:         coreReports{metrics: sinkMetrics{t}, events: s.events},
 		newEpoch:        NewEpoch,
 	}
 	// The holder informer's list or relist completion is a floor under
@@ -145,11 +235,24 @@ func (t *Tracker) setHeld(pgk schema.GroupKind, n int) {
 		return
 	}
 	t.heldBy[pgk] = n
+	t.reportHeldLocked()
+}
+
+// reportHeld reports the held gauge again, as after a rebind.
+func (t *Tracker) reportHeld() {
+	t.heldMu.Lock()
+	defer t.heldMu.Unlock()
+	if !t.gone {
+		t.reportHeldLocked()
+	}
+}
+
+func (t *Tracker) reportHeldLocked() {
 	sum := 0
 	for _, c := range t.heldBy {
 		sum += c
 	}
-	t.o.Metrics.HeldObjects(kindLabel(t.gk), sum)
+	sinkMetrics{t}.HeldObjects(kindLabel(t.gk), sum)
 }
 
 // dropHeld clears the held gauge of a tracker a failed Track dropped; a
@@ -158,7 +261,7 @@ func (t *Tracker) dropHeld() {
 	t.heldMu.Lock()
 	defer t.heldMu.Unlock()
 	if !t.gone && len(t.heldBy) > 0 {
-		t.o.Metrics.HeldObjects(kindLabel(t.gk), 0)
+		sinkMetrics{t}.HeldObjects(kindLabel(t.gk), 0)
 	}
 	t.gone = true
 }
@@ -199,7 +302,7 @@ func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
 	if ro, ok := obj.(runtime.Object); ok {
 		t.s.events.record(ro, "Warning", EventDegraded, a.Err.Error())
 	}
-	t.o.Logger.Warn("credential-use: the acquire failed for an established holder, which proceeds",
+	t.warn("credential-use: the acquire failed for an established holder, which proceeds",
 		"holder", obj.GetNamespace()+"/"+obj.GetName(), "kind", t.gk.String(), "error", a.Err.Error())
 }
 

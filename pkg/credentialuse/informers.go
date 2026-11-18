@@ -187,9 +187,16 @@ type protectedInformer struct {
 	gvr schema.GroupVersionResource
 	lw  *listWatch
 	inf cache.SharedIndexInformer
-	// stop ends the informer when a Track after Run started it; RunInformers'
-	// context ends the others.
-	stop context.CancelFunc
+	// Under Shared.mu: claims counts the Tracks and trackers that use the
+	// informer; runOwned, that RunInformers starts it; starting, that a
+	// Track after Run is starting it, or has; stop ends it then.
+	claims   int
+	runOwned bool
+	starting bool
+	stop     context.CancelFunc
+	// started is closed once a Track's start of it has a result, startErr.
+	started  chan struct{}
+	startErr error
 
 	mu       sync.Mutex
 	trackers []*Tracker
@@ -501,7 +508,7 @@ func (t *Tracker) enqueueHolders(id ID) {
 		}
 		for _, o := range objs {
 			if m, ok := o.(*metav1.PartialObjectMetadata); ok {
-				t.o.Enqueue(types.NamespacedName{Namespace: m.Namespace, Name: m.Name})
+				t.enqueue(types.NamespacedName{Namespace: m.Namespace, Name: m.Name})
 			}
 		}
 	}
