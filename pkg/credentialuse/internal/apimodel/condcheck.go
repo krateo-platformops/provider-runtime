@@ -20,10 +20,12 @@ type CondConfig struct {
 	// the same rules as a condition's, so it adds nothing to what is
 	// trusted.
 	Pure []string
-	// NoReflect refuses any import of reflect or unsafe: either could call
-	// Actor's waits, or write a parked actor's condition, out of the check's
-	// sight. Set for every package but the API model's, which uses reflect
-	// to render locals (deepString) and declares the waits itself.
+	// NoReflect refuses any import of reflect or unsafe in a test file, or
+	// in a file that imports the API model: either could call Actor's waits,
+	// or write a parked actor's condition, out of the check's sight. Set for
+	// every package but the API model's, which uses reflect to render locals
+	// (deepString) and declares the waits itself. Production files that
+	// don't import the API model can't drive it, and are left free.
 	NoReflect bool
 }
 
@@ -81,6 +83,9 @@ func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, c
 	}
 	if cfg.NoReflect {
 		for _, f := range files {
+			if !strings.HasSuffix(fset.Position(f.Pos()).Filename, "_test.go") && !importsPath(f, cfg.APIModel) {
+				continue // production code that doesn't drive the model
+			}
 			for _, im := range f.Imports {
 				if path := strings.Trim(im.Path.Value, `"`); path == "reflect" || path == "unsafe" {
 					c.report(im, "could be reached through %s, which the check can't follow: the package may not import it", path)
@@ -211,6 +216,15 @@ func (c *condChecker) waitSignature(t types.Type) bool {
 	}
 	b, ok := f.Results().At(0).Type().Underlying().(*types.Basic)
 	return ok && b.Kind() == types.Bool
+}
+
+func importsPath(f *ast.File, path string) bool {
+	for _, im := range f.Imports {
+		if strings.Trim(im.Path.Value, `"`) == path {
+			return true
+		}
+	}
+	return false
 }
 
 func declName(fd *ast.FuncDecl) string {

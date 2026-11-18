@@ -345,10 +345,12 @@ ignore):
       whichever package declares it: through one, `*Actor` could be called
       unseen (a generic wrapper, a conversion of `*Actor` to such an
       interface). An unrelated `Wait`, such as `Wait() error`, isn't one;
-    - any import of reflect or unsafe, in every package but apimodel
-      (whose `deepString` uses reflect): reflect could call `Wait` by name
-      or as a function value, and unsafe could write a parked actor's
-      condition, past both halves.
+    - any import of reflect or unsafe in a test file, or in a file that
+      imports apimodel, in every package but apimodel (whose `deepString`
+      uses reflect): reflect could call `Wait` by name or as a function
+      value, and unsafe could write a parked actor's condition, past both
+      halves. Production files that don't import apimodel can't drive the
+      model, and stay free to use either.
 
     So every condition the model can pass to `Actor`'s waits is a literal
     the check has read. The holder's and the releaser's waits take their
@@ -530,29 +532,30 @@ ignore):
   reduced in CI get the check too.
 
   *The watch and the stateful search.* The watch is scheduler state that
-  the abstract state's key (§10.1) leaves out, so a prune must account for
-  it. Pruning an arrival at a visited state is sound exactly when the visit
-  that covers it ran under at least the arrival's watch: that visit's
-  continuation evaluated every condition the arrival's would have, after
-  the same steps, and perhaps more. A wider arrival is not covered: its
-  continuation would check a condition the visit didn't. So `Visited`
-  records the watch with each budget it stores, and an arrival that a
-  dominating visit would prune is pruned only if its watch is a subset of
-  that visit's; otherwise the search panics, rather than merge away a
-  check. Widening the key instead would change every recorded key and
-  state count.
+  the abstract state's key (§10.1) leaves out, so it decides, at a visited
+  state, between pruning and exploring, and is never a reason to fail. A
+  visit covers an arrival when its budget dominates the arrival's and its
+  watch contains the arrival's: its continuation evaluated every condition
+  the arrival's would have, after the same steps, and perhaps more. A
+  covered arrival is pruned. An arrival no visit covers, such as one with
+  a wider watch, is explored and recorded: that costs search time, never
+  soundness, and never fires on a correct model. A new visit evicts an
+  old one only if it covers it the same way, budget and watch, so that an
+  arrival only the old visit covered keeps its cover. Widening the key
+  instead would change every recorded key and state count.
 
   *What names a watched condition.* A watch entry is the actor and the
-  position of the `Wait` that parked it, not the park's label, which two
-  waits could share. One position can still build different conditions
-  from what its closure captures: the holder's "await" is one call site
-  for every live pass, each with its pass's `waitFor`. What a condition
-  captures is fixed by the actor's state, which is in the key: the
-  holder's pass number is a declared local, and selects the pass's
-  `waitFor`; every other quiet condition in the model captures only the
-  world and values fixed when the scenario is built. So at equal keys,
-  equal actor and position mean the same condition, and the subset test
-  compares conditions.
+  condition's code, the function literal it is (its code pointer, taken
+  when the actor resumes from a quiet park with a condition), not the
+  park's label, which two waits could share. One literal can still build
+  different conditions from what its closure captures: the holder's
+  "await" is one literal for every live pass, each with its pass's
+  `waitFor`. What a condition captures is fixed by the actor's state,
+  which is in the key: the holder's pass number is a declared local, and
+  selects the pass's `waitFor`; every other quiet condition in the model
+  captures only the world and values fixed when the scenario is built. So
+  at equal keys, equal actor and code mean the same condition, and the
+  containment test compares conditions.
 - **C-progress.** Every quiet segment reaches a park, and no cycle of quiet
   parks runs without a call. So R terminates.
 

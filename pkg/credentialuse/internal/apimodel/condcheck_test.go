@@ -66,7 +66,7 @@ func checkSource(t *testing.T, body string, pure ...string) []string {
 	if imports, rest, ok := strings.Cut(body, "\n---\n"); ok {
 		src = strings.Replace(prelude, "package p\n", "package p\n\n"+imports+"\n", 1) + "\n" + rest
 	}
-	f, err := parser.ParseFile(fset, "cond.go", src, parser.ParseComments)
+	f, err := parser.ParseFile(fset, "cond_test.go", src, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse: %v\n%s", err, body)
 	}
@@ -273,5 +273,29 @@ func TestCheckConditionsChecksPureFunctions(t *testing.T) {
 	}
 	if got := checkSource(t, `func f() {}`, "missing"); !strings.Contains(strings.Join(got, "\n"), "isn't declared") {
 		t.Errorf("want a missing Pure function reported, got %q", got)
+	}
+}
+
+// NoReflect binds test files and files that import the API model: a
+// production file that can't drive the model may use reflect.
+func TestCheckConditionsLeavesOtherProductionCodeFree(t *testing.T) {
+	src := "package q\n\nimport \"reflect\"\n\nfunc same(a, b any) bool { return reflect.DeepEqual(a, b) }\n"
+	for _, c := range []struct {
+		file string
+		want bool
+	}{{"release.go", false}, {"release_test.go", true}} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, c.file, src, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
+		if _, err := (&types.Config{Importer: importer.ForCompiler(fset, "source", nil)}).Check("q", fset, []*ast.File{f}, info); err != nil {
+			t.Fatal(err)
+		}
+		got := CheckConditions(fset, []*ast.File{f}, info, CondConfig{APIModel: "example/apimodel", NoReflect: true})
+		if refused := strings.Contains(strings.Join(got, "\n"), "through reflect"); refused != c.want {
+			t.Errorf("%s: reflect refused = %v, want %v (%q)", c.file, refused, c.want, got)
+		}
 	}
 }

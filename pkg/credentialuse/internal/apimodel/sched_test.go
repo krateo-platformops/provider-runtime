@@ -292,9 +292,10 @@ func TestQuietSegmentKeepsTheClock(t *testing.T) {
 }
 
 // A stateful search merges states by key, and the key leaves C-stable's
-// watch out. An arrival may be pruned only by a visit whose watch contains
-// its own, since that visit's continuation checked at least as much; a
-// prune that would drop a watched condition panics. Both directions.
+// watch out, so the watch decides between pruning and exploring (§5,
+// C-stable). An arrival is pruned only by a visit whose budget dominates its
+// own and whose watch contains its own; otherwise it is explored and
+// recorded. A visit evicts another only if it covers it in both.
 func TestVisitedPrunesOnlyUnderAWiderWatch(t *testing.T) {
 	set := func(ks ...string) map[string]bool {
 		m := map[string]bool{}
@@ -305,19 +306,29 @@ func TestVisitedPrunesOnlyUnderAWiderWatch(t *testing.T) {
 	}
 	b := Budget{Preemptions: 1, Faults: 1, Jumps: 1}
 	v := NewVisited()
-	if v.see("k", b, set("a@x:1", "a@x:2"), nil) {
+	if v.see("k", b, set("a@1", "a@2"), nil) {
 		t.Fatal("the first arrival was pruned")
 	}
-	if !v.see("k", b, set("a@x:1"), nil) || !v.see("k", b, nil, nil) {
+	if !v.see("k", b, set("a@1"), nil) || !v.see("k", b, nil, nil) {
 		t.Error("an arrival with a narrower watch wasn't pruned")
 	}
-	if v.see("k", Budget{Preemptions: 2, Faults: 1, Jumps: 1}, set("b@y:9"), nil) {
+	if v.see("k", b, set("a@1", "a@3"), nil) {
+		t.Error("an arrival with a wider watch was pruned: its continuation checks a@3, which no visit did")
+	}
+	if !v.see("k", b, set("a@3"), nil) {
+		t.Error("an arrival covered by the wider visit just recorded wasn't pruned")
+	}
+	if v.see("k", Budget{Preemptions: 2, Faults: 1, Jumps: 1}, set("b@9"), nil) {
 		t.Error("an arrival with a larger budget was pruned")
 	}
-	defer func() {
-		if p := recover(); p == nil || !strings.Contains(fmt.Sprint(p), "C-stable") {
-			t.Errorf("an arrival with a wider watch: want the C-stable panic, got %v", p)
-		}
-	}()
-	v.see("k", b, set("a@x:1", "a@x:3"), nil)
+
+	// The review's sequence: a larger budget with a narrower watch must not
+	// evict the visit with the wider watch, or the third arrival, which only
+	// that visit covers, would be explored again.
+	v = NewVisited()
+	v.see("k", b, set("x"), nil)
+	v.see("k", Budget{Preemptions: 2, Faults: 1, Jumps: 1}, nil, nil)
+	if !v.see("k", b, set("x"), nil) {
+		t.Error("the visit with the wider watch was evicted by one with a larger budget and a narrower watch")
+	}
 }
