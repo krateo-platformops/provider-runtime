@@ -264,6 +264,16 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	if raceEnabled || os.Getenv("CREDENTIALUSE_MODEL_BOUNDS") != "" {
 		t.Skip("the differential test runs in the model step, on its own bounds")
 	}
+	// The differential is a measured run on a VM (§11.3, the user's decision
+	// of 2026-11-12), with pre-registered pass rules and its results under
+	// hack/differential-credential-use-2/: at T = 2 its stateless legs took
+	// run 3 1,953 CPU-hours on 96 vCPU. It runs only under an explicit plan,
+	// so that `go test -run '^TestModel'`, locally and in CI's model step,
+	// doesn't start it.
+	if os.Getenv("CREDENTIALUSE_MODEL_DIFF_PLAN") == "" && os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY") == "" && os.Getenv("CREDENTIALUSE_MODEL_DIFF_JUMPS") == "" {
+		t.Skip("the differential runs only under an explicit plan (CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS): " +
+			"it is a VM measurement (docs/credential-use-model-reduction.md §11.3; results in hack/differential-credential-use-2/*/RESULTS.md and t2-RESULTS.md)")
+	}
 	t.Parallel()
 	// For the measured runs of §11.3: CREDENTIALUSE_MODEL_DIFF_ONLY (a regexp)
 	// picks scenarios, and CREDENTIALUSE_MODEL_DIFF_JUMPS sets T; or

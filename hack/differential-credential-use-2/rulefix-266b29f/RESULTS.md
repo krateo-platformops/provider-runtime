@@ -126,3 +126,10 @@ searches that took run 3 1,953 CPU-hours on 96 vCPU. It was also among the
 tests running at CI's own timeouts since 1c3ff46.
 
 The VM was up about 2h20m in all, about $0.80. It is deleted.
+
+**What follows (the lead's decision, under §11.3).** The differential runs
+only under an explicit plan: TestModelStatefulAgreesWithStateless skips
+unless CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS is set, since
+it is a VM measurement that CI's step was never meant to run. Rule R is on
+by default in the model tests (f41b8b9). CI's model step is the
+measurement of whether the rest fits in 90m.

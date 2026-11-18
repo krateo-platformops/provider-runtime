@@ -62,7 +62,12 @@ def uptime():
 def go_test(part):
     env = dict(os.environ)
     env.pop("CREDENTIALUSE_MODEL_AUDITSTOP", None)
-    args = ["go", "test", "-count=1", "-v", "-timeout", f"{TIMEOUT}s", "-run", TEST]
+    # The differential runs only under an explicit plan (§11.3). Unless the
+    # caller gives one, this is the plan it ran under before the gate: every
+    # small scenario at T = 2.
+    if not any(env.get(v) for v in ("CREDENTIALUSE_MODEL_DIFF_PLAN", "CREDENTIALUSE_MODEL_DIFF_ONLY", "CREDENTIALUSE_MODEL_DIFF_JUMPS")):
+        env["CREDENTIALUSE_MODEL_DIFF_JUMPS"] = "2"
+    args =["go", "test", "-count=1", "-v", "-timeout", f"{TIMEOUT}s", "-run", TEST]
     if PARALLEL:
         args += ["-parallel", PARALLEL]
     start = time.time()

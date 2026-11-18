@@ -1101,6 +1101,16 @@ the rest.** In this order, each step only if the one before passes:
 A failed rule is reported with its witness, as the differential test logs
 it. Nothing is rerun to pass.
 
+**It runs only under an explicit plan.** TestModelStatefulAgreesWithStateless
+skips unless CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS is set.
+Its default plan was every small scenario at T = 2 with a stateless leg,
+which `-run '^TestModel'` matched: CI's model step started it from 1c3ff46
+on, and it can't finish there (run 3 took 1,953 CPU-hours on 96 vCPU). It
+was still running when the step hit its 90m timeout, in CI and in run C's
+replica of the step (hack/differential-credential-use-2/rulefix-266b29f).
+The differential is a VM measurement, and its record is the RESULTS files
+under hack/differential-credential-use-2/.
+
 ## 12. Sleep sets under the bounds (the user's decision; spec revision 3, not implemented)
 
 *For away and back and two releasers, whose stateless reference at T = 1 is
