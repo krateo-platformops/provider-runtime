@@ -639,6 +639,14 @@ func (s *Shared) startTracker(ctx, ictx context.Context, t *Tracker, ps []*prote
 	return nil
 }
 
+// setStop records stop as what ends p: releaseLocked calls it once nobody
+// claims p, and the end of RunInformers' context ends p anyway.
+func (s *Shared) setStop(p *protectedInformer, stop context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.stop = stop
+}
+
 // ensureStarted starts p under ictx, if neither RunInformers nor another
 // Track has, after checking this process may list and watch it, and waits
 // for its sync for as long as ctx allows. Every caller gets the starter's
@@ -656,9 +664,7 @@ func (p *protectedInformer) ensureStarted(ctx, ictx context.Context, s *Shared) 
 		err := p.informer().preflight(ctx, s)
 		if err == nil {
 			pctx, pstop := context.WithCancel(ictx)
-			s.mu.Lock()
-			p.stop = pstop
-			s.mu.Unlock()
+			s.setStop(p, pstop)
 			err = s.startAndSync(pctx, ctx, p.inf, "the protected informer of "+p.gk.String())
 		}
 		p.startErr = err
