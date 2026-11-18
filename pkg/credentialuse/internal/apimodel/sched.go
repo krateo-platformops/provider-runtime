@@ -798,7 +798,7 @@ type watched struct {
 	// makes every condition its own literal, and Go doesn't fold identical
 	// functions.
 	code uintptr
-	cond  func() bool
+	cond func() bool
 }
 
 // watchSet is every actor's C-stable watch, each condition named by its
