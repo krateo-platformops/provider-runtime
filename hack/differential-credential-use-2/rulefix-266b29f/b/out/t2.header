@@ -1,0 +1,5 @@
+source bundle src-266b29f.bundle at 266b29fa023c25b1299cd37b6711e76073bc24cf, machine n2-highcpu-96, 96 vCPU
+start 2026-11-18 04:05:34 UTC;  04:05:34 up 0 min,  0 user,  load average: 1.20, 0.33, 0.11
+env: GOGC=off GOMEMLIMIT=80GiB CREDENTIALUSE_MODEL_DIFF_WORKERS=96 CREDENTIALUSE_MODEL_DIFF_PLAN=^deletions around the grace=2 CREDENTIALUSE_MODEL_DIFF_SAVE=/home/diegobraga/out/terminal CREDENTIALUSE_MODEL_DIFF_EXPECT=deletions.*Preemptions:0_Faults:1=541817533;deletions.*Preemptions:1_Faults:0=435439566
+run: ^TestModelStatefulAgreesWithStateless$, timeout 15h40m
+end 2026-11-18 08:30:49 UTC;  08:30:49 up  4:26,  0 user,  load average: 84.39, 84.21, 84.06; go test exit 0

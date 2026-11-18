@@ -54,3 +54,38 @@ Read:
 - The new model's stateful counts, 935 and 4,331, equal run 3's on the old
   model. Equal counts don't make equal sets; B's stateless leg is the check
   on the new model's stateful search.
+
+## Run B: results
+
+cred-rulefix-b, n2-highcpu-96, created 04:04:27 UTC. Hard stop: go test
+-timeout 15h40m on the VM, and a local loop that would stop it at 20:04 UTC.
+It finished well before either. Raw output in b/out/, with the stateless
+terminal sets in b/out/terminal/.
+
+Env: GOGC=off GOMEMLIMIT=80GiB CREDENTIALUSE_MODEL_DIFF_WORKERS=96
+CREDENTIALUSE_MODEL_DIFF_PLAN=^deletions around the grace=2, with DIFF_SAVE,
+and DIFF_EXPECT set to run 3's counts.
+
+| bounds | stateless schedules | stateless | stateful (runs) | reduced (runs) | violations | audits, divergences | subtest wall |
+|---|---|---|---|---|---|---|---|
+| {1,0} | 435,775,541 | 935 | 935 (51,847) | 935 (29,533) | 0 | 48,657 and 26,343, 0 | 3:51:58 |
+| {0,1} | 543,501,839 | 4,331 | 4,331 (54,822) | 4,331 (34,446) | 0 | 46,515 and 26,139, 0 | 4:25:11 |
+
+go test exit 0. 4:25:14 wall, 1,332,537 s user + 5,305 s system CPU
+(372 CPU-hours, 84 of 96 vCPU on average), peak RSS 79.7 GB. The VM was up
+about 4h29m (4h26m for the run, and a restart to copy the outputs back), so
+about $20 at $4.43/h. It is deleted.
+
+Read:
+- **Stateless = stateful = reduced on the new model**, at both bounds. With
+  run A, the C-park fix is checked three ways on the scenario it changed.
+- **The terminal sets are the same as on the old model.** B's saved
+  stateless sets equal run 3's (run3-e5d5af9/out/terminal) key for key: 0
+  only in either, at both bounds. The schedules changed (435,439,566 to
+  435,775,541, and 541,817,533 to 543,501,839), but not the terminal states.
+  A state the old harness reached with `dt` captured early, the new one
+  reaches with the read after the Wait on some other schedule, and the
+  other way round.
+- Run 3's results for the other five scenarios stand. The fix changes only
+  this scenario's harness, and its checks never fired on the others (the
+  pinned state keys of every other small scenario are byte-identical).
