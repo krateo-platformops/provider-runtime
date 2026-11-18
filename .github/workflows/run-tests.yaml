@@ -40,10 +40,57 @@ jobs:
           assets="$("$(go env GOPATH)/bin/setup-envtest" use -p path 1.36.2)"
           test -n "$assets"
           KUBEBUILDER_ASSETS="$assets" go test -race -count=1 -run '^TestPremise' ./pkg/credentialuse/
+      # The credential-use protocol's schedules, searched exhaustively within
+      # their bounds (pkg/credentialuse/model_test.go). Under -race the run
+      # above walks random schedules only: the model runs one coroutine at a
+      # time, so the race detector finds nothing there and only slows it.
+      # The searches with one preemption and one fault together are about a
+      # million schedules, so the step can take tens of minutes; -v logs each
+      # search's size and time, and the random walks' seed. The comparison of
+      # rule R against no R (TestModelStatefulAgreesWithStateless) skips here,
+      # with no plan set: it is the model-differential job's.
+      - name: Credential-use model, exhaustive schedules
+        run: go test -v -count=1 -timeout 90m -run '^TestModel' ./pkg/credentialuse/
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # The credential-use model's comparison of the quiet-segment reduction
+  # (rule R) against no reduction, on every push: the three Teardown
+  # scenarios stateless, stateful and reduced, and AcquireAgainstRelease
+  # stateful against reduced, at T = 2, {0,1} and {1,0}
+  # (docs/credential-use-model-reduction.md §11.3, ciPlan). It is its own
+  # job, on its own runner, because it doesn't fit the build job's model
+  # step: there, beside the exhaustive searches, it ran past the step's 90m.
+  # The 8 subtests run 4 at a time, each with its stateful legs beside its
+  # stateless one; DIFF_WORKERS=4 splits a stateless leg across the 4 vCPU,
+  # which the longest one, alone at the end, uses.
+  model-differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - name: Gather dependencies
+        run: go mod download
+      # A misspelled -run pattern would say "no tests to run" and exit 0, so
+      # the job also requires that as many subtests passed as the test's
+      # plan line says it started. pipefail keeps a test failure a failure
+      # through tee.
+      - name: Credential-use model, rule R against no R
+        env:
+          CREDENTIALUSE_MODEL_DIFF_CI: "1"
+          CREDENTIALUSE_MODEL_DIFF_WORKERS: "4"
+        run: |
+          set -o pipefail
+          go test -v -count=1 -timeout 90m -run '^TestModelStatefulAgreesWithStateless$' ./pkg/credentialuse/ | tee differential.log
+          want="$(sed -n 's/.*differential plan: \([0-9][0-9]*\) subtests.*/\1/p' differential.log | head -n1)"
+          passed="$(grep -c -- '--- PASS: TestModelStatefulAgreesWithStateless/' differential.log || true)"
+          echo "differential: ${passed} subtests passed, the plan started ${want:-none}"
+          test -n "$want" && test "$want" -gt 0 && test "$passed" -eq "$want"
 
   # The org's shared workflows have no golangci-lint job: component-go-checks
   # runs only go vet and gofmt. This is the same check as `make lint`.

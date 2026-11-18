@@ -1,0 +1,17 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [35, 36, 37]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 35 started 2026-11-11 19:38:19
+KILLED    t_obs ignores recordSince
+          killed in: TestAcquireSkipsInTheSteadyState, TestCanSkip/an_unparseable_record_ends_the_run, TestCanSkip/away_and_back,_both_delivered, TestCanSkip/written,_then_delivered:_the_write_may_predate_the_record, TestCanSkipAwayAndBack
+          mutant 35: 2026-11-11 19:38:19 to 2026-11-11 20:52:11
+          mutant 36 started 2026-11-11 20:52:11
+KILLED    t_obs ignores observed
+          killed in: TestCanSkip/the_later_of_observed_and_recordSince_counts
+          mutant 36: 2026-11-11 20:52:11 to 2026-11-11 22:05:14
+          mutant 37 started 2026-11-11 22:05:14
+KILLED    t_obs ignores the last relist
+          killed in: TestCanSkip/a_relist_after_the_write
+          mutant 37: 2026-11-11 22:05:14 to 2026-11-11 23:15:02
+
+KILLED=3 of 3 run here, of 46
+tree restored

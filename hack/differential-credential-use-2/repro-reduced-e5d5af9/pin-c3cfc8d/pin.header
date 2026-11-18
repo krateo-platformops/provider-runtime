@@ -1,0 +1,4 @@
+source src-c3cfc8d.tar, machine n2-highcpu-8, 8 vCPU
+start 2026-11-13 11:38:14 UTC;  11:38:14 up 0 min,  0 user,  load average: 0.06, 0.01, 0.00
+env: CREDENTIALUSE_MODEL_REDUCED_DROPS=1
+end 2026-11-13 11:43:47 UTC;  11:43:47 up 6 min,  0 user,  load average: 2.21, 2.75, 1.49; go test exit 1

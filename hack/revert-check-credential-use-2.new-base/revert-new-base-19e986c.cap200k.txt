@@ -1,0 +1,24 @@
+BASELINE FAILED: the run is invalid
+go:997: away and back, 3 live passes, 1 preemptions, 0 faults: merge audit: every 100 prunes from offset 90 (seed 1794409684872836552): 1788 audits, 0 divergences
+        model_test.go:997: away and back, 3 live passes, 1 preemptions, 0 faults: stateful: 268512 distinct states, 200000 runs, 178882 pruned; the counts below are distinct states
+        model_test.go:997: away and back, 3 live passes, 1 preemptions, 0 faults: 200000 schedules, finished=false
+        model_test.go:997: away and back, 3 live passes, 1 preemptions, 0 faults: capacity used (§10.2): at most 24 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 943ns
+        model_test.go:997: away and back, 3 live passes, 1 preemptions, 0 faults: the search didn't finish within 200000 schedules
+        model_test.go:997: away and back, 3 live passes, 1 preemptions, 0 faults: 8m56.527s; 24343 schedules released, 8330 released over a live user (U5), 0 reached L6, 0 reached H1's state, 95499 had a deleting holder read what it held
+--- FAIL: TestModelTwoReleasers (1023.30s)
+    model_test.go:974: two releasers, 0 preemptions, 1 faults: merge audit: every 100 prunes from offset 90 (seed 1794409684872836552): 1735 audits, 0 divergences
+    model_test.go:974: two releasers, 0 preemptions, 1 faults: stateful: 196793 distinct states, 200000 runs, 173552 pruned; the counts below are distinct states
+    model_test.go:974: two releasers, 0 preemptions, 1 faults: 200000 schedules, finished=false
+    model_test.go:974: two releasers, 0 preemptions, 1 faults: capacity used (§10.2): at most 20 calls between jumps (K = 512), 3 jumps chosen or forced, smallest tick 941ns
+    model_test.go:974: two releasers, 0 preemptions, 1 faults: the search didn't finish within 200000 schedules
+    model_test.go:974: two releasers, 0 preemptions, 1 faults: 8m6.699s; 25667 schedules released, 0 released over a live user (U5), 0 reached L6, 0 reached H1's state, 91711 had a deleting holder read what it held
+    model_test.go:974: two releasers, 1 preemptions, 0 faults: merge audit: every 100 prunes from offset 90 (seed 1794409684872836552): 1795 audits, 0 divergences
+    model_test.go:974: two releasers, 1 preemptions, 0 faults: stateful: 201755 distinct states, 200000 runs, 179495 pruned; the counts below are distinct states
+    model_test.go:974: two releasers, 1 preemptions, 0 faults: 200000 schedules, finished=false
+    model_test.go:974: two releasers, 1 preemptions, 0 faults: capacity used (§10.2): at most 20 calls between jumps (K = 512), 3 jumps chosen or forced, smallest tick 941ns
+    model_test.go:974: two releasers, 1 preemptions, 0 faults: the search didn't finish within 200000 schedules
+    model_test.go:974: two releasers, 1 preemptions, 0 faults: 8m56.597s; 26080 schedules released, 0 released over a live user (U5), 0 reached L6, 0 reached H1's state, 112040 had a deleting holder read what it held
+FAIL
+FAIL	github.com/krateo-platformops/provider-runtime/pkg/credentialuse	2094.241s
+FAIL
+

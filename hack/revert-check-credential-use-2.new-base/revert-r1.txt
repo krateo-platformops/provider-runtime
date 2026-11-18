@@ -1,0 +1,13 @@
+baseline passed, commit 710f26c, mutants [3, 4], load 20:54:48 up  4:30,  0 user,  load average: 36.26, 30.44, 29.46
+
+          mutant 3 started 2026-11-11 20:54:48
+KILLED    A1 isn't guarded by the holder's resourceVersion
+          killed in: TestAcquireOutcomes/a_conflict_on_A1_is_the_caller's_to_requeue
+          mutant 3: 2026-11-11 20:54:48 to 2026-11-11 22:11:50
+          mutant 4 started 2026-11-11 22:11:50
+KILLED    A1 doesn't set observed for the refs it adds
+          killed in: TestAcquireOutcomes/no_refs:_the_record_goes,_and_observed_with_it
+          mutant 4: 2026-11-11 22:11:50 to 2026-11-11 23:20:36
+
+KILLED=2 of 2 run here, of 46
+tree restored

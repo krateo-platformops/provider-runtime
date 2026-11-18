@@ -1,0 +1,7 @@
+== shared-gogc100: GOGC=100 GOMEMLIMIT=off layout=one, start 17:17:23 (epoch 1794503843)
+shared-gogc100 size_test.go:339: throughput: deletions around the grace, small, {0,1}: 1092516 schedules in 10m0s with 22 workers, 1821/s
+shared-gogc100 size_test.go:339: throughput: deletions around the grace, small, {1,0}: 1114022 schedules in 10m0s with 22 workers, 1857/s
+shared-gogc100 size_test.go:339: throughput: acquire against release, {0,1}: 803297 schedules in 10m0s with 22 workers, 1339/s
+shared-gogc100 size_test.go:339: throughput: acquire against release, {1,0}: 785482 schedules in 10m0s with 22 workers, 1309/s
+shared-gogc100 user CPU: mean 57.9% over 29 samples
+== perprocess-gogc100: GOGC=100 GOMEMLIMIT=off layout=each, start 17:27:23 (epoch 1794504443)

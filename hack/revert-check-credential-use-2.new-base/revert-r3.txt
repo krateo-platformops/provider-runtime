@@ -1,0 +1,21 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [9, 10, 11, 12]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 9 started 2026-11-11 19:38:19
+KILLED    a ref in another namespace is held
+          killed in: TestAcquireOutcomes/a_ref_in_another_namespace_is_never_held_yet
+          mutant 9: 2026-11-11 19:38:19 to 2026-11-11 20:52:50
+          mutant 10 started 2026-11-11 20:52:50
+KILLED    A2 on a custom resource doesn't retry a conflict
+          killed in: TestAcquireACustomResourceRetriesConflicts
+          mutant 10: 2026-11-11 20:52:50 to 2026-11-11 22:05:57
+          mutant 11 started 2026-11-11 22:05:57
+KILLED    written isn't recorded for a built-in kind
+          killed in: TestAcquireSkipsInTheSteadyState, TestModelRecreateBehindACachedUID, TestStalePassEqualLagWindow
+          mutant 11: 2026-11-11 22:05:57 to 2026-11-11 23:14:10
+          mutant 12 started 2026-11-11 23:14:10
+KILLED    BeforeEstablish skips Missing refs
+          killed in: TestAcquireOutcomes/missing,_then_appeared_but_can't_be_held:_no_establishing, TestAcquireOutcomes/missing,_then_created_before_establishing
+          mutant 12: 2026-11-11 23:14:10 to 2026-11-12 00:07:19
+
+KILLED=4 of 4 run here, of 46
+tree restored

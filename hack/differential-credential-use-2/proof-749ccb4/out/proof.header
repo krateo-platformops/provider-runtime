@@ -1,0 +1,4 @@
+source src-749ccb4.tar, machine n2-highcpu-48, 48 vCPU
+start 2026-11-12 11:38:06 UTC;  11:38:06 up 0 min,  0 user,  load average: 0.14, 0.03, 0.01
+env: CREDENTIALUSE_MODEL_PARALLEL_PROOF=4 CREDENTIALUSE_MODEL_SIZE=1 CREDENTIALUSE_MODEL_SIZE_JUMPS=1 CREDENTIALUSE_MODEL_SIZE_ONLY=teardown|recreate|away|two releasers|two processes
+end 2026-11-12 13:24:25 UTC;  13:24:25 up  1:46,  0 user,  load average: 2.46, 2.09, 3.04; go test exit 0

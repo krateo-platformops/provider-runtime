@@ -1,0 +1,24 @@
+=== RUN   TestModelStatefulAgreesWithStateless
+=== PAUSE TestModelStatefulAgreesWithStateless
+=== CONT  TestModelStatefulAgreesWithStateless
+=== RUN   TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== RUN   TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== NAME  TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    stateful_test.go:302: no stateless leg (CREDENTIALUSE_MODEL_DIFF_STATELESS=off): stateful against reduced only
+=== NAME  TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    stateful_test.go:302: no stateless leg (CREDENTIALUSE_MODEL_DIFF_STATELESS=off): stateful against reduced only
+=== NAME  TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    stateful_test.go:302: stateless: 0 schedules, 0 terminal states, 0 violations; stateful: 54822 runs, 87209 states, 46515 pruned, 4331 terminal states, 0 violations, 46515 audits, 0 divergences; reduced: 34446 runs, 71730 states, 26139 pruned, 4331 terminal states, 0 violations, 26139 audits, 0 divergences
+    stateful_test.go:302: capacity used (§10.2): at most 17 calls between jumps (K = 512), 4 jumps chosen or forced, smallest tick 1ns
+=== NAME  TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+    stateful_test.go:302: stateless: 0 schedules, 0 terminal states, 0 violations; stateful: 51847 runs, 71353 states, 48657 pruned, 935 terminal states, 0 violations, 48657 audits, 0 divergences; reduced: 29533 runs, 54807 states, 26343 pruned, 935 terminal states, 0 violations, 26343 audits, 0 divergences
+    stateful_test.go:302: capacity used (§10.2): at most 17 calls between jumps (K = 512), 3 jumps chosen or forced, smallest tick 941ns
+--- PASS: TestModelStatefulAgreesWithStateless (0.00s)
+    --- PASS: TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (527.59s)
+    --- PASS: TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (562.34s)
+PASS
+ok  	github.com/krateo-platformops/provider-runtime/pkg/credentialuse	562.352s

@@ -1,0 +1,23 @@
+	Command being timed: "go test -count=1 -v -timeout 180m -run ^TestModelStatelessSize$ ./pkg/credentialuse/"
+	User time (seconds): 32638.78
+	System time (seconds): 2730.90
+	Percent of CPU this job got: 860%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:08:30
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 901508
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 9384
+	Minor (reclaiming a frame) page faults: 153880299
+	Voluntary context switches: 317809133
+	Involuntary context switches: 140024
+	Swaps: 0
+	File system inputs: 1932256
+	File system outputs: 146088
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

@@ -1,0 +1,9 @@
+baseline passed, commit b238050, mutants [38], load 00:03:13 up  7:39,  0 user,  load average: 8.78, 9.12, 10.34
+
+          mutant 38 started 2026-11-12 00:03:13
+KILLED    equal times skip
+          killed in: TestAcquireSkipsInTheSteadyState
+          mutant 38: 2026-11-12 00:03:13 to 2026-11-12 00:49:18
+
+KILLED=1 of 1 run here, of 46
+tree restored

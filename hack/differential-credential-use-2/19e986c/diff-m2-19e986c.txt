@@ -1,0 +1,10 @@
+commit 19e986c, parts 2
+  load at the start: 15:37:44 up 35 min,  0 user,  load average: 14.43, 14.60, 12.58
+  load at the end:   08:00:00 up 16:57,  0 user,  load average: 35.16, 35.12, 35.03
+DISAGREE     M4's late clock: R2 measures the grace after its reads (982.3 min)
+  NONE teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+       stateless 693798 schedules, 626 terminal, 0 violations; stateful 4171 runs, 7319 states, 626 terminal, 0 violations, 3025 audits, 0 divergences; reduced 2255 runs, 5660 states, 626 terminal, 0 violations, 1109 audits, 0 divergences
+       capacity: 19 calls between jumps, 2 jumps, smallest tick 942ns
+
+DISAGREE=1 of 1 run here
+tree restored

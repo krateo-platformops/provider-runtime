@@ -1,0 +1,21 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [13, 14, 15, 16]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 13 started 2026-11-11 19:38:19
+KILLED    BeforeEstablish ignores a ref it can't hold
+          killed in: TestAcquireOutcomes/missing,_then_appeared_but_can't_be_held:_no_establishing
+          mutant 13: 2026-11-11 19:38:19 to 2026-11-11 20:52:23
+          mutant 14 started 2026-11-11 20:52:23
+KILLED    Forget doesn't clear observed
+          killed in: TestAcquireOutcomes/forget
+          mutant 14: 2026-11-11 20:52:23 to 2026-11-11 22:10:12
+          mutant 15 started 2026-11-11 22:10:12
+KILLED    Forget leaves the record
+          killed in: TestAcquireOutcomes/forget
+          mutant 15: 2026-11-11 22:10:12 to 2026-11-11 23:20:38
+          mutant 16 started 2026-11-11 23:20:38
+KILLED    a changed holder isn't flagged for a re-read
+          killed in: TestAcquireRereadsAfterAChangedHolder
+          mutant 16: 2026-11-11 23:20:38 to 2026-11-12 00:11:56
+
+KILLED=4 of 4 run here, of 46
+tree restored

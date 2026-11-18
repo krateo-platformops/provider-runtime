@@ -1,0 +1,1240 @@
+=== RUN   TestModelStatelessSize
+=== PAUSE TestModelStatelessSize
+=== RUN   TestModelParallelStatelessIsSerial
+=== PAUSE TestModelParallelStatelessIsSerial
+=== CONT  TestModelStatelessSize
+=== CONT  TestModelParallelStatelessIsSerial
+=== NAME  TestModelStatelessSize
+    size_test.go:33: size: probes 20000, cap 300000, T 1, seed 1794483510812651646
+=== RUN   TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== RUN   TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== PAUSE TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== CONT  TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== CONT  TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== CONT  TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== CONT  TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+=== CONT  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+=== CONT  TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=2000 mean=5.295e+05 rse=0.369 elapsed=20s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=2000 mean=2.646e+05 rse=0.168 elapsed=20s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=2000 mean=3.442e+05 rse=0.187 elapsed=20s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=2000 mean=1.464e+05 rse=0.137 elapsed=22s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=2000 mean=7.014e+05 rse=0.436 elapsed=23s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=2000 mean=2.683e+05 rse=0.225 elapsed=24s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=2000 mean=2.514e+09 rse=0.679 elapsed=34s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=2000 mean=1.133e+09 rse=0.242 elapsed=35s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=2000 mean=5.32e+08 rse=0.305 elapsed=35s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=4000 mean=3.655e+05 rse=0.275 elapsed=37s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=2000 mean=4.942e+09 rse=0.734 elapsed=38s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=4000 mean=6.114e+05 rse=0.403 elapsed=39s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=4000 mean=4.57e+05 rse=0.380 elapsed=39s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=4000 mean=1.627e+05 rse=0.126 elapsed=41s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=4000 mean=5.763e+05 rse=0.286 elapsed=44s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=4000 mean=3.804e+05 rse=0.432 elapsed=44s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=2000 mean=3.404e+08 rse=0.730 elapsed=49s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=2000 mean=6.832e+07 rse=0.286 elapsed=51s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=6000 mean=3.314e+05 rse=0.206 elapsed=54s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=6000 mean=6.078e+05 rse=0.302 elapsed=56s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=6000 mean=4.443e+05 rse=0.282 elapsed=57s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=2000 mean=8.348e+10 rse=0.269 elapsed=58s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=6000 mean=2.164e+05 rse=0.211 elapsed=1m0s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=2000 mean=1.384e+12 rse=0.614 elapsed=1m3s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=4000 mean=1.671e+09 rse=0.521 elapsed=1m4s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=6000 mean=5.058e+05 rse=0.222 elapsed=1m5s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=6000 mean=3.283e+05 rse=0.336 elapsed=1m5s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=4000 mean=1.988e+09 rse=0.294 elapsed=1m6s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=4000 mean=8.312e+08 rse=0.476 elapsed=1m6s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=8000 mean=3.43e+05 rse=0.172 elapsed=1m10s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=4000 mean=4.316e+09 rse=0.505 elapsed=1m12s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=8000 mean=4.843e+05 rse=0.219 elapsed=1m14s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=8000 mean=6.366e+05 rse=0.259 elapsed=1m14s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=8000 mean=2.045e+05 rse=0.173 elapsed=1m19s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=8000 mean=3.313e+05 rse=0.260 elapsed=1m25s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=8000 mean=4.86e+05 rse=0.178 elapsed=1m25s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=10000 mean=3.411e+05 rse=0.148 elapsed=1m26s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=10000 mean=4.364e+05 rse=0.198 elapsed=1m31s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=10000 mean=5.829e+05 rse=0.234 elapsed=1m32s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=6000 mean=1.452e+09 rse=0.406 elapsed=1m33s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=4000 mean=2.128e+08 rse=0.591 elapsed=1m34s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=4000 mean=6.921e+07 rse=0.171 elapsed=1m37s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=6000 mean=1.684e+09 rse=0.238 elapsed=1m37s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=6000 mean=7.999e+08 rse=0.347 elapsed=1m37s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=10000 mean=2.109e+05 rse=0.145 elapsed=1m37s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=12000 mean=3.225e+05 rse=0.133 elapsed=1m42s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=10000 mean=3.286e+05 rse=0.216 elapsed=1m44s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=6000 mean=3.673e+09 rse=0.420 elapsed=1m45s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=10000 mean=4.87e+05 rse=0.164 elapsed=1m45s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=12000 mean=4.033e+05 rse=0.179 elapsed=1m48s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=12000 mean=5.474e+05 rse=0.209 elapsed=1m49s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=4000 mean=6.404e+10 rse=0.187 elapsed=1m51s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=12000 mean=2.051e+05 rse=0.129 elapsed=1m55s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=14000 mean=2.4e+06 rse=0.871 elapsed=1m58s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=4000 mean=8.076e+11 rse=0.528 elapsed=2m1s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=8000 mean=1.242e+09 rse=0.357 elapsed=2m2s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=12000 mean=3.977e+05 rse=0.260 elapsed=2m3s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=12000 mean=4.727e+05 rse=0.146 elapsed=2m4s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=14000 mean=3.93e+05 rse=0.161 elapsed=2m5s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=14000 mean=5.25e+05 rse=0.189 elapsed=2m5s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=8000 mean=2.225e+09 rse=0.263 elapsed=2m5s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=8000 mean=7.327e+08 rse=0.297 elapsed=2m6s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=14000 mean=2.083e+05 rse=0.114 elapsed=2m13s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=16000 mean=2.167e+06 rse=0.844 elapsed=2m13s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=8000 mean=4.185e+09 rse=0.358 elapsed=2m17s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=6000 mean=1.887e+08 rse=0.457 elapsed=2m17s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=6000 mean=6.894e+07 rse=0.125 elapsed=2m20s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=16000 mean=4.167e+05 rse=0.149 elapsed=2m21s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=14000 mean=3.628e+05 rse=0.245 elapsed=2m22s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=16000 mean=5.115e+05 rse=0.176 elapsed=2m22s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=14000 mean=5.47e+05 rse=0.227 elapsed=2m23s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=18000 mean=1.979e+06 rse=0.822 elapsed=2m28s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=10000 mean=1.29e+09 rse=0.313 elapsed=2m29s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=16000 mean=2.048e+05 rse=0.106 elapsed=2m29s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=10000 mean=2.458e+09 rse=0.226 elapsed=2m33s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=10000 mean=7.162e+08 rse=0.250 elapsed=2m34s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=18000 mean=4.369e+05 rse=0.151 elapsed=2m37s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=18000 mean=4.996e+05 rse=0.163 elapsed=2m38s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=16000 mean=3.448e+05 rse=0.226 elapsed=2m40s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=6000 mean=6.015e+10 rse=0.145 elapsed=2m40s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=16000 mean=5.185e+05 rse=0.211 elapsed=2m41s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {0,1} T=1 knuth probes=20000 mean=1.811e+06 rse=0.808 elapsed=2m43s
+    size_test.go:120: size: teardown, interleaving A {0,1} T=1 knuth final probes=20000 mean=1.811e+06 rse=0.808 rate=122.9/s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=18000 mean=2.163e+05 rse=0.099 elapsed=2m46s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=10000 mean=3.74e+09 rse=0.325 elapsed=2m47s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {0,1} T=1 knuth probes=20000 mean=4.126e+05 rse=0.144 elapsed=2m53s
+    size_test.go:120: size: teardown, krateo-057 {0,1} T=1 knuth final probes=20000 mean=4.126e+05 rse=0.144 rate=115.9/s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {0,1} T=1 knuth probes=20000 mean=4.769e+05 rse=0.154 elapsed=2m53s
+    size_test.go:120: size: teardown, interleaving B {0,1} T=1 knuth final probes=20000 mean=4.769e+05 rse=0.154 rate=115.5/s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=6000 mean=6.348e+11 rse=0.450 elapsed=2m55s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=12000 mean=1.157e+09 rse=0.292 elapsed=2m56s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=8000 mean=1.57e+08 rse=0.412 elapsed=2m57s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=18000 mean=3.351e+05 rse=0.207 elapsed=2m58s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=18000 mean=5.346e+05 rse=0.190 elapsed=2m59s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=8000 mean=6.856e+07 rse=0.101 elapsed=3m1s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=12000 mean=2.711e+09 rse=0.259 elapsed=3m1s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=12000 mean=6.709e+08 rse=0.225 elapsed=3m2s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving A {1,0} T=1 knuth probes=20000 mean=2.139e+05 rse=0.095 elapsed=3m3s
+    size_test.go:120: size: teardown, interleaving A {1,0} T=1 knuth final probes=20000 mean=2.139e+05 rse=0.095 rate=109.2/s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, krateo-057 {1,0} T=1 knuth probes=20000 mean=3.196e+05 rse=0.196 elapsed=3m17s
+    size_test.go:120: size: teardown, krateo-057 {1,0} T=1 knuth final probes=20000 mean=3.196e+05 rse=0.196 rate=101.7/s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: teardown, interleaving B {1,0} T=1 knuth probes=20000 mean=5.101e+05 rse=0.179 elapsed=3m18s
+    size_test.go:120: size: teardown, interleaving B {1,0} T=1 knuth final probes=20000 mean=5.101e+05 rse=0.179 rate=101.1/s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=12000 mean=3.273e+09 rse=0.310 elapsed=3m18s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=14000 mean=1.093e+09 rse=0.266 elapsed=3m24s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=14000 mean=3.1e+09 rse=0.252 elapsed=3m29s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=8000 mean=6.11e+10 rse=0.123 elapsed=3m29s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=14000 mean=8.616e+08 rse=0.232 elapsed=3m31s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=10000 mean=1.476e+08 rse=0.355 elapsed=3m39s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=10000 mean=7.53e+07 rse=0.102 elapsed=3m44s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=8000 mean=5.195e+11 rse=0.413 elapsed=3m50s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=14000 mean=2.916e+09 rse=0.298 elapsed=3m50s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=16000 mean=1.102e+09 rse=0.239 elapsed=3m52s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=16000 mean=2.968e+09 rse=0.231 elapsed=3m58s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=16000 mean=1.267e+09 rse=0.353 elapsed=4m0s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=10000 mean=5.612e+10 rse=0.112 elapsed=4m20s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=18000 mean=1.171e+09 rse=0.220 elapsed=4m20s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=12000 mean=1.303e+08 rse=0.335 elapsed=4m21s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=16000 mean=2.723e+09 rse=0.281 elapsed=4m22s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=10000 elapsed=1m43s rate=96.7/s position=0.002227 est=4.491e+06
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=12000 mean=7.869e+07 rse=0.102 elapsed=4m27s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=18000 mean=2.794e+09 rse=0.220 elapsed=4m27s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=18000 mean=1.17e+09 rse=0.340 elapsed=4m28s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=10000 elapsed=1m49s rate=91.7/s position=0.002227 est=4.491e+06
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=10000 elapsed=1m49s rate=91.7/s position=0.001054 est=9.489e+06
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=10000 elapsed=1m40s rate=100.4/s position=0.01951 est=5.127e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=10000 mean=4.55e+11 rse=0.378 elapsed=4m44s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {0,1} T=1 knuth probes=20000 mean=1.151e+09 rse=0.205 elapsed=4m47s
+    size_test.go:120: size: two releasers {0,1} T=1 knuth final probes=20000 mean=1.151e+09 rse=0.205 rate=69.8/s
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=18000 mean=2.72e+09 rse=0.264 elapsed=4m53s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {0,1} T=1 knuth probes=20000 mean=2.787e+09 rse=0.202 elapsed=4m55s
+    size_test.go:120: size: away and back, small, with a relist {0,1} T=1 knuth final probes=20000 mean=2.787e+09 rse=0.202 rate=67.9/s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: away and back, small, with a relist {1,0} T=1 knuth probes=20000 mean=1.135e+09 rse=0.317 elapsed=4m56s
+    size_test.go:120: size: away and back, small, with a relist {1,0} T=1 knuth final probes=20000 mean=1.135e+09 rse=0.317 rate=67.5/s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=14000 mean=1.259e+08 rse=0.300 elapsed=5m1s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=12000 mean=1.526e+11 rse=0.640 elapsed=5m9s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=14000 mean=7.691e+07 rse=0.091 elapsed=5m9s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=10000 elapsed=1m57s rate=85.8/s position=0.007792 est=1.283e+06
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=10000 elapsed=1m55s rate=86.6/s position=0.007668 est=1.304e+06
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two releasers {1,0} T=1 knuth probes=20000 mean=2.505e+09 rse=0.258 elapsed=5m25s
+    size_test.go:120: size: two releasers {1,0} T=1 knuth final probes=20000 mean=2.505e+09 rse=0.258 rate=61.6/s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=12000 mean=4.689e+11 rse=0.314 elapsed=5m41s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=16000 mean=1.193e+08 rse=0.278 elapsed=5m44s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=16000 mean=7.324e+07 rse=0.085 elapsed=5m53s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=14000 mean=1.425e+11 rse=0.589 elapsed=5m59s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=20000 elapsed=3m28s rate=96.3/s position=0.01121 est=1.785e+06
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=20000 elapsed=3m20s rate=99.8/s position=0.08518 est=2.348e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=18000 mean=1.144e+08 rse=0.258 elapsed=6m26s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=20000 elapsed=3m37s rate=92.0/s position=0.01114 est=1.795e+06
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=20000 elapsed=3m38s rate=91.6/s position=0.01121 est=1.785e+06
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=18000 mean=7.328e+07 rse=0.078 elapsed=6m37s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=14000 mean=4.494e+11 rse=0.284 elapsed=6m37s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=16000 mean=1.29e+11 rse=0.569 elapsed=6m50s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {0,1} T=1 knuth probes=20000 mean=1.123e+08 rse=0.238 elapsed=7m8s
+    size_test.go:120: size: recreate behind a cached UID, small {0,1} T=1 knuth final probes=20000 mean=1.123e+08 rse=0.238 rate=46.8/s
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=20000 elapsed=3m54s rate=85.4/s position=0.05655 est=3.537e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=20000 elapsed=3m57s rate=84.4/s position=0.01997 est=1.001e+06
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: recreate behind a cached UID, small {1,0} T=1 knuth probes=20000 mean=8.544e+07 rse=0.095 elapsed=7m20s
+    size_test.go:120: size: recreate behind a cached UID, small {1,0} T=1 knuth final probes=20000 mean=8.544e+07 rse=0.095 rate=45.5/s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=16000 mean=4.353e+11 rse=0.260 elapsed=7m34s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=18000 mean=1.283e+11 rse=0.510 elapsed=7m40s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=30000 elapsed=5m10s rate=96.9/s position=0.06948 est=4.318e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=10000 elapsed=3m7s rate=53.4/s position=6.421e-07 est=1.557e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=30000 elapsed=4m59s rate=100.4/s position=0.2222 est=1.35e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=10000 elapsed=2m52s rate=58.2/s position=3.014e-05 est=3.318e+08
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=10000 elapsed=3m21s rate=49.9/s position=5.038e-08 est=1.985e+11
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=30000 elapsed=5m25s rate=92.3/s position=0.06948 est=4.318e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=30000 elapsed=5m25s rate=92.4/s position=0.06667 est=4.5e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=10000 elapsed=3m34s rate=46.8/s position=6.556e-11 est=1.525e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=18000 mean=4.546e+11 rse=0.236 elapsed=8m31s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {0,1} T=1 knuth probes=20000 mean=1.223e+11 rse=0.482 elapsed=8m31s
+    size_test.go:120: size: two processes, shrunk {0,1} T=1 knuth final probes=20000 mean=1.223e+11 rse=0.482 rate=39.1/s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=30000 elapsed=5m52s rate=85.3/s position=0.07414 est=4.046e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=30000 elapsed=5m58s rate=83.9/s position=0.08934 est=3.358e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:113: size: two processes, shrunk {1,0} T=1 knuth probes=20000 mean=4.834e+11 rse=0.217 elapsed=9m29s
+    size_test.go:120: size: two processes, shrunk {1,0} T=1 knuth final probes=20000 mean=4.834e+11 rse=0.217 rate=35.2/s
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=40000 elapsed=6m52s rate=97.2/s position=0.1167 est=3.428e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=40000 elapsed=6m41s rate=99.7/s position=0.253 est=1.581e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=40000 elapsed=7m12s rate=92.7/s position=0.1167 est=3.428e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=40000 elapsed=7m14s rate=92.1/s position=0.08102 est=4.937e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=10000 elapsed=3m47s rate=44.1/s position=5.212e-07 est=1.918e+10
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=10000 elapsed=3m41s rate=45.2/s position=0.0002002 est=4.995e+07
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=20000 elapsed=6m20s rate=52.6/s position=1.015e-06 est=1.97e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=40000 elapsed=7m52s rate=84.7/s position=0.1613 est=2.48e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=40000 elapsed=7m54s rate=84.3/s position=0.1921 est=2.082e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=20000 elapsed=5m52s rate=56.7/s position=3.324e-05 est=6.016e+08
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=50000 elapsed=8m35s rate=97.1/s position=0.1852 est=2.699e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=50000 elapsed=8m25s rate=99.1/s position=0.2814 est=1.777e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=20000 elapsed=6m43s rate=49.7/s position=1.522e-07 est=1.314e+11
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=50000 elapsed=8m58s rate=92.9/s position=0.1852 est=2.699e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=50000 elapsed=9m0s rate=92.6/s position=0.1668 est=2.998e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=20000 elapsed=7m12s rate=46.3/s position=1.037e-10 est=1.929e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=60000 elapsed=10m10s rate=98.3/s position=0.2502 est=2.398e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=50000 elapsed=9m51s rate=84.6/s position=0.1907 est=2.621e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=60000 elapsed=10m8s rate=98.6/s position=0.3148 est=1.906e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=50000 elapsed=10m1s rate=83.2/s position=0.2348 est=2.13e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=60000 elapsed=10m35s rate=94.4/s position=0.2501 est=2.399e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=60000 elapsed=10m42s rate=93.4/s position=0.2239 est=2.68e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=10000 elapsed=5m9s rate=32.3/s position=3.91e-18 est=2.558e+21
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=30000 elapsed=8m49s rate=56.8/s position=4.075e-05 est=7.362e+08
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=10000 elapsed=4m48s rate=34.7/s position=1.596e-11 est=6.267e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=30000 elapsed=9m32s rate=52.4/s position=1.126e-06 est=2.663e+10
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=20000 elapsed=7m32s rate=44.3/s position=8.436e-07 est=2.371e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=70000 elapsed=11m58s rate=97.5/s position=0.251 est=2.789e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=20000 elapsed=7m21s rate=45.3/s position=0.000562 est=3.559e+07
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=70000 elapsed=11m52s rate=98.3/s position=0.3294 est=2.125e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=30000 elapsed=10m4s rate=49.6/s position=3.639e-07 est=8.243e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=60000 elapsed=11m50s rate=84.5/s position=0.2278 est=2.634e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=70000 elapsed=12m26s rate=93.8/s position=0.2502 est=2.798e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=70000 elapsed=12m28s rate=93.6/s position=0.251 est=2.789e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=60000 elapsed=12m19s rate=81.2/s position=0.2445 est=2.454e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=30000 elapsed=10m50s rate=46.1/s position=1.15e-10 est=2.609e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=80000 elapsed=13m43s rate=97.2/s position=0.2558 est=3.127e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=80000 elapsed=13m35s rate=98.1/s position=0.333 est=2.402e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=80000 elapsed=14m19s rate=93.1/s position=0.2548 est=3.139e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=80000 elapsed=14m19s rate=93.1/s position=0.251 est=3.187e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=40000 elapsed=11m48s rate=56.5/s position=4.482e-05 est=8.925e+08
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=70000 elapsed=14m1s rate=83.2/s position=0.2391 est=2.928e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=40000 elapsed=12m46s rate=52.2/s position=1.19e-06 est=3.363e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=70000 elapsed=14m17s rate=81.7/s position=0.2534 est=2.762e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=90000 elapsed=15m28s rate=97.0/s position=0.2799 est=3.215e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=90000 elapsed=15m18s rate=98.1/s position=0.3359 est=2.679e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=30000 elapsed=11m1s rate=45.4/s position=0.001367 est=2.195e+07
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=40000 elapsed=13m26s rate=49.7/s position=9.708e-07 est=4.12e+10
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=30000 elapsed=11m16s rate=44.4/s position=1.817e-06 est=1.651e+10
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=20000 elapsed=10m14s rate=32.6/s position=1.245e-17 est=1.607e+21
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=20000 elapsed=9m32s rate=35.0/s position=4.069e-11 est=4.915e+14
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=90000 elapsed=16m8s rate=93.0/s position=0.2798 est=3.216e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=90000 elapsed=16m8s rate=93.0/s position=0.2557 est=3.52e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=40000 elapsed=14m29s rate=46.0/s position=1.215e-10 est=3.293e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=80000 elapsed=16m12s rate=82.3/s position=0.2439 est=3.28e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=80000 elapsed=16m20s rate=81.7/s position=0.265 est=3.019e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=100000 elapsed=17m11s rate=97.0/s position=0.2859 est=3.497e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=100000 elapsed=16m59s rate=98.1/s position=0.3417 est=2.927e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=50000 elapsed=14m46s rate=56.5/s position=4.641e-05 est=1.077e+09
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=50000 elapsed=15m55s rate=52.3/s position=1.222e-06 est=4.093e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=100000 elapsed=17m55s rate=93.0/s position=0.2859 est=3.498e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=100000 elapsed=17m56s rate=92.9/s position=0.2798 est=3.574e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=90000 elapsed=18m11s rate=82.5/s position=0.2546 est=3.534e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=90000 elapsed=18m15s rate=82.2/s position=0.3108 est=2.896e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=110000 elapsed=18m55s rate=96.9/s position=0.2886 est=3.811e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=50000 elapsed=16m45s rate=49.7/s position=1.646e-06 est=3.038e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=110000 elapsed=18m42s rate=98.1/s position=0.3643 est=3.019e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=40000 elapsed=14m45s rate=45.2/s position=0.001554 est=2.574e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=40000 elapsed=14m59s rate=44.5/s position=2.1e-06 est=1.905e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=110000 elapsed=19m41s rate=93.1/s position=0.2859 est=3.848e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=110000 elapsed=19m46s rate=92.7/s position=0.2868 est=3.836e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=50000 elapsed=18m3s rate=46.2/s position=1.247e-10 est=4.009e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=60000 elapsed=17m42s rate=56.5/s position=4.694e-05 est=1.278e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=120000 elapsed=20m40s rate=96.8/s position=0.2917 est=4.113e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=120000 elapsed=20m21s rate=98.3/s position=0.3999 est=3.001e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=100000 elapsed=20m11s rate=82.6/s position=0.265 est=3.774e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=100000 elapsed=20m20s rate=82.0/s position=0.3151 est=3.174e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=30000 elapsed=14m11s rate=35.3/s position=1.765e-10 est=1.7e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=30000 elapsed=15m15s rate=32.8/s position=1.433e-17 est=2.093e+21
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=60000 elapsed=19m1s rate=52.6/s position=1.904e-06 est=3.152e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=120000 elapsed=21m32s rate=92.9/s position=0.2867 est=4.185e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=120000 elapsed=21m34s rate=92.7/s position=0.2917 est=4.114e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=60000 elapsed=20m3s rate=49.9/s position=3.071e-06 est=1.954e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=130000 elapsed=21m59s rate=98.6/s position=0.4479 est=2.902e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=130000 elapsed=22m25s rate=96.6/s position=0.2925 est=4.445e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=110000 elapsed=22m5s rate=83.0/s position=0.3041 est=3.617e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=110000 elapsed=22m18s rate=82.2/s position=0.3238 est=3.398e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=50000 elapsed=18m22s rate=45.4/s position=0.001945 est=2.571e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=50000 elapsed=18m38s rate=44.7/s position=2.624e-06 est=1.906e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=70000 elapsed=20m37s rate=56.6/s position=4.834e-05 est=1.448e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=130000 elapsed=23m20s rate=92.9/s position=0.2906 est=4.473e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=130000 elapsed=23m24s rate=92.6/s position=0.2925 est=4.445e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=60000 elapsed=21m33s rate=46.4/s position=1.755e-10 est=3.418e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=140000 elapsed=23m40s rate=98.6/s position=0.4581 est=3.056e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=140000 elapsed=24m10s rate=96.5/s position=0.293 est=4.779e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=70000 elapsed=22m7s rate=52.8/s position=2.46e-06 est=2.846e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=120000 elapsed=24m7s rate=82.9/s position=0.3142 est=3.819e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=120000 elapsed=24m17s rate=82.4/s position=0.3314 est=3.621e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=140000 elapsed=25m9s rate=92.8/s position=0.2918 est=4.797e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=140000 elapsed=25m15s rate=92.4/s position=0.2929 est=4.78e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=70000 elapsed=23m17s rate=50.1/s position=6.871e-06 est=1.019e+10
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=40000 elapsed=18m47s rate=35.5/s position=3.745e-10 est=1.068e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=150000 elapsed=25m17s rate=98.9/s position=0.4826 est=3.108e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=150000 elapsed=25m53s rate=96.6/s position=0.2935 est=5.111e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=40000 elapsed=20m8s rate=33.1/s position=1.819e-17 est=2.199e+21
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=80000 elapsed=23m27s rate=56.9/s position=4.863e-05 est=1.645e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=60000 elapsed=21m52s rate=45.7/s position=0.002078 est=2.888e+07
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=130000 elapsed=25m57s rate=83.5/s position=0.317 est=4.101e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=60000 elapsed=22m10s rate=45.1/s position=2.776e-06 est=2.161e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=130000 elapsed=26m6s rate=83.0/s position=0.3335 est=3.898e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=150000 elapsed=26m47s rate=93.3/s position=0.2927 est=5.124e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=70000 elapsed=24m52s rate=46.9/s position=2.393e-10 est=2.925e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=160000 elapsed=26m44s rate=99.7/s position=0.5709 est=2.803e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=80000 elapsed=25m1s rate=53.3/s position=2.917e-06 est=2.742e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=150000 elapsed=26m55s rate=92.9/s position=0.2934 est=5.113e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=160000 elapsed=27m30s rate=96.9/s position=0.2936 est=5.45e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=140000 elapsed=27m39s rate=84.4/s position=0.3294 est=4.25e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=140000 elapsed=27m47s rate=84.0/s position=0.3359 est=4.168e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=80000 elapsed=26m7s rate=51.0/s position=9.833e-06 est=8.136e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=170000 elapsed=28m3s rate=101.0/s position=0.7094 est=2.396e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=160000 elapsed=28m19s rate=94.2/s position=0.2933 est=5.456e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=90000 elapsed=25m54s rate=57.9/s position=4.9e-05 est=1.837e+09
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=160000 elapsed=28m28s rate=93.7/s position=0.2936 est=5.449e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=170000 elapsed=28m52s rate=98.2/s position=0.2967 est=5.73e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=50000 elapsed=22m38s rate=36.8/s position=3.879e-10 est=1.289e+14
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=70000 elapsed=24m51s rate=47.0/s position=0.002175 est=3.218e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=70000 elapsed=25m10s rate=46.4/s position=3.001e-06 est=2.333e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=90000 elapsed=27m31s rate=54.5/s position=3.071e-06 est=2.931e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=180000 elapsed=29m19s rate=102.3/s position=0.7917 est=2.274e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=150000 elapsed=29m13s rate=85.6/s position=0.3314 est=4.527e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=150000 elapsed=29m17s rate=85.4/s position=0.3409 est=4.4e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=80000 elapsed=27m40s rate=48.2/s position=2.646e-10 est=3.023e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=170000 elapsed=29m47s rate=95.1/s position=0.2935 est=5.791e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=50000 elapsed=24m13s rate=34.4/s position=2.045e-17 est=2.445e+21
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=170000 elapsed=29m55s rate=94.7/s position=0.2959 est=5.745e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=180000 elapsed=30m16s rate=99.1/s position=0.297 est=6.061e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=90000 elapsed=28m41s rate=52.3/s position=2.051e-05 est=4.389e+09
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=100000 elapsed=28m12s rate=59.1/s position=4.909e-05 est=2.037e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=190000 elapsed=30m38s rate=103.4/s position=0.8133 est=2.336e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=160000 elapsed=30m47s rate=86.6/s position=0.3433 est=4.661e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=160000 elapsed=30m46s rate=86.7/s position=0.3333 est=4.801e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=180000 elapsed=31m16s rate=96.0/s position=0.2936 est=6.131e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=180000 elapsed=31m20s rate=95.8/s position=0.2969 est=6.063e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=190000 elapsed=31m37s rate=100.1/s position=0.2971 est=6.395e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=100000 elapsed=29m53s rate=55.8/s position=3.192e-06 est=3.132e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=200000 elapsed=31m50s rate=104.7/s position=0.8325 est=2.402e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=80000 elapsed=27m34s rate=48.4/s position=0.002226 est=3.594e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=80000 elapsed=27m53s rate=47.8/s position=3.091e-06 est=2.588e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=90000 elapsed=30m14s rate=49.6/s position=2.904e-10 est=3.1e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=190000 elapsed=32m30s rate=97.5/s position=0.2966 est=6.405e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=170000 elapsed=32m9s rate=88.1/s position=0.3638 est=4.673e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=170000 elapsed=32m8s rate=88.2/s position=0.3356 est=5.066e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=200000 elapsed=32m44s rate=101.8/s position=0.3147 est=6.356e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=60000 elapsed=26m1s rate=38.4/s position=4.277e-10 est=1.403e+14
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=190000 elapsed=32m38s rate=97.0/s position=0.297 est=6.397e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=110000 elapsed=30m14s rate=60.6/s position=4.913e-05 est=2.239e+09
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=100000 elapsed=30m58s rate=53.8/s position=2.76e-05 est=3.624e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=210000 elapsed=32m59s rate=106.1/s position=0.8494 est=2.472e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=60000 elapsed=27m46s rate=36.0/s position=2.129e-17 est=2.818e+21
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=210000 elapsed=33m55s rate=103.2/s position=0.3167 est=6.631e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=200000 elapsed=33m46s rate=98.7/s position=0.2969 est=6.737e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=180000 elapsed=33m24s rate=89.8/s position=0.3403 est=5.29e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=110000 elapsed=31m58s rate=57.3/s position=3.245e-06 est=3.389e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=200000 elapsed=33m53s rate=98.4/s position=0.2976 est=6.72e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=180000 elapsed=33m30s rate=89.5/s position=0.3652 est=4.929e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=220000 elapsed=34m2s rate=107.7/s position=0.8828 est=2.492e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=90000 elapsed=29m54s rate=50.2/s position=0.002444 est=3.683e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=90000 elapsed=30m15s rate=49.6/s position=3.461e-06 est=2.601e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=100000 elapsed=32m31s rate=51.3/s position=3.008e-10 est=3.324e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=120000 elapsed=32m5s rate=62.3/s position=4.948e-05 est=2.425e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=220000 elapsed=35m0s rate=104.8/s position=0.3171 est=6.939e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=210000 elapsed=34m53s rate=100.3/s position=0.3155 est=6.656e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=210000 elapsed=34m53s rate=100.3/s position=0.297 est=7.071e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=190000 elapsed=34m32s rate=91.7/s position=0.4128 est=4.602e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=110000 elapsed=32m59s rate=55.6/s position=4.236e-05 est=2.597e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=190000 elapsed=34m38s rate=91.5/s position=0.3415 est=5.563e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=230000 elapsed=35m2s rate=109.4/s position=0.9419 est=2.442e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=70000 elapsed=28m54s rate=40.4/s position=4.977e-10 est=1.407e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=120000 elapsed=33m48s rate=59.2/s position=3.796e-06 est=3.161e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=230000 elapsed=36m6s rate=106.2/s position=0.3171 est=7.252e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=220000 elapsed=36m0s rate=101.8/s position=0.3167 est=6.946e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=220000 elapsed=36m1s rate=101.8/s position=0.2974 est=7.398e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=200000 elapsed=35m38s rate=93.6/s position=0.4497 est=4.447e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {1,0} T=1 dfs runs=240000 elapsed=36m0s rate=111.1/s position=0.9664 est=2.483e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=200000 elapsed=35m46s rate=93.2/s position=0.3598 est=5.559e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=70000 elapsed=30m38s rate=38.1/s position=6.927e-17 est=1.011e+21
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=130000 elapsed=33m49s rate=64.1/s position=4.964e-05 est=2.619e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=100000 elapsed=32m1s rate=52.1/s position=0.002656 est=3.764e+07
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:155: size: teardown, interleaving A {1,0} T=1 dfs finished: exactly 243911 schedules in 36m19s
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=110000 elapsed=34m37s rate=53.0/s position=3.091e-10 est=3.559e+14
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=100000 elapsed=32m25s rate=51.4/s position=3.722e-06 est=2.687e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=240000 elapsed=37m1s rate=108.1/s position=0.4264 est=5.629e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=120000 elapsed=34m54s rate=57.3/s position=7.74e-05 est=1.55e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=230000 elapsed=37m0s rate=103.6/s position=0.3135 est=7.337e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=230000 elapsed=37m7s rate=103.3/s position=0.3171 est=7.254e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=210000 elapsed=36m51s rate=95.0/s position=0.4573 est=4.592e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=210000 elapsed=36m54s rate=94.8/s position=0.3643 est=5.764e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=130000 elapsed=35m35s rate=60.9/s position=4.598e-06 est=2.828e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=250000 elapsed=38m1s rate=109.6/s position=0.4358 est=5.736e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=140000 elapsed=35m27s rate=65.8/s position=6.763e-05 est=2.07e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=240000 elapsed=38m3s rate=105.1/s position=0.3167 est=7.579e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=80000 elapsed=31m34s rate=42.2/s position=5.062e-10 est=1.58e+14
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=240000 elapsed=38m13s rate=104.7/s position=0.3171 est=7.568e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=220000 elapsed=38m1s rate=96.5/s position=0.4587 est=4.796e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=220000 elapsed=38m4s rate=96.3/s position=0.3651 est=6.026e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=110000 elapsed=34m3s rate=53.8/s position=0.002724 est=4.038e+07
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=120000 elapsed=36m38s rate=54.6/s position=3.125e-10 est=3.84e+14
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=110000 elapsed=34m30s rate=53.1/s position=4.259e-06 est=2.583e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=130000 elapsed=36m43s rate=59.0/s position=0.0001158 est=1.123e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=260000 elapsed=39m0s rate=111.1/s position=0.4458 est=5.832e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=80000 elapsed=33m27s rate=39.9/s position=9.353e-17 est=8.554e+20
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=250000 elapsed=39m7s rate=106.5/s position=0.317 est=7.887e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=250000 elapsed=39m10s rate=106.4/s position=0.3796 est=6.585e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=140000 elapsed=37m20s rate=62.5/s position=5.147e-06 est=2.72e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=230000 elapsed=39m5s rate=98.1/s position=0.4807 est=4.785e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=230000 elapsed=39m4s rate=98.1/s position=0.4077 est=5.642e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=150000 elapsed=37m5s rate=67.4/s position=6.816e-05 est=2.201e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=270000 elapsed=39m59s rate=112.6/s position=0.4643 est=5.815e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=260000 elapsed=40m10s rate=107.9/s position=0.4356 est=5.968e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=260000 elapsed=40m13s rate=107.8/s position=0.3171 est=8.199e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=240000 elapsed=40m5s rate=99.8/s position=0.4382 est=5.476e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=120000 elapsed=36m5s rate=55.4/s position=0.002813 est=4.265e+07
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=140000 elapsed=38m36s rate=60.5/s position=0.0001158 est=1.209e+09
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=240000 elapsed=40m15s rate=99.4/s position=0.4961 est=4.838e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=130000 elapsed=38m38s rate=56.1/s position=3.309e-10 est=3.929e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=90000 elapsed=34m12s rate=43.9/s position=5.316e-10 est=1.693e+14
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=280000 elapsed=40m57s rate=113.9/s position=0.4694 est=5.965e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=120000 elapsed=36m34s rate=54.7/s position=5.372e-06 est=2.234e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=150000 elapsed=39m5s rate=64.0/s position=5.948e-06 est=2.522e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=270000 elapsed=41m13s rate=109.2/s position=0.4397 est=6.141e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=160000 elapsed=38m43s rate=68.9/s position=8.625e-05 est=1.855e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=270000 elapsed=41m17s rate=109.0/s position=0.3178 est=8.495e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=250000 elapsed=41m17s rate=100.9/s position=0.4517 est=5.534e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=290000 elapsed=41m58s rate=115.2/s position=0.4706 est=6.162e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=250000 elapsed=41m25s rate=100.6/s position=0.5059 est=4.942e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=90000 elapsed=36m17s rate=41.3/s position=9.561e-17 est=9.413e+20
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=280000 elapsed=42m11s rate=110.6/s position=0.4286 est=6.533e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=280000 elapsed=42m15s rate=110.4/s position=0.4636 est=6.04e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=150000 elapsed=40m28s rate=61.8/s position=0.0001159 est=1.294e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=130000 elapsed=38m8s rate=56.8/s position=0.002853 est=4.557e+07
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=140000 elapsed=40m38s rate=57.4/s position=3.555e-10 est=3.938e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=160000 elapsed=40m51s rate=65.3/s position=6.506e-06 est=2.459e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=260000 elapsed=42m23s rate=102.2/s position=0.6516 est=3.99e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=260000 elapsed=42m25s rate=102.1/s position=0.4575 est=5.684e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs runs=300000 elapsed=43m1s rate=116.2/s position=0.4708 est=6.372e+05
+    size_test.go:135: size: teardown, interleaving A {0,1} T=1 dfs capped runs=300000 elapsed=43m1s rate=116.2/s position=0.4708 est=6.372e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=170000 elapsed=40m22s rate=70.2/s position=9.111e-05 est=1.866e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=130000 elapsed=38m39s rate=56.1/s position=5.663e-06 est=2.296e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=290000 elapsed=43m13s rate=111.8/s position=0.4358 est=6.655e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=290000 elapsed=43m14s rate=111.8/s position=0.4689 est=6.185e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=100000 elapsed=36m50s rate=45.3/s position=5.428e-10 est=1.842e+14
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=270000 elapsed=43m21s rate=103.8/s position=0.7504 est=3.598e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=270000 elapsed=43m38s rate=103.1/s position=0.4587 est=5.886e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs runs=300000 elapsed=44m19s rate=112.8/s position=0.4397 est=6.822e+05
+    size_test.go:135: size: teardown, interleaving B {0,1} T=1 dfs capped runs=300000 elapsed=44m19s rate=112.8/s position=0.4397 est=6.822e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs runs=300000 elapsed=44m21s rate=112.7/s position=0.4704 est=6.377e+05
+    size_test.go:135: size: teardown, krateo-057 {0,1} T=1 dfs capped runs=300000 elapsed=44m21s rate=112.7/s position=0.4704 est=6.377e+05
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=160000 elapsed=42m21s rate=63.0/s position=0.0001161 est=1.379e+09
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=170000 elapsed=42m36s rate=66.5/s position=7.037e-06 est=2.416e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=180000 elapsed=42m0s rate=71.4/s position=9.775e-05 est=1.841e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=140000 elapsed=40m10s rate=58.1/s position=0.002891 est=4.842e+07
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=150000 elapsed=42m38s rate=58.6/s position=3.713e-10 est=4.039e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=100000 elapsed=39m5s rate=42.6/s position=9.603e-17 est=1.041e+21
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=280000 elapsed=44m28s rate=104.9/s position=0.7699 est=3.637e+05
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=140000 elapsed=40m41s rate=57.4/s position=5.939e-06 est=2.357e+10
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=280000 elapsed=44m34s rate=104.7/s position=0.4786 est=5.851e+05
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=290000 elapsed=45m28s rate=106.3/s position=0.8073 est=3.592e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=110000 elapsed=39m17s rate=46.7/s position=5.531e-10 est=1.989e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=190000 elapsed=43m26s rate=72.9/s position=9.883e-05 est=1.922e+09
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=290000 elapsed=45m34s rate=106.1/s position=0.4886 est=5.936e+05
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=180000 elapsed=44m7s rate=68.0/s position=7.489e-06 est=2.404e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=170000 elapsed=43m58s rate=64.4/s position=0.0001165 est=1.459e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=150000 elapsed=41m56s rate=59.6/s position=0.002981 est=5.032e+07
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=160000 elapsed=44m22s rate=60.1/s position=3.879e-10 est=4.124e+14
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=150000 elapsed=42m30s rate=58.8/s position=6.317e-06 est=2.374e+10
+=== NAME  TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs runs=300000 elapsed=46m35s rate=107.4/s position=0.8107 est=3.701e+05
+    size_test.go:135: size: teardown, krateo-057 {1,0} T=1 dfs capped runs=300000 elapsed=46m35s rate=107.4/s position=0.8107 est=3.701e+05
+=== NAME  TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs runs=300000 elapsed=46m38s rate=107.2/s position=0.4947 est=6.065e+05
+    size_test.go:135: size: teardown, interleaving B {1,0} T=1 dfs capped runs=300000 elapsed=46m38s rate=107.2/s position=0.4947 est=6.065e+05
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=110000 elapsed=41m32s rate=44.1/s position=9.721e-17 est=1.132e+21
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=200000 elapsed=44m49s rate=74.4/s position=0.0001004 est=1.992e+09
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=190000 elapsed=45m38s rate=69.4/s position=7.657e-06 est=2.482e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=180000 elapsed=45m32s rate=65.9/s position=0.0001173 est=1.535e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=160000 elapsed=43m35s rate=61.2/s position=0.003015 est=5.307e+07
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=120000 elapsed=41m27s rate=48.3/s position=5.6e-10 est=2.143e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=170000 elapsed=46m1s rate=61.6/s position=3.937e-10 est=4.318e+14
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=160000 elapsed=44m8s rate=60.4/s position=6.587e-06 est=2.429e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=210000 elapsed=46m7s rate=75.9/s position=0.0001005 est=2.089e+09
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=200000 elapsed=47m2s rate=70.9/s position=7.661e-06 est=2.611e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=190000 elapsed=46m59s rate=67.4/s position=0.0001183 est=1.606e+09
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=120000 elapsed=43m41s rate=45.8/s position=1.018e-16 est=1.179e+21
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=180000 elapsed=47m32s rate=63.1/s position=5.321e-10 est=3.383e+14
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=170000 elapsed=45m9s rate=62.7/s position=0.003028 est=5.614e+07
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=220000 elapsed=47m22s rate=77.4/s position=0.000101 est=2.179e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=170000 elapsed=45m45s rate=61.9/s position=7.15e-06 est=2.378e+10
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=130000 elapsed=43m29s rate=49.8/s position=5.761e-10 est=2.257e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=210000 elapsed=48m27s rate=72.2/s position=7.663e-06 est=2.74e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=200000 elapsed=48m26s rate=68.8/s position=0.0001222 est=1.637e+09
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=190000 elapsed=48m59s rate=64.6/s position=9.335e-10 est=2.035e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=230000 elapsed=48m40s rate=78.8/s position=0.0001013 est=2.272e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=180000 elapsed=46m45s rate=64.2/s position=0.003046 est=5.91e+07
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=130000 elapsed=45m44s rate=47.4/s position=3.329e-16 est=3.905e+20
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=180000 elapsed=47m22s rate=63.3/s position=7.346e-06 est=2.45e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=220000 elapsed=49m52s rate=73.5/s position=7.664e-06 est=2.871e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=210000 elapsed=49m53s rate=70.2/s position=0.0001243 est=1.69e+09
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=140000 elapsed=45m32s rate=51.3/s position=6.139e-10 est=2.281e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=200000 elapsed=50m26s rate=66.1/s position=1.514e-09 est=1.321e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=240000 elapsed=49m56s rate=80.1/s position=0.0001015 est=2.365e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=190000 elapsed=48m19s rate=65.5/s position=0.003068 est=6.193e+07
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=230000 elapsed=51m16s rate=74.8/s position=7.674e-06 est=2.997e+10
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=190000 elapsed=48m58s rate=64.7/s position=7.493e-06 est=2.536e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=220000 elapsed=51m19s rate=71.4/s position=0.000135 est=1.629e+09
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=140000 elapsed=47m53s rate=48.7/s position=4.64e-16 est=3.018e+20
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=250000 elapsed=51m13s rate=81.3/s position=0.0001016 est=2.46e+09
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=210000 elapsed=51m58s rate=67.3/s position=1.676e-09 est=1.253e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=150000 elapsed=47m33s rate=52.6/s position=7.004e-10 est=2.142e+14
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=200000 elapsed=49m53s rate=66.8/s position=0.00308 est=6.494e+07
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=240000 elapsed=52m41s rate=75.9/s position=7.675e-06 est=3.127e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=230000 elapsed=52m47s rate=72.6/s position=0.0001365 est=1.685e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=200000 elapsed=50m36s rate=65.9/s position=7.758e-06 est=2.578e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=260000 elapsed=52m30s rate=82.5/s position=0.0001017 est=2.558e+09
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=220000 elapsed=53m28s rate=68.6/s position=1.715e-09 est=1.283e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=150000 elapsed=49m59s rate=50.0/s position=4.667e-16 est=3.214e+20
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=210000 elapsed=51m20s rate=68.2/s position=0.003095 est=6.786e+07
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=250000 elapsed=53m55s rate=77.3/s position=7.694e-06 est=3.249e+10
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=160000 elapsed=49m24s rate=54.0/s position=8.142e-10 est=1.965e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=240000 elapsed=53m59s rate=74.1/s position=0.0001447 est=1.659e+09
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=270000 elapsed=53m33s rate=84.0/s position=0.0001112 est=2.429e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=210000 elapsed=51m57s rate=67.4/s position=7.944e-06 est=2.644e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=230000 elapsed=54m42s rate=70.1/s position=1.73e-09 est=1.33e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=260000 elapsed=55m2s rate=78.7/s position=7.698e-06 est=3.378e+10
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=220000 elapsed=52m35s rate=69.7/s position=0.003116 est=7.06e+07
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=280000 elapsed=54m34s rate=85.5/s position=0.0001143 est=2.451e+09
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=250000 elapsed=55m9s rate=75.6/s position=0.0001447 est=1.727e+09
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=160000 elapsed=51m44s rate=51.6/s position=4.672e-16 est=3.425e+20
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=220000 elapsed=53m15s rate=68.9/s position=8.008e-06 est=2.747e+10
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=170000 elapsed=51m2s rate=55.5/s position=1.05e-09 est=1.62e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=240000 elapsed=55m54s rate=71.6/s position=1.988e-09 est=1.207e+14
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=270000 elapsed=56m9s rate=80.1/s position=7.722e-06 est=3.497e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=290000 elapsed=55m35s rate=86.9/s position=0.0001159 est=2.503e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=230000 elapsed=53m50s rate=71.2/s position=0.003129 est=7.352e+07
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=260000 elapsed=56m18s rate=77.0/s position=0.0001449 est=1.795e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=230000 elapsed=54m32s rate=70.3/s position=8.114e-06 est=2.835e+10
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=170000 elapsed=53m28s rate=53.0/s position=4.686e-16 est=3.627e+20
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {1,0} T=1 dfs runs=300000 elapsed=56m36s rate=88.3/s position=0.0001164 est=2.578e+09
+    size_test.go:135: size: two releasers {1,0} T=1 dfs capped runs=300000 elapsed=56m36s rate=88.3/s position=0.0001164 est=2.578e+09
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=280000 elapsed=57m15s rate=81.5/s position=7.727e-06 est=3.624e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=250000 elapsed=57m7s rate=72.9/s position=1.999e-09 est=1.25e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=180000 elapsed=52m38s rate=57.0/s position=1.305e-09 est=1.379e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=270000 elapsed=57m26s rate=78.4/s position=0.0001451 est=1.861e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=240000 elapsed=55m4s rate=72.6/s position=0.003139 est=7.646e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=240000 elapsed=55m46s rate=71.7/s position=8.351e-06 est=2.874e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=290000 elapsed=58m19s rate=82.9/s position=7.728e-06 est=3.753e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=260000 elapsed=58m16s rate=74.4/s position=2.074e-09 est=1.254e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=280000 elapsed=58m31s rate=79.7/s position=0.0001455 est=1.924e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=250000 elapsed=56m15s rate=74.1/s position=0.003147 est=7.945e+07
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=180000 elapsed=55m7s rate=54.4/s position=4.715e-16 est=3.818e+20
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=190000 elapsed=54m11s rate=58.4/s position=2.03e-09 est=9.358e+13
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=250000 elapsed=56m58s rate=73.1/s position=8.544e-06 est=2.926e+10
+=== NAME  TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two releasers {0,1} T=1 dfs runs=300000 elapsed=59m22s rate=84.2/s position=7.739e-06 est=3.877e+10
+    size_test.go:135: size: two releasers {0,1} T=1 dfs capped runs=300000 elapsed=59m22s rate=84.2/s position=7.739e-06 est=3.877e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=270000 elapsed=59m25s rate=75.7/s position=2.081e-09 est=1.297e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=290000 elapsed=59m36s rate=81.1/s position=0.0001463 est=1.982e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=260000 elapsed=57m25s rate=75.5/s position=0.003155 est=8.242e+07
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=190000 elapsed=56m34s rate=56.0/s position=1.785e-15 est=1.065e+20
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=200000 elapsed=55m40s rate=59.9/s position=2.235e-09 est=8.948e+13
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=260000 elapsed=58m8s rate=74.5/s position=8.881e-06 est=2.928e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=280000 elapsed=1h0m33s rate=77.1/s position=2.086e-09 est=1.342e+14
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs runs=300000 elapsed=1h0m38s rate=82.5/s position=0.0001473 est=2.037e+09
+    size_test.go:135: size: away and back, small, with a relist {1,0} T=1 dfs capped runs=300000 elapsed=1h0m38s rate=82.5/s position=0.0001473 est=2.037e+09
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=270000 elapsed=58m31s rate=76.9/s position=0.003163 est=8.536e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=270000 elapsed=59m14s rate=76.0/s position=9.031e-06 est=2.99e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=290000 elapsed=1h1m37s rate=78.4/s position=2.088e-09 est=1.389e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=210000 elapsed=57m5s rate=61.3/s position=2.27e-09 est=9.253e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=200000 elapsed=58m4s rate=57.4/s position=2.316e-15 est=8.636e+19
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=280000 elapsed=59m36s rate=78.3/s position=0.003175 est=8.819e+07
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=280000 elapsed=1h0m20s rate=77.3/s position=9.191e-06 est=3.046e+10
+=== NAME  TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs runs=300000 elapsed=1h2m41s rate=79.8/s position=2.09e-09 est=1.436e+14
+    size_test.go:135: size: away and back, small, with a relist {0,1} T=1 dfs capped runs=300000 elapsed=1h2m41s rate=79.8/s position=2.09e-09 est=1.436e+14
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=220000 elapsed=58m23s rate=62.8/s position=2.323e-09 est=9.469e+13
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=290000 elapsed=1h0m34s rate=79.8/s position=0.003223 est=8.997e+07
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=210000 elapsed=59m26s rate=58.9/s position=2.319e-15 est=9.055e+19
+=== NAME  TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+    stateful_test.go:579: serial: 616721 schedules, 240 terminal states, 0 violations, 1h8m14s; split over 4 workers: 616721 schedules, 240 terminal states, 0 violations, 28m7s
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=290000 elapsed=1h1m11s rate=79.0/s position=9.54e-06 est=3.04e+10
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs runs=300000 elapsed=1h1m20s rate=81.5/s position=0.003244 est=9.247e+07
+    size_test.go:135: size: recreate behind a cached UID, small {1,0} T=1 dfs capped runs=300000 elapsed=1h1m20s rate=81.5/s position=0.003244 est=9.247e+07
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=230000 elapsed=59m22s rate=64.6/s position=2.702e-09 est=8.513e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=220000 elapsed=1h0m28s rate=60.6/s position=2.32e-15 est=9.484e+19
+=== NAME  TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs runs=300000 elapsed=1h1m56s rate=80.7/s position=9.928e-06 est=3.022e+10
+    size_test.go:135: size: recreate behind a cached UID, small {0,1} T=1 dfs capped runs=300000 elapsed=1h1m56s rate=80.7/s position=9.928e-06 est=3.022e+10
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=240000 elapsed=1h0m12s rate=66.4/s position=2.985e-09 est=8.04e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=230000 elapsed=1h1m20s rate=62.5/s position=2.322e-15 est=9.907e+19
+=== NAME  TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+    stateful_test.go:579: serial: 693798 schedules, 419 terminal states, 0 violations, 1h10m20s; split over 4 workers: 693798 schedules, 419 terminal states, 0 violations, 30m25s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=250000 elapsed=1h1m1s rate=68.3/s position=3.016e-09 est=8.29e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=240000 elapsed=1h2m11s rate=64.3/s position=2.329e-15 est=1.031e+20
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=260000 elapsed=1h1m47s rate=70.1/s position=3.109e-09 est=8.364e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=250000 elapsed=1h2m56s rate=66.2/s position=2.893e-15 est=8.642e+19
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=270000 elapsed=1h2m34s rate=71.9/s position=3.229e-09 est=8.361e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=260000 elapsed=1h3m45s rate=68.0/s position=2.913e-15 est=8.927e+19
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=280000 elapsed=1h3m20s rate=73.7/s position=3.249e-09 est=8.617e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=270000 elapsed=1h4m34s rate=69.7/s position=2.955e-15 est=9.136e+19
+=== NAME  TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+    stateful_test.go:579: serial: 764469 schedules, 419 terminal states, 0 violations, 1h13m28s; split over 4 workers: 764469 schedules, 419 terminal states, 0 violations, 33m54s
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=290000 elapsed=1h4m6s rate=75.4/s position=3.305e-09 est=8.775e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=280000 elapsed=1h5m22s rate=71.4/s position=2.965e-15 est=9.444e+19
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs runs=300000 elapsed=1h4m50s rate=77.1/s position=3.322e-09 est=9.03e+13
+    size_test.go:135: size: two processes, shrunk {1,0} T=1 dfs capped runs=300000 elapsed=1h4m50s rate=77.1/s position=3.322e-09 est=9.03e+13
+=== NAME  TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0}
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=290000 elapsed=1h6m5s rate=73.1/s position=2.984e-15 est=9.719e+19
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs runs=300000 elapsed=1h6m46s rate=74.9/s position=2.995e-15 est=1.002e+20
+    size_test.go:135: size: two processes, shrunk {0,1} T=1 dfs capped runs=300000 elapsed=1h6m46s rate=74.9/s position=2.995e-15 est=1.002e+20
+--- PASS: TestModelStatelessSize (0.00s)
+    --- PASS: TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (2361.90s)
+    --- PASS: TestModelStatelessSize/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (2743.95s)
+    --- PASS: TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (2832.63s)
+    --- PASS: TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (2833.54s)
+    --- PASS: TestModelStatelessSize/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (2991.17s)
+    --- PASS: TestModelStatelessSize/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (2995.47s)
+    --- PASS: TestModelStatelessSize/two_releasers,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (3720.48s)
+    --- PASS: TestModelStatelessSize/two_releasers,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (3848.33s)
+    --- PASS: TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (3933.89s)
+    --- PASS: TestModelStatelessSize/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (4055.57s)
+    --- PASS: TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (4120.38s)
+    --- PASS: TestModelStatelessSize/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (4143.44s)
+    --- PASS: TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:1_MaxRuns:0} (4458.42s)
+    --- PASS: TestModelStatelessSize/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:1_MaxRuns:0} (4516.86s)
+=== NAME  TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+    stateful_test.go:579: serial: 844875 schedules, 514 terminal states, 0 violations, 1h15m40s; split over 4 workers: 844875 schedules, 514 terminal states, 0 violations, 36m30s
+=== NAME  TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+    stateful_test.go:579: serial: 1409097 schedules, 268 terminal states, 0 violations, 1h34m55s; split over 4 workers: 1409097 schedules, 268 terminal states, 0 violations, 58m10s
+=== NAME  TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+    stateful_test.go:579: serial: 1951942 schedules, 464 terminal states, 0 violations, 1h45m54s; split over 4 workers: 1951942 schedules, 464 terminal states, 0 violations, 1h7m36s
+--- PASS: TestModelParallelStatelessIsSerial (0.00s)
+    --- PASS: TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0} (4093.84s)
+    --- PASS: TestModelParallelStatelessIsSerial/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0} (4219.86s)
+    --- PASS: TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0} (4407.56s)
+    --- PASS: TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0} (4539.78s)
+    --- PASS: TestModelParallelStatelessIsSerial/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0} (5694.90s)
+    --- PASS: TestModelParallelStatelessIsSerial/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0} (6354.21s)
+PASS
+ok  	github.com/krateo-platformops/provider-runtime/pkg/credentialuse	6354.228s

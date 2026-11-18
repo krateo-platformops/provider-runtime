@@ -1,0 +1,21 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [5, 6, 7, 8]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 5 started 2026-11-11 19:38:19
+KILLED    A1 doesn't drop observed for the refs it removes
+          killed in: TestAcquireOutcomes/no_refs:_the_record_goes,_and_observed_with_it
+          mutant 5: 2026-11-11 19:38:19 to 2026-11-11 20:54:50
+          mutant 6 started 2026-11-11 20:54:50
+KILLED    an unparseable record equal to the refs isn't rewritten
+          killed in: TestAcquireOutcomes/an_unparseable_record_and_no_refs:_the_record_goes
+          mutant 6: 2026-11-11 20:54:50 to 2026-11-11 22:11:45
+          mutant 7 started 2026-11-11 22:11:45
+KILLED    a new holder connects on a Deleting ref
+          killed in: TestAcquireOutcomes/being_deleted,_a_new_holder_must_not_connect
+          mutant 7: 2026-11-11 22:11:45 to 2026-11-11 23:21:59
+          mutant 8 started 2026-11-11 23:21:59
+KILLED    an A2 error is ignored
+          killed in: TestAcquireACustomResourceRetriesConflicts, TestAcquireOutcomes/an_A2_error_fails_closed_for_a_new_holder_and_open_for_an_established_one, TestModelAcquireAgainstRelease, TestModelDeletionsAroundTheGrace, TestModelRecreateBehindACachedUID
+          mutant 8: 2026-11-11 23:21:59 to 2026-11-12 00:13:00
+
+KILLED=4 of 4 run here, of 46
+tree restored

@@ -9,14 +9,16 @@ timestamp: 2026-11-09T00:00:00Z
 
 # Credential-use finalizer
 
-**Status:** design, revision 16. Nothing is built yet; the build follows
+**Status:** design, revision 17. Nothing is built yet; the build follows
 [the implementation plan](./plan-credential-use-implementation.md), eleven
 stacked PRs that ship as v1.13.0. The
 user chose the approach: a finalizer on each Secret an object uses, the
 analog of Crossplane's ProviderConfigUsage. The user's decisions are
 binding here: U1 to U7 on the first review, NQ1 to NQ4 on the second, and
 IP1 to IP5 on the implementation plan. Revision 16 amends the text where
-the plan found it ambiguous once coded (§17, "Revision 16").
+the plan found it ambiguous once coded (§17, "Revision 16"). Revision 17
+amends the skip rule and the grace's clock after the independent review of
+the protocol's code (§17, "Revision 17").
 §17 maps every review item to the section that resolves it, and §18 holds
 what is still open.
 
@@ -532,7 +534,9 @@ for the set of protected objects pending there (R7). For each pending P:
   - If P is being deleted in a namespace that was live when last seen, has
     users by R0, and is still inside the grace, requeue the batch at the
     end of the grace (§5).
-- **R2. The last reads, after every R1 in the batch.** For each P being
+- **R2. The last reads, after every R1 in the batch.** First read the
+  clock: whether each P's grace is over is decided on that reading, taken
+  before any of R2's reads (revision 17, §6.4). For each P being
   deleted, GET its Namespace live and read its `deletionTimestamp`. Then
   make **one** live, paginated, metadata-only list of K in N
   (`PartialObjectMetadataList`, no resourceVersion, so it is a consistent
@@ -577,30 +581,35 @@ for the set of protected objects pending there (R7). For each pending P:
   status is pinned by a test, and is treated as a conflict: P goes back to R1.
   No other writer's change can be clobbered: the patch removes one index it
   has just tested, and keys only this kind writes. When R3 succeeds, this
-  process drops its `written` entries for P at once, synchronously.
+  process drops its `written` entry for P and N at once, synchronously.
 
 ### 6.3 The verified set
 
 A2 may skip the write only for pairs this process has written (U6), and
-never on a deletion pass. The tracker keeps three maps in memory:
+never on a deletion pass. The tracker keeps four maps in memory:
 
 - `written[(P.uid, K, N)] = t_issue`: the local monotonic time at which this
   process issued a successful A2 write for P, K and N.
+- `delivered[H.uid]`: the resourceVersion of the version of H that the
+  holder informer delivered last (revision 17).
 - `recordSince[(H.uid, P)]`: the **informer delivery time** of the first
   holder event, in the current unbroken run of H's versions whose record
-  names P. The holder informer's handler maintains it, and the handler
-  touches nothing else. A delivered version whose record doesn't name P
-  ends the run and deletes the entry, so a later re-add starts a new run
-  with a new time.
-- `observed[(H.uid, P)]`, written only by passes, **synchronously**. When a
+  names P. A delivered version whose record doesn't name P ends the run and
+  deletes the entry, so a later re-add starts a new run with a new time.
+- `observed[(H.uid, P)]`, written by passes, **synchronously**. When a
   pass's A1 adds P, it sets `observed` to the time A1's response returned,
   **overwriting** any earlier value (M1). When A1 removes P, it deletes the
-  entry. That ref can't skip in the pass whose A1 added it.
+  entry. That ref can't skip in the pass whose A1 added it. A delivered
+  version that ends P's run deletes it too (revision 17), so a later run
+  can't lean on an A1 of an earlier one.
 
-t_obs for (H, P) is **the later of** `observed` and `recordSince`. If both
-are absent, because the informer hasn't delivered the record yet and no
-local A1 wrote it, the pass doesn't skip. Taking the later time can only
-make skips rarer. `written` is keyed by P, not by holder, so A1 has no
+The holder informer's handler maintains `delivered` and `recordSince`, and
+deletes `observed` entries; it touches nothing else.
+
+t_obs for (H, P) is **the later of** `observed` and `recordSince` (and
+the last list, §6.5 L2). Without `recordSince`, because the informer hasn't
+delivered a version naming P, the pass doesn't skip: an A1 alone never lets
+it (revision 17). Taking the later time can only make skips rarer. `written` is keyed by P, not by holder, so A1 has no
 per-holder `written` entry to reset. The comparison with t_obs is what makes
 a re-added ref write again.
 
@@ -608,22 +617,54 @@ a re-added ref write again.
 
 - the pass is not a deletion pass;
 - this pass's A1 didn't add P;
+- the pass works from H at resourceVersion *rv*, `delivered[H.uid]` is
+  exactly *rv*, and that version's record names P (revision 17);
 - `written[(P.uid, K, N)]` exists, with `t_obs < t_issue`. That is, this
   process wrote P after the informer had delivered H's record naming P.
 
-**After a restart or a leader change**, all three maps are empty. The
+**Why the exact version** (H1 of the review of the protocol's code,
+revision 17). The maps describe the versions the informer has delivered.
+A pass that works from any other version, newer or older, may be looking at
+another run of the record. Revision 16 let it skip anyway, which three
+interleavings break, each reproduced by a test:
+
+- in one process, A1 removes P; before the informer delivers that version,
+  another process releases P; A1 puts P back and its response is lost; the
+  next pass, which runs no A1, skips on the first run's `recordSince` and
+  reports P held while P has no finalizer, and a teardown then wedges;
+- across two processes, B removes P and puts it back, and B's A2 fails; A's
+  informer has delivered the removal, or nothing since the first run, and
+  A's surviving `observed` or `recordSince` lets A skip, so A's runtime can
+  reach `AddFinalizer` with no A2 behind the record (§6.7);
+- the manager's typed cache, from which a runtime's pass reads H, can run
+  ahead of the core's holder informer, and so give the pass a version of a
+  later run.
+
+With equality, the delivered versions up to *rv* are all the informer has
+seen, in order, so the run containing *rv* began at a version it delivered,
+or at a list, and `t_obs` is no earlier than that version's delivery
+(§6.4). A pass whose view of H differs from the informer's writes A2. That
+costs a write, never safety: after an A1 the pass works from A1's response,
+which the informer hasn't delivered yet, but A1 writes only when the record
+changes; and the typed cache and the core's informer agree once both have
+caught up.
+
+**After a restart or a leader change**, all four maps are empty. The
 holder informer's initial list delivers every holder at about the time it
 syncs, t_sync, and that becomes their `recordSince`. The first pass of the
 first holder of P writes P at some t_issue > t_sync. Every holder whose
 record was in that initial list has `recordSince` = t_sync < t_issue, so it
 skips. **So a restart costs one A2 per (P, K, N)**, as claimed, under this
 definition. The exceptions are holders whose record changes after the
-sync, and every deletion pass: they write again.
+sync, passes that work from a version the informer hasn't delivered yet,
+and every deletion pass: they write again.
 
 Entries are dropped:
 
 - **in the pass, synchronously:** by A1, for refs it removes; by a
-  successful R3, for the P it released;
+  successful R3, for the P and N it released;
+- **in the holder informer's handler:** `observed`, when a delivered
+  version of H ends P's run (revision 17);
 - **in the protected informer's handler:** when P's UID changes or P is
   deleted, when P loses the finalizer for (K, N), or when P leaves the
   label-scoped cache (§10.2). The handler only deletes `written` entries; it
@@ -669,14 +710,24 @@ is read live after the grace, as the last step before R3. A namespace
 deletion that starts after that read deletes the holders, and their
 deletion passes write, which breaks an R3 that hasn't landed yet.
 
-**That leaves an unrecoverable window, a few milliseconds wide** (L3). Say
+**The grace is measured before R2's reads** (M4 of the review of the
+protocol's code, revision 17). R2 reads the clock first, and decides
+whether the grace is over on that reading. So the Namespace GET comes after
+the grace's end, and a namespace deletion it doesn't see began after the
+grace too. Revision 16's code read the clock after the list: a namespace
+deletion that began inside the grace, after the GET, was then released over
+as if it had begun after the grace. A test reproduces it, and the model
+checks every release against it.
+
+**That leaves an unrecoverable window, about M round trips wide for M R3
+patches in a row** (L3). Say
 the namespace's deletion begins between R2's Namespace GET and R3's patch,
 after the grace, while no user is deleting. R3 then lands first, because
 the namespace controller takes far longer than that to discover and delete
 the holders. P goes, the namespace is terminating so P can't be recreated,
 and the holders wedge exactly as in §1. It needs a Secret deleted in a live
 namespace, then the grace running out with no user deleting, then the
-namespace deleted inside those milliseconds. Nothing in this design closes
+namespace deleted inside that window. Nothing in this design closes
 it. It is stated here, and tested in the model, rather than claimed
 away.
 
@@ -691,12 +742,43 @@ use the record against H. Either the record is visible to its R2
 next A2 restores it or reports Deleting. In no case does H connect on a P
 that a releaser can remove underneath it without H's next write seeing so.
 
-**The skip is safe** for the same reason as the first case. If
-`t_obs < t_issue`, then tA < t_obs < t_issue < tW, because the informer
-delivered the record after the API server had stored it. So every releaser
-that read P before tW fails its test, and every releaser that reads after
-tW sees H. The only things that can still remove the finalizer while H's
-record names P are:
+**The skip is safe** for the same reason as the first case. The pass
+works from the version *rv* the informer delivered last (§6.3). The run of
+versions naming P that contains *rv* began with the A1 that landed at tA;
+the informer delivered every version of that run up to *rv*, or listed
+after its start, so `t_obs` is no earlier than the delivery of its first
+version, or than the list. If `t_obs < t_issue`, then
+tA < t_obs < t_issue < tW, because the informer delivered the record after
+the API server had stored it. And the record has named P since tA, without
+a break: a break would have been a version of H that the informer delivered
+before *rv*, ending the run. So every releaser that read P before tW fails
+its test, and every releaser that reads after tW sees H, **as of *rv***. The
+proof says nothing about versions after *rv*: the informer hasn't delivered
+them, and the pass doesn't see them.
+
+**The equal-lag stale pass: an accepted window** (the re-review of #59). Say
+a process's typed cache and its core informer are equally behind, both at
+version V of H, which names P, under a written entry of the process's own.
+Meanwhile another process removes P from H's record, a releaser releases P,
+which then has no user, and the other process puts P back but its A2
+fails. A pass of the first process works from V, which its informer
+delivered, so it skips, and reports P held while P has no finalizer. The
+pass is stale, but consistent with what its process has seen. Delivery of
+the later versions ends the *permission* to skip, but P stays unheld until
+a pass of that holder actually runs from a current version and writes:
+- B's re-add is a record-only update, which the predicate filters out (§7.5);
+- B is Degraded and doesn't requeue;
+- a pass that P's label loss triggers can skip too, while it works from V.
+
+So the window is bounded by the informer's lag **plus the time to the
+holder's next pass**, at worst the poll interval. It is the same accepted
+fail-open as B's failed A2, which it follows from: the holder runs on a P
+that a later pass will hold again, and the damage needs P deleted inside the
+window. A test pins both the window and the write of the pass that closes
+it.
+
+The only things that can still remove the finalizer while H's record names
+P are:
 
 - §5's live-namespace release, which H's deletion passes guard against by
   never skipping;
@@ -756,11 +838,15 @@ only come after the write it reports.
   its `written` entries for the old UID only when its informer delivers
   the old P's deletion. Until then, that process's fast path may find the
   old P, with the finalizer, in its cache, and skip A2, while Connect reads
-  the new, unheld P. **The window runs from the old P's final removal to
-  that delivery**, which is watch latency. It can't open while the old P
-  is held, because the recreate fails with AlreadyExists until P is gone.
-  It can't open in the releasing process, which drops its entries when R3
-  succeeds. It matters only if the new P is deleted inside the window.
+  the new, unheld P. **The permission to skip lasts from the old P's final
+  removal to that delivery**, which is watch latency. The new P is unheld
+  until a pass of each holder then runs and writes, so the window is that
+  latency **plus the time to the holder's next pass**, at worst the poll
+  interval. It is an accepted fail-open, like a failed A2 (§8). It can't
+  open while the old P is held, because the recreate fails with
+  AlreadyExists until P is gone. It can't open in the releasing process,
+  which drops its entries when R3 succeeds. It matters only if the new P is
+  deleted inside the window.
 
 ### 6.6 Cost
 
@@ -3820,6 +3906,28 @@ amendment keeps the merged design's safety proofs. Its findings:
 | L2 A1 copies the whole returned `ObjectMeta`, and re-reads the object before the next write when the generation or labels changed | §6.2 A1 |
 | L3 Class (e) is counted; the RBAC message format is the same from apiserver v0.31.0 to v0.37.2; Krateo's minimum Kubernetes is 1.36 (the user's decision), and CI pins the message on 1.36.2 and 1.37.0 | §6.2, §12, §18 |
 | L4 Guarded CRD writes are bounded to 5 attempts, and a starved count write is logged and counted | §7.3, §12 |
+
+**Revision 17** (the independent review of the protocol's code, PR 2,
+provider-runtime#59). It found one High and four Mediums, each reproduced by
+a test or a model schedule before the fix:
+
+| Item | Resolved in |
+|---|---|
+| H1 The A2 skip could rest on an observation of an earlier run of the record: a lost A1 response in one process, another process's remove and re-add with a failed A2, or a typed cache ahead of the core informer let a pass report P held with no finalizer. A skip now needs the informer to have delivered exactly the version the pass works from, naming P; a delivered version that ends P's run drops `observed` too | §6.3, §6.4 |
+| M1 The model forgot a hold using the stale record after a lost A1: its instrumentation now reads the live record | §14 (the model) |
+| M2 CI searched one fault or one preemption, never both: it now searches both for the scenarios with a second process, including a second acquiring process for one holder, and varies the random walk's seed | §14 (the model) |
+| M3 A crash in the model skipped the actor's next wait, losing the deletion phase: a crash now restarts every actor of the process, and the model asserts each deletion phase ran | §14 (the model) |
+| M4 R2 read the clock for the grace after the list, so a namespace deletion inside the grace, after the Namespace GET, could be released over: the clock is read before R2's first read, and the model requires every namespace deletion before a release to come after the grace | §6.2 R2, §6.4 |
+| Lows: the handler maps keyed by UID; first sights pruned once P is released or gone; the grace kept on the local monotonic clock against wall-clock steps; R3 drops only its own (P, N) entry | §6.2 R3, §6.3, §5 |
+
+**The re-review of revision 17** (#59 at c0d5e61) found nothing High or
+Medium. Its points:
+
+| Item | Resolved in |
+|---|---|
+| The skip proof holds as of the delivered version *rv*; the equal-lag stale pass (a process whose typed cache and informer are equally behind) is an accepted window, like L6, pinned by a test | §6.4 |
+| The exact-version rule rests on PR 3 recording `lastList` no later than a relist's versions reach the holder handler | the plan, PR 3 |
+| L3's width is about M round trips for M R3 patches in a row, not "a few milliseconds" | §6.4 |
 
 ## 18. Open questions for the user
 

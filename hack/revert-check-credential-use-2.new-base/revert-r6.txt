@@ -1,0 +1,17 @@
+baseline left to another clone of commit 710f26c (--no-baseline); mutants [20, 21, 22]; load 19:38:19 up  3:14,  0 user,  load average: 3.17, 2.52, 2.44
+
+          mutant 20 started 2026-11-11 19:38:19
+KILLED    the Namespace is read from the cache
+          killed in: TestModelDeletionsAroundTheGrace, TestReleaseRows/deleting,_its_namespace_deleting,_a_live_user:_kept
+          mutant 20: 2026-11-11 19:38:19 to 2026-11-11 20:56:40
+          mutant 21 started 2026-11-11 20:56:40
+KILLED    a missing Namespace reads as live
+          killed in: TestReleaseTreatsAMissingNamespaceAsDeleting
+          mutant 21: 2026-11-11 20:56:40 to 2026-11-11 22:13:43
+          mutant 22 started 2026-11-11 22:13:43
+KILLED    the grace ignores first sight
+          killed in: TestReleaseGraceFromFirstSight, TestReleasePrunesFirstSight
+          mutant 22: 2026-11-11 22:13:43 to 2026-11-11 22:32:31
+
+KILLED=3 of 3 run here, of 46
+tree restored

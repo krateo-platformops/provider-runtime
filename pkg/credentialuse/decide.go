@@ -112,12 +112,14 @@ func Decide(in ReleaseInput) Decision {
 // process first saw that timestamp (§5, L4). So neither a server clock behind
 // the local one nor a late delivery can shorten it.
 //
-// firstSeen is a local time.Now() reading; the comparison with the server's
-// timestamp is on the wall clock.
+// firstSeen is a local time.Now() reading. The server's timestamp is compared
+// with it once, on the wall clock, and the result is an offset from firstSeen,
+// so it keeps firstSeen's monotonic reading: a step of the local wall clock
+// afterwards can neither shorten nor stretch the grace.
 func GraceEnd(deletionTimestamp, firstSeen time.Time, grace time.Duration) time.Time {
-	from := deletionTimestamp
-	if firstSeen.After(from) {
-		from = firstSeen
+	ahead := deletionTimestamp.Sub(firstSeen.Round(0)) // wall clock only
+	if ahead < 0 {
+		ahead = 0
 	}
-	return from.Add(grace)
+	return firstSeen.Add(ahead + grace)
 }

@@ -1,0 +1,21 @@
+cap at Thu Nov 12 08:00:00 UTC 2026
+ 08:00:00 up 16:57,  0 user,  load average: 35.16, 35.12, 35.03
+group 19363: SIGQUIT test binary 34342 (elapsed    16:51:56)
+group 35331: SIGQUIT test binary 36193 (elapsed    16:22:12)
+group 35332: SIGQUIT test binary 36211 (elapsed    16:22:12)
+group 35334: SIGQUIT test binary 36176 (elapsed    16:22:13)
+group 35335: SIGQUIT test binary 36220 (elapsed    16:22:12)
+after the cap: Thu Nov 12 08:05:20 UTC 2026
+baseline: 
+m1: 
+m2: 
+m3: 
+m4: 
+total 584
+drwxr-xr-x 2 diegobraga diegobraga   4096 Nov 12 08:00 .
+drwxr-xr-x 3 diegobraga diegobraga   4096 Nov 12 08:00 ..
+-rw-r--r-- 1 diegobraga diegobraga 112481 Nov 12 08:00 differential-1.log
+-rw-r--r-- 1 diegobraga diegobraga 110662 Nov 12 08:00 differential-2.log
+-rw-r--r-- 1 diegobraga diegobraga  93501 Nov 12 08:00 differential-3.log
+-rw-r--r-- 1 diegobraga diegobraga 104532 Nov 12 08:00 differential-4.log
+-rw-r--r-- 1 diegobraga diegobraga 159129 Nov 12 08:00 differential-baseline.log

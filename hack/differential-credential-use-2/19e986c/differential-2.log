@@ -1,0 +1,1471 @@
+=== RUN   TestModelStatefulAgreesWithStateless
+=== RUN   TestModelStatefulAgreesWithStateless/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/acquire_against_release,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/teardown,_interleaving_B,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/teardown,_interleaving_B,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/deletions_around_the_grace,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/two_releasers,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/two_releasers,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/two_releasers,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/two_releasers,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/teardown,_interleaving_A,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/two_processes,_shrunk,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/teardown,_krateo-057,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/teardown,_krateo-057,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/away_and_back,_small,_with_a_relist,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== RUN   TestModelStatefulAgreesWithStateless/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== PAUSE TestModelStatefulAgreesWithStateless/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatefulAgreesWithStateless/acquire_against_release,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatefulAgreesWithStateless/away_and_back,_small,_with_a_relist,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatefulAgreesWithStateless/recreate_behind_a_cached_UID,_small,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatefulAgreesWithStateless/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatefulAgreesWithStateless/recreate_behind_a_cached_UID,_small,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+=== CONT  TestModelStatefulAgreesWithStateless/two_releasers,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+=== NAME  TestModelStatefulAgreesWithStateless/teardown,_interleaving_A,_{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0}
+    stateful_test.go:264: stateless: 693798 schedules, 626 terminal states, 0 violations; stateful: 4171 runs, 7319 states, 3025 pruned, 626 terminal states, 0 violations, 3025 audits, 0 divergences; reduced: 2255 runs, 5660 states, 1109 pruned, 626 terminal states, 0 violations, 1109 audits, 0 divergences
+    stateful_test.go:264: capacity used (§10.2): at most 19 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 942ns
+=== CONT  TestModelStatefulAgreesWithStateless/two_processes,_shrunk,_{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0}
+SIGQUIT: quit
+PC=0x44f0d5 m=0 sigcode=0
+
+goroutine 0 gp=0x35e00c0 m=0 mp=0x35e1500 [idle]:
+runtime.(*sysMemStat).add(0x35eafa0?, 0xffffffffffffe000)
+	/usr/local/go/src/runtime/mstats.go:660 +0x15 fp=0x7ffea55eb170 sp=0x7ffea55eb148 pc=0x44f0d5
+runtime.(*mheap).allocSpan(0x35eafa0, 0x1, 0x0, 0x59)
+	/usr/local/go/src/runtime/mheap.go:1408 +0x4c8 fp=0x7ffea55eb220 sp=0x7ffea55eb170 pc=0x442868
+runtime.(*mheap).alloc.func1()
+	/usr/local/go/src/runtime/mheap.go:1017 +0x5c fp=0x7ffea55eb268 sp=0x7ffea55eb220 pc=0x44201c
+runtime.systemstack(0x498e9f)
+	/usr/local/go/src/runtime/asm_amd64.s:562 +0x4a fp=0x7ffea55eb278 sp=0x7ffea55eb268 pc=0x494d6a
+
+goroutine 88 gp=0x8b36531860 m=0 mp=0x35e1500 [running]:
+runtime.systemstack_switch()
+	/usr/local/go/src/runtime/asm_amd64.s:516 +0x8 fp=0x8b36447d98 sp=0x8b36447d88 pc=0x494d08
+runtime.(*mheap).alloc(0x7f1266320f70?, 0x8b36447e50?, 0x87?)
+	/usr/local/go/src/runtime/mheap.go:1011 +0x57 fp=0x8b36447de0 sp=0x8b36447d98 pc=0x441f77
+runtime.(*mcentral).grow(0x1f0000001d?)
+	/usr/local/go/src/runtime/mcentral.go:253 +0x36 fp=0x8b36447e10 sp=0x8b36447de0 pc=0x429a16
+runtime.(*mcentral).cacheSpan(0x35ff500)
+	/usr/local/go/src/runtime/mcentral.go:171 +0x454 fp=0x8b36447e88 sp=0x8b36447e10 pc=0x429894
+runtime.(*mcache).refill(0x7f1266320f70, 0x59?)
+	/usr/local/go/src/runtime/mcache.go:205 +0x16b fp=0x8b36447ec8 sp=0x8b36447e88 pc=0x428e6b
+runtime.(*mcache).nextFree(0x7f1266320f70, 0x59)
+	/usr/local/go/src/runtime/malloc.go:1006 +0x7e fp=0x8b36447f00 sp=0x8b36447ec8 pc=0x42533e
+runtime.mallocgcSmallNoscan(0x4a074a?, 0x35bfaa0?, 0xbb?)
+	/usr/local/go/src/runtime/malloc.go:1397 +0x185 fp=0x8b36447f58 sp=0x8b36447f00 pc=0x425925
+runtime.mallocgc(0x1000, 0x0, 0x0)
+	/usr/local/go/src/runtime/malloc.go:1143 +0xcc fp=0x8b36447f88 sp=0x8b36447f58 pc=0x48c42c
+runtime.growslice(0x8b3693f400, 0x5?, 0x5?, 0x0?, 0x8b36c625a0?)
+	/usr/local/go/src/runtime/slice.go:265 +0x573 fp=0x8b36447ff8 sp=0x8b36447f88 pc=0x491a33
+strings.(*Builder).WriteString(...)
+	/usr/local/go/src/strings/builder.go:114
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*keyEncoder).tok(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:65
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).encode(0x8b3768c140, 0x0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:390 +0x3665 fp=0x8b36448a68 sp=0x8b36447ff8 pc=0xe3c465
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).timeTerms(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:301
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).timeTerms-fm()
+	<autogenerated>:1 +0x19 fp=0x8b36448a88 sp=0x8b36448a68 pc=0xe59d39
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).tick(0x8b3b4d4960, {0x20fd97e?, 0x9?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:854 +0x151 fp=0x8b36448b78 sp=0x8b36448a88 pc=0xdac571
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).Run(0x8b3b4d4960)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:750 +0xce5 fp=0x8b36448f00 sp=0x8b36448b78 pc=0xdab825
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.runner.func4(0x8b3b4d4960)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:233 +0xcc fp=0x8b36448fa8 sp=0x8b36448f00 pc=0xe40b6c
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.func2(0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:300 +0x46 fp=0x8b36449010 sp=0x8b36448fa8 pc=0xe409c6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.explore({0x380017?, 0x8b36a25240?, 0x425357?, 0x7f121f482170?}, 0x0, 0x0, 0x8b36449330)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:996 +0x15b fp=0x8b364491b0 sp=0x8b36449010 pc=0xdad39b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.Explore(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:950
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search(0x8b3687dd48, 0x222b848, {0x0?, 0x0?, 0x0?, 0x0?}, 0x0, 0x1)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:311 +0x455 fp=0x8b36449410 sp=0x8b364491b0 pc=0xe40435
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.differential(0x8b3687dd48, 0x222b848, {0x2d52ed8?, 0x353e1e0?, 0x8b36b34760?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:336 +0x92 fp=0x8b36449f08 sp=0x8b36449410 pc=0xe40ff2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687dd48)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:264 +0x6b fp=0x8b36449f70 sp=0x8b36449f08 pc=0xe3ffab
+testing.tRunner(0x8b3687dd48, 0x8b36553da0)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36449fc0 sp=0x8b36449f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36449fe0 sp=0x8b36449fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36449fe8 sp=0x8b36449fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 1 gp=0x8b364281e0 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x3000002239a20?, 0x300121f6bc160?, 0x60?, 0xc1?, 0x7f1266321868?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b365f5908 sp=0x8b365f58e8 pc=0x48ecee
+runtime.chanrecv(0x8b3682e100, 0x8b365f59ef, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b365f5980 sp=0x8b365f5908 pc=0x41ca2e
+runtime.chanrecv1(0x35dde40?, 0x2282da0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b365f59a8 sp=0x8b365f5980 pc=0x41c552
+testing.(*T).Run(0x8b36578908, {0x212b40e?, 0x0?}, 0x222b448)
+	/usr/local/go/src/testing/testing.go:2109 +0x4e5 fp=0x8b365f5a80 sp=0x8b365f59a8 pc=0x563be5
+testing.runTests.func1(0x8b36578908)
+	/usr/local/go/src/testing/testing.go:2585 +0x3e fp=0x8b365f5ac8 sp=0x8b365f5a80 pc=0x565ffe
+testing.tRunner(0x8b36578908, 0x8b365f5bd0)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b365f5b18 sp=0x8b365f5ac8 pc=0x562bca
+testing.runTests({0x2141bf6, 0x2e}, {0x2170373, 0x40}, 0x8b36848138, {0x35cffe0, 0x4c, 0x4c}, {0xc2b59532dcb1ece6, 0x4e94923d99f0, ...})
+	/usr/local/go/src/testing/testing.go:2583 +0x505 fp=0x8b365f5c00 sp=0x8b365f5b18 pc=0x565ec5
+testing.(*M).Run(0x8b36867a40)
+	/usr/local/go/src/testing/testing.go:2443 +0x6ac fp=0x8b365f5e40 sp=0x8b365f5c00 pc=0x56484c
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse_test.TestMain(0x8b36867a40)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/main_test.go:21 +0xa5 fp=0x8b365f5eb8 sp=0x8b365f5e40 pc=0x1aeb685
+main.main()
+	_testmain.go:200 +0xa5 fp=0x8b365f5f48 sp=0x8b365f5eb8 pc=0x1af75e5
+runtime.main()
+	/usr/local/go/src/runtime/proc.go:290 +0x2d5 fp=0x8b365f5fe0 sp=0x8b365f5f48 pc=0x4574d5
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b365f5fe8 sp=0x8b365f5fe0 pc=0x4967c1
+
+goroutine 2 gp=0x8b36428780 m=nil [force gc (idle), 982 minutes]:
+runtime.gopark(0x0?, 0x0?, 0x0?, 0x0?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d8fa8 sp=0x8b364d8f88 pc=0x48ecee
+runtime.goparkunlock(...)
+	/usr/local/go/src/runtime/proc.go:468
+runtime.forcegchelper()
+	/usr/local/go/src/runtime/proc.go:375 +0xb3 fp=0x8b364d8fe0 sp=0x8b364d8fa8 pc=0x4577f3
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d8fe8 sp=0x8b364d8fe0 pc=0x4967c1
+created by runtime.init.7 in goroutine 1
+	/usr/local/go/src/runtime/proc.go:363 +0x1a
+
+goroutine 3 gp=0x8b36428d20 m=nil [GC sweep wait]:
+runtime.gopark(0x35dd901?, 0x35dd9a0?, 0x8?, 0x9?, 0x1?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d9788 sp=0x8b364d9768 pc=0x48ecee
+runtime.goparkunlock(...)
+	/usr/local/go/src/runtime/proc.go:468
+runtime.bgsweep(0x8b364f8000)
+	/usr/local/go/src/runtime/mgcsweep.go:324 +0x151 fp=0x8b364d97c8 sp=0x8b364d9788 pc=0x43e891
+runtime.gcenable.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:214 +0x17 fp=0x8b364d97e0 sp=0x8b364d97c8 pc=0x42fbf7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d97e8 sp=0x8b364d97e0 pc=0x4967c1
+created by runtime.gcenable in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:214 +0x66
+
+goroutine 4 gp=0x8b36428f00 m=nil [sleep]:
+runtime.gopark(0x8b364fc000?, 0x378b873cb7e1?, 0x0?, 0x0?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d9f38 sp=0x8b364d9f18 pc=0x48ecee
+runtime.goparkunlock(...)
+	/usr/local/go/src/runtime/proc.go:468
+runtime.(*scavengerState).sleep(0x35df5c0, 0x412ecd8600000000)
+	/usr/local/go/src/runtime/mgcscavenge.go:504 +0xf6 fp=0x8b364d9fa8 sp=0x8b364d9f38 pc=0x43c4d6
+runtime.bgscavenge(0x8b364f8000)
+	/usr/local/go/src/runtime/mgcscavenge.go:662 +0x74 fp=0x8b364d9fc8 sp=0x8b364d9fa8 pc=0x43c8b4
+runtime.gcenable.gowrap2()
+	/usr/local/go/src/runtime/mgc.go:215 +0x17 fp=0x8b364d9fe0 sp=0x8b364d9fc8 pc=0x42fbb7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d9fe8 sp=0x8b364d9fe0 pc=0x4967c1
+created by runtime.gcenable in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:215 +0xa5
+
+goroutine 5 gp=0x8b364294a0 m=nil [GOMAXPROCS updater (idle), 982 minutes]:
+runtime.gopark(0x0?, 0x0?, 0x0?, 0x0?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364da788 sp=0x8b364da768 pc=0x48ecee
+runtime.goparkunlock(...)
+	/usr/local/go/src/runtime/proc.go:468
+runtime.updateMaxProcsGoroutine()
+	/usr/local/go/src/runtime/proc.go:7095 +0xe7 fp=0x8b364da7e0 sp=0x8b364da788 pc=0x465dc7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364da7e8 sp=0x8b364da7e0 pc=0x4967c1
+created by runtime.defaultGOMAXPROCSUpdateEnable in goroutine 1
+	/usr/local/go/src/runtime/proc.go:7083 +0x37
+
+goroutine 6 gp=0x8b36429680 m=nil [finalizer wait, 982 minutes]:
+runtime.gopark(0x466e15?, 0x3603780?, 0x13?, 0x0?, 0x8b364d8670?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d8620 sp=0x8b364d8600 pc=0x48ecee
+runtime.runFinalizers()
+	/usr/local/go/src/runtime/mfinal.go:210 +0x107 fp=0x8b364d87e0 sp=0x8b364d8620 pc=0x42eb67
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d87e8 sp=0x8b364d87e0 pc=0x4967c1
+created by runtime.createfing in goroutine 1
+	/usr/local/go/src/runtime/mfinal.go:172 +0x3d
+
+goroutine 7 gp=0x8b3660e3c0 m=nil [cleanup wait, 982 minutes]:
+runtime.gopark(0x0?, 0x0?, 0x0?, 0x0?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364daf68 sp=0x8b364daf48 pc=0x48ecee
+runtime.goparkunlock(...)
+	/usr/local/go/src/runtime/proc.go:468
+runtime.(*cleanupQueue).dequeue(0x35dfaa0)
+	/usr/local/go/src/runtime/mcleanup.go:522 +0xd4 fp=0x8b364dafa0 sp=0x8b364daf68 pc=0x42b0d4
+runtime.runCleanups()
+	/usr/local/go/src/runtime/mcleanup.go:718 +0x45 fp=0x8b364dafe0 sp=0x8b364dafa0 pc=0x42b745
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364dafe8 sp=0x8b364dafe0 pc=0x4967c1
+created by runtime.(*cleanupQueue).createGs in goroutine 1
+	/usr/local/go/src/runtime/mcleanup.go:672 +0xa5
+
+goroutine 10 gp=0x8b3660eb40 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b75e18108?, 0x8b36520000?, 0x1c?, 0xa?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea1740 sp=0x8b36ea1720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea17c8 sp=0x8b36ea1740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea17e0 sp=0x8b36ea17c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea17e8 sp=0x8b36ea17e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 17 gp=0x8b3650c3c0 m=nil [GC worker (idle)]:
+runtime.gopark(0x3603780?, 0x1?, 0x4c?, 0x66?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea3740 sp=0x8b36ea3720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea37c8 sp=0x8b36ea3740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea37e0 sp=0x8b36ea37c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea37e8 sp=0x8b36ea37e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 18 gp=0x8b3650c5a0 m=nil [GC worker (idle)]:
+runtime.gopark(0x378a5d287ead?, 0x1?, 0x14?, 0x90?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d4f40 sp=0x8b364d4f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b364d4fc8 sp=0x8b364d4f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b364d4fe0 sp=0x8b364d4fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d4fe8 sp=0x8b364d4fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 19 gp=0x8b3650c780 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b8703d0ef?, 0x1?, 0xdf?, 0x10?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b398eef40 sp=0x8b398eef20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b398eefc8 sp=0x8b398eef40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b398eefe0 sp=0x8b398eefc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b398eefe8 sp=0x8b398eefe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 20 gp=0x8b3650c960 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b3f5ac4ae?, 0x1?, 0x2a?, 0xc4?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea2f40 sp=0x8b36ea2f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea2fc8 sp=0x8b36ea2f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea2fe0 sp=0x8b36ea2fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea2fe8 sp=0x8b36ea2fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 21 gp=0x8b3650cb40 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b8702aacc?, 0x1?, 0x1a?, 0xc1?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d6740 sp=0x8b364d6720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b364d67c8 sp=0x8b364d6740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b364d67e0 sp=0x8b364d67c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d67e8 sp=0x8b364d67e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 22 gp=0x8b3650cd20 m=nil [GC worker (idle)]:
+runtime.gopark(0x3603780?, 0x1?, 0x7a?, 0x79?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d6f40 sp=0x8b364d6f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b364d6fc8 sp=0x8b364d6f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b364d6fe0 sp=0x8b364d6fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d6fe8 sp=0x8b364d6fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 23 gp=0x8b3650cf00 m=nil [GC worker (idle)]:
+runtime.gopark(0x378ae0bba3bb?, 0x1?, 0x39?, 0x2c?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d7740 sp=0x8b364d7720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b364d77c8 sp=0x8b364d7740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b364d77e0 sp=0x8b364d77c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d77e8 sp=0x8b364d77e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 24 gp=0x8b3650d0e0 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b870bcd44?, 0x1?, 0x5c?, 0x9f?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b398ec740 sp=0x8b398ec720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b398ec7c8 sp=0x8b398ec740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b398ec7e0 sp=0x8b398ec7c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b398ec7e8 sp=0x8b398ec7e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 25 gp=0x8b3650d2c0 m=nil [GC worker (idle)]:
+runtime.gopark(0x378a5d2f2731?, 0x1?, 0xd2?, 0x1?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b398edf40 sp=0x8b398edf20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b398edfc8 sp=0x8b398edf40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b398edfe0 sp=0x8b398edfc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b398edfe8 sp=0x8b398edfe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 26 gp=0x8b3650d4a0 m=nil [GC worker (idle)]:
+runtime.gopark(0x3603780?, 0x1?, 0x1a?, 0xaf?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36528f40 sp=0x8b36528f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36528fc8 sp=0x8b36528f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36528fe0 sp=0x8b36528fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36528fe8 sp=0x8b36528fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 27 gp=0x8b3650d680 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b6bf3afde?, 0x3?, 0x75?, 0xbe?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea7f40 sp=0x8b36ea7f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea7fc8 sp=0x8b36ea7f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea7fe0 sp=0x8b36ea7fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea7fe8 sp=0x8b36ea7fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 28 gp=0x8b3650d860 m=nil [GC worker (idle)]:
+runtime.gopark(0x378a5d2eb418?, 0x3?, 0x65?, 0x5b?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b398ebf40 sp=0x8b398ebf20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b398ebfc8 sp=0x8b398ebf40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b398ebfe0 sp=0x8b398ebfc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b398ebfe8 sp=0x8b398ebfe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 29 gp=0x8b3650da40 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b86cd20fe?, 0x8b36521a00?, 0x1c?, 0xa?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea2740 sp=0x8b36ea2720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea27c8 sp=0x8b36ea2740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea27e0 sp=0x8b36ea27c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea27e8 sp=0x8b36ea27e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 30 gp=0x8b3650dc20 m=nil [GC worker (idle)]:
+runtime.gopark(0x378a5d2d5063?, 0x3?, 0x10?, 0x20?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea5f40 sp=0x8b36ea5f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea5fc8 sp=0x8b36ea5f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea5fe0 sp=0x8b36ea5fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea5fe8 sp=0x8b36ea5fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 31 gp=0x8b36530000 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b3f5566f3?, 0x1?, 0xb?, 0x9?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea3f40 sp=0x8b36ea3f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea3fc8 sp=0x8b36ea3f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea3fe0 sp=0x8b36ea3fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea3fe8 sp=0x8b36ea3fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 32 gp=0x8b365301e0 m=nil [GC worker (idle)]:
+runtime.gopark(0x378ae0bba5cf?, 0x1?, 0x38?, 0x46?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b3652df40 sp=0x8b3652df20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b3652dfc8 sp=0x8b3652df40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b3652dfe0 sp=0x8b3652dfc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b3652dfe8 sp=0x8b3652dfe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 33 gp=0x8b365303c0 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b5883b0a0?, 0x1?, 0x65?, 0x9?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b398ecf40 sp=0x8b398ecf20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b398ecfc8 sp=0x8b398ecf40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b398ecfe0 sp=0x8b398ecfc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b398ecfe8 sp=0x8b398ecfe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 34 gp=0x8b365305a0 m=nil [GC worker (idle)]:
+runtime.gopark(0x3603780?, 0x1?, 0x22?, 0x8a?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea7740 sp=0x8b36ea7720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea77c8 sp=0x8b36ea7740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea77e0 sp=0x8b36ea77c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea77e8 sp=0x8b36ea77e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 35 gp=0x8b36530780 m=nil [GC worker (idle), 1 minutes]:
+runtime.gopark(0x3771eb35938d?, 0x1?, 0xeb?, 0xb5?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea0740 sp=0x8b36ea0720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea07c8 sp=0x8b36ea0740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea07e0 sp=0x8b36ea07c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea07e8 sp=0x8b36ea07e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 36 gp=0x8b36530960 m=nil [GC worker (idle)]:
+runtime.gopark(0x378a5d29d01a?, 0x3?, 0x5d?, 0x7f?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b364d7f40 sp=0x8b364d7f20 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b364d7fc8 sp=0x8b364d7f40 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b364d7fe0 sp=0x8b364d7fc8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b364d7fe8 sp=0x8b364d7fe0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 11 gp=0x8b3660f4a0 m=nil [GC worker (idle)]:
+runtime.gopark(0x378b870bb80c?, 0x1?, 0xc?, 0xf1?, 0x0?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36ea4740 sp=0x8b36ea4720 pc=0x48ecee
+runtime.gcBgMarkWorker(0x8b36580e70)
+	/usr/local/go/src/runtime/mgc.go:1791 +0xeb fp=0x8b36ea47c8 sp=0x8b36ea4740 pc=0x4326cb
+runtime.gcBgMarkStartWorkers.gowrap1()
+	/usr/local/go/src/runtime/mgc.go:1695 +0x17 fp=0x8b36ea47e0 sp=0x8b36ea47c8 pc=0x4325b7
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ea47e8 sp=0x8b36ea47e0 pc=0x4967c1
+created by runtime.gcBgMarkStartWorkers in goroutine 1
+	/usr/local/go/src/runtime/mgc.go:1695 +0x105
+
+goroutine 39 gp=0x8b369043c0 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x0?, 0x8b36b3cdc8?, 0xd?, 0x29?, 0x8b36553770?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b3cd38 sp=0x8b36b3cd18 pc=0x48ecee
+runtime.chanrecv(0x8b3682e200, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b3cdb0 sp=0x8b36b3cd38 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x2282da0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b3cdd8 sp=0x8b36b3cdb0 pc=0x41c552
+testing.tRunner.func1()
+	/usr/local/go/src/testing/testing.go:1993 +0x445 fp=0x8b36b3cf70 sp=0x8b36b3cdd8 pc=0x5630c5
+testing.tRunner(0x8b36578b48, 0x222b448)
+	/usr/local/go/src/testing/testing.go:2042 +0x123 fp=0x8b36b3cfc0 sp=0x8b36b3cf70 pc=0x562c03
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b3cfe0 sp=0x8b36b3cfc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b3cfe8 sp=0x8b36b3cfe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 1
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 40 gp=0x8b369045a0 m=nil [runnable]:
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).enabled(0x8b36c58a80?, {0x0?, 0xee2829380?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:616 +0x90 fp=0x8b372bcb78 sp=0x8b372bcb70 pc=0xdaaa70
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).Run(0x8b3b6165a0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:656 +0x1bb fp=0x8b372bcf00 sp=0x8b372bcb78 pc=0xdaacfb
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.runner.func4(0x8b3b6165a0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:233 +0xcc fp=0x8b372bcfa8 sp=0x8b372bcf00 pc=0xe40b6c
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.func2(0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:300 +0x46 fp=0x8b372bd010 sp=0x8b372bcfa8 pc=0xe409c6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.explore({0x4901f3?, 0x1b8cf2d?, 0x2e32a0?, 0x8b36471290?}, 0x0, 0x0, 0x8b372bd330)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:996 +0x15b fp=0x8b372bd1b0 sp=0x8b372bd010 pc=0xdad39b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.Explore(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:950
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search(0x8b36578d88, 0x222b810, {0x0?, 0x0?, 0x0?, 0x0?}, 0x0, 0x1)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:311 +0x455 fp=0x8b372bd410 sp=0x8b372bd1b0 pc=0xe40435
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.differential(0x8b36578d88, 0x222b810, {0x2d52ed8?, 0x353e1e0?, 0x8b36b34760?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:336 +0x92 fp=0x8b372bdf08 sp=0x8b372bd410 pc=0xe40ff2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36578d88)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:264 +0x6b fp=0x8b372bdf70 sp=0x8b372bdf08 pc=0xe3ffab
+testing.tRunner(0x8b36578d88, 0x8b365537a0)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b372bdfc0 sp=0x8b372bdf70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b372bdfe0 sp=0x8b372bdfc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b372bdfe8 sp=0x8b372bdfe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 41 gp=0x8b36904780 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x7ffea55eaf88?, 0x8?, 0x0?, 0x8b36b3ee38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b3eda8 sp=0x8b36b3ed88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b3ee20 sp=0x8b36b3eda8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b3ee48 sp=0x8b36b3ee20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b3ee70 sp=0x8b36b3ee48 pc=0x563eaa
+testing.(*T).Parallel(0x8b36578fc8)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b3ef08 sp=0x8b36b3ee70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36578fc8)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b3ef70 sp=0x8b36b3ef08 pc=0xe3ff85
+testing.tRunner(0x8b36578fc8, 0x8b36553800)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b3efc0 sp=0x8b36b3ef70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b3efe0 sp=0x8b36b3efc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b3efe8 sp=0x8b36b3efe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 42 gp=0x8b36904960 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x7ffea55eaf88?, 0x8?, 0x0?, 0x8b36b3fe38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b3fda8 sp=0x8b36b3fd88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b3fe20 sp=0x8b36b3fda8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b3fe48 sp=0x8b36b3fe20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b3fe70 sp=0x8b36b3fe48 pc=0x563eaa
+testing.(*T).Parallel(0x8b36579208)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b3ff08 sp=0x8b36b3fe70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36579208)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b3ff70 sp=0x8b36b3ff08 pc=0xe3ff85
+testing.tRunner(0x8b36579208, 0x8b36553860)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b3ffc0 sp=0x8b36b3ff70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b3ffe0 sp=0x8b36b3ffc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b3ffe8 sp=0x8b36b3ffe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 43 gp=0x8b36904b40 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x7ffea55eaf88?, 0x8?, 0x0?, 0x8b36b38e38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b38da8 sp=0x8b36b38d88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b38e20 sp=0x8b36b38da8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b38e48 sp=0x8b36b38e20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b38e70 sp=0x8b36b38e48 pc=0x563eaa
+testing.(*T).Parallel(0x8b36579448)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b38f08 sp=0x8b36b38e70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36579448)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b38f70 sp=0x8b36b38f08 pc=0xe3ff85
+testing.tRunner(0x8b36579448, 0x8b365538c0)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b38fc0 sp=0x8b36b38f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b38fe0 sp=0x8b36b38fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b38fe8 sp=0x8b36b38fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 44 gp=0x8b36904d20 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x8b36480008?, 0x8?, 0x0?, 0x8b36b39e38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b39da8 sp=0x8b36b39d88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b39e20 sp=0x8b36b39da8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b39e48 sp=0x8b36b39e20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b39e70 sp=0x8b36b39e48 pc=0x563eaa
+testing.(*T).Parallel(0x8b36579688)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b39f08 sp=0x8b36b39e70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36579688)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b39f70 sp=0x8b36b39f08 pc=0xe3ff85
+testing.tRunner(0x8b36579688, 0x8b36553920)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b39fc0 sp=0x8b36b39f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b39fe0 sp=0x8b36b39fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b39fe8 sp=0x8b36b39fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 45 gp=0x8b36904f00 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x8b368b9ce0?, 0x8?, 0x0?, 0x8b36b3ae38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b3ada8 sp=0x8b36b3ad88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b3ae20 sp=0x8b36b3ada8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b3ae48 sp=0x8b36b3ae20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b3ae70 sp=0x8b36b3ae48 pc=0x563eaa
+testing.(*T).Parallel(0x8b365798c8)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b3af08 sp=0x8b36b3ae70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b365798c8)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b3af70 sp=0x8b36b3af08 pc=0xe3ff85
+testing.tRunner(0x8b365798c8, 0x8b36553980)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b3afc0 sp=0x8b36b3af70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b3afe0 sp=0x8b36b3afc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b3afe8 sp=0x8b36b3afe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 46 gp=0x8b369050e0 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x8b36b36068?, 0x8b368b9ce0?, 0x8?, 0x0?, 0x8b36b3be38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b3bda8 sp=0x8b36b3bd88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b3be20 sp=0x8b36b3bda8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b3be48 sp=0x8b36b3be20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b3be70 sp=0x8b36b3be48 pc=0x563eaa
+testing.(*T).Parallel(0x8b36579b08)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b3bf08 sp=0x8b36b3be70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36579b08)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b3bf70 sp=0x8b36b3bf08 pc=0xe3ff85
+testing.tRunner(0x8b36579b08, 0x8b365539e0)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b3bfc0 sp=0x8b36b3bf70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b3bfe0 sp=0x8b36b3bfc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b3bfe8 sp=0x8b36b3bfe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 47 gp=0x8b369052c0 m=nil [coroutine]:
+runtime.coroswitch(0x20f70d5?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b36a34b28 sp=0x8b36a34b08 pc=0x48b907
+iter.Pull[...].func2()
+	/usr/local/go/src/iter/iter.go:317 +0x5b fp=0x8b36a34b68 sp=0x8b36a34b28 pc=0xdb0b9b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).resume(0x8b37616a80, 0xee2f07086?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:624 +0x45 fp=0x8b36a34b78 sp=0x8b36a34b68 pc=0xdaaae5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).Run(0x8b3b4d4000)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:752 +0xd4b fp=0x8b36a34f00 sp=0x8b36a34b78 pc=0xdab88b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.runner.func4(0x8b3b4d4000)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:233 +0xcc fp=0x8b36a34fa8 sp=0x8b36a34f00 pc=0xe40b6c
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.func2(0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:300 +0x46 fp=0x8b36a35010 sp=0x8b36a34fa8 pc=0xe409c6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.explore({0x380017?, 0x8b369df240?, 0x425357?, 0x7f121f36c1e8?}, 0x0, 0x0, 0x8b36a35330)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:996 +0x15b fp=0x8b36a351b0 sp=0x8b36a35010 pc=0xdad39b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.Explore(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:950
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search(0x8b36579d48, 0x222b850, {0x0?, 0x0?, 0x0?, 0x0?}, 0x0, 0x1)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:311 +0x455 fp=0x8b36a35410 sp=0x8b36a351b0 pc=0xe40435
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.differential(0x8b36579d48, 0x222b850, {0x2d52ed8?, 0x353e1e0?, 0x8b36b34760?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:336 +0x92 fp=0x8b36a35f08 sp=0x8b36a35410 pc=0xe40ff2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36579d48)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:264 +0x6b fp=0x8b36a35f70 sp=0x8b36a35f08 pc=0xe3ffab
+testing.tRunner(0x8b36579d48, 0x8b36553a40)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36a35fc0 sp=0x8b36a35f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36a35fe0 sp=0x8b36a35fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36a35fe8 sp=0x8b36a35fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 81 gp=0x8b36905680 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x8b36480008?, 0x8?, 0x0?, 0x8b36b48e38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b48da8 sp=0x8b36b48d88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b48e20 sp=0x8b36b48da8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b48e48 sp=0x8b36b48e20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b48e70 sp=0x8b36b48e48 pc=0x563eaa
+testing.(*T).Parallel(0x8b3687c488)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b48f08 sp=0x8b36b48e70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687c488)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b48f70 sp=0x8b36b48f08 pc=0xe3ff85
+testing.tRunner(0x8b3687c488, 0x8b36553b00)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b48fc0 sp=0x8b36b48f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b48fe0 sp=0x8b36b48fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b48fe8 sp=0x8b36b48fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 82 gp=0x8b36905860 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x8b36b36068?, 0x8b368b9ce0?, 0x8?, 0x0?, 0x8b36b49e38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b49da8 sp=0x8b36b49d88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b49e20 sp=0x8b36b49da8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b49e48 sp=0x8b36b49e20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b49e70 sp=0x8b36b49e48 pc=0x563eaa
+testing.(*T).Parallel(0x8b3687c908)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b49f08 sp=0x8b36b49e70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687c908)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b49f70 sp=0x8b36b49f08 pc=0xe3ff85
+testing.tRunner(0x8b3687c908, 0x8b36553b60)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b49fc0 sp=0x8b36b49f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b49fe0 sp=0x8b36b49fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b49fe8 sp=0x8b36b49fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 83 gp=0x8b36905a40 m=nil [runnable]:
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*keyEncoder).meta(0x8b367d3130, 0x8b366907e0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:116 +0x1005 fp=0x8b36b83dd8 sp=0x8b36b83dd0 pc=0xe36ec5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*keyEncoder).value(0x8b367d3130, {0x20bdf40?, 0x8b366907c0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:197 +0xcc5 fp=0x8b36b83ee8 sp=0x8b36b83dd8 pc=0xe37ba5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*keyEncoder).value(0x8b367d3130, {0x1e99de0?, 0x8b3948a9e0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:192 +0x5e5 fp=0x8b36b83ff8 sp=0x8b36b83ee8 pc=0xe374c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).encode(0x8b37074140, 0x0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:353 +0x1a2e fp=0x8b36b84a68 sp=0x8b36b83ff8 pc=0xe3a82e
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).timeTerms(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:301
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).timeTerms-fm()
+	<autogenerated>:1 +0x19 fp=0x8b36b84a88 sp=0x8b36b84a68 pc=0xe59d39
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).tick(0x8b392be5a0, {0x20f7a47?, 0x0?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:854 +0x151 fp=0x8b36b84b78 sp=0x8b36b84a88 pc=0xdac571
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).Run(0x8b392be5a0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:750 +0xce5 fp=0x8b36b84f00 sp=0x8b36b84b78 pc=0xdab825
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.runner.func4(0x8b392be5a0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:233 +0xcc fp=0x8b36b84fa8 sp=0x8b36b84f00 pc=0xe40b6c
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.func2(0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:300 +0x46 fp=0x8b36b85010 sp=0x8b36b84fa8 pc=0xe409c6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.explore({0x1?, 0x2b?, 0x1?, 0x2b?}, 0x0, 0x0, 0x8b36b85330)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:996 +0x15b fp=0x8b36b851b0 sp=0x8b36b85010 pc=0xdad39b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.Explore(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:950
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search(0x8b3687cd88, 0x222b818, {0x0?, 0x0?, 0x0?, 0x0?}, 0x0, 0x1)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:311 +0x455 fp=0x8b36b85410 sp=0x8b36b851b0 pc=0xe40435
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.differential(0x8b3687cd88, 0x222b818, {0x2d52ed8?, 0x353e1e0?, 0x8b36b34760?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:336 +0x92 fp=0x8b36b85f08 sp=0x8b36b85410 pc=0xe40ff2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687cd88)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:264 +0x6b fp=0x8b36b85f70 sp=0x8b36b85f08 pc=0xe3ffab
+testing.tRunner(0x8b3687cd88, 0x8b36553bc0)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b85fc0 sp=0x8b36b85f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b85fe0 sp=0x8b36b85fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b85fe8 sp=0x8b36b85fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 84 gp=0x8b36905c20 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x7ffea55eb0f0?, 0x8?, 0x0?, 0x8b36b43e38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b43da8 sp=0x8b36b43d88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b43e20 sp=0x8b36b43da8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b43e48 sp=0x8b36b43e20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b43e70 sp=0x8b36b43e48 pc=0x563eaa
+testing.(*T).Parallel(0x8b3687d208)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b43f08 sp=0x8b36b43e70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687d208)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b43f70 sp=0x8b36b43f08 pc=0xe3ff85
+testing.tRunner(0x8b3687d208, 0x8b36553c20)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b43fc0 sp=0x8b36b43f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b43fe0 sp=0x8b36b43fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b43fe8 sp=0x8b36b43fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 85 gp=0x8b365312c0 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x8b36484008?, 0x8?, 0x40?, 0x8b36b44e38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b44da8 sp=0x8b36b44d88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b44e20 sp=0x8b36b44da8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b44e48 sp=0x8b36b44e20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b44e70 sp=0x8b36b44e48 pc=0x563eaa
+testing.(*T).Parallel(0x8b3687d688)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b44f08 sp=0x8b36b44e70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687d688)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b44f70 sp=0x8b36b44f08 pc=0xe3ff85
+testing.tRunner(0x8b3687d688, 0x8b36553c80)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b44fc0 sp=0x8b36b44f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b44fe0 sp=0x8b36b44fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b44fe8 sp=0x8b36b44fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 86 gp=0x8b365314a0 m=nil [chan receive, 982 minutes]:
+runtime.gopark(0x48ecee?, 0x8b36480008?, 0x8?, 0x0?, 0x8b36b45e38?)
+	/usr/local/go/src/runtime/proc.go:462 +0xce fp=0x8b36b45da8 sp=0x8b36b45d88 pc=0x48ecee
+runtime.chanrecv(0x8b36b36000, 0x0, 0x1)
+	/usr/local/go/src/runtime/chan.go:667 +0x4ae fp=0x8b36b45e20 sp=0x8b36b45da8 pc=0x41ca2e
+runtime.chanrecv1(0x8b36b360e0?, 0x0?)
+	/usr/local/go/src/runtime/chan.go:509 +0x12 fp=0x8b36b45e48 sp=0x8b36b45e20 pc=0x41c552
+testing.(*testState).waitParallel(0x8b36823360)
+	/usr/local/go/src/testing/testing.go:2220 +0xaa fp=0x8b36b45e70 sp=0x8b36b45e48 pc=0x563eaa
+testing.(*T).Parallel(0x8b3687d8c8)
+	/usr/local/go/src/testing/testing.go:1804 +0x245 fp=0x8b36b45f08 sp=0x8b36b45e70 pc=0x5627c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687d8c8)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:263 +0x45 fp=0x8b36b45f70 sp=0x8b36b45f08 pc=0xe3ff85
+testing.tRunner(0x8b3687d8c8, 0x8b36553ce0)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b36b45fc0 sp=0x8b36b45f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b36b45fe0 sp=0x8b36b45fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b45fe8 sp=0x8b36b45fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 87 gp=0x8b36531680 m=nil [coroutine]:
+runtime.coroswitch(0x20fd96c?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b368dcb28 sp=0x8b368dcb08 pc=0x48b907
+iter.Pull[...].func2()
+	/usr/local/go/src/iter/iter.go:317 +0x5b fp=0x8b368dcb68 sp=0x8b368dcb28 pc=0xdb0b9b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).resume(0x8b38d5a900, 0x20fd96c?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:624 +0x45 fp=0x8b368dcb78 sp=0x8b368dcb68 pc=0xdaaae5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).Run(0x8b392be3c0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:752 +0xd4b fp=0x8b368dcf00 sp=0x8b368dcb78 pc=0xdab88b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.runner.func4(0x8b392be3c0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:233 +0xcc fp=0x8b368dcfa8 sp=0x8b368dcf00 pc=0xe40b6c
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.func2(0x8b369421c0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:300 +0x46 fp=0x8b368dd010 sp=0x8b368dcfa8 pc=0xe409c6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.explore({0x380017?, 0x8b3643f240?, 0x425357?, 0x7f121f582468?}, 0x0, 0x0, 0x8b368dd330)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:996 +0x15b fp=0x8b368dd1b0 sp=0x8b368dd010 pc=0xdad39b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.Explore(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:950
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search(0x8b3687db08, 0x222b838, {0x0?, 0x0?, 0x0?, 0x0?}, 0x0, 0x1)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:311 +0x455 fp=0x8b368dd410 sp=0x8b368dd1b0 pc=0xe40435
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.differential(0x8b3687db08, 0x222b838, {0x2d52ed8?, 0x353e1e0?, 0x8b36b34760?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:336 +0x92 fp=0x8b368ddf08 sp=0x8b368dd410 pc=0xe40ff2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b3687db08)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:264 +0x6b fp=0x8b368ddf70 sp=0x8b368ddf08 pc=0xe3ffab
+testing.tRunner(0x8b3687db08, 0x8b36553d40)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b368ddfc0 sp=0x8b368ddf70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b368ddfe0 sp=0x8b368ddfc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b368ddfe8 sp=0x8b368ddfe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 89 gp=0x8b36531a40 m=nil [runnable]:
+runtime.mapaccess2_faststr(0x1e0f300, 0x8b374838f0, {0x8b37e02b30, 0x9})
+	/usr/local/go/src/internal/runtime/maps/runtime_faststr.go:161 +0x296 fp=0x8b368a5e08 sp=0x8b368a5e00 pc=0x416d16
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*keyEncoder).name(0x8b37f12a50, {0x20f7491, 0x3}, {0x8b37332400?, 0x222f710?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:76 +0x256 fp=0x8b368a5ee8 sp=0x8b368a5e08 pc=0xe35656
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*keyEncoder).value(0x8b37f12a50, {0x1c73720?, 0x8b372d25b0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:188 +0xb53 fp=0x8b368a5ff8 sp=0x8b368a5ee8 pc=0xe37a33
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).encode(0x8b364643c0, 0x0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:405 +0x3ce8 fp=0x8b368a6a68 sp=0x8b368a5ff8 pc=0xe3cae8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).timeTerms(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/state_test.go:301
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).timeTerms-fm()
+	<autogenerated>:1 +0x19 fp=0x8b368a6a88 sp=0x8b368a6a68 pc=0xe59d39
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).tick(0x8b38bf2780, {0x20fd97e?, 0x0?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:854 +0x151 fp=0x8b368a6b78 sp=0x8b368a6a88 pc=0xdac571
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).Run(0x8b38bf2780)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:750 +0xce5 fp=0x8b368a6f00 sp=0x8b368a6b78 pc=0xdab825
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.runner.func4(0x8b38bf2780)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:233 +0xcc fp=0x8b368a6fa8 sp=0x8b368a6f00 pc=0xe40b6c
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search.func2(0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:300 +0x46 fp=0x8b368a7010 sp=0x8b368a6fa8 pc=0xe409c6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.explore({0x380017?, 0x8b3643b240?, 0x425357?, 0x7f121f715de8?}, 0x0, 0x0, 0x8b368a7330)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:996 +0x15b fp=0x8b368a71b0 sp=0x8b368a7010 pc=0xdad39b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.Explore(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:950
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.search(0x8b36602008, 0x222b848, {0x0?, 0x0?, 0x0?, 0x0?}, 0x0, 0x1)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:311 +0x455 fp=0x8b368a7410 sp=0x8b368a71b0 pc=0xe40435
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.differential(0x8b36602008, 0x222b848, {0x2d52ed8?, 0x353e1e0?, 0x8b36b34760?, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:336 +0x92 fp=0x8b368a7f08 sp=0x8b368a7410 pc=0xe40ff2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.TestModelStatefulAgreesWithStateless.func1(0x8b36602008)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:264 +0x6b fp=0x8b368a7f70 sp=0x8b368a7f08 pc=0xe3ffab
+testing.tRunner(0x8b36602008, 0x8b36553e00)
+	/usr/local/go/src/testing/testing.go:2036 +0xea fp=0x8b368a7fc0 sp=0x8b368a7f70 pc=0x562bca
+testing.(*T).Run.gowrap1()
+	/usr/local/go/src/testing/testing.go:2101 +0x1b fp=0x8b368a7fe0 sp=0x8b368a7fc0 pc=0x563d5b
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b368a7fe8 sp=0x8b368a7fe0 pc=0x4967c1
+created by testing.(*T).Run in goroutine 39
+	/usr/local/go/src/testing/testing.go:2101 +0x4c5
+
+goroutine 171300050 gp=0x8b36b5f0e0 m=nil [coroutine]:
+runtime.coroswitch(0x10?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b3800ae50 sp=0x8b3800ae30 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b3800ae88 sp=0x8b3800ae50 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b37bbc3c0, {0x20f7a43?, 0x2103072?}, 0xd?, {0x8b3800aef0?, 0x8b3800af00?, 0x0?}, 0x20?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b3800aea8 sp=0x8b3800ae88 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).WaitQuiet(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:544
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.init.func8.3(0x8b37bbc3c0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:116 +0xef fp=0x8b3800af10 sp=0x8b3800aea8 pc=0xde51af
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b37c7e440?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b3800af38 sp=0x8b3800af10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b3800afa0 sp=0x8b3800af38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b3800afe0 sp=0x8b3800afa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b3800afe8 sp=0x8b3800afe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 88
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299518 gp=0x8b36c04d20 m=nil [coroutine]:
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:69 fp=0x8b3800efe0 sp=0x8b3800efd8 pc=0x41d180
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b3800efe8 sp=0x8b3800efe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 83
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299957 gp=0x8b36a82d20 m=nil [coroutine]:
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:69 fp=0x8b36ed8fe0 sp=0x8b36ed8fd8 pc=0x41d180
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36ed8fe8 sp=0x8b36ed8fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 40
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299519 gp=0x8b368c23c0 m=nil [coroutine]:
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:69 fp=0x8b38b96fe0 sp=0x8b38b96fd8 pc=0x41d180
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38b96fe8 sp=0x8b38b96fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 83
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171300038 gp=0x8b36abaf00 m=nil [coroutine]:
+runtime.coroswitch(0x0?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b36aee7a0 sp=0x8b36aee780 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b36aee7d8 sp=0x8b36aee7a0 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b38d5ab40, {0x8b3872c480?, 0x8b3872c48b?}, 0x80?, {0x8b36aee850?, 0x8b36aee890?, 0x0?}, 0x6df905?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b36aee7f8 sp=0x8b36aee7d8 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Call(0x8b38d5ab40, {0x8b3872c480, 0x1c}, 0x8b36aee940)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:469 +0x7c fp=0x8b36aee870 sp=0x8b36aee7f8 pc=0xda9bfc
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.call({0x8b372e8d20?, 0x8b38d5ab40?}, {0x8b3872c480?, 0x20f9465?}, 0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:53 +0x36 fp=0x8b36aee8a0 sp=0x8b36aee870 pc=0xdfc616
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.Get({0x8b372e8d20?, 0x8b38d5ab40?}, {0x48ccd3?, 0x48c405?}, {{0x0?, 0x1f873a0?}, {0x20f9465?, 0x410a66?}}, {0x2100468, 0xb}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:85 +0x125 fp=0x8b36aee9b0 sp=0x8b36aee8a0 pc=0xdfc8c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*modelServer).Get(0x8b36aeea01?, {0x22516c8?, 0x3601cc0?}, {{0x0?, 0x6008b36aef878?}, {0x20f9465?, 0x7f1266320678?}}, {0x2100468?, 0x8b36c00808?}, {0x2109872, ...})
+	<autogenerated>:1 +0x85 fp=0x8b36aeea20 sp=0x8b36aee9b0 pc=0xe572e5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.firstCall.Get({{0x2249f20?, 0x8b375a9260?}, 0x8b3834cf58?, 0x8b367fe440?}, {0x22516c8?, 0x3601cc0?}, {{0x0, 0x0}, {0x20f9465, 0x6}}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:132 +0xa7 fp=0x8b36aeeab0 sp=0x8b36aeea20 pc=0xdfd3a7
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*firstCall).Get(0x8b36aef000?, {0x22516c8?, 0x3601cc0?}, {{0x0?, 0x6?}, {0x20f9465?, 0xb?}}, {0x2100468?, 0x11?}, {0x2109872, ...})
+	<autogenerated>:1 +0x98 fp=0x8b36aeeb30 sp=0x8b36aeeab0 pc=0xe57638
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*protocol).release(0x8b36aefd60, {0x22516c8, 0x3601cc0}, {0x2100468, 0xb}, {0x8b36aefe30, 0x1, 0x1})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/release.go:114 +0x69a fp=0x8b36aefb00 sp=0x8b36aeeb30 pc=0xdf25fa
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).releaser.func1(0x8b38d5ab40)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:615 +0x57d fp=0x8b36aeff10 sp=0x8b36aefb00 pc=0xe052dd
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b39f106a0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b36aeff38 sp=0x8b36aeff10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b36aeffa0 sp=0x8b36aeff38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b36aeffe0 sp=0x8b36aeffa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36aeffe8 sp=0x8b36aeffe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 87
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171300035 gp=0x8b36abb2c0 m=nil [runnable]:
+regexp.(*inputString).step(0x8b3647a760?, 0x23?)
+	/usr/local/go/src/regexp/regexp.go:385 +0x77 fp=0x8b38b9d7f8 sp=0x8b38b9d7f0 pc=0x5e6677
+regexp.(*Regexp).tryBacktrack(0x8b366ab4a0, 0x8b3647a6e0, {0x2256720, 0x8b3647a760}, 0x38840060?, 0x53?)
+	/usr/local/go/src/regexp/backtrack.go:207 +0x72a fp=0x8b38b9d890 sp=0x8b38b9d7f8 pc=0x5dff4a
+regexp.(*Regexp).backtrack(0x8b366ab4a0, {0x0, 0x0, 0x0}, {0x8b3752b700, 0x32}, 0x0, 0x0, {0x3601cc0, 0x0, ...})
+	/usr/local/go/src/regexp/backtrack.go:324 +0x1ed fp=0x8b38b9d910 sp=0x8b38b9d890 pc=0x5e058d
+regexp.(*Regexp).doExecute(0x1c?, {0x0, 0x0}, {0x0, 0x0, 0x0}, {0x8b3752b700, 0x32}, 0x0, 0x0, ...)
+	/usr/local/go/src/regexp/exec.go:535 +0x277 fp=0x8b38b9d9b0 sp=0x8b38b9d910 pc=0x5e2717
+regexp.(*Regexp).doMatch(...)
+	/usr/local/go/src/regexp/exec.go:514
+regexp.(*Regexp).MatchString(...)
+	/usr/local/go/src/regexp/regexp.go:507
+k8s.io/apimachinery/pkg/util/validation.IsDNS1123Subdomain({0x8b3752b700?, 0x2106106?})
+	/home/diegobraga/go/pkg/mod/k8s.io/apimachinery@v0.37.2/pkg/util/validation/validation.go:203 +0x105 fp=0x8b38b9da90 sp=0x8b38b9d9b0 pc=0x713485
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.FinalizerPrefix({{0x211c525, 0x1c}, {0x20f946b, 0x6}})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/names.go:71 +0x154 fp=0x8b38b9db48 sp=0x8b38b9da90 pc=0xdeccb4
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.FinalizerName({{0x211c525, 0x1c}, {0x20f946b, 0x6}}, {0x2100468, 0xb})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/names.go:85 +0x4f fp=0x8b38b9dc00 sp=0x8b38b9db48 pc=0xdece6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*verified).protectedEvent(0x8b3ad70d90, {0x2278228, 0x8b3750edc0}, {0x2278228, 0x8b36811560})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/verified.go:271 +0x2ba fp=0x8b38b9dd08 sp=0x8b38b9dc00 pc=0xdf717a
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*process).deliver(0x8b36f91400, {{{{0x0, 0x0}, {0x20f9465, 0x6}}, {0x2100468, 0xb}, {0x2109872, 0x11}}, 0x8b3750edc0, ...}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:212 +0x2d8 fp=0x8b38b9ddb0 sp=0x8b38b9dd08 pc=0xdfe1b8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).informer.func1(0x8b38d5a900)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:418 +0x365 fp=0x8b38b9df10 sp=0x8b38b9ddb0 pc=0xe02be5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b37c7cfc0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b38b9df38 sp=0x8b38b9df10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b38b9dfa0 sp=0x8b38b9df38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b38b9dfe0 sp=0x8b38b9dfa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38b9dfe8 sp=0x8b38b9dfe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 87
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299988 gp=0x8b377eb0e0 m=nil [runnable]:
+runtime.gcTrigger.test({0x0?, 0x0?, 0x0?})
+	/usr/local/go/src/runtime/mgc.go:706 +0xdc fp=0x8b36b62e58 sp=0x8b36b62e50 pc=0x42ffbc
+runtime.mallocgcSmallNoscan(0x15?, 0x8b3866e420?, 0x18?)
+	/usr/local/go/src/runtime/malloc.go:1447 +0x27e fp=0x8b36b62eb0 sp=0x8b36b62e58 pc=0x425a1e
+runtime.mallocgc(0x1c0, 0x0, 0x0)
+	/usr/local/go/src/runtime/malloc.go:1143 +0xcc fp=0x8b36b62ee0 sp=0x8b36b62eb0 pc=0x48c42c
+runtime.growslice(0x0, 0x1e0fa60?, 0x8b3866e420?, 0x8?, 0x2?)
+	/usr/local/go/src/runtime/slice.go:265 +0x573 fp=0x8b36b62f50 sp=0x8b36b62ee0 pc=0x491a33
+encoding/json.Marshal({0x1e0fa60, 0x8b3866e420})
+	/usr/local/go/src/encoding/json/encode.go:213 +0x125 fp=0x8b36b63010 sp=0x8b36b62f50 pc=0x59f565
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Model).Patch(0x8b367ed720, {{{0x211c525, 0x1c}, {0x20f946b, 0x6}}, {0x2100468, 0xb}, {0x20f70d5, 0x2}}, {0x211c541, ...}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/model.go:252 +0x335 fp=0x8b36b63648 sp=0x8b36b63010 pc=0xda6075
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.Patch.func1()
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:98 +0xfb fp=0x8b36b63720 sp=0x8b36b63648 pc=0xdfcf5b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Call(0x8b37616a80, {0x8b36e4fba0, 0xf}, 0x8b36b63868)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:489 +0x1fb fp=0x8b36b63798 sp=0x8b36b63720 pc=0xda9d7b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.call({0x8b367ed720?, 0x8b37616a80?}, {0x8b36e4fba0?, 0x20f946b?}, 0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:53 +0x36 fp=0x8b36b637c8 sp=0x8b36b63798 pc=0xdfc616
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.Patch({0x8b367ed720?, 0x8b37616a80?}, {0x20f70d5?, 0x2?}, {{0x211c525?, 0x8b38f7afc0?}, {0x20f946b?, 0x1?}}, {0x2100468, 0xb}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:96 +0x172 fp=0x8b36b63900 sp=0x8b36b637c8 pc=0xdfccb2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1.2()
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:546 +0xe74 fp=0x8b36b63db0 sp=0x8b36b63900 pc=0xe04714
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1(0x8b37616a80)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:575 +0x502 fp=0x8b36b63f10 sp=0x8b36b63db0 pc=0xe03762
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b3948b8e0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b36b63f38 sp=0x8b36b63f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b36b63fa0 sp=0x8b36b63f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b36b63fe0 sp=0x8b36b63fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36b63fe8 sp=0x8b36b63fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 47
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299959 gp=0x8b377eb680 m=nil [coroutine]:
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:69 fp=0x8b38ce6fe0 sp=0x8b38ce6fd8 pc=0x41d180
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38ce6fe8 sp=0x8b38ce6fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 40
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171300037 gp=0x8b37189c20 m=nil [coroutine]:
+runtime.coroswitch(0x0?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b36a70678 sp=0x8b36a70658 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b36a706b0 sp=0x8b36a70678 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b38d5aa80, {0x8b3834d500?, 0x8b3834d50d?}, 0x58?, {0x8b36a70728?, 0x8b36a70768?, 0x0?}, 0x8b36a70780?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b36a706d0 sp=0x8b36a706b0 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Call(0x8b38d5aa80, {0x8b3834d500, 0xf}, 0x8b36a70818)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:469 +0x7c fp=0x8b36a70748 sp=0x8b36a706d0 pc=0xda9bfc
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.call({0x8b372e8d20?, 0x8b38d5aa80?}, {0x8b3834d500?, 0x20f946b?}, 0x1e0fa60?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:53 +0x36 fp=0x8b36a70778 sp=0x8b36a70748 pc=0xdfc616
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.Patch({0x8b372e8d20?, 0x8b38d5aa80?}, {0x8b36d4c180?, 0x59f680?}, {{0x211c525?, 0x20a99e0?}, {0x20f946b?, 0x8b36a70910?}}, {0x2100468, 0xb}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:96 +0x172 fp=0x8b36a708b0 sp=0x8b36a70778 pc=0xdfccb2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*modelServer).Patch(0x0?, {0x22516c8?, 0x3601cc0?}, {{0x211c525?, 0x8b372e8d20?}, {0x20f946b?, 0x7c94d200000000?}}, {0x2100468?, 0x8b366065a0?}, {0x20f70d5, ...}, ...)
+	<autogenerated>:1 +0xd3 fp=0x8b36a70948 sp=0x8b36a708b0 pc=0xe57513
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*protocol).announce(0x8b36a71cf0, {0x22516c8, 0x3601cc0}, {0x2278228, 0x8b36810d80}, {0x8b3724ef80, 0x1, 0x1}, 0x8b36a711d8)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/acquire.go:255 +0x418 fp=0x8b36a70ec8 sp=0x8b36a70948 pc=0xde9b58
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*protocol).acquire(0x8b36a71cf0, {0x22516c8, 0x3601cc0}, {0x2278228, 0x8b36810d80}, {0x8b3682cb90, 0x1, 0x5008b36812901?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/acquire.go:191 +0xa59 fp=0x8b36a71900 sp=0x8b36a70ec8 pc=0xde8a59
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1.2()
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:502 +0x646 fp=0x8b36a71db0 sp=0x8b36a71900 pc=0xe03ee6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1(0x8b38d5aa80)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:562 +0x34d fp=0x8b36a71f10 sp=0x8b36a71db0 pc=0xe035ad
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b3a64c840?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b36a71f38 sp=0x8b36a71f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b36a71fa0 sp=0x8b36a71f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b36a71fe0 sp=0x8b36a71fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36a71fe8 sp=0x8b36a71fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 87
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171300039 gp=0x8b36c3f680 m=nil [coroutine]:
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:69 fp=0x8b37ae4fe0 sp=0x8b37ae4fd8 pc=0x41d180
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b37ae4fe8 sp=0x8b37ae4fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 87
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299974 gp=0x8b382f2b40 m=nil [coroutine]:
+runtime.coroswitch(0x10?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b38b9ce50 sp=0x8b38b9ce30 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b38b9ce88 sp=0x8b38b9ce50 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b365c3140, {0x20f7a43?, 0x2103072?}, 0xd?, {0x8b38b9cef0?, 0x8b38b9cf00?, 0x0?}, 0x20?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b38b9cea8 sp=0x8b38b9ce88 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).WaitQuiet(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:544
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.init.func8.3(0x8b365c3140)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/stateful_test.go:116 +0xef fp=0x8b38b9cf10 sp=0x8b38b9cea8 pc=0xde51af
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b3948b8e0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b38b9cf38 sp=0x8b38b9cf10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b38b9cfa0 sp=0x8b38b9cf38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b38b9cfe0 sp=0x8b38b9cfa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38b9cfe8 sp=0x8b38b9cfe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 89
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299952 gp=0x8b382f2780 m=nil [coroutine]:
+runtime.coroswitch(0x1ecf5a0?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b36bcbd58 sp=0x8b36bcbd38 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b36bcbd90 sp=0x8b36bcbd58 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b37bbc240, {0x20f8469?, 0x20f70d5?}, 0x2?, {0x8b366c1650?, 0x8b36ac8900?, 0x0?}, 0x9?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b36bcbdb0 sp=0x8b36bcbd90 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).WaitQuiet(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:544
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1(0x8b37bbc240)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:559 +0x338 fp=0x8b36bcbf10 sp=0x8b36bcbdb0 pc=0xe03598
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b36bcbf38 sp=0x8b36bcbf10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b36bcbfa0 sp=0x8b36bcbf38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b36bcbfe0 sp=0x8b36bcbfa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36bcbfe8 sp=0x8b36bcbfe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 88
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299958 gp=0x8b381a7a40 m=nil [coroutine]:
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:69 fp=0x8b38ce3fe0 sp=0x8b38ce3fd8 pc=0x41d180
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38ce3fe8 sp=0x8b38ce3fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 40
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299517 gp=0x8b380d7680 m=nil [coroutine]:
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:69 fp=0x8b38011fe0 sp=0x8b38011fd8 pc=0x41d180
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38011fe8 sp=0x8b38011fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 83
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299987 gp=0x8b371881e0 m=nil [coroutine]:
+runtime.coroswitch(0x10?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b38b98d58 sp=0x8b38b98d38 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b38b98d90 sp=0x8b38b98d58 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b376166c0, {0x20f8464?, 0x20f9465?}, 0x6?, {0x2100468?, 0xb?, 0x0?}, 0x11?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b38b98db0 sp=0x8b38b98d90 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).informer.func1(0x8b376166c0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:415 +0xd7 fp=0x8b38b98f10 sp=0x8b38b98db0 pc=0xe02957
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b37c7e440?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b38b98f38 sp=0x8b38b98f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b38b98fa0 sp=0x8b38b98f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b38b98fe0 sp=0x8b38b98fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38b98fe8 sp=0x8b38b98fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 47
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299989 gp=0x8b37036000 m=nil [coroutine]:
+runtime.coroswitch(0x0?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b36bc7aa8 sp=0x8b36bc7a88 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b36bc7ae0 sp=0x8b36bc7aa8 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b37616b40, {0x20fab33?, 0x2239a60?}, 0xe0?, {0x3601cc0?, 0x2100468?, 0x0?}, 0x8b368efe30?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b36bc7b00 sp=0x8b36bc7ae0 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).WaitQuiet(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:544
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).releaser.func1(0x8b37616b40)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:630 +0xa0f fp=0x8b36bc7f10 sp=0x8b36bc7b00 pc=0xe0576f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b3a64c840?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b36bc7f38 sp=0x8b36bc7f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b36bc7fa0 sp=0x8b36bc7f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b36bc7fe0 sp=0x8b36bc7fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36bc7fe8 sp=0x8b36bc7fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 47
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299956 gp=0x8b370363c0 m=nil [coroutine]:
+runtime.coroswitch(0x10?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b38ce2d58 sp=0x8b38ce2d38 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b38ce2d90 sp=0x8b38ce2d58 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b36c58840, {0x20f8464?, 0x20f946b?}, 0x6?, {0x2100468?, 0xb?, 0x0?}, 0x2?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b38ce2db0 sp=0x8b38ce2d90 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).informer.func1(0x8b36c58840)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:415 +0xd7 fp=0x8b38ce2f10 sp=0x8b38ce2db0 pc=0xe02957
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b39f11420?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b38ce2f38 sp=0x8b38ce2f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b38ce2fa0 sp=0x8b38ce2f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b38ce2fe0 sp=0x8b38ce2fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b38ce2fe8 sp=0x8b38ce2fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 40
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299515 gp=0x8b39854780 m=nil [coroutine]:
+runtime.coroswitch(0x10?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b37ae7d58 sp=0x8b37ae7d38 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b37ae7d90 sp=0x8b37ae7d58 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b38d5a3c0, {0x20f8464?, 0x2249f80?}, 0xc0?, {0x8b36662930?, 0x8b3654a100?, 0x0?}, 0x3601cc0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b37ae7db0 sp=0x8b37ae7d90 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).informer.func1(0x8b38d5a3c0)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:415 +0xd7 fp=0x8b37ae7f10 sp=0x8b37ae7db0 pc=0xe02957
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b36725900?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b37ae7f38 sp=0x8b37ae7f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b37ae7fa0 sp=0x8b37ae7f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b37ae7fe0 sp=0x8b37ae7fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b37ae7fe8 sp=0x8b37ae7fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 83
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299971 gp=0x8b389774a0 m=nil [coroutine]:
+runtime.coroswitch(0x10?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b37ae0d58 sp=0x8b37ae0d38 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b37ae0d90 sp=0x8b37ae0d58 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b365c2780, {0x20f8464?, 0x20f9465?}, 0x6?, {0x2100468?, 0xb?, 0x0?}, 0x11?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b37ae0db0 sp=0x8b37ae0d90 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).informer.func1(0x8b365c2780)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:415 +0xd7 fp=0x8b37ae0f10 sp=0x8b37ae0db0 pc=0xe02957
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b3873cda0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b37ae0f38 sp=0x8b37ae0f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b37ae0fa0 sp=0x8b37ae0f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b37ae0fe0 sp=0x8b37ae0fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b37ae0fe8 sp=0x8b37ae0fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 89
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299973 gp=0x8b3b7cd680 m=nil [coroutine]:
+runtime.coroswitch(0x8b36a94830?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b36a947d0 sp=0x8b36a947b0 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b36a94808 sp=0x8b36a947d0 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b365c3080, {0x8b37e028d0?, 0x6?}, 0x1?, {0x6?, 0x8b37e028d0?, 0x0?}, 0x8b36a948b0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b36a94828 sp=0x8b36a94808 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Call(0x8b365c3080, {0x8b37e028d0, 0xb}, 0x8b36a94970)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:469 +0x7c fp=0x8b36a948a0 sp=0x8b36a94828 pc=0xda9bfc
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.call({0x8b36846140?, 0x8b365c3080?}, {0x8b37e028d0?, 0x20f946b?}, 0x8b36572120?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:53 +0x36 fp=0x8b36a948d0 sp=0x8b36a948a0 pc=0xdfc616
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.List({0x8b36846140?, 0x8b365c3080?}, {0x425cb4?, 0x3008b36509008?}, {{0x211c525?, 0x7f126631fd80?}, {0x20f946b?, 0x3000000dfd3a7?}}, {0x2100468, 0xb})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:107 +0xf5 fp=0x8b36a949d0 sp=0x8b36a948d0 pc=0xdfd0b5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*modelServer).List(0x18?, {0x22516c8?, 0x3601cc0?}, {{0x211c525?, 0x800000048cc1f?}, {0x20f946b?, 0x7f126631fd80?}}, {0x2100468?, 0x8b36509008?})
+	<autogenerated>:1 +0x5f fp=0x8b36a94a30 sp=0x8b36a949d0 pc=0xe573bf
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.firstCall.List({{0x2249f20?, 0x8b36695cc0?}, 0x8b37e0243b?, 0x8b3890e9e0?}, {0x22516c8?, 0x3601cc0?}, {{0x211c525, 0x1c}, {0x20f946b, 0x6}}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:144 +0x8e fp=0x8b36a94ac0 sp=0x8b36a94a30 pc=0xdfd68e
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*firstCall).List(0x0?, {0x22516c8?, 0x3601cc0?}, {{0x211c525?, 0x1ee0e20?}, {0x20f946b?, 0xcca2e51310000?}}, {0x2100468?, 0xb?})
+	<autogenerated>:1 +0x7b fp=0x8b36a94b30 sp=0x8b36a94ac0 pc=0xe5773b
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*protocol).release(0x8b36a95d60, {0x22516c8, 0x3601cc0}, {0x2100468, 0xb}, {0x8b36a95e30, 0x1, 0x1})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/release.go:193 +0x13f5 fp=0x8b36a95b00 sp=0x8b36a94b30 pc=0xdf3355
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).releaser.func1(0x8b365c3080)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:615 +0x57d fp=0x8b36a95f10 sp=0x8b36a95b00 pc=0xe052dd
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b37f8a8c0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b36a95f38 sp=0x8b36a95f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b36a95fa0 sp=0x8b36a95f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b36a95fe0 sp=0x8b36a95fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b36a95fe8 sp=0x8b36a95fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 89
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299951 gp=0x8b3b616960 m=nil [coroutine]:
+runtime.coroswitch(0x10?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b3800fd58 sp=0x8b3800fd38 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b3800fd90 sp=0x8b3800fd58 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b37bbc180, {0x20f8464?, 0x1?}, 0x72?, {0x11?, 0x8b3800fe50?, 0x0?}, 0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b3800fdb0 sp=0x8b3800fd90 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Wait(...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:519
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).informer.func1(0x8b37bbc180)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:415 +0xd7 fp=0x8b3800ff10 sp=0x8b3800fdb0 pc=0xe02957
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b367ff340?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b3800ff38 sp=0x8b3800ff10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b3800ffa0 sp=0x8b3800ff38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b3800ffe0 sp=0x8b3800ffa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b3800ffe8 sp=0x8b3800ffe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 88
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299972 gp=0x8b39045680 m=nil [coroutine]:
+runtime.coroswitch(0x0?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b369a56f0 sp=0x8b369a56d0 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b369a5728 sp=0x8b369a56f0 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b365c2840, {0x8b38b2c7a0?, 0x8b38b2c7ab?}, 0xd0?, {0x8b369a57a0?, 0x8b369a57e0?, 0x0?}, 0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b369a5748 sp=0x8b369a5728 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Call(0x8b365c2840, {0x8b38b2c7a0, 0x1c}, 0x8b369a5890)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:469 +0x7c fp=0x8b369a57c0 sp=0x8b369a5748 pc=0xda9bfc
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.call({0x8b36846140?, 0x8b365c2840?}, {0x8b38b2c7a0?, 0x20f9465?}, 0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:53 +0x36 fp=0x8b369a57f0 sp=0x8b369a57c0 pc=0xdfc616
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.Get({0x8b36846140?, 0x8b365c2840?}, {0x0?, 0x0?}, {{0x0?, 0x0?}, {0x20f9465?, 0x20f70d5?}}, {0x2100468, 0xb}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:85 +0x125 fp=0x8b369a5900 sp=0x8b369a57f0 pc=0xdfc8c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1.2()
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:535 +0xa2c fp=0x8b369a5db0 sp=0x8b369a5900 pc=0xe042cc
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1(0x8b365c2840)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:562 +0x34d fp=0x8b369a5f10 sp=0x8b369a5db0 pc=0xe035ad
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b37c7cfc0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b369a5f38 sp=0x8b369a5f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b369a5fa0 sp=0x8b369a5f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b369a5fe0 sp=0x8b369a5fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b369a5fe8 sp=0x8b369a5fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 89
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171299516 gp=0x8b3b2a65a0 m=nil [coroutine]:
+runtime.coroswitch(0x0?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b369f6a60 sp=0x8b369f6a40 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b369f6a98 sp=0x8b369f6a60 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b38d5a480, {0x8b3646dd00?, 0x8b3646dd0d?}, 0x40?, {0x8b369f6b10?, 0x8b369f6b50?, 0x0?}, 0x8b370403c0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b369f6ab8 sp=0x8b369f6a98 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Call(0x8b38d5a480, {0x8b3646dd00, 0x1e}, 0x8b369f6c00)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:469 +0x7c fp=0x8b369f6b30 sp=0x8b369f6ab8 pc=0xda9bfc
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.call({0x8b367d2a50?, 0x8b38d5a480?}, {0x8b3646dd00?, 0x20f9465?}, 0x59f5c5?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:53 +0x36 fp=0x8b369f6b60 sp=0x8b369f6b30 pc=0xdfc616
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.Patch({0x8b367d2a50?, 0x8b38d5a480?}, {0x8b36b35840?, 0x8b38d5a480?}, {{0x0?, 0x0?}, {0x20f9465?, 0x0?}}, {0x2100468, 0xb}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:96 +0x172 fp=0x8b369f6c98 sp=0x8b369f6b60 pc=0xdfccb2
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*modelServer).Patch(0xf?, {0x22516c8?, 0x3601cc0?}, {{0x0?, 0x8b369f6df8?}, {0x20f9465?, 0x8b369f6ec8?}}, {0x2100468?, 0x1?}, {0x2109872, ...}, ...)
+	<autogenerated>:1 +0xd3 fp=0x8b369f6d30 sp=0x8b369f6c98 pc=0xe57513
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*protocol).write(0x8b369f7cf0, {0x22516c8, 0x3601cc0}, {{0x0, 0x0}, {0x20f9465, 0x6}, {0x2100468, 0xb}, {0x2109872, ...}}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/acquire.go:309 +0x26d fp=0x8b369f6ec8 sp=0x8b369f6d30 pc=0xdea7ad
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*protocol).acquire(0x8b369f7cf0, {0x22516c8, 0x3601cc0}, {0x2278228, 0x8b36d3eea0}, {0x8b36b9fca0, 0x1, 0x0?})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/acquire.go:210 +0xf18 fp=0x8b369f7900 sp=0x8b369f6ec8 pc=0xde8f18
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1.2()
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:502 +0x646 fp=0x8b369f7db0 sp=0x8b369f7900 pc=0xe03ee6
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).holder.func1(0x8b38d5a480)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:562 +0x34d fp=0x8b369f7f10 sp=0x8b369f7db0 pc=0xe035ad
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b379e62a0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b369f7f38 sp=0x8b369f7f10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b369f7fa0 sp=0x8b369f7f38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b369f7fe0 sp=0x8b369f7fa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b369f7fe8 sp=0x8b369f7fe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 83
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+goroutine 171300049 gp=0x8b38976000 m=nil [coroutine]:
+runtime.coroswitch(0x0?)
+	/usr/local/go/src/runtime/coro.go:94 +0x47 fp=0x8b368ec7a0 sp=0x8b368ec780 pc=0x48b907
+iter.Pull[...].func1.1()
+	/usr/local/go/src/iter/iter.go:287 +0x4f fp=0x8b368ec7d8 sp=0x8b368ec7a0 pc=0xdb0e6f
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).park(0x8b37bbc300, {0x8b37f9cb00?, 0x8b37f9cb0b?}, 0x80?, {0x8b368ec850?, 0x8b368ec890?, 0x0?}, 0x6df905?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:457 +0x98 fp=0x8b368ec7f8 sp=0x8b368ec7d8 pc=0xda9ad8
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Actor).Call(0x8b37bbc300, {0x8b37f9cb00, 0x1c}, 0x8b368ec940)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:469 +0x7c fp=0x8b368ec870 sp=0x8b368ec7f8 pc=0xda9bfc
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.call({0x8b367f87d0?, 0x8b37bbc300?}, {0x8b37f9cb00?, 0x20f9465?}, 0x0?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:53 +0x36 fp=0x8b368ec8a0 sp=0x8b368ec870 pc=0xdfc616
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.modelServer.Get({0x8b367f87d0?, 0x8b37bbc300?}, {0x48ccd3?, 0x48c405?}, {{0x0?, 0x1f873a0?}, {0x20f9465?, 0x410a66?}}, {0x2100468, 0xb}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:85 +0x125 fp=0x8b368ec9b0 sp=0x8b368ec8a0 pc=0xdfc8c5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*modelServer).Get(0x8b368eca01?, {0x22516c8?, 0x3601cc0?}, {{0x0?, 0x6008b368ed878?}, {0x20f9465?, 0x7f1266320f70?}}, {0x2100468?, 0x35e1500?}, {0x2109872, ...})
+	<autogenerated>:1 +0x85 fp=0x8b368eca20 sp=0x8b368ec9b0 pc=0xe572e5
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.firstCall.Get({{0x2249f20?, 0x8b3b4661f0?}, 0x8b3c25c1f8?, 0x8b37c7e980?}, {0x22516c8?, 0x3601cc0?}, {{0x0, 0x0}, {0x20f9465, 0x6}}, ...)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/harness_test.go:132 +0xa7 fp=0x8b368ecab0 sp=0x8b368eca20 pc=0xdfd3a7
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*firstCall).Get(0x8b368ed000?, {0x22516c8?, 0x3601cc0?}, {{0x0?, 0x6?}, {0x20f9465?, 0xb?}}, {0x2100468?, 0x11?}, {0x2109872, ...})
+	<autogenerated>:1 +0x98 fp=0x8b368ecb30 sp=0x8b368ecab0 pc=0xe57638
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*protocol).release(0x8b368edd60, {0x22516c8, 0x3601cc0}, {0x2100468, 0xb}, {0x8b368ede30, 0x1, 0x1})
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/release.go:114 +0x69a fp=0x8b368edb00 sp=0x8b368ecb30 pc=0xdf25fa
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse.(*world).releaser.func1(0x8b37bbc300)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/model_test.go:615 +0x57d fp=0x8b368edf10 sp=0x8b368edb00 pc=0xe052dd
+github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel.(*Sched).GoIn.func1(0x8b36725a80?)
+	/home/diegobraga/runs/19e986c/m2/pkg/credentialuse/internal/apimodel/sched.go:447 +0x5a fp=0x8b368edf38 sp=0x8b368edf10 pc=0xda99fa
+iter.Pull[...].func1()
+	/usr/local/go/src/iter/iter.go:301 +0xe5 fp=0x8b368edfa0 sp=0x8b368edf38 pc=0xdb0d05
+runtime.corostart()
+	/usr/local/go/src/runtime/coro.go:75 +0x7b fp=0x8b368edfe0 sp=0x8b368edfa0 pc=0x41d1fb
+runtime.goexit({})
+	/usr/local/go/src/runtime/asm_amd64.s:1771 +0x1 fp=0x8b368edfe8 sp=0x8b368edfe0 pc=0x4967c1
+created by iter.Pull[...] in goroutine 88
+	/usr/local/go/src/iter/iter.go:271 +0x90
+
+rax    0x36038a0
+rbx    0x1602000
+rcx    0xffffffffffffe000
+rdx    0xffffffffffffe000
+rdi    0x20
+rsi    0x7f121f9e229a
+rbp    0x7ffea55eb160
+rsp    0x7ffea55eb148
+r8     0x1
+r9     0x8b369aa000
+r10    0x1
+r11    0x7f121f9d2000
+r12    0x8b364cc008
+r13    0x2
+r14    0x35e00c0
+r15    0x8b3682ec80
+rip    0x44f0d5
+rflags 0x207
+cs     0x33
+fs     0x0
+gs     0x0
+FAIL	github.com/krateo-platformops/provider-runtime/pkg/credentialuse	58932.880s
+FAIL

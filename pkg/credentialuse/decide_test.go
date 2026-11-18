@@ -1,6 +1,7 @@
 package credentialuse
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +118,21 @@ func TestGraceEnd(t *testing.T) {
 	now := time.Now()
 	if got := GraceEnd(now.Add(-time.Hour).Round(0), now, grace); !got.Equal(now.Add(grace)) {
 		t.Errorf("GraceEnd with a monotonic first sight = %v, want %v", got, now.Add(grace))
+	}
+	// The end keeps first sight's monotonic reading, whichever of the two it
+	// counts from, so a step of the local wall clock can't move it: compared
+	// with a later local reading, it is the monotonic clock that decides.
+	for name, dt := range map[string]time.Time{
+		"from first sight":   now.Add(-time.Hour).Round(0),
+		"from the timestamp": now.Add(time.Minute).Round(0),
+	} {
+		got := GraceEnd(dt, now, grace)
+		if !strings.Contains(got.String(), "m=") {
+			t.Errorf("GraceEnd %s = %v: it lost the monotonic reading", name, got)
+		}
+		if name == "from the timestamp" && got.Sub(now) != time.Minute+grace {
+			t.Errorf("GraceEnd %s is %v after first sight, want %v", name, got.Sub(now), time.Minute+grace)
+		}
 	}
 }
 
