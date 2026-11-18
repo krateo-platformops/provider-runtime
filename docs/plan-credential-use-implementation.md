@@ -439,6 +439,10 @@ unreleased and nothing imports it, so neither is visible to anyone.
   grace and a changed ref; the prober; the rescan and buffered events; R3
   rejected; two `RefsFunc` versions with the churn measured; R0 with a
   deleting user; the namespace-restricted live read; stress; drain.
+- The release loop ignores a batch whose holder kind has no tracker: a
+  `Track` after start that failed and rolled back may have left batches
+  and `AddAfter` timers for its kind in the shared queue, from the replay
+  of a shared cache (the re-review of #109).
 - `hack/revert-check-credential-use-3b.py`, with its output.
 
 **Reviewer attack** (§14): the label-scoped informer's handling of objects
