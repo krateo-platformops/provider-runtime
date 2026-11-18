@@ -314,19 +314,40 @@ ignore):
   Then a parked actor's state is constant until its next step, and the
   conditions below hold as stated.
 
-  *Checked, not trusted:*
-  - The scheduler compares the actor's declared locals and its inputs
-    before and after every evaluation of its condition, and panics if
-    either changed.
-  - The harness panics on any change to the model, and on any write to a
-    scenario counter, while a condition runs (`Sched.InCond`).
-  - Names captured in a closure are locals (§10.1), so a write to a
-    declared one is caught. A write to an undeclared one would already
-    break §10.1's obligation, which the merge audit checks.
+  *Checked, not trusted, twice.* A runtime check sees only the conditions
+  a search evaluates, in the states it reaches, and only what is declared.
+  The independent review of the first check showed three writes it missed:
+  through a local that is a pointer, into a local that is a map, and to a
+  variable nobody declared. So C-park has a static half, which covers code,
+  and a runtime half, which covers what the code calls.
+  - **Statically** (`apimodel.CheckConditions`, run over this package and
+    apimodel by TestConditionsWriteNothing): every `func() bool` literal is
+    taken as a condition, and may assign or `++` only variables declared
+    inside it; it may not send, start a goroutine or defer; and it may call
+    only known read-only functions (the model's and a cache's Get, a
+    cache's Pending, the key constructors, and builtins that don't write).
+    A Wait whose condition is a method value or a top-level function is
+    refused, since the check can't see into it. This is what catches a
+    write to an undeclared variable, or to a world field, in any state.
+  - **At run time:** the scheduler compares the actor's declared locals,
+    rendered deeply through pointers, maps and slices, and its inputs,
+    before and after every evaluation of its condition. The harness panics
+    on every write path to shared state that goes through code while a
+    condition runs (`Sched.InCond`): a change to the model or to a cache,
+    any access to the protocol's memory (the verified set, first sights),
+    a write to a scenario counter, and a monitor's record. This is what
+    catches a read-only-looking call that writes.
+  - **What neither covers:** a function on the read-only list that starts
+    writing behind its name, in a way none of the runtime hooks see. The
+    list is short and named in the check.
+  - **The merge audit is not a check on this.** Run 3's reduced search
+    audited every prune (25,885 and 25,395) with 0 divergences while it
+    missed 15 and 119 terminal states: an audit compares two paths to a
+    state the search reached, and can't see a state it never reached.
 
   *Why this covers every case:*
   - The only code of an actor that runs while it is parked is its
-    condition. A crash's restart runs inside a call step, and resets
+    condition, and the static half covers all of its code. A crash's restart runs inside a call step, and resets
     process memory in place (§3.2); the scheduler's own reads (Deadlines,
     Terms, Key, Locals) write nothing.
   - So once no condition writes, nothing about a parked actor changes
@@ -366,9 +387,14 @@ ignore):
   That segment is a visible step in both searches, so both reach both
   outcomes. This changes the scenario in both searches, not only in the
   reduced one: `dt` is now what the actor reads when it runs, not what its
-  condition last saw. So run 3's counts for this scenario (935 and 4,331)
-  no longer apply, and its differential must run again. The evidence,
-  with rule R off on both harnesses:
+  condition last saw. Run B re-ran the small variant's differential on the
+  new harness: stateless, stateful and reduced agree, and the terminal sets
+  equal run 3's on the old harness key for key, though the schedules
+  changed (hack/differential-credential-use-2/rulefix-266b29f). The CI form
+  of the scenario (TestModelDeletionsAroundTheGrace: 3 deletion passes and
+  3 release batches, against the small variant's 2 and 2) was never
+  compared old against new. The evidence on schedules, with rule R off on
+  both harnesses:
   - The four pinned schedules end at the same terminal states on the old
     harness and the new one.
   - The same four with the late deletions' start moved to the first step
@@ -379,10 +405,11 @@ ignore):
     all of them this scenario's and none of them terminal. Those are states
     in which the actor waits while the Secret is deleting: the old key
     holds the captured `dt`. Every other scenario's lines are unchanged.
-  - The real controller reads a deletionTimestamp from the object it has
-    just read, in the step that reads it (release.go, R1). The late
-    deletions are the environment, not the controller, but the model's own
-    rule is the same: a read of shared state happens in a step (§10.1).
+  - The late deletions are an environment actor: a person or a controller
+    that deletes the namespace and the holder. What it learns of the
+    Secret, it learns when it acts, in a step, as the model's own rule for
+    every read of shared state has it (§10.1). The old condition learned it
+    between steps, by being evaluated, which no actor of the system does.
 
 - **C-invisible.** By (b), checked by M-a's guard, a quiet segment changes
   nothing that any of these read:
@@ -402,7 +429,15 @@ ignore):
 - **C-independent.** By (a), checked by M-a's guard, no other step changes
   what a quiet segment does, with two exceptions, both closed by §3:
   - **the clock:** resumes never move time on the new base, so removing or
-    moving one shifts no time;
+    moving one shifts no time. Nor may a quiet segment add a deadline. A
+    segment that ended at a timed park would add its notBefore as a
+    pending deadline, and moving it, as R does, would change which
+    deadlines bound the ticks of the calls in between (§10.2). The term the
+    actor's own park held does go away when it resumes, in both searches
+    but at different points; that changes only tick sizes, and by §10.2's
+    invariant the abstract state doesn't depend on them. *Checked:* the
+    scheduler panics if a quiet segment, with R or without, ends at a park
+    whose notBefore is in the future, or changes the pending deadlines;
   - **crashes:** with §3.2's (i) and (ii), resume→crash→call and
     crash→resume→call reach the same state.
 - **C-enabledness.** A quiet segment enables or disables nothing, by
@@ -419,6 +454,10 @@ ignore):
   The rotation actor's "gone" wait is undone only by that actor's own later
   recreate, so it holds while the actor waits on it. Any other Wait stays
   non-quiet.
+
+  *Checked:* the scheduler panics if, at a quiet park, a condition that has
+  held is later false before the actor resumes. With R a ready quiet park
+  resumes at once, so the unreduced search is where this can show.
 - **C-progress.** Every quiet segment reaches a park, and no cycle of quiet
   parks runs without a call. So R terminates.
 
@@ -515,13 +554,30 @@ segment. §3.2 makes the two equivalent.
   **What ran, and the gap.** Rule R is on by default in the model tests and
   in CI (the user's decision, after run C), because without it AwayAndBack
   with 3 live passes and TwoReleasers ran past their CI caps on the new
-  base. With it they finish inside them. The differential ran on Teardown ×3,
-  AcquireAgainstRelease and Recreate (run 3), and on DeletionsAroundTheGrace
-  (run A), at (0,1) and (1,0): equal terminal states. **AwayAndBack and
-  TwoReleasers have no differential.** The stateful search without R doesn't
-  finish on them, and run 3's size tests ran out their 8h cap, so there is
-  no unreduced terminal set to compare with. On those two, R rests on §5's
-  argument, the guards (M-a, C-park) and the sampled merge audit.
+  base. With it they finish inside them. What the reduced search has been
+  compared against, exactly:
+  - **Teardown ×3 and AcquireAgainstRelease, in their CI form,** at (0,1)
+    and (1,0) with T = 2, stateless, stateful and reduced (run 3). CI's
+    model step re-runs this part on every push (§11.3, the CI plan):
+    Teardown with the stateless leg, AcquireAgainstRelease stateful against
+    reduced.
+  - **Recreate, only in its small form** (2 release batches) at T = 1
+    (run 3). CI runs it with 3 batches at T = 2.
+  - **DeletionsAroundTheGrace, only in its small form** (2 deletion passes,
+    2 release batches) at T = 2 (runs A and B). CI runs 3 and 3.
+  - **No scenario at (1,1).** CI runs (1,1) for AcquireAgainstRelease and
+    AwayAndBack with 3 and 4 live passes, and the two comparisons above
+    list it as required.
+  - **AwayAndBack and TwoReleasers: nothing.** The stateful search without
+    R doesn't finish on them (run 3's size tests ran out their 8h cap), so
+    there is no unreduced terminal set to compare with.
+  - **And everything else CI runs, reduced, with no comparison:** the
+    400-schedule random walks of every scenario, and the two-process
+    scenario's walks.
+
+  Where nothing was compared, R rests on §5's argument and on the checks
+  that run in every search: M-a, C-park (static and at run time), C-stable
+  and the clock's.
 - **Mutants.** The same comparison on revert-check mutants the model kills:
   - H1's skip without the exact version;
   - M4's late clock;
@@ -1101,15 +1157,24 @@ the rest.** In this order, each step only if the one before passes:
 A failed rule is reported with its witness, as the differential test logs
 it. Nothing is rerun to pass.
 
-**It runs only under an explicit plan.** TestModelStatefulAgreesWithStateless
-skips unless CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS is set.
-Its default plan was every small scenario at T = 2 with a stateless leg,
+**Without a measured plan, it runs CI's.** TestModelStatefulAgreesWithStateless
+used to run every small scenario at T = 2 with a stateless leg by default,
 which `-run '^TestModel'` matched: CI's model step started it from 1c3ff46
 on, and it can't finish there (run 3 took 1,953 CPU-hours on 96 vCPU). It
 was still running when the step hit its 90m timeout, in CI and in run C's
 replica of the step (hack/differential-credential-use-2/rulefix-266b29f).
-The differential is a VM measurement, and its record is the RESULTS files
-under hack/differential-credential-use-2/.
+Now:
+- With CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS set, it runs
+  that plan: the VM measurements of this section, whose record is the
+  RESULTS files under hack/differential-credential-use-2/.
+- With none of them, it runs the CI plan (`ciPlan`), at T = 2, (0,1) and
+  (1,0): the three Teardown scenarios with the stateless leg (the largest
+  is 1,951,942 schedules), and AcquireAgainstRelease stateful against
+  reduced only (its stateless leg is 460 to 900 million). It is the one
+  comparison of rule R against no R that CI finishes.
+- With another CREDENTIALUSE_MODEL_DIFF_* variable set and no plan, it
+  fails: a measured run whose plan is missing or misspelled must not run
+  the CI plan and exit 0 on a VM.
 
 ## 12. Sleep sets under the bounds (the user's decision; spec revision 3, not implemented)
 
