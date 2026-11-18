@@ -505,10 +505,10 @@ ignore):
   The rotation actor's "gone" wait is undone only by that actor's own later
   recreate, so it holds while the actor waits on it. Any other Wait stays
   non-quiet. (The two-process scenario's releaser trigger, a counter
-  threshold, was meant to be quiet, but its marker never took effect: the
-  trigger has always been a plain Wait, and making it quiet would change
-  that scenario's bounded search, since a quiet resume costs no
-  preemption.)
+  threshold, was meant to be quiet, but its marker never took effect, and
+  the trigger has always been a plain Wait. The user decided to keep it
+  one: making it quiet would change that scenario's bounded search, since
+  a quiet resume costs no preemption.)
 
   *What exactly must hold, and for how long.* R resumes a quiet park at
   the first moment it is ready. The unreduced search can leave it parked
