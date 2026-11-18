@@ -41,7 +41,8 @@ the generic `Reconciler` (a `reconcile.Reconciler`) around that client. Per
 reconcile it: gets the managed resource, honors the pause annotation
 (`krateo.io/paused`), connects, observes, then creates/updates/deletes
 according to both the observation and the **management/deletion policy
-annotations** (`pkg/meta.IsActionAllowed`, `ShouldDelete`, …). It manages the
+annotations** (`pkg/meta.ShouldCreate`, `ShouldUpdate`, `ShouldDelete`,
+`ShouldOnlyObserve`). It manages the
 finalizer (`finalizer.managedresource.krateo.io`), records Kubernetes events
 (via the plumbing event recorder, with an optional throttled recorder), sets
 the `Ready`/`Synced` conditions from `apis/common/v1`, and requeues on the

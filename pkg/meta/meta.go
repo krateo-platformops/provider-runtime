@@ -336,7 +336,13 @@ func IsVerbose(o metav1.Object) bool {
 	return o.GetAnnotations()[AnnotationKeyConnectorVerbose] == "true"
 }
 
-// IsActionAllowed determines if action is allowed to be performed on Object
+// IsActionAllowed determines if action is allowed to be performed on Object.
+//
+// Deprecated: the reconciler doesn't use it, and its answer for delete
+// differs from what the reconciler does: it ignores
+// krateo.io/deletion-policy, so under the default policy it allows a delete
+// that orphan forbids. Use ShouldCreate, ShouldUpdate and ShouldDelete, the
+// predicates the reconciler's gates call.
 func IsActionAllowed(o metav1.Object, action string) bool {
 	p := o.GetAnnotations()[AnnotationKeyManagementPolicy]
 	if len(p) == 0 {
