@@ -931,7 +931,7 @@ func (s *Sched) tick(now time.Time) time.Duration {
 func (s *Sched) liveActors() bool {
 	now := s.Clock.t
 	for _, a := range s.actors {
-		if !a.done && !a.daemon && !(a.quiet && a.enabled(now)) {
+		if !a.done && !a.daemon && (!a.quiet || !a.enabled(now)) {
 			return true
 		}
 	}
