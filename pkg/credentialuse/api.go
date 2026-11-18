@@ -47,12 +47,15 @@ type views interface {
 	NamespaceDeleting(namespace string) (deleting, known bool)
 }
 
-// reports are the protocol's events and counters. PR 3 implements them
-// with the metrics and events of §12; until then the protocol uses
+// reports are the protocol's events and counters. coreReports implements
+// them with the metrics and events of §12; the model's protocols use
 // nopReports.
 type reports interface {
 	// Degraded counts a fail-open of an established holder (§8), by class.
 	Degraded(holder schema.GroupKind, reason string)
+	// AdmissionDenied counts an A2 refused with class (e) of §6.2, for any
+	// holder (L3 of the review of revision 16).
+	AdmissionDenied(holder schema.GroupKind)
 	// ReleaseRejected reports a release patch that failed against an
 	// unchanged object (§6.2, L1 of the review of revision 16).
 	ReleaseRejected(holder schema.GroupKind, p ID, resourceVersion string)
@@ -61,4 +64,5 @@ type reports interface {
 type nopReports struct{}
 
 func (nopReports) Degraded(schema.GroupKind, string)            {}
+func (nopReports) AdmissionDenied(schema.GroupKind)             {}
 func (nopReports) ReleaseRejected(schema.GroupKind, ID, string) {}
