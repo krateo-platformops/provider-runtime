@@ -364,7 +364,7 @@ func (v *Visited) see(key string, b Budget, watch map[string]bool, choices []int
 	}
 	keep := vs[:0]
 	for _, o := range vs {
-		if !(b.dominates(o.b) && subset(o.watch, watch)) {
+		if !b.dominates(o.b) || !subset(o.watch, watch) {
 			keep = append(keep, o)
 		}
 	}
