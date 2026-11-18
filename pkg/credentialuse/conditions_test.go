@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,42 +13,58 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 )
 
-// TestConditionsWriteNothing is C-park's static check over the model's code
-// (docs/credential-use-model-reduction.md §5): every Wait condition in this
-// package and in apimodel, tests included, is a literal at its call site
-// that could write nothing. The packages are loaded typed, with their tests,
-// so that calls resolve by type, not by name.
-func TestConditionsWriteNothing(t *testing.T) {
-	if raceEnabled {
-		t.Skip("a static check: once, without the race detector")
-	}
-	const apimodelPath = "github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
+// TestModelConditionsWriteNothing is C-park's static check over the model's
+// code (docs/credential-use-model-reduction.md §5): every Wait condition in
+// every package under pkg/credentialuse that imports apimodel, and in
+// apimodel itself, tests included, is a literal at its call site that could
+// write nothing. The packages are loaded typed, with their tests, so that
+// calls resolve by type, not by name. It is static analysis, not a search:
+// it runs in CI's coverage step, under the race detector, and, by its name,
+// in the model step, whose log lists it.
+func TestModelConditionsWriteNothing(t *testing.T) {
+	const (
+		self         = "github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
+		apimodelPath = self + "/internal/apimodel"
+	)
 	pkgs, err := packages.Load(&packages.Config{
-		Mode:  packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+		Mode:  packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
 		Tests: true,
-	}, ".", "./internal/apimodel")
+	}, "./...")
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked := map[string]bool{}
+	// One variant per package: the test variant, which holds every file of
+	// the package, its tests too, where there is one.
+	chosen := map[string]*packages.Package{}
 	for _, p := range pkgs {
-		// The test variants hold every file of the package, its tests too.
-		if !strings.HasSuffix(p.ID, ".test]") {
+		if strings.HasSuffix(p.ID, ".test") {
+			continue // the generated test main
+		}
+		if prev, ok := chosen[p.PkgPath]; ok && strings.HasSuffix(prev.ID, ".test]") {
+			continue
+		}
+		chosen[p.PkgPath] = p
+	}
+	var checked []string
+	for path, p := range chosen {
+		if _, imports := p.Imports[apimodelPath]; !imports && path != apimodelPath {
 			continue
 		}
 		for _, e := range p.Errors {
 			t.Fatalf("%s: %v", p.ID, e)
 		}
 		cfg := apimodel.CondConfig{APIModel: apimodelPath}
-		if p.PkgPath == "github.com/krateo-platformops/provider-runtime/pkg/credentialuse" {
+		if path == self {
 			cfg.Pure = []string{"keyOf", "widgetKey", "nsKey", "ID.GroupKind", "waitFor.met"}
 		}
 		for _, problem := range apimodel.CheckConditions(p.Fset, p.Syntax, p.TypesInfo, cfg) {
 			t.Error(problem)
 		}
-		checked[p.PkgPath] = true
+		checked = append(checked, p.ID)
 	}
-	if !checked["github.com/krateo-platformops/provider-runtime/pkg/credentialuse"] || !checked[apimodelPath] {
+	slices.Sort(checked)
+	t.Logf("checked %d packages: %v", len(checked), checked)
+	if !slices.Contains(checked, self+" ["+self+".test]") || !slices.Contains(checked, apimodelPath+" ["+apimodelPath+".test]") {
 		t.Fatalf("checked %v: want this package and apimodel, with their tests", checked)
 	}
 }

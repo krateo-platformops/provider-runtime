@@ -324,8 +324,9 @@ ignore):
   structural and typed, which covers code, and a runtime half, which covers
   what the code calls.
   - **Statically** (`apimodel.CheckConditions`, run by
-    TestConditionsWriteNothing over this package and apimodel, tests
-    included, loaded with their types). The rule is structural: every call
+    TestModelConditionsWriteNothing over every package under
+    pkg/credentialuse that imports apimodel, and apimodel, tests included,
+    loaded with their types; in CI's coverage step and its model step). The rule is structural: every call
     of `Actor.Wait` or `Actor.WaitQuiet` (the API's own `WaitQuiet`, which
     hands its condition on, aside) must pass nil or a function literal
     written at the call site; a variable, a parameter, a method value or a
