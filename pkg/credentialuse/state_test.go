@@ -615,6 +615,9 @@ func TestStateKeysAreStable(t *testing.T) {
 			var end string
 			keys, err := apimodel.Replay(b0, nil, apimodel.Budget{Preemptions: 1, Faults: 1, Jumps: testJumps}, seed, 0, func(s *apimodel.Sched) error {
 				w := newWorld(s)
+				// The pinned keys are the unreduced search's, as the terminal
+				// sets saved by earlier runs are.
+				s.NoQuiet = true
 				sc(w)
 				s.Key = w.stateKey
 				err := s.Run()

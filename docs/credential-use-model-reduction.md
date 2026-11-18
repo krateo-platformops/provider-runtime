@@ -21,8 +21,10 @@ exhaustive in CI, with no cut in scope.
 - Run 3's differential found the quiet-segment reduction losing terminal
   states, where a Wait's condition wrote an actor's local. §4 and §5 now
   require every condition to be a guard that writes nothing (C-park), and
-  the scheduler checks it. Run 3's differential on that scenario must run
-  again.
+  the scheduler checks it. Run A (stateful against reduced) and run B
+  (stateless) re-ran that scenario's differential on the new model.
+- Rule R is now on by default in the model tests and in CI (§7, "What ran,
+  and the gap").
 - The implementation goes in this order:
   1. the new base and the stateful search;
   2. the gate (§3.3, adjusted as §10.4 proposes);
@@ -509,6 +511,17 @@ segment. §3.2 makes the two equivalent.
     (reads, releases, holds, deletion phases);
   - at CI's bounds, (1,0), (0,1) and (1,1) with T = 2: the two sets must be
     equal too, by §5's two mappings, and any difference is reported.
+
+  **What ran, and the gap.** Rule R is on by default in the model tests and
+  in CI (the user's decision, after run C), because without it AwayAndBack
+  with 3 live passes and TwoReleasers ran past their CI caps on the new
+  base. With it they finish inside them. The differential ran on Teardown ×3,
+  AcquireAgainstRelease and Recreate (run 3), and on DeletionsAroundTheGrace
+  (run A), at (0,1) and (1,0): equal terminal states. **AwayAndBack and
+  TwoReleasers have no differential.** The stateful search without R doesn't
+  finish on them, and run 3's size tests ran out their 8h cap, so there is
+  no unreduced terminal set to compare with. On those two, R rests on §5's
+  argument, the guards (M-a, C-park) and the sampled merge audit.
 - **Mutants.** The same comparison on revert-check mutants the model kills:
   - H1's skip without the exact version;
   - M4's late clock;

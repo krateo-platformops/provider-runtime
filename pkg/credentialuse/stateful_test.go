@@ -592,10 +592,23 @@ func firstDiff(a, b []string) string {
 // last actor, §5).
 type quietMode struct{ off bool }
 
-// defaultQuiet is the model tests' mode: the reduction is off unless
-// CREDENTIALUSE_MODEL_QUIET is set (work in progress, not reviewed).
+// defaultQuiet is the model tests' mode: rule R is on, and
+// CREDENTIALUSE_MODEL_QUIET=off turns it off. It is on by default because the
+// new base (§3) made two of CI's scenarios too large for the stateful search
+// alone: AwayAndBack with 3 live passes and TwoReleasers ran past their caps
+// (200,000 and 5,000,000 runs) without it, and finish well inside them with
+// it (hack/differential-credential-use-2/rulefix-266b29f, run C). The
+// reduction's evidence is §5's argument, with C-park and M-a checked in every
+// search, and the stateful search against the reduced one: equal terminal
+// states on five scenarios in run 3 and on DeletionsAroundTheGrace in run A,
+// at {0,1} and {1,0}.
+//
+// Caveat: AwayAndBack and TwoReleasers have no such differential. The
+// stateful search without R doesn't finish on them (run 3's size tests ran
+// out their 8h cap), so there is no unreduced terminal set to compare with.
+// There, R rests on the argument, the guards and the sampled merge audit.
 func defaultQuiet() quietMode {
-	return quietMode{off: os.Getenv("CREDENTIALUSE_MODEL_QUIET") == ""}
+	return quietMode{off: os.Getenv("CREDENTIALUSE_MODEL_QUIET") == "off"}
 }
 
 // TestModelParallelStatelessIsSerial proves the split stateless search

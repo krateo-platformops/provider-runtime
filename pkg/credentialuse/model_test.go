@@ -263,8 +263,8 @@ func newWorld(s *apimodel.Sched) *world {
 	w.p = SecretRef(w.ns, "probe-dummy-creds").ID()
 	s.Deadlines = w.deadlines
 	s.Terms = w.timeTerms
-	// The quiet-segment reduction (§4) is work in progress, not reviewed, and
-	// off by default: CREDENTIALUSE_MODEL_QUIET turns it on.
+	// The quiet-segment reduction (§4) is on by default, and
+	// CREDENTIALUSE_MODEL_QUIET=off turns it off (defaultQuiet says why).
 	s.NoQuiet = defaultQuiet().off
 	w.m.OnEvent = w.onModelEvent
 	w.m.Guard = func() {
