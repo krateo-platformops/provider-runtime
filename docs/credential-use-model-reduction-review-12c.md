@@ -1,5 +1,5 @@
 ---
-type: Review
+type: Decision
 title: provider-runtime — credential-use model, third review of spec §12 (sleep sets) at 14c30a3
 description: Independent re-review of docs/credential-use-model-reduction.md §12, revision 3: the rule unchanged and stage B ready; spec items for stage A (the recording context as a stack, three clock reads, the analyzer's five rules, the recorder API) and corrections to the MSR-TR reading.
 resource: github.com/krateo-platformops/provider-runtime

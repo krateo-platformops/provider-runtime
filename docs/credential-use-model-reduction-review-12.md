@@ -1,5 +1,5 @@
 ---
-type: Review
+type: Decision
 title: provider-runtime — credential-use model, review of spec §12 (sleep sets) at d7fa08b
 description: Independent review of docs/credential-use-model-reduction.md §12, revision 1, by a fresh reviewer: two counterexamples, the fixes, footprint omissions and the audit's limits. §12 revision 2 answers it.
 resource: github.com/krateo-platformops/provider-runtime
