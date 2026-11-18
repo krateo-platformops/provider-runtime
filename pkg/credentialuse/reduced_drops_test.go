@@ -93,3 +93,37 @@ func TestModelReducedKeepsDroppedTerminals(t *testing.T) {
 		})
 	}
 }
+
+// TestModelReducedFollowsDroppedSchedules is the fast check on the fix of
+// TestModelReducedKeepsDroppedTerminals's defect (§5, C-park): each recorded
+// schedule, replayed with rule R on, runs its quiet resumes silently and
+// must end at the terminal state the unreduced replay ends at. Before the
+// fix, the late deletions' condition captured the Secret's deletionTimestamp
+// from the first step, so the reduced replay ended with dt at the deletion,
+// and the unreduced one with dt at now. A reduced schedule within the bounds
+// that reaches the state is what the reduced search needs to find it; the
+// search itself runs in TestModelReducedKeepsDroppedTerminals.
+func TestModelReducedFollowsDroppedSchedules(t *testing.T) {
+	if raceEnabled {
+		t.Skip("model searches don't run under the race detector")
+	}
+	sc := smallScenarios["deletions around the grace, small"]
+	for b, schedules := range reducedDrops(t) {
+		for i, labels := range schedules {
+			keys := map[bool]string{}
+			for _, off := range []bool{true, false} {
+				var key string
+				_, err := apimodel.ReplayLabels(b, labels, runner(sc, func(_ *apimodel.Sched, k string, _ []string) {
+					key = k
+				}, quietMode{off: off}))
+				if err != nil || key == "" {
+					t.Fatalf("%+v, schedule %d, rule R off=%v: error %v, terminal key %q", b, i, off, err, key)
+				}
+				keys[off] = key
+			}
+			if keys[true] != keys[false] {
+				t.Errorf("%+v, schedule %d: with rule R on, the replay ends at a different terminal state\nschedule: %s", b, i, strings.Join(labels, " → "))
+			}
+		}
+	}
+}

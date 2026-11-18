@@ -75,14 +75,16 @@ var smallScenarios = map[string]func(w *world){
 		w.s.Go("late deletions", apimodel.QuietStart, func(a *apimodel.Actor) {
 			var dt time.Time
 			a.Locals = func() []any { return []any{dt} }
+			// The condition only tests (§5, C-park): the deletionTimestamp is
+			// read when the actor runs, and if the Secret is gone by then,
+			// "deleted" is now.
 			a.Wait("secret deleting", time.Time{}, func() bool {
 				o, err := w.m.Get(keyOf(w.p))
-				if err == nil && o.DeletionTimestamp != nil {
-					dt = o.DeletionTimestamp.Time
-				}
 				return err != nil || o.DeletionTimestamp != nil
 			})
-			if dt.IsZero() {
+			if o, err := w.m.Get(keyOf(w.p)); err == nil && o.DeletionTimestamp != nil {
+				dt = o.DeletionTimestamp.Time
+			} else {
 				dt = a.Now()
 			}
 			a.WaitQuiet("into the grace", dt.Add(testGrace/2), nil)

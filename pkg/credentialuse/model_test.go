@@ -275,12 +275,23 @@ func newWorld(s *apimodel.Sched) *world {
 	return w
 }
 
+// checkNotInCond panics if a Wait's condition is being evaluated: a condition
+// is a guard and writes nothing (§5, C-park). The model's changes and the
+// scenario's counters call it; the scheduler itself checks the actor's
+// locals and inputs.
+func (w *world) checkNotInCond(what string) {
+	if w.s.InCond() {
+		panic(fmt.Sprintf("model: a Wait's condition %s (§5, C-park)\n%s", what, debug.Stack()))
+	}
+}
+
 // onModelEvent is the hold monitor (§10.1): every version of a holder, by
 // any actor, whose record no longer names P ends that holder's hold on P.
 // The protection lives in the record, so a hold lasts only while every
 // version since names the ref; neither a lost A1 nor another process's
 // write can leave a stale one (M1 of #59's review).
 func (w *world) onModelEvent(ev apimodel.Event) {
+	w.checkNotInCond("changed the API model")
 	if ev.Key.GK != widgetGK {
 		return
 	}
@@ -1133,14 +1144,16 @@ func TestModelDeletionsAroundTheGrace(t *testing.T) {
 			// jump to its end first.
 			var dt time.Time
 			a.Locals = func() []any { return []any{dt} }
+			// The condition only tests (§5, C-park): the deletionTimestamp is
+			// read when the actor runs, and if the Secret is gone by then,
+			// "deleted" is now.
 			a.Wait("secret deleting", time.Time{}, func() bool {
 				o, err := w.m.Get(keyOf(w.p))
-				if err == nil && o.DeletionTimestamp != nil {
-					dt = o.DeletionTimestamp.Time
-				}
 				return err != nil || o.DeletionTimestamp != nil
 			})
-			if dt.IsZero() {
+			if o, err := w.m.Get(keyOf(w.p)); err == nil && o.DeletionTimestamp != nil {
+				dt = o.DeletionTimestamp.Time
+			} else {
 				dt = a.Now()
 			}
 			a.WaitQuiet("into the grace", dt.Add(testGrace/2), nil)
@@ -1239,11 +1252,12 @@ func peekWritten(p *process, uid types.UID, ns string) bool {
 }
 
 // inc counts in one of the scenario's counters, which Wait conditions read:
-// never from a quiet segment (§4, M-a).
+// never from a quiet segment (§4, M-a), nor from a condition (§5, C-park).
 func (w *world) inc(m map[string]int, k string) {
 	if w.s.InQuiet() {
 		panic("model: a quiet segment wrote a scenario counter (§4, M-a)")
 	}
+	w.checkNotInCond("wrote a scenario counter")
 	m[k]++
 }
 

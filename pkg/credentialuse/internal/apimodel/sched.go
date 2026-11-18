@@ -6,6 +6,7 @@ import (
 	"iter"
 	"math"
 	"math/rand"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -184,6 +185,10 @@ type Sched struct {
 	// last actor). The differential test compares the two.
 	NoQuiet bool
 	inQuiet bool
+	// inCond: a Wait's condition is being evaluated, which must change
+	// nothing (§5, C-park). noCondCheck turns the check off, only for the
+	// test that shows what it guards against.
+	inCond, noCondCheck bool
 	// Terms, if set, returns every live time term of the state (§10.2), for
 	// tick's invariant.
 	Terms func() []time.Time
@@ -518,7 +523,9 @@ func (a *Actor) Stale() bool {
 // Wait parks the actor until cond holds (nil: always) and the clock has
 // reached notBefore (zero: now). It is a yield point that can't fail. It
 // ends the actor's unit of work: whatever runs after it is the process's
-// new work, as it is now.
+// new work, as it is now. cond is a guard: it may read anything, and must
+// write nothing, not even the actor's own locals; what the actor learns, it
+// reads in the code after the Wait (§5, C-park, checked by holds).
 func (a *Actor) Wait(label string, notBefore time.Time, cond func() bool) {
 	a.unitGen = 0
 	a.inputs = nil
@@ -620,8 +627,47 @@ func (s *Sched) pending(now time.Time) []time.Time {
 }
 
 func (a *Actor) enabled(now time.Time) bool {
-	return !a.done && !a.notBefore.After(now) && (a.cond == nil || a.cond())
+	return !a.done && !a.notBefore.After(now) && a.holds()
 }
+
+// holds evaluates the actor's Wait condition (nil holds). A condition is a
+// guard on the actor's next step, not a step: it must change nothing
+// (docs/credential-use-model-reduction.md §5, C-park). The scheduler
+// evaluates every parked actor's condition whenever it looks at the actor,
+// at every choice; a condition that wrote would be a hidden step that runs
+// after every step while the actor waits, and rule R, which moves a quiet
+// segment, and so the park it ends at, earlier, would start it earlier. That
+// is how a condition that captured a deletion timestamp made the reduced
+// search miss terminal states (run 3, TestModelReducedKeepsDroppedTerminals).
+// So it is checked: the actor's declared locals and its inputs must be the
+// same after the condition as before, and the harness panics on a write to
+// the model or to a scenario counter while InCond.
+func (a *Actor) holds() bool {
+	if a.cond == nil {
+		return true
+	}
+	s := a.s
+	if s.noCondCheck {
+		return a.cond()
+	}
+	var before []any
+	if a.Locals != nil {
+		before = a.Locals()
+	}
+	n := len(a.inputs)
+	outer := s.inCond
+	s.inCond = true
+	ok := a.cond()
+	s.inCond = outer
+	if len(a.inputs) != n || (a.Locals != nil && !reflect.DeepEqual(before, a.Locals())) {
+		panic(fmt.Sprintf("apimodel: %s's condition at %q changed the actor's state: a Wait's condition is a guard and must change nothing (docs/credential-use-model-reduction.md §5, C-park)", a.Name, a.label))
+	}
+	return ok
+}
+
+// InCond reports whether a Wait's condition is being evaluated: the harness
+// panics on any write to shared state then (§5, C-park).
+func (s *Sched) InCond() bool { return s.inCond }
 
 // resume runs a until its next yield point, or its end.
 func (a *Actor) resume(f Fault) {
