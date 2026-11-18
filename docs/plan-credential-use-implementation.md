@@ -408,12 +408,21 @@ unreleased and nothing imports it, so neither is visible to anyone.
   election and write loops with it. PR 3a has `RunInformers`, and `Run`
   runs it; PR 3b adds `RunWriteLoops`. `HasSynced` reports the informers'
   first sync.
-- Tests: the relist (watch-list and List); `Track` after start and twice;
-  the published settings and both owner finalizers; start fails without
-  namespace `list` or `watch`; the Namespace handler; `kubectl
-  replace`-style stripping; a Secret already being deleted gives a new
-  holder `MustNotConnect`; class (e) counted; the queue's buffering,
-  deduplication and timers; setup's refusals.
+- §12's gauges and events split by what computes them (the review of
+  #109): the held gauge, `credentialuse_held_objects`, is PR 3a's, counted
+  from the protected informers' finalizers; the waiting gauge,
+  `credentialuse_waiting_objects`, and the `CredentialDeleting` and
+  `WaitingForCredentialUsers` events are PR 3b's, since only the release
+  loop knows which deletions wait for users.
+- Tests: the relist (watch-list and List), its order forced; `Track` after
+  start and twice, concurrent `Track`s, a failed `Track`'s rollback, and a
+  `Track` after start that rechecks a shared cache; the published settings
+  and both owner finalizers, and the CRD write's guard, retries and bound;
+  start fails without the verbs each informer needs; the protected,
+  Namespace and holder handlers; `kubectl replace`-style stripping; a
+  Secret already being deleted gives a new holder `MustNotConnect`; class
+  (e) counted; the held gauge; the queue's buffering, deduplication,
+  timers, shutdown and lock order; setup's refusals.
 - `hack/revert-check-credential-use-3a.py`, with its output.
 
 **PR 3b** (branch `feat/credential-use-3b-…`, depends on PR 3a):
