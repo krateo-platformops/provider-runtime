@@ -9,6 +9,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -79,10 +80,12 @@ func disagreement(want, got published) string {
 // or checks them against what is published there (§7.3). The first process
 // writes credential-use.krateo.io/config after a GET that finds it absent,
 // with a merge patch guarded by the CRD's resourceVersion; a conflict reads
-// and decides again, at most maxCRDWriteAttempts times, after which the
-// write waits for the next start, logged and counted. A process whose
-// settings disagree refuses to start: changing a value means editing the
-// annotation and restarting every process of the kind.
+// and decides again, at most maxCRDWriteAttempts times. After the last
+// conflict a read-only GET still checks what another process may have
+// published meanwhile (G3 of the review of #109); if the annotation is
+// still absent, the write waits for the next start, logged and counted. A
+// process whose settings disagree refuses to start: changing a value means
+// editing the annotation and restarting every process of the kind.
 func (s *Shared) publishConfig(ctx context.Context, o Options) error {
 	gk := o.Holder.GroupKind()
 	m, err := s.c.Mapper.RESTMapping(gk, o.Holder.Version)
@@ -99,22 +102,32 @@ func (s *Shared) publishConfig(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
+	// check reads the CRD; done reports whether it carries the
+	// annotation, which then agrees with want, or check fails.
+	check := func() (crd *unstructured.Unstructured, done bool, err error) {
+		crd, err = crds.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, false, fmt.Errorf("credential-use: reading the CRD of %s to publish its settings (%s): %w", gk, AnnotationConfig, err)
+		}
+		cur, ok := crd.GetAnnotations()[AnnotationConfig]
+		if !ok {
+			return crd, false, nil
+		}
+		var got published
+		if err := json.Unmarshal([]byte(cur), &got); err != nil {
+			return nil, false, fmt.Errorf("credential-use: %s on CRD %s can't be read: %w", AnnotationConfig, name, err)
+		}
+		if d := disagreement(want, got); d != "" {
+			return nil, false, fmt.Errorf("credential-use: this process's settings for %s disagree with those published on CRD %s (%s): %s; "+
+				"edit the annotation and restart every process of the kind to change them", gk, name, AnnotationConfig, d)
+		}
+		return crd, true, nil
+	}
 	var last error
 	for range maxCRDWriteAttempts {
-		crd, err := crds.Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("credential-use: reading the CRD of %s to publish its settings (%s): %w", gk, AnnotationConfig, err)
-		}
-		if cur, ok := crd.GetAnnotations()[AnnotationConfig]; ok {
-			var got published
-			if err := json.Unmarshal([]byte(cur), &got); err != nil {
-				return fmt.Errorf("credential-use: %s on CRD %s can't be read: %w", AnnotationConfig, name, err)
-			}
-			if d := disagreement(want, got); d != "" {
-				return fmt.Errorf("credential-use: this process's settings for %s disagree with those published on CRD %s (%s): %s; "+
-					"edit the annotation and restart every process of the kind to change them", gk, name, AnnotationConfig, d)
-			}
-			return nil
+		crd, done, err := check()
+		if err != nil || done {
+			return err
 		}
 		patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
 			"resourceVersion": crd.GetResourceVersion(),
@@ -131,6 +144,9 @@ func (s *Shared) publishConfig(ctx context.Context, o Options) error {
 			return fmt.Errorf("credential-use: publishing the settings of %s on CRD %s: %w", gk, name, err)
 		}
 		last = err
+	}
+	if _, done, err := check(); err != nil || done {
+		return err
 	}
 	o.Metrics.CRDWriteStarved(kindLabel(gk))
 	o.Logger.Warn("credential-use: publishing the settings conflicted every time; they will be written at the next start",

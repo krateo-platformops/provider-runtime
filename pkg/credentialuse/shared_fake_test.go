@@ -3,13 +3,14 @@ package credentialuse
 // The core's client-go runtime on client-go's fake clients and a fake clock
 // (the review of #109): Track's concurrency and rollback (D2, D3), the
 // recheck of a shared cache by a Track after Run (D4), the protected
-// handler (G2, G4, G5, G6, N3, N5), the queue's shutdown (G6), and the
-// RBAC checks before an informer starts (N2).
+// handler (G2, G4, G5, G6, N3, N5), the queue's shutdown (G6), publishing
+// the settings (G3), and the RBAC checks before an informer starts (N2).
 // The fake metadata client says it can't stream lists, so the reflectors
 // list with a List.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"slices"
@@ -642,4 +643,134 @@ func TestRunInformersChecksAccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+// G3: publishing the settings on the CRD.
+func TestPublishConfig(t *testing.T) {
+	type rig struct {
+		*fakeRig
+		o       Options
+		gets    int
+		patches [][]byte
+	}
+	newRig := func(t *testing.T) *rig {
+		r := &rig{fakeRig: newFakeRig(t)}
+		o, err := r.s.validate(r.options(widgetGK))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.o = o
+		r.dyn.PrependReactor("get", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+			r.gets++
+			return false, nil, nil
+		})
+		return r
+	}
+	conflict := apierrors.NewConflict(crdGVR.GroupResource(), "widgets", errors.New("test: conflict"))
+	patching := func(r *rig, f func(n int) error) {
+		r.dyn.PrependReactor("patch", "customresourcedefinitions", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			r.patches = append(r.patches, a.(clienttesting.PatchAction).GetPatch())
+			if err := f(len(r.patches)); err != nil {
+				return true, nil, err
+			}
+			return false, nil, nil
+		})
+	}
+	published := func(r *rig) string {
+		crd, err := r.dyn.Resource(crdGVR).Get(context.Background(), crdOf(widgetGK).GetName(), metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return crd.GetAnnotations()[AnnotationConfig]
+	}
+	// publishElsewhere writes the annotation as another process would.
+	publishElsewhere := func(r *rig, value string) {
+		u := crdOf(widgetGK)
+		u.SetAnnotations(map[string]string{AnnotationConfig: value})
+		if err := r.dyn.Tracker().Update(crdGVR, u, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("the patch is guarded by the resourceVersion read", func(t *testing.T) {
+		r := newRig(t)
+		patching(r, func(int) error { return nil })
+		if err := r.s.publishConfig(context.Background(), r.o); err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Metadata struct {
+				ResourceVersion string            `json:"resourceVersion"`
+				Annotations     map[string]string `json:"annotations"`
+			} `json:"metadata"`
+		}
+		if len(r.patches) != 1 || json.Unmarshal(r.patches[0], &body) != nil || body.Metadata.ResourceVersion != "7" {
+			t.Fatalf("patches %q, want one carrying resourceVersion 7", r.patches)
+		}
+		if got := published(r); got != `{"deletionGrace":"60s","disownPasses":5,"disownInterval":"60s","timeoutBound":"90s"}` {
+			t.Errorf("published %s", got)
+		}
+	})
+	t.Run("only a conflict is retried", func(t *testing.T) {
+		r := newRig(t)
+		patching(r, func(int) error {
+			return apierrors.NewForbidden(crdGVR.GroupResource(), "widgets", errors.New("test: no"))
+		})
+		if err := r.s.publishConfig(context.Background(), r.o); err == nil || !strings.Contains(err.Error(), "publishing the settings") {
+			t.Errorf("publishConfig = %v, want the patch's error", err)
+		}
+		if len(r.patches) != 1 {
+			t.Errorf("%d patches, want 1: a forbidden patch isn't retried", len(r.patches))
+		}
+	})
+	t.Run("a conflict reads again, and finds another process's settings", func(t *testing.T) {
+		r := newRig(t)
+		patching(r, func(n int) error {
+			if n == 2 {
+				publishElsewhere(r, `{"deletionGrace":"1m0s","disownPasses":5,"disownInterval":"60s","timeoutBound":"90s"}`)
+				return conflict
+			}
+			return conflict
+		})
+		if err := r.s.publishConfig(context.Background(), r.o); err != nil {
+			t.Fatalf("publishConfig = %v, want the agreeing settings accepted", err)
+		}
+		if len(r.patches) != 2 || r.gets != 3 {
+			t.Errorf("%d patches and %d reads, want 2 and 3", len(r.patches), r.gets)
+		}
+	})
+	t.Run("after the last conflict, a read refuses disagreeing settings", func(t *testing.T) {
+		r := newRig(t)
+		patching(r, func(n int) error {
+			if n == maxCRDWriteAttempts {
+				publishElsewhere(r, `{"deletionGrace":"30s","disownPasses":5,"disownInterval":"60s","timeoutBound":"90s"}`)
+			}
+			return conflict
+		})
+		if err := r.s.publishConfig(context.Background(), r.o); err == nil || !strings.Contains(err.Error(), "deletionGrace") {
+			t.Errorf("publishConfig = %v, want the disagreement", err)
+		}
+		if len(r.patches) != maxCRDWriteAttempts || r.gets != maxCRDWriteAttempts+1 {
+			t.Errorf("%d patches and %d reads, want %d and %d", len(r.patches), r.gets, maxCRDWriteAttempts, maxCRDWriteAttempts+1)
+		}
+		if n := r.metrics.count("crd_write_starved " + kindLabel(widgetGK)); n != 0 {
+			t.Errorf("counted %d starved writes, want none: the read decided", n)
+		}
+	})
+	t.Run("conflicts every time wait for the next start, counted", func(t *testing.T) {
+		r := newRig(t)
+		patching(r, func(int) error { return conflict })
+		if err := r.s.publishConfig(context.Background(), r.o); err != nil {
+			t.Errorf("publishConfig = %v, want nil", err)
+		}
+		if len(r.patches) != maxCRDWriteAttempts || r.gets != maxCRDWriteAttempts+1 {
+			t.Errorf("%d patches and %d reads, want %d and %d", len(r.patches), r.gets, maxCRDWriteAttempts, maxCRDWriteAttempts+1)
+		}
+		if n := r.metrics.count("crd_write_starved " + kindLabel(widgetGK)); n != 1 {
+			t.Errorf("counted %d starved writes, want 1", n)
+		}
+		if got := published(r); got != "" {
+			t.Errorf("published %q after only conflicts", got)
+		}
+	})
 }
