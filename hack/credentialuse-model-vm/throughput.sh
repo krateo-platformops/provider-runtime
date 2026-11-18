@@ -50,7 +50,10 @@ run() { # name, GOGC, GOMEMLIMIT (total), layout (one|each)
     env GOGC=$gogc GOMEMLIMIT=$lim CREDENTIALUSE_MODEL_THROUGHPUT=$DUR "CREDENTIALUSE_MODEL_THROUGHPUT_ONLY=$all" CREDENTIALUSE_MODEL_DIFF_WORKERS=$n CREDENTIALUSE_MODEL_PROGRESS_EVERY=50000 \
       "$HOME/ct.test" -test.run '^TestModelSplitThroughput$' -test.v -test.timeout 30m > "$HOME/out/$name.log" 2>&1
   else
-    per=$(( ${lim%GiB} / 4 ))GiB; [ "$lim" = off ] && per=off
+    # A share of the limit per process, or none. The test comes first: with
+    # set -u, $(( off / 4 )) is an unbound variable, which ended the layout
+    # run at 63c25cb before layout 2.
+    if [ "$lim" = off ]; then per=off; else per=$(( ${lim%GiB} / 4 ))GiB; fi
     i=0; for s in "${searches[@]}"; do
       env GOGC=$gogc GOMEMLIMIT=$per CREDENTIALUSE_MODEL_THROUGHPUT=$DUR "CREDENTIALUSE_MODEL_THROUGHPUT_ONLY=$s" CREDENTIALUSE_MODEL_DIFF_WORKERS=$n CREDENTIALUSE_MODEL_PROGRESS_EVERY=50000 \
         "$HOME/ct.test" -test.run '^TestModelSplitThroughput$' -test.v -test.timeout 30m > "$HOME/out/$name.$i.log" 2>&1 &
