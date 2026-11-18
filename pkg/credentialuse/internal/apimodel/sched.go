@@ -315,11 +315,45 @@ type Visited struct {
 	// States counts distinct abstract states; Flagged counts, per flag the
 	// scenario's key reports, the distinct states in which it is set.
 	States int
+	// watches[key] is C-stable's watch (watched) at the state: the key
+	// leaves it out, so a merge is sound only if it is a function of the
+	// key, which checkWatch asserts.
+	watches map[string]string
 }
 
 // NewVisited returns an empty memory.
 func NewVisited() *Visited {
-	return &Visited{m: map[string][]Budget{}, witness: map[string]Witness{}}
+	return &Visited{m: map[string][]Budget{}, witness: map[string]Witness{}, watches: map[string]string{}}
+}
+
+// checkWatch panics if key was reached before with another C-stable watch:
+// merging the two states would drop a check that only one of them has to
+// run (§5, C-stable).
+func (v *Visited) checkWatch(key, watch string) {
+	if prev, ok := v.watches[key]; ok {
+		if prev != watch {
+			panic(fmt.Sprintf("apimodel: a state was reached with two different C-stable watches (%q and %q): the watch must be a function of the state's key, or a merge would drop a check (docs/credential-use-model-reduction.md §5, C-stable)", prev, watch))
+		}
+		return
+	}
+	v.watches[key] = watch
+}
+
+// watchSig is every actor's C-stable watch, as the labels of the quiet parks
+// it has left since its last visible step.
+func (s *Sched) watchSig() string {
+	var b strings.Builder
+	for _, a := range s.actors {
+		if len(a.watch) == 0 {
+			continue
+		}
+		b.WriteString(a.Name + ":")
+		for _, w := range a.watch {
+			b.WriteString(w.label + ";")
+		}
+		b.WriteString(" ")
+	}
+	return b.String()
 }
 
 // A Witness is a path to a state: its choices, and the budget it had left
@@ -872,6 +906,7 @@ func (s *Sched) Run() error {
 			}
 			b := Budget{s.bounds.Preemptions - s.preemptions, s.bounds.Faults - s.faults, s.bounds.Jumps - s.jumps}
 			k := s.Key() + "\x00last=" + last
+			s.visited.checkWatch(k, s.watchSig())
 			if s.visited.see(k, b, s.choices) {
 				s.pruned = true
 				s.prunedAt = Witness{slices.Clone(s.choices), b, k}

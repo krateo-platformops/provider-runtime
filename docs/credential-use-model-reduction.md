@@ -507,7 +507,11 @@ ignore):
   unreduced resume precedes it; and its quiet segment can't, by
   C-invisible. If another actor's step did, the unreduced search would
   have a schedule in which the actor is disabled at a point where R has
-  already resumed it, and C-enabledness would fail.
+  already resumed it, and C-enabledness would fail. A schedule that, at
+  that point, takes another step instead of the actor's visible step is
+  not a different case: it is the other branch of the same choice, which
+  the reduced search explores too, with the watch still running until the
+  actor's visible step is taken on that branch.
 
   *Checked, with R and without:* while an actor waits at a quiet park, a
   condition that has held and is later false panics. When it resumes from
@@ -516,6 +520,18 @@ ignore):
   actor's next visible step, which ends the watch before it runs, or the
   end of the run, and a false panics. So the scenarios that run only
   reduced in CI get the check too.
+
+  *The watch and the stateful search.* The watch is scheduler state that
+  the abstract state's key (§10.1) leaves out. Merging two states with
+  equal keys and different watches would drop a check one of them still
+  has to run. The watch is the list of quiet parks an actor has left since
+  its last visible step; in the model's scenarios the park an actor sits
+  at, with its locals, fixes which quiet parks led there (a holder at its
+  pass's first call came through that pass's wait or through none, and
+  its pass number is a local). Rather than widen the key, which would
+  change every recorded key and state count, the stateful search asserts
+  it: `Visited` records each key's watch, and a state reached again with
+  another one panics.
 - **C-progress.** Every quiet segment reaches a park, and no cycle of quiet
   parks runs without a call. So R terminates.
 

@@ -290,3 +290,19 @@ func TestQuietSegmentKeepsTheClock(t *testing.T) {
 		}
 	}
 }
+
+// A stateful search merges states by key, and the key leaves C-stable's
+// watch out: a state reached again with another watch panics, rather than
+// merge away a check (§5, C-stable).
+func TestVisitedWatchIsAFunctionOfTheKey(t *testing.T) {
+	v := NewVisited()
+	v.checkWatch("k", "waiter:set; ")
+	v.checkWatch("k", "waiter:set; ")
+	v.checkWatch("other", "")
+	defer func() {
+		if p := recover(); p == nil || !strings.Contains(fmt.Sprint(p), "C-stable") {
+			t.Errorf("want the C-stable watch panic, got %v", p)
+		}
+	}()
+	v.checkWatch("k", "")
+}
