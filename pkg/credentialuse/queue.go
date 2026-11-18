@@ -30,7 +30,12 @@ type batchKey struct {
 // was added meanwhile. Timers run on the queue's clock, so tests drive them
 // with a fake one.
 //
-// No lock of the queue is held while a timer's add or a caller runs.
+// The queue never calls its clock while holding mu. A clock may run a
+// timer's function while holding a lock of its own, as the fake clock of
+// k8s.io/utils does under Step, and that function takes mu; so calling the
+// clock under mu would order the two locks both ways (D1 of the review of
+// #109). AddAfter therefore registers a timer in two steps, and ShutDown
+// stops the timers after releasing mu.
 type batchQueue struct {
 	clock clock.WithDelayedExecution
 
@@ -40,7 +45,7 @@ type batchQueue struct {
 	ready   []batchKey               // keys waiting to be taken, in order
 	queued  map[batchKey]bool        // in ready
 	working map[batchKey]bool        // taken, not yet done
-	timers  map[clock.Timer]bool     // AddAfter timers not yet fired
+	timers  map[*queueTimer]bool     // AddAfter timers neither fired nor stopped
 	stopped bool
 }
 
@@ -50,7 +55,7 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 		pending: map[batchKey]map[ID]bool{},
 		queued:  map[batchKey]bool{},
 		working: map[batchKey]bool{},
-		timers:  map[clock.Timer]bool{},
+		timers:  map[*queueTimer]bool{},
 	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
@@ -80,27 +85,53 @@ func (q *batchQueue) Add(k batchKey, ids ...ID) {
 	}
 }
 
+// A queueTimer is one AddAfter. It is in the queue's timers from before the
+// clock is asked for a timer until the timer fires or ShutDown takes it; t is
+// set once the clock has returned it.
+type queueTimer struct {
+	t clock.Timer
+}
+
 // AddAfter adds k's batch, covering ids, once d has passed on the queue's
 // clock: the end of a grace (§5, §10.2). A d of zero or less adds at once.
+// After ShutDown it does nothing.
 func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 	if d <= 0 {
 		q.Add(k, ids...)
 		return
 	}
 	ids = slices.Clone(ids)
+	e := &queueTimer{}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.stopped {
+		q.mu.Unlock()
 		return
 	}
-	var t clock.Timer
-	t = q.clock.AfterFunc(d, func() {
+	q.timers[e] = true
+	q.mu.Unlock()
+
+	t := q.clock.AfterFunc(d, func() {
 		q.mu.Lock()
-		delete(q.timers, t)
+		live := q.timers[e]
+		delete(q.timers, e)
 		q.mu.Unlock()
-		q.Add(k, ids...)
+		if live {
+			q.Add(k, ids...)
+		}
 	})
-	q.timers[t] = true
+
+	q.mu.Lock()
+	live := q.timers[e]
+	if live {
+		e.t = t
+	}
+	q.mu.Unlock()
+	if !live {
+		// It fired already, or ShutDown took it before it had a timer to
+		// stop: either way it is no longer the queue's, and stopping it is
+		// harmless if it fired.
+		t.Stop()
+	}
 }
 
 // Get takes the next batch, waiting for one, and marks it as being worked
@@ -151,17 +182,24 @@ func (q *batchQueue) Len() int {
 }
 
 // ShutDown stops the timers, drops what is waiting, and wakes every Get.
+// A timer that fires while ShutDown runs adds nothing.
 func (q *batchQueue) ShutDown() {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	q.stopped = true
-	for t := range q.timers {
-		t.Stop()
+	var stop []clock.Timer
+	for e := range q.timers {
+		if e.t != nil {
+			stop = append(stop, e.t)
+		}
 	}
 	clear(q.timers)
 	q.ready, q.pending = nil, map[batchKey]map[ID]bool{}
 	clear(q.queued)
 	q.cond.Broadcast()
+	q.mu.Unlock()
+	for _, t := range stop {
+		t.Stop()
+	}
 }
 
 func keysOf[K comparable, V any](m map[K]V) []K {

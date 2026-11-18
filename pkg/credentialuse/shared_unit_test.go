@@ -108,6 +108,70 @@ func TestBatchQueueTimersAndShutDown(t *testing.T) {
 	}
 }
 
+// The fake clock runs a timer's function while holding its own lock, and
+// that function takes the queue's; so the queue must never call the clock
+// while holding its lock (D1 of the review of #109). These two probes race
+// what would order the locks the other way: AddAfter against timers firing,
+// and ShutDown against timers firing. Each fails on a deadline rather than
+// hanging.
+func TestBatchQueueNeverCallsTheClockUnderItsLock(t *testing.T) {
+	within := func(t *testing.T, what string, f func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() { defer close(done); f() }()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s deadlocked", what)
+		}
+	}
+	t.Run("AddAfter against Step", func(t *testing.T) {
+		clk := testingclock.NewFakeClock(time.Now())
+		q := newBatchQueue(clk)
+		within(t, "AddAfter against Step", func() {
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				for i := range 2000 {
+					q.AddAfter(batchKey{widgetGK, "ns"}, time.Millisecond, idOf(string(rune('a'+i%26))))
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				for range 2000 {
+					clk.Step(time.Millisecond)
+				}
+			}()
+			wg.Wait()
+		})
+	})
+	t.Run("ShutDown against Step", func(t *testing.T) {
+		for range 200 {
+			clk := testingclock.NewFakeClock(time.Now())
+			q := newBatchQueue(clk)
+			for i := range 20 {
+				q.AddAfter(batchKey{widgetGK, "ns"}, time.Duration(i+1)*time.Millisecond)
+			}
+			within(t, "ShutDown against Step", func() {
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					for range 20 {
+						clk.Step(time.Millisecond)
+					}
+				}()
+				go func() { defer wg.Done(); q.ShutDown() }()
+				wg.Wait()
+			})
+			if clk.HasWaiters() {
+				t.Fatal("a timer is still waiting after ShutDown")
+			}
+		}
+	})
+}
+
 // A Get returns false when its context ends.
 func TestBatchQueueGetHonoursContext(t *testing.T) {
 	q := newBatchQueue(testingclock.NewFakeClock(time.Now()))
