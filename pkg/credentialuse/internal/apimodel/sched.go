@@ -379,8 +379,10 @@ type Actor struct {
 
 	// quiet: the actor is parked at a quiet park (§4); nextQuiet: the park
 	// it is about to make is one. condHeld: its condition has held at this
-	// park, which C-stable says it then always does.
+	// park, which C-stable says it then always does. watch: the conditions
+	// of the quiet parks it has left since its last visible step (watched).
 	quiet, nextQuiet, condHeld bool
+	watch                      []watched
 
 	// inputs are what the actor's code received in its current unit: call
 	// results, values it read from shared state, times it read (§10.1).
@@ -608,6 +610,9 @@ func (s *Sched) Settle() {
 func (s *Sched) resumeQuiet(a *Actor) {
 	now := s.Clock.t
 	pend := s.pending(now)
+	if a.cond != nil {
+		a.watch = append(a.watch, watched{a.label, a.cond})
+	}
 	a.quiet = false
 	s.inQuiet = true
 	a.resume(FaultNone)
@@ -708,15 +713,27 @@ func (a *Actor) enabled(now time.Time) bool {
 // inputs must be the same after the condition as before; and the harness
 // panics on any write to shared state while InCond.
 //
-// It also checks C-stable: at a quiet park, a condition that has held must
-// go on holding until the actor resumes.
+// It also checks C-stable at a quiet park (see watched): a condition that
+// has held must go on holding while the actor waits.
 func (a *Actor) holds() bool {
 	if a.cond == nil {
 		return true
 	}
+	ok := a.evalCond(a.label, a.cond)
+	if a.quiet && !a.s.noCondCheck {
+		if a.condHeld && !ok {
+			panic(fmt.Sprintf("apimodel: %s's quiet condition at %q held, then stopped holding before the actor resumed: a quiet Wait's condition must stay true once true (docs/credential-use-model-reduction.md §5, C-stable)", a.Name, a.label))
+		}
+		a.condHeld = a.condHeld || ok
+	}
+	return ok
+}
+
+// evalCond evaluates one of a's conditions under C-park's runtime check.
+func (a *Actor) evalCond(label string, cond func() bool) bool {
 	s := a.s
 	if s.noCondCheck {
-		return a.cond()
+		return cond()
 	}
 	var before string
 	if a.Locals != nil {
@@ -725,18 +742,41 @@ func (a *Actor) holds() bool {
 	n := len(a.inputs)
 	outer := s.inCond
 	s.inCond = true
-	ok := a.cond()
+	ok := cond()
 	s.inCond = outer
 	if len(a.inputs) != n || (a.Locals != nil && deepString(a.Locals()) != before) {
-		panic(fmt.Sprintf("apimodel: %s's condition at %q changed the actor's state: a Wait's condition is a guard and must change nothing (docs/credential-use-model-reduction.md §5, C-park)", a.Name, a.label))
-	}
-	if a.quiet {
-		if a.condHeld && !ok {
-			panic(fmt.Sprintf("apimodel: %s's quiet condition at %q held, then stopped holding before the actor resumed: a quiet Wait's condition must stay true once true (docs/credential-use-model-reduction.md §5, C-stable)", a.Name, a.label))
-		}
-		a.condHeld = a.condHeld || ok
+		panic(fmt.Sprintf("apimodel: %s's condition at %q changed the actor's state: a Wait's condition is a guard and must change nothing (docs/credential-use-model-reduction.md §5, C-park)", a.Name, label))
 	}
 	return ok
+}
+
+// A watched condition is C-stable's check under rule R (§5, C-stable). When
+// an actor resumes from a quiet park, R may have run the segment at the
+// first moment the park was ready; the unreduced search could instead have
+// left it parked until just before the actor's next visible step, with every
+// step of the other actors in between still before it. So from the resume
+// to the actor's next visible step (a call, or a resume from a park that
+// isn't quiet), or to the end of the run, the park's condition must hold
+// after every step: a step of another actor that falsified it is a schedule
+// in which the unreduced search's actor is no longer enabled where R has
+// already run it. The actor's own visible step ends the watch first, since
+// the unreduced resume must come before it, and that step may falsify the
+// condition. Without R the same watch runs from the quiet resume step, which
+// the unreduced search can likewise defer to the actor's next visible step.
+type watched struct {
+	label string
+	cond  func() bool
+}
+
+// checkWatches is C-stable's check after a step (watched).
+func (s *Sched) checkWatches() {
+	for _, a := range s.actors {
+		for _, w := range a.watch {
+			if !a.evalCond(w.label, w.cond) {
+				panic(fmt.Sprintf("apimodel: %s's quiet condition at %q held when the actor resumed, and a step of another actor made it false before %s's next visible step (trace %s): a quiet Wait's condition must stay true once true (docs/credential-use-model-reduction.md §5, C-stable)", a.Name, w.label, a.Name, s.Trace()))
+			}
+		}
+	}
 }
 
 // InCond reports whether a Wait's condition is being evaluated: the harness
@@ -767,6 +807,7 @@ func (s *Sched) Run() error {
 		}
 	}()
 	for {
+		s.checkWatches()
 		if !s.NoQuiet {
 			s.Settle()
 		}
@@ -879,6 +920,7 @@ func (s *Sched) Run() error {
 			s.resumeQuiet(o.actor)
 			continue
 		}
+		o.actor.watch = nil // its visible step: the watch ends (watched)
 		o.actor.resume(o.fault)
 	}
 }

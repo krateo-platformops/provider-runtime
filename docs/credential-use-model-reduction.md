@@ -472,11 +472,33 @@ ignore):
 
   The rotation actor's "gone" wait is undone only by that actor's own later
   recreate, so it holds while the actor waits on it. Any other Wait stays
-  non-quiet.
+  non-quiet. (The two-process scenario's releaser trigger, a counter
+  threshold, was meant to be quiet, but its marker never took effect: the
+  trigger has always been a plain Wait, and making it quiet would change
+  that scenario's bounded search, since a quiet resume costs no
+  preemption.)
 
-  *Checked:* the scheduler panics if, at a quiet park, a condition that has
-  held is later false before the actor resumes. With R a ready quiet park
-  resumes at once, so the unreduced search is where this can show.
+  *What exactly must hold, and for how long.* R resumes a quiet park at
+  the first moment it is ready. The unreduced search can leave it parked
+  until just before the actor's next visible step: a quiet resume costs no
+  preemption and is never the last actor, so deferring it changes no
+  step's cost, and every step of the other actors in between can come
+  before it. It can't defer it past that step, which needs the resume
+  first. So C-stable is: from the moment the condition first holds to the
+  actor's next visible step (or the end of the run), no step of another
+  actor makes it false. The actor's own visible step may, since the
+  unreduced resume precedes it; and its quiet segment can't, by
+  C-invisible. If another actor's step did, the unreduced search would
+  have a schedule in which the actor is disabled at a point where R has
+  already resumed it, and C-enabledness would fail.
+
+  *Checked, with R and without:* while an actor waits at a quiet park, a
+  condition that has held and is later false panics. When it resumes from
+  one, with R silently or without R as a step of its own, the park's
+  condition is watched: it is evaluated after every step until the
+  actor's next visible step, which ends the watch before it runs, or the
+  end of the run, and a false panics. So the scenarios that run only
+  reduced in CI get the check too.
 - **C-progress.** Every quiet segment reaches a park, and no cycle of quiet
   parks runs without a call. So R terminates.
 

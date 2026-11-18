@@ -226,38 +226,34 @@ func TestConditionCheckSeesThroughLocals(t *testing.T) {
 	}
 }
 
-// C-stable is checked: a quiet park's condition that held, then stopped
-// holding before the actor resumed, panics. With rule R a ready quiet park
-// resumes at once, so only the unreduced search can see it.
+// C-stable is checked, with rule R and without (§5, C-stable): a quiet
+// park's condition that held must hold after every step of another actor
+// until the waiting actor's next visible step, since the unreduced search
+// can defer the quiet resume to just before it. With R the actor has already
+// resumed when the writer clears the flag, so only the watch can see it. The
+// actor's own visible step may falsify its condition.
 func TestQuietConditionStaysTrue(t *testing.T) {
-	p := explorePanic(Bounds{}, true, func(s *Sched) {
-		flag := 0
-		s.Go("writer", 0, func(a *Actor) {
-			_ = a.Call("set", func() error { flag = 1; return nil })
-			_ = a.Call("clear", func() error { flag = 0; return nil })
-		})
-		s.Go("waiter", 0, func(a *Actor) {
-			a.WaitQuiet("set", time.Time{}, func() bool { return flag == 1 })
-		})
-	})
-	if p == nil || !strings.Contains(fmt.Sprint(p), "C-stable") {
-		t.Errorf("want the C-stable panic, got %v", p)
-	}
-}
-
-// A quiet segment that ends at a timed park would add a deadline, and so
-// change every tick after the point rule R moves it to (§5, C-independent,
-// the clock). It panics, with R and without.
-func TestQuietSegmentKeepsTheClock(t *testing.T) {
-	for _, noQuiet := range []bool{true, false} {
-		p := explorePanic(Bounds{Jumps: 1}, noQuiet, func(s *Sched) {
-			s.Go("worker", 0, func(a *Actor) { _ = a.Call("work", func() error { return nil }) })
-			s.Go("timer", QuietStart, func(a *Actor) {
-				a.Wait("later", Start.Add(5*TimeUnit), nil)
+	scenario := func(writerClears bool) func(s *Sched) {
+		return func(s *Sched) {
+			flag := 0
+			s.Go("writer", 0, func(a *Actor) {
+				_ = a.Call("set", func() error { flag = 1; return nil })
+				if writerClears {
+					_ = a.Call("clear", func() error { flag = 0; return nil })
+				}
 			})
-		})
-		if p == nil || !strings.Contains(fmt.Sprint(p), "timed park") {
-			t.Errorf("NoQuiet=%v: want the timed-park panic, got %v", noQuiet, p)
+			s.Go("waiter", QuietStart, func(a *Actor) {
+				a.WaitQuiet("set", time.Time{}, func() bool { return flag == 1 })
+				_ = a.Call("work", func() error { flag = 0; return nil })
+			})
+		}
+	}
+	for _, noQuiet := range []bool{true, false} {
+		if p := explorePanic(Bounds{}, noQuiet, scenario(true)); p == nil || !strings.Contains(fmt.Sprint(p), "C-stable") {
+			t.Errorf("another actor falsifies it, NoQuiet=%v: want the C-stable panic, got %v", noQuiet, p)
+		}
+		if p := explorePanic(Bounds{Preemptions: 1}, noQuiet, scenario(false)); p != nil {
+			t.Errorf("only the waiter's own step falsifies it, NoQuiet=%v: want no panic, got %v", noQuiet, p)
 		}
 	}
 }
@@ -274,6 +270,23 @@ func TestQuietSegmentCantReadSchedNow(t *testing.T) {
 		})
 		if p == nil || !strings.Contains(fmt.Sprint(p), "Sched.Now") {
 			t.Errorf("NoQuiet=%v: want the Sched.Now panic, got %v", noQuiet, p)
+		}
+	}
+}
+
+// A quiet segment that ends at a timed park would add a deadline, and so
+// change every tick after the point rule R moves it to (§5, C-independent,
+// the clock). It panics, with R and without.
+func TestQuietSegmentKeepsTheClock(t *testing.T) {
+	for _, noQuiet := range []bool{true, false} {
+		p := explorePanic(Bounds{Jumps: 1}, noQuiet, func(s *Sched) {
+			s.Go("worker", 0, func(a *Actor) { _ = a.Call("work", func() error { return nil }) })
+			s.Go("timer", QuietStart, func(a *Actor) {
+				a.Wait("later", Start.Add(5*TimeUnit), nil)
+			})
+		})
+		if p == nil || !strings.Contains(fmt.Sprint(p), "timed park") {
+			t.Errorf("NoQuiet=%v: want the timed-park panic, got %v", noQuiet, p)
 		}
 	}
 }
