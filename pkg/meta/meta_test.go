@@ -357,7 +357,7 @@ func TestSetExternalCreatePending(t *testing.T) {
 		"SetsTheCorrectKey": {
 			o:    &corev1.Pod{},
 			t:    now,
-			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreatePending: now.Format(MarkerTimeLayout)}}},
+			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreatePending: now.UTC().Format(MarkerTimeLayout)}}},
 		},
 	}
 
@@ -409,7 +409,7 @@ func TestSetExternalCreateSucceeded(t *testing.T) {
 		"SetsTheCorrectKey": {
 			o:    &corev1.Pod{},
 			t:    now,
-			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateSucceeded: now.Format(MarkerTimeLayout)}}},
+			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateSucceeded: now.UTC().Format(MarkerTimeLayout)}}},
 		},
 	}
 
@@ -461,7 +461,7 @@ func TestSetExternalCreateFailed(t *testing.T) {
 		"SetsTheCorrectKey": {
 			o:    &corev1.Pod{},
 			t:    now,
-			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateFailed: now.Format(MarkerTimeLayout)}}},
+			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateFailed: now.UTC().Format(MarkerTimeLayout)}}},
 		},
 	}
 
@@ -600,6 +600,33 @@ func TestExternalCreateIncomplete(t *testing.T) {
 // TestExternalCreateMarkersSubSecond pins #88: markers set within the same
 // second are ordered by their times, not tied, and markers written with second
 // precision by earlier releases still order correctly against new ones.
+func TestExternalCreateMarkersAreUTC(t *testing.T) {
+	// A process whose time zone isn't UTC must still write UTC markers, so
+	// every marker carries the same offset; the parsed time is the same instant.
+	at := time.Date(2026, 11, 18, 10, 0, 0, 500_000_000, time.FixedZone("CET", 3600))
+	cases := map[string]struct {
+		set func(o metav1.Object, t time.Time)
+		key string
+		get func(o metav1.Object) time.Time
+	}{
+		"Pending":   {SetExternalCreatePending, AnnotationKeyExternalCreatePending, GetExternalCreatePending},
+		"Succeeded": {SetExternalCreateSucceeded, AnnotationKeyExternalCreateSucceeded, GetExternalCreateSucceeded},
+		"Failed":    {SetExternalCreateFailed, AnnotationKeyExternalCreateFailed, GetExternalCreateFailed},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			o := &corev1.Pod{}
+			tc.set(o, at)
+			if got, want := o.GetAnnotations()[tc.key], "2026-11-18T09:00:00.5Z"; got != want {
+				t.Errorf("%s = %q, want %q", tc.key, got, want)
+			}
+			if got := tc.get(o); !got.Equal(at) {
+				t.Errorf("parsed %v, want the instant %v", got, at)
+			}
+		})
+	}
+}
+
 func TestExternalCreateMarkersSubSecond(t *testing.T) {
 	base := time.Date(2026, 11, 12, 12, 0, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
