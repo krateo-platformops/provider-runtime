@@ -4,13 +4,398 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-14T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-14 — v1.20.0: an opt-in capacity model, and a share per controller
+- **A minor release. Everything new is behind the saturation input**
+  (`--saturation-governor`, off by default), and the capacity model behind an
+  option of its own, also off. Providers that haven't enabled saturation see no
+  change (#98).
+- **A capacity model, opt-in** (`RateLimit.Saturation.CapacityModel`; needs a
+  CPU limit of 500m or more). It sizes local capacity from the CPU the
+  container used and the reconciles in flight, so CPU use settles at
+  `CPUTarget` (0.9) of the limit, and it leaves v1.19.0's pressure step as a
+  veto that can only lower it ([design](./design-capacity-model.md)).
+- **It is a trade, measured on GKE.** At a 500m limit, where the test workload
+  saturates, it gave 86.8% of the step alone's throughput for calls 16 times
+  faster (23ms against 366ms), holding local capacity at the computed knee with
+  no pressure cut. It missed the bar of 95% of the throughput set before the
+  run, and the user chose to ship it as this trade. At 1 CPU, where the
+  workload doesn't saturate, it settled at the knee in two runs of three and
+  never moved in the third: under its target it lowers nothing
+  ([configuration](./configuration.md#capacity-model-measured-2026-11-13-and-14)).
+- **A guaranteed share per controller, whenever saturation is on.** A freed
+  slot goes first to a controller under its equal share of the local capacity,
+  and otherwise is lent to any controller with work; nothing is preempted. A
+  single controller behaves as before. Covered by unit and stress tests and an
+  independent review; not yet measured on a cluster with several controllers.
+- **New instruments for sizing a controller from outside:** per controller, the
+  slots in flight, the guaranteed share, the items waiting and the arrivals;
+  the cuts by the step; the CPU limit; and, with the model on, its capacity,
+  the CPU used, the background, the CPU per reconcile and a required-CPU
+  estimate (a lower bound while a backlog stands).
+- **Known limits:** when one slot is a large share of the limit, a target
+  between two slot levels can settle on either; after a cut, recovery with very
+  slow reconciles is one doubling per window of up to 5 minutes.
+- **Docs only, since v1.19.0:** during `Create` the `Ready` condition is the
+  runtime's (#102, #103), and the CPU step's measurement at a 100m limit (#97).
+
+## 2026-11-13 — v1.19.0: the CPU slow-down cuts once per 10s window
+- **A minor release: it changes the behaviour of an opt-in feature**
+  (`--saturation-governor`, off by default). Providers that haven't enabled it
+  see no change (#95).
+- **What was wrong.** The CPU step halved local capacity on every 1s sample of
+  `cpu.pressure`'s `some avg10`, an average that still holds most of a stall
+  10s after it ended, so one stall cut capacity several times. On GKE at a 250m
+  limit it settled at about 72% of the limit with 31% less throughput.
+- **What changed.** CPU pressure is now the share of the last 10s in which some
+  task waited for CPU, from the cumulative `some total`. A cut needs a whole
+  window of evidence, and the next cut a whole window measured after the last
+  one. After a CPU cut, capacity rises by one per `StartupRampInterval` (2s).
+  The experimental memory input is unchanged.
+- **Measured on GKE (250m, 16 workers, 5 runs per arm):** 93.4% of the CPU
+  limit used, pressure 41.7, 91.0% of the ungoverned throughput, no restarts.
+  That meets the four bars the user set on 2026-11-08; the margins on pressure
+  and throughput are thin, and it is one workload at one limit
+  ([configuration](./configuration.md#cpu-step-re-measured-2026-11-13)).
+- **For consumers that enable it:** `CPUPressureThreshold` keeps its name and
+  default (50, still provisional), but now reads the 10s share, not `avg10`;
+  the `saturation.input` metric reports the same value; the log text says
+  `CPU pressure N% (some, over 10s)`; new export `ratelimit.CPUPressureWindow`.
+- **The cost model was stopped.** The per-reconcile cost model (#57) is closed
+  unmerged after its review: at CPU limits of 100m to 125m it could not tell
+  its target from saturation. Its design documents are kept, marked not
+  pursued.
+
+## 2026-11-12 — v1.18.0: create markers keep sub-second precision
+- **A minor release: the `krateo.io/external-create-pending`, `-succeeded` and
+  `-failed` markers are now written with RFC3339Nano** (new export
+  `meta.MarkerTimeLayout`). With second precision, a pending marker and its
+  terminal marker set within one second tied, and `ExternalCreateIncomplete`
+  returned "complete" by default on the tie rather than by ordering (#88,
+  reported by oasgen-provider from a live azuredevops-provider-kog
+  measurement: 25 resources tied).
+- **Compatible with existing objects.** Parsing accepts values with or
+  without a fractional second, so markers written by earlier releases still
+  read back. A second-precision value is truncated, so it can only be earlier
+  than the event it records: mixed old and new markers still order correctly.
+- **Consumers checked:** core-provider and oasgen-provider (with the
+  rest-dynamic-controller and the kog providers it generates) don't read these
+  annotations outside provider-runtime's `meta` helpers.
+- **Also:** the reconciler comment that called the pending-to-terminal window
+  "~2s" now says it measures well under a second.
+- `TestExternalCreateMarkersSubSecond` pins it; it fails with second-precision
+  markers.
+
+## 2026-11-12 — v1.17.1: a deleted object is not an error
+- **A patch release. Only a log level changes.** When a reconcile's Get returns
+  NotFound, the normal end of a deletion, the reconciler now logs "Managed
+  resource is gone" at Debug, instead of "Cannot get managed resource" at
+  ERROR. The pass still returns no error and no requeue, as before.
+- **Why:** every normal deletion logged an ERROR. It carried no trace id
+  (it comes before the reconcile span), inflated error counts and could trip
+  log-based alerts. Reported by acmp from alert-provider on krateo-057.
+- **Other Get failures** are still logged at ERROR and requeue.
+- `TestNotFoundIsNotAnError` pins it.
+
+## 2026-11-11 — v1.17.0: a failed write leaves mg's version
+- **A minor release: one new export,
+  `reconcilertest.AssertFailedWriteLeavesManaged`.** Behaviour is unchanged.
+  It's the #80 follow-up the user approved after v1.16.0, from
+  oasgen-provider's request in the review of #84.
+- **What it checks:** the `ExternalClient` ordering rule. A method whose
+  write of the managed object fails must leave `mg`'s resourceVersion
+  untouched. A version copied onto `mg` too early, from a re-read, lets the
+  runtime's next write succeed against an object the method never wrote. A
+  stale version fails loudly instead.
+- **How:**
+  - The caller passes a kube client that fails the method's writes, for
+    example the fake client with an interceptor whose `SubResourceUpdate`
+    returns a conflict.
+  - The helper first moves the stored version with its own `kube.Update` of
+    one annotation, so a re-read returns a version `mg` doesn't carry. The
+    caller's interceptor must let that Update through; failing only status
+    writes does.
+  - It then requires the method to return an error and its write not to
+    land, and fails if `mg`'s resourceVersion changed. Only the version is
+    checked: a method may change status in memory on failure.
+  - A `retry.RetryOnConflict` loop that fails on every attempt is covered.
+  - The rule is strict, by the user's decision: re-reading the object into
+    `mg` itself, for example inside `RetryOnConflict`, fails too. Re-read into
+    a copy and copy back only after success. A re-read into `mg` drops the
+    pass's in-memory status, and on the REST client the Get merges the stored
+    object into `mg` rather than replacing it. The failure message says so.
+- **Its tests:**
+  - These pass: copying the version only after success, with or without a
+    retry loop.
+  - These fail: copying the re-read version before the write, or despite
+    its error, also inside a retry loop; re-reading into `mg` inside a retry
+    loop; a method that returns nil; a write that landed; a stale `mg`.
+- The `ExternalClient` doc now names both helpers.
+
+## 2026-11-11 — v1.16.0: a status conflict names its cause
+- **A minor release: the error text of a status conflict changes, and there
+  are four new exports:** `reconciler.WithAPIReader`, `tracing.StepStatus`,
+  `reconcilertest.AssertLeavesManagedCurrent` and `reconcilertest.Method`.
+  It's option 1 of #80, the user's decision of 2026-11-11
+  (design-status-write-conflict §7.1, §12). Behaviour is otherwise unchanged:
+  a status write is still sent once, with no retry and no merge.
+- **The contract is written down.** The `ExternalClient` doc now says a
+  method that writes the managed object must leave `mg` describing what is
+  stored: write `mg` itself, or copy the new resourceVersion and every field it
+  wrote back onto `mg`, only after the write succeeded. Copying only the
+  version silently reverts the write. A re-read-then-write can revert someone
+  else's change, a human's status patch included.
+- **The error names the likely cause.** A status write that conflicts now
+  returns `cannot update managed resource status: <the API server's conflict>:
+  the object changed since the pass's read (read at resourceVersion V): if an
+  ExternalClient method writes the object itself, it must copy ... back onto mg
+  (see ExternalClient); pass error: <the pass's own error>`.
+  - It starts with what it said before, the prefix and the API server's
+    conflict text, so existing searches still match.
+  - `kerrors.IsConflict`, `errors.Is` on the pass's error, and
+    `resource.IsAPIErrorWrapped` still see through it: it's a
+    `kerrors.APIStatus` itself, the conflict's.
+  - **So `resource.IsAPIError(err)` is now true on the bare error,** where
+    it was false for the old wrapped one. A consumer that wraps a call in
+    `retry.OnError(…, resource.IsAPIError, …)` would now retry a status
+    conflict.
+  - Before, on an error path, the status conflict replaced the pass's own
+    error (an Observe or Update failure, for example). Now both are kept.
+  - It stays an error that `Reconcile` returns, not a silent requeue.
+  - All 20 status writes go through one function, so every one gets it. A
+    status write that fails with anything but a conflict reads as before.
+  - **Consumers' tests may need updating:** a test that compares a status
+    conflict's error with `test.EquateErrors` against
+    `errors.Wrap(conflict, errUpdateManagedStatus)` now fails, because both the
+    type and the text differ. Compare with `kerrors.IsConflict`, or the prefix.
+- **New step `status` on `k8s.conflict`** (`tracing.StepStatus`, in
+  `tracing.Steps()`). It's the one step whose pass returns an error, so its
+  root is Error.
+- **`reconciler.WithAPIReader`.** Pass `mgr.GetAPIReader()` and a status
+  conflict reads the object live once, for the message only: it adds the live
+  resourceVersion and generation (next to the pass's, so a spec edit shows),
+  the top-level status keys that differ from the pass's read, and the newest
+  managedFields entry, labelled as a hint. Nothing is decided from it, and a
+  failed read gives the plain message.
+  - It's opt-in. `NewReconciler` can't take the reader from its manager:
+    `fake.Manager` embeds a nil `manager.Manager`, whose `GetAPIReader` would
+    panic, and so would any consumer's fake built the same way.
+  - Its cost: one in-memory deep copy of the managed object per pass (the
+    pass's read, kept for the comparison), and one uncached Get, only when a
+    status write conflicts. With a rate-limit governor, the governor's copy
+    is that same one, except on a pass where the trace marker write moved the
+    version (at most once per trace window), which takes two.
+- **`reconcilertest.AssertLeavesManagedCurrent`,** with its `Method` type. It
+  runs one of a provider's methods against a stored object, writes `mg`'s
+  status as the runtime would, and fails if that write conflicts or reverts a
+  status field the method wrote. It checks the contract in a provider's own
+  tests, on envtest or controller-runtime's fake client.
+- **Consumers need no change.** oasgen-provider mirrors, incident-provider and
+  git-provider write through `mg`, and alert-provider and core-provider don't
+  write `mg` from handlers (design-status-write-conflict §4).
+
+## 2026-11-11 — v1.15.0: symmetric act links, and acting passes are marked
+- **A minor release: two tracing behaviours change.** Both are the user's
+  decisions of 2026-11-11. Nothing changes with tracing off.
+- **The act links to its root only when the root is sampled** (#74). Before,
+  the act's link to its root was unconditional, while the root's link to the
+  act needed the act sampled. Now both directions follow one rule: link only to
+  a sampled target. Under `parentbased_always_on`, which every adopting chart
+  uses, every root is sampled, so nothing visible changes today.
+  "Sampled" is the head decision; the collector's tail sampler still decides
+  what's stored (design-tracing §6.2).
+- **`provider_runtime.acted=true` on the root of every pass that starts an act
+  step** (create, update or delete), joined upstream or not, failed or not
+  (design-tracing §6.7). An observe-only pass carries no such attribute, and
+  it's never set to false. observability's tail sampler keeps traces with it
+  (otel-collector-tailsampling 0.1.11), so a change keeps its reconcile even
+  for a provider sampled at 5%. New exports: `tracing.AttrActed` and
+  `tracing.MarkActed`.
+- **Plumbing floor: v1.48.0** (up from v1.45.0), which carries both changes
+  (plumbing#130). Consumers bumping plumbing for unstructured-runtime should
+  go to v1.48.0 if they also adopt this release.
+- **Also since v1.14.3:** a test pins that the default TracerProvider is read
+  on every pass, not once at construction (#79).
+
+## 2026-11-11 — v1.14.3: shared event names
+- **A patch release. Behaviour is unchanged:** every span, event and
+  attribute carries the same bytes as in v1.14.2.
+- **Shared names:** `pkg/tracing`'s `EventReconcilePaused`
+  (`reconcile.paused`), `EventConflict` (`k8s.conflict`), `EventMarkerFailed`
+  (`trace.marker_failed`) and `AttrStep` (`provider_runtime.step`) now
+  reference plumbing's `tracecontext` constants (plumbing v1.45.0,
+  plumbing#126). unstructured-runtime emits the same constants, so a query or
+  a sampler rule reads the same bytes from either runtime.
+  - Their names and docs are unchanged.
+  - The rate-limit events and keys stay provider-runtime's own.
+  - `TestAliasedNamesAreTheirStrings` pins all four literal strings.
+- **The plumbing bump, v1.44.0 to v1.45.0:** it's one commit, which adds
+  `tracecontext/events.go` and its test.
+  - Nothing else provider-runtime links changes. `env`, `kubeutil/event` and
+    the rest of `tracecontext` are byte-identical.
+  - No other module in the build graph moves.
+
+## 2026-11-11 — v1.14.2: the trace rule lives in plumbing
+- **A patch release. Behaviour is unchanged,** with tracing on or off.
+- **The rule's source of truth is plumbing's `tracecontext`** (plumbing
+  v1.44.0, plumbing#125). provider-runtime and unstructured-runtime now apply one
+  identical `krateo.io/traceparent` rule, D8's (the user's decision).
+  - `pkg/tracing`'s `Decide`, `Decision`, `Mode`, `When`, `Canonical`,
+    `Object` and `StartReconcile`, `StartActStep` and `StartStep` are aliases
+    and thin wrappers over it. Every exported name, signature and doc is
+    unchanged.
+  - The Start functions keep their `TracerProvider` signatures and pass
+    `tp.Tracer(ScopeName)`, or nil when `tp` is nil, so every span keeps
+    provider-runtime's instrumentation scope.
+  - `Inject` reads the inbound context through `tracecontext.Inbound`.
+- **What pins it:** provider-runtime's own tracing tests (D8, envtest, the
+  zero-allocation tests) pass unchanged. New tests pin that a nil `tp`
+  allocates nothing, that every span carries `ScopeName`, that `pkg/meta`'s
+  three keys equal `tracecontext`'s, and the 10-minute default window.
+  - `pkg/meta` keeps its own constants, so it still doesn't import
+    OpenTelemetry.
+  - `go list -deps ./pkg/tracing` gains only `plumbing/tracecontext`, with
+    no SDK.
+- **The plumbing bump, v1.13.0 to v1.44.0:**
+  - It changes nothing else that provider-runtime links. Its other plumbing
+    packages, `env` and `kubeutil/event`, are byte-identical in both
+    versions.
+  - No other module in the build graph moves.
+  - plumbing's `go 1.26.0` directive matches provider-runtime's.
+- **Follow-ups:** provider-runtime#72 closes, covered by plumbing's
+  `TestStartActStepRecordOnlyActGetsNoRootLink`. `pkg/tracing` keeps a copy of
+  that test, so a plumbing bump that broke the guard fails here too.
+  provider-runtime#74 stays open, pinned by plumbing's
+  `TestStartActStepLinksToAnUnsampledRootAsInV1141`. A change to it goes in
+  `tracecontext`.
+
+## 2026-11-10 — v1.14.1: every reconcile is its own trace
+- **Design:** [design-tracing](./design-tracing.md) §13, D8, decided by the
+  user on 2026-11-10 after krateo-057's first day under v1.14.0.
+- **The behaviour change, with tracing on:**
+  - Every `reconcile` root is a new trace. When the object carries a valid
+    `krateo.io/traceparent`, the root has one link to it. In v1.14.0, a pass
+    inside a new value's 10-minute window was that value's child.
+  - Only the first act step for a new value, the `create`, `update` or
+    `delete` span, is the value's child. It carries a link back to its
+    `reconcile` root and the root's three `k8s.object.*` attributes, and the
+    root links to it (when the act is sampled). What the provider does under it
+    with the method's `ctx` joins the upstream trace too; `connect`, `observe`
+    and every other pass don't, and every other root has exactly one link.
+  - Under `parentbased_always_on`, the joined act follows the stamp's sampled
+    flag: a `00` stamp drops it. Charts set `OTEL_TRACES_SAMPLER` to
+    `parentbased_always_on` or leave it unset; `always_on` is allowed; never a
+    ratio sampler.
+  - The marker is unchanged: written with the optimistic lock just before
+    that act, or when the window closes with no act. The window parents
+    nothing now.
+  - With tracing off, nothing changes.
+- **Why:** the composition-dynamic-controller stamps every object of a
+  release on every apply. Under v1.14.0, every chart upgrade put up to 10
+  minutes of every child's observe-only polls into the upgrade's trace: on
+  krateo-057, about 260 reconciles per upgrade, and the reconciles of 28 Alerts
+  in one composition's trace (at least 3,204 spans, about 13 times the
+  volume). The tail sampler kept those traces whole. It wasn't a marker bug:
+  28 of 28 markers were written, and the windows closed as designed.
+- **For tail sampling:** a trace that holds a stamper's span gains one
+  `update`, `create` or `delete` span per object that acts on the new value,
+  each with the object's `k8s.object.*` attributes and a link to a `reconcile`
+  root in a trace of its own, which links back. Observe-only reconciles never
+  join it.
+- **API:** `tracing.StartActStep(ctx, tp, obj, step, upstream)`. `StartReconcile`
+  now always starts a new root, and links to `d.Remote` in Parent and Link
+  mode.
+
+## 2026-11-10 — v1.14.0: trace every reconcile
+- **Design:** [design-tracing](./design-tracing.md) (#60), built in #64, #65
+  and #66, each reviewed independently.
+  - `telemetry.Setup` gains a TracerProvider, and the reconciler opens a
+    `reconcile` root span with `connect`, `observe`, `create`, `update` and
+    `delete` children.
+  - A new `krateo.io/traceparent` value is continued by the first pass that
+    acts on it, within a 10-minute window (`WithTraceContinueWindow`), and is
+    linked after that.
+  - The marker is the `krateo.io/traceparent-continued` annotation
+    (`meta.AnnotationKeyTraceparentContinued`), written with an optimistic
+    lock.
+- **What's in it:**
+  - `pkg/tracing`: `Decide`, `StartReconcile`, `Inject`, `InjectHeader` and
+    the event and step names.
+  - `telemetry.Setup`'s tracing (`Config.TracingEnabled`, `ConfigFromEnv`,
+    the shared resource, the protocol check following OTel's precedence).
+  - httpsignal's propagation of the active span.
+  - The reconciler's wiring:
+    - the root span and its children, the events and the status mapping;
+    - the memo, keyed by NamespacedName with the UID;
+    - the locked marker write before the first act, or when the window closes,
+      with a requeue before acting on a conflict;
+    - `WithTracerProvider` and `WithTraceContinueWindow`.
+- **Changes to existing behaviour:**
+  - **The critical write carries only the runtime's own keys** (#64).
+    `RetryingCriticalAnnotationUpdater`, the default
+    `CriticalAnnotationUpdater`, writes back only `krateo.io/external-name`,
+    the `krateo.io/external-create-*` markers and
+    `krateo.io/traceparent-continued`. Before, it captured every annotation,
+    re-read the object and wrote the captured map back, reverting a fresh
+    `krateo.io/traceparent`, and any other writer's annotations, set while
+    `Create` ran. It affects a provider that sets some other annotation on its
+    managed resource in memory and relies on this write to persist it. No
+    consumer in krateo-platformops does: the scan is in design-tracing §2.
+  - **`telemetry.Setup` sets the global propagator** (W3C TraceContext and
+    Baggage) on every call, tracing on or off. OTel's default is a no-op, so a
+    provider's own `otelhttp` starts honouring and forwarding W3C context and
+    baggage. core-provider and oasgen-provider already set the same
+    propagator themselves.
+  - **httpsignal sets `traceparent`** on outbound requests when tracing is
+    on. With tracing off, it sends nothing.
+  - **"Reconciling" is logged after the Get.** The per-reconcile Logger is
+    bound once the root span starts, which needs the object, so the
+    "Reconciling" debug record now follows the Get. A pass whose object is
+    gone (NotFound) logs no "Reconciling" record.
+  - **With tracing on, a concurrent write requeues before acting.** A write
+    to the object between the pass's Get and the locked marker patch makes the
+    update and delete paths requeue before they act, backing off from 1 s to
+    60 s. Before, the act ran and the status Update failed instead. An object
+    written more often than one Connect and Observe can see its act slip until
+    the 10-minute window closes. That's bounded, and it's what the create path
+    already does with its create-pending Update.
+- **New dependency:**
+  `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` v1.45.0.
+- **Adoption:** design-tracing §11. core-provider and oasgen-provider delete
+  their own `SetupTracing` when they bump; observability adds each provider's
+  `OTEL_SERVICE_NAME` to the tail sampler before its chart turns tracing on.
+
+## 2026-11-09 — v1.13.0: logs can correlate with traces
+- **Additive; nothing breaks.** `logging.ContextLogger` (`WithContext(ctx)
+  Logger`) is an optional interface, so a `Logger` written without it still
+  compiles. The helper `logging.WithContext(l, ctx)` binds `l` when it
+  implements it and returns `l` unchanged when it doesn't.
+- **Why:** `NewOTelJSONHandler` already stamped `trace_id` and `span_id` from
+  the record's context, but the `Logger` had no context to give it. The slog
+  Logger called slog without one, so every record carried
+  `context.Background()` and no controller could correlate a log with a trace.
+- **The slog Logger** passes the bound context with every record, and keeps
+  it through `WithName` and `WithValues`. The nop Logger stays a nop. **The
+  logr Logger can't carry a context**: logr's sink takes none, and its slog
+  adapter calls the handler with `context.Background()`. It comes back
+  unchanged.
+- **`Reconcile` binds its per-reconcile Logger** to the `ctx` it is given.
+  Neither provider-runtime nor controller-runtime starts a span there, so its
+  records correlate only when the provider wraps the reconciler in one that
+  does. Providers bind their own Logger in `ExternalClient` methods with
+  `logging.WithContext(log, ctx)`; the greeting example now does.
+- **Correction:** `NewOTelHandler`'s doc named a `SetupOTLPLogs` that never
+  existed. The binary's main installs the OTLP LoggerProvider, with
+  `global.SetLoggerProvider`.
+- **Ships first,** as its own minor release, before the credential-use and
+  cost-model work.
 
 ## 2026-11-09 — unreleased, decided, not built: size local capacity from what reconciles cost
 - **Design:** [design-saturation-cost-model](./design-saturation-cost-model.md),

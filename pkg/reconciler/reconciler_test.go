@@ -648,7 +648,7 @@ func TestReconciler(t *testing.T) {
 							want := &fake.Managed{}
 							meta.SetExternalCreatePending(want, time.Now())
 							want.SetConditions(prv1.Creating(), prv1.ReconcileError(errors.Wrap(errBoom, errUpdateManaged)))
-							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second)); diff != "" {
+							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second), equateMarkerTimes()); diff != "" {
 								reason := "Errors while creating an external resource should be reported as a conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
 							}
@@ -688,7 +688,7 @@ func TestReconciler(t *testing.T) {
 							meta.SetExternalCreateFailed(want, time.Now())
 							want.SetConditions(prv1.ReconcileError(errors.Wrap(errBoom, errReconcileCreate)))
 							want.SetConditions(prv1.Creating())
-							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second)); diff != "" {
+							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second), equateMarkerTimes()); diff != "" {
 								reason := "Errors while creating an external resource should be reported as a conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
 							}
@@ -731,7 +731,7 @@ func TestReconciler(t *testing.T) {
 							meta.SetExternalCreateSucceeded(want, time.Now())
 							want.SetConditions(prv1.ReconcileError(errors.Wrap(errBoom, errUpdateManagedAnnotations)))
 							want.SetConditions(prv1.Creating())
-							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second)); diff != "" {
+							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second), equateMarkerTimes()); diff != "" {
 								reason := "Errors updating critical annotations after creation should be reported as a conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
 							}
@@ -772,7 +772,7 @@ func TestReconciler(t *testing.T) {
 							meta.SetExternalCreateSucceeded(want, time.Now())
 							want.SetConditions(prv1.ReconcileSuccess())
 							want.SetConditions(prv1.Creating())
-							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second)); diff != "" {
+							if diff := cmp.Diff(want, obj, test.EquateConditions(), cmpopts.EquateApproxTime(1*time.Second), equateMarkerTimes()); diff != "" {
 								reason := "Successful managed resource creation should be reported as a conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
 							}

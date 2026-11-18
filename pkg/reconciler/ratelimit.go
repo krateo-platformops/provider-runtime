@@ -10,7 +10,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
-	"github.com/krateo-platformops/provider-runtime/pkg/errors"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
@@ -164,7 +163,8 @@ func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k rateLimitKe
 // deferReconcile ends a pass whose next external call was deferred. It sets
 // Synced=False/ReconcileDeferred with the deferral's message and nothing else
 // (Ready is left as it is), writes it in one resourceVersion-guarded status
-// update, and requeues after the deferral's delay with a nil error:
+// update (writeStatus, which returns the error the pass returns when it
+// fails), and requeues after the deferral's delay with a nil error:
 // controller-runtime then forgets the item's failure backoff, because a
 // deferral is not a failure.
 //
@@ -177,7 +177,7 @@ func (r *Reconciler) gate(ctx context.Context, log logging.Logger, k rateLimitKe
 // A Normal event is recorded, through the throttled recorder, when the object
 // enters a deferral or a throttled deferral names a new deadline, so a long
 // window does not flood events.
-func (r *Reconciler) deferReconcile(log logging.Logger, mg, pristine resource.Managed, d *ratelimit.Deferral, statusUpdate func() error) (reconcile.Result, error) {
+func (r *Reconciler) deferReconcile(log logging.Logger, mg, pristine resource.Managed, d *ratelimit.Deferral, writeStatus func() error) (reconcile.Result, error) {
 	prev := mg.GetCondition(prv1.TypeSynced)
 	cond := prv1.ReconcileDeferred(d.Message())
 	newWindow := prev.Reason != prv1.ReasonReconcileDeferred ||
@@ -192,8 +192,8 @@ func (r *Reconciler) deferReconcile(log logging.Logger, mg, pristine resource.Ma
 		log.Debug("Deferral changes nothing on the object; skipping the status update")
 		return reconcile.Result{RequeueAfter: d.RequeueAfter}, nil
 	}
-	if err := statusUpdate(); err != nil {
-		return reconcile.Result{}, errors.Wrap(err, errUpdateManagedStatus)
+	if err := writeStatus(); err != nil {
+		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: d.RequeueAfter}, nil
 }

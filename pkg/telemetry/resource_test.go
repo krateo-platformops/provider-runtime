@@ -23,7 +23,7 @@ func TestNewResourceServiceName(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("OTEL_SERVICE_NAME", tc.envName)
 			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tc.envAttrs)
-			res, err := newResource(context.Background(), tc.field)
+			res, err := newResource(context.Background(), Config{ServiceName: tc.field})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -43,7 +43,7 @@ func TestNewResourceServiceName(t *testing.T) {
 func TestNewResourceToleratesMalformedEnv(t *testing.T) {
 	t.Setenv("OTEL_SERVICE_NAME", "")
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "not-a-pair")
-	res, err := newResource(context.Background(), "git-provider")
+	res, err := newResource(context.Background(), Config{ServiceName: "git-provider"})
 	if err != nil {
 		t.Fatalf("newResource: %v", err)
 	}

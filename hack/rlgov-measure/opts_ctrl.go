@@ -13,3 +13,6 @@ import (
 func applyExperimental(s *ratelimit.SaturationOptions) {
 	s.ExperimentalMemoryWorkingSet = os.Getenv("EXPERIMENTAL_MEMORY") == "true"
 }
+
+// modelStat is empty in the control build: v1.10.0 has no capacity model.
+func modelStat(ratelimit.Snapshot) string { return "" }

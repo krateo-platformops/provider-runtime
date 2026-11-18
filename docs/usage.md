@@ -4,7 +4,7 @@ title: provider-runtime — usage
 description: How to consume provider-runtime as a Go module and the minimal code to build a provider on it.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, go-get, usage]
-timestamp: 2026-11-08T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Usage
@@ -189,9 +189,87 @@ For Krateo, that's core-provider#310.
   (`NewSlogLogger`); use `logging.NewOTelHandler(level, w, serviceName)` as
   the binary's slog handler to get OTel-model JSON on stderr plus OTLP export
   once a LoggerProvider is installed.
+  - *Log-to-trace correlation* (unreleased, v1.13.0). Bind a Logger to a
+    context with `logging.WithContext(log, ctx)`, and every record it logs
+    carries that context to the slog handler. It works when the Logger is
+    slog-backed (`NewSlogLogger`), `ctx` holds a span, and the handler reads
+    it. `NewOTelJSONHandler` and `NewOTelHandler`'s JSON stream add `trace_id`
+    and `span_id`. `NewOTelHandler`'s otelslog bridge gives the context to
+    the LoggerProvider your main installs with `global.SetLoggerProvider`,
+    which sets the OTLP record's trace context. A logr-backed Logger can't
+    carry a context to its sink, so `WithContext` returns it unchanged.
+    `Reconcile` binds its per-reconcile Logger to the `ctx` it is given.
+    With tracing on (unreleased), it starts the reconcile span itself and binds
+    the Logger to it, and each provider method gets its child span's `ctx`.
+    With tracing off, that `ctx` holds a span only if you wrap the
+    `Reconciler` in a reconciler that starts it. Your `ExternalClient` methods get a `ctx`
+    (the reconcile's, with its timeout) but not that Logger, so bind your
+    own where you log:
+
+    ```go
+    func (e *external) Create(ctx context.Context, mg resource.Managed) error {
+        log := logging.WithContext(e.log, ctx)
+        // ... call the API with ctx, so its client spans are children ...
+        log.Info("created external resource", "externalName", meta.GetExternalName(mg))
+        return nil
+    }
+    ```
+
+    `WithContext` on a Logger that doesn't implement `logging.ContextLogger`
+    returns it unchanged, so this is safe with any Logger.
 - **Metrics** — `telemetry.Setup(ctx, log, telemetry.Config{Enabled: true})`
   returns `(*Metrics, shutdown, error)`; pass the metrics handle to
   `reconciler.WithMetrics` and `controller.Options.QueueWaitRecorder`.
+- **Tracing** (unreleased; [the design](./design-tracing.md)). Read Krateo's
+  OTel convention in main and pass it to `Setup`, with your service name. Shut
+  it down after the manager returns, with a bounded context, so the batcher
+  flushes:
+
+  ```go
+  cfg, err := telemetry.ConfigFromEnv() // OTEL_ENABLED, OTEL_TRACING_ENABLED, DEPLOYMENT_NAME, SERVICE_VERSION, ...
+  if err != nil { /* ... */ }
+  cfg.ServiceName = "git-provider"
+  metrics, shutdown, err := telemetry.Setup(ctx, log, cfg)
+  if err != nil { /* ... */ }
+  defer func() {
+      ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+      defer cancel()
+      _ = shutdown(ctx)
+  }()
+  ```
+
+  `OTEL_TRACING_ENABLED` unset means off, whatever `OTEL_ENABLED` says. See
+  [configuration](./configuration.md) for the environment, and the design's
+  §11 for the chart side: the `HOST_IP` endpoint, `OTEL_SERVICE_NAME` and
+  `DEPLOYMENT_NAME`.
+  - *Outbound HTTP.* A client wrapped with `httpsignal.NewTransport` sends the
+    active span's `traceparent` on every request made with the method's `ctx`.
+    With tracing off it sends nothing.
+  - *Onto another controller's object.* When you create or update an object
+    another Krateo controller reconciles, call `tracing.Inject(ctx, obj)` on
+    it first, so that controller continues your trace. Follow the rules:
+    - only onto such an object, never a Pod, ConfigMap, Secret or your own
+      managed resource;
+    - only on a write you make anyway;
+    - never in a status write (the status subresource drops metadata);
+    - stamp before the change that triggers the work, when they're two writes;
+    - never copy `krateo.io/traceparent-continued`.
+  - *Each method's own `ctx`.* Use the `ctx` each method is given. A client
+    that keeps the `ctx` from `Connect` would parent later calls onto a span
+    that has ended.
+  - *What the reconciler does with it.* With a TracerProvider, every
+    `Reconcile` is a `reconcile` span with `connect`, `observe`, `create`,
+    `update` and `delete` children, in a trace of its own that links to your
+    managed resource's `krateo.io/traceparent`. For a new value, the first
+    `create`, `update` or `delete` span is the value's child, so your
+    `Create`, `Update` or `Delete`, and what it does with its `ctx`, joins the
+    upstream trace. Later acts don't. If no pass acts within the window
+    (`reconciler.WithTraceContinueWindow`, default 10 minutes; raise it if you
+    poll much more slowly), the value is continued without joining. The
+    reconciler records that in `krateo.io/traceparent-continued`, which needs
+    `patch` on your kind. Work your Observe does by itself never joins. Add your
+    own attributes to the child spans with
+    `trace.SpanFromContext(ctx).SetAttributes(...)`.
 - **Rate limiting** — `ratelimiter.NewController()` for per-controller
   defaults, `ratelimiter.LimitRESTConfig(cfg, rps)` to bound client-side QPS,
   `workqueue.NewExponentialTimedFailureRateLimiter` for time-expiring
@@ -217,10 +295,11 @@ For Krateo, that's core-provider#310.
     workers: the queue's order is the order work runs in, and nothing is popped
     that can't run. The slot covers the whole reconcile, so expensive work is
     bounded wherever the provider does it. It reads `cpu.pressure`
-    (`some avg10`) once a second. `local` starts at 1 and rises by 1 every 2s
-    until its first cut, so 16 workers take about 30s. A saturated sample
-    halves it, never below 1, and after any cut it rises by 1 per clean
-    `RecoveryInterval` (30s), the same as API limits. Controllers sharing the
+    (`some total`) once a second, and measures the share of the last 10s in
+    which some task waited for CPU. `local` starts at 1 and rises by 1 every
+    clean 2s, so 16 workers take about 30s. Pressure over the threshold for a
+    whole 10s halves it, never below 1 and at most once per 10s; it then
+    rises by 1 per clean 2s again. Controllers sharing the
     governor share `local`; an idle controller holds none of it.
   - *Nothing is written on the object for it.* The controller's own saturation
     isn't a state of the object: the item waits in the queue, with no
@@ -284,7 +363,7 @@ For Krateo, that's core-provider#310.
     rate-limited by the server; next attempt 2026-11-05T10:00:31Z`, or says
     it is waiting for capacity. A deferral by the local capacity names the
     cause and no key, for example `reconciliation deferred: controller
-    saturated: CPU pressure 63% (some avg10); waiting for capacity (1
+    saturated: CPU pressure 63% (some, over 10s); waiting for capacity (1
     call(s) in flight allowed); no server deadline was given`, or
     `reconciliation deferred: controller recovering its local concurrency
     limit (2 call(s) in flight allowed); waiting for capacity; no server

@@ -4,7 +4,7 @@ title: provider-runtime — overview
 description: Package design and the managed-resource reconcile flow provider-runtime drives for every Krateo provider.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, controller-runtime, reconciler, architecture]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-14T00:00:00Z
 ---
 
 # Overview
@@ -82,12 +82,64 @@ A handshake whose outcome was never recorded (`ExternalCreateIncomplete`:
 - **Managed resource being deleted, external resource absent**: deletion
   proceeds.
 
+**What the retry assumes.** Retrying after the grace period is safe only when
+one of these holds for the kind:
+
+- `Observe` finds the resource by a key the managed resource carries **before**
+  `Create` returns: its name, a spec field, a name derived from them. A create
+  that landed is then seen and adopted, not repeated.
+- `Create` is idempotent on that key: a second call applies in place, or fails
+  with "already exists" without making a second object.
+
+If neither holds, the retry can duplicate. The case is a backend that assigns
+the identifier and a provider that can look the resource up only by it: when
+the create lands and the identifier is never written back, `Observe` reports
+the resource absent, and after the grace period `Create` makes a second one.
+For such a kind, give `Observe` a lookup that needs no assigned identifier (a
+name, a label or a tag that `Create` sets from the managed resource). Raising
+`WithCreateRecoveryGracePeriod` only delays the retry.
+
+A key whose derivation changes between releases needs the same care: a
+resource created under the old rule is not found under the new one.
+
 **The contract this puts on `Observe`:** when the external resource does not
 exist, return `ExternalObservation{ResourceExists: false}` with a **nil**
 error. An `Observe` error ends the reconcile before both the guard and
 `Create`, with or without a pending create. So an `Observe` that errors on
 "not found" never creates anything. On a half-created resource it also holds
 the unresolved handshake, because the guard needs `Observe`'s answer.
+
+**`ResourceExists` answers "is it there", not "is it ready".** A resource
+you did observe but that isn't usable yet, because it is still provisioning or
+still rolling out, is `ResourceExists: true`. Report readiness on the `Ready`
+condition (for example `Unavailable().WithMessage(...)`), and keep
+`ResourceUpToDate: true` if no update would help, so the runtime waits in the
+observe path.
+
+Answer `false` for a resource you observed to be absent. If your own lookup
+couldn't answer, because of a stale or wrong key or an unreadable
+prerequisite, never guess `true`; apply the duplication test below instead.
+It allows `false` when `Create` is idempotent for this resource and would hit
+the same failure, so the handshake closes as `external-create-failed`. A
+template that can never render is that case. It doesn't cover a lookup that
+keeps missing a resource `Create` did make: every `false` after the creation
+grace period starts the handshake again, so fix that lookup. The two wrong
+answers fail differently:
+
+- **A wrong `false`** is loud. After the creation grace period (30s by default,
+  `WithCreationGracePeriod`) the runtime starts the create handshake again on
+  a resource that was already created. It re-sets `external-create-pending`
+  and calls `Create`, and while `Observe` keeps saying `false` the pass ends
+  in "cannot determine creation result". The signature is a `Waiting for
+  external resource existence to be confirmed` event followed by a second
+  create event. oasgen-provider measured this twice: `-pending` re-set 75s and
+  97s after `-succeeded`. In one case a Deployment was still rolling out; in
+  the other a CRD was looked up at the wrong version, and the fix was the
+  lookup.
+- **A wrong `true`** is quiet and worse. `Create` never runs, so the resource
+  is never created and nothing reports a failure.
+
+A runtime upgrade fixes neither; only `Observe` can.
 
 **The common trap is not a mishandled "not found".** It is an error return
 *earlier* in `Observe`, on a prerequisite the provider reads before it can
@@ -194,6 +246,29 @@ Warning event with reason `ReadyNotSetAfterObserve`
 resource being deleted is never reported (since v1.8.1). The event goes through
 the throttled recorder, like the runtime's other error events. `Synced` is
 not affected.
+
+**During `Create`, `Ready` is the runtime's.** On every outcome of a create,
+success or failure, the runtime writes `Ready=False` with reason `Creating`,
+next to `Synced` (`ReconcileSuccess`, or `ReconcileError` with the error).
+Conditions are replaced by type, so a `Ready` that `Create` set on the managed
+resource is overwritten, whatever its reason, and nothing reports it. A
+provider that has something of its own to say about a failed create has two
+places for it:
+
+- the error `Create` returns: its text becomes the message of
+  `Synced=False/ReconcileError` (`create failed: <the provider's error>`);
+- a condition of a type of its own, which the runtime never touches.
+
+Don't write `Ready` from `Create`, and don't persist status from inside it. A
+provider that updates the object's status itself before returning does reach
+the API server, and the runtime's own status write replaces the value within
+the same reconcile, so anything watching the conditions can see the reason
+appear and vanish. That follows from the order of the writes; it has not been
+measured on a provider built on this library.
+
+This is this library's contract. Controllers built on unstructured-runtime
+(rest-dynamic-controller, composition-dynamic-controller) follow that
+runtime's rules, which differ.
 
 What readers see while the resource can't be observed:
 

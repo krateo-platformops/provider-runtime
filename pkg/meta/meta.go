@@ -7,6 +7,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// MarkerTimeLayout is the layout the external-create markers are written
+// with. RFC3339Nano keeps sub-second precision, so markers set within the
+// same second are ordered by their times rather than tied (#88). Parsing
+// accepts values with or without a fractional second, so markers written
+// with second precision by earlier releases still read back: a truncated
+// value can only be earlier than the event it records, never later.
+const MarkerTimeLayout = time.RFC3339Nano
+
 const (
 	// AnnotationKeyExternalName is the key in the annotations map of a
 	// resource for the name of the resource as it appears on provider's
@@ -16,13 +24,13 @@ const (
 	// AnnotationKeyExternalCreatePending is the key in the annotations map
 	// of a resource that indicates the last time creation of the external
 	// resource was pending (i.e. about to happen). Its value must be an
-	// RFC3999 timestamp.
+	// RFC3339 timestamp; see MarkerTimeLayout.
 	AnnotationKeyExternalCreatePending = "krateo.io/external-create-pending"
 
 	// AnnotationKeyExternalCreateSucceeded is the key in the annotations
 	// map of a resource that represents the last time the external resource
-	// was created successfully. Its value must be an RFC3339 timestamp,
-	// which can be used to determine how long ago a resource was created.
+	// was created successfully. Its value must be an RFC3339 timestamp (see
+	// MarkerTimeLayout), which can be used to determine how long ago a resource was created.
 	// This is useful for eventually consistent APIs that may take some time
 	// before the API called by Observe will report that a recently created
 	// external resource exists.
@@ -30,7 +38,8 @@ const (
 
 	// AnnotationKeyExternalCreateFailed is the key in the annotations map
 	// of a resource that indicates the last time creation of the external
-	// resource failed. Its value must be an RFC3999 timestamp.
+	// resource failed. Its value must be an RFC3339 timestamp; see
+	// MarkerTimeLayout.
 	AnnotationKeyExternalCreateFailed = "krateo.io/external-create-failed"
 
 	// AnnotationKeyReconciliationPaused is the key in the annotations map
@@ -60,6 +69,13 @@ const (
 	// of a resource that determines what should happen to the underlying external
 	// resource when a managed resource is deleted
 	AnnotationKeyDeletionPolicy = "krateo.io/deletion-policy"
+
+	// AnnotationKeyTraceparentContinued is the key in the annotations map of a
+	// managed resource under which provider-runtime records the krateo.io/traceparent
+	// value it has continued, so a new value is the parent of one reconcile and
+	// linked from the rest (docs/design-tracing.md §6.2). Only provider-runtime
+	// writes it; never copy it onto another object.
+	AnnotationKeyTraceparentContinued = "krateo.io/traceparent-continued"
 )
 
 const (
@@ -200,7 +216,7 @@ func SetExternalName(o metav1.Object, name string) {
 // was most recently pending creation.
 func GetExternalCreatePending(o metav1.Object) time.Time {
 	a := o.GetAnnotations()[AnnotationKeyExternalCreatePending]
-	t, err := time.Parse(time.RFC3339, a)
+	t, err := time.Parse(MarkerTimeLayout, a)
 	if err != nil {
 		return time.Time{}
 	}
@@ -210,14 +226,14 @@ func GetExternalCreatePending(o metav1.Object) time.Time {
 // SetExternalCreatePending sets the time at which the external resource was
 // most recently pending creation to the supplied time.
 func SetExternalCreatePending(o metav1.Object, t time.Time) {
-	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreatePending: t.Format(time.RFC3339)})
+	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreatePending: t.Format(MarkerTimeLayout)})
 }
 
 // GetExternalCreateSucceeded returns the time at which the external resource
 // was most recently created.
 func GetExternalCreateSucceeded(o metav1.Object) time.Time {
 	a := o.GetAnnotations()[AnnotationKeyExternalCreateSucceeded]
-	t, err := time.Parse(time.RFC3339, a)
+	t, err := time.Parse(MarkerTimeLayout, a)
 	if err != nil {
 		return time.Time{}
 	}
@@ -227,14 +243,14 @@ func GetExternalCreateSucceeded(o metav1.Object) time.Time {
 // SetExternalCreateSucceeded sets the time at which the external resource was
 // most recently created to the supplied time.
 func SetExternalCreateSucceeded(o metav1.Object, t time.Time) {
-	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateSucceeded: t.Format(time.RFC3339)})
+	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateSucceeded: t.Format(MarkerTimeLayout)})
 }
 
 // GetExternalCreateFailed returns the time at which the external resource
 // recently failed to create.
 func GetExternalCreateFailed(o metav1.Object) time.Time {
 	a := o.GetAnnotations()[AnnotationKeyExternalCreateFailed]
-	t, err := time.Parse(time.RFC3339, a)
+	t, err := time.Parse(MarkerTimeLayout, a)
 	if err != nil {
 		return time.Time{}
 	}
@@ -244,7 +260,7 @@ func GetExternalCreateFailed(o metav1.Object) time.Time {
 // SetExternalCreateFailed sets the time at which the external resource most
 // recently failed to create.
 func SetExternalCreateFailed(o metav1.Object, t time.Time) {
-	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateFailed: t.Format(time.RFC3339)})
+	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateFailed: t.Format(MarkerTimeLayout)})
 }
 
 // ExternalCreateIncomplete returns true if creation of the external resource
@@ -376,3 +392,15 @@ func ShouldUpdate(o metav1.Object) bool {
 
 	return mp == ManagementPolicyDefault || mp == ManagementPolicyObserveCreateUpdate
 }
+
+// The W3C trace context of the reconcile that created or last changed an
+// object, so the controller that reconciles it continues the distributed trace
+// (docs/design-tracing.md §6). The same keys as unstructured-runtime's.
+const (
+	// AnnotationKeyTraceparent carries the W3C traceparent.
+	AnnotationKeyTraceparent = "krateo.io/traceparent"
+
+	// AnnotationKeyTracestate carries the W3C tracestate alongside
+	// AnnotationKeyTraceparent.
+	AnnotationKeyTracestate = "krateo.io/tracestate"
+)

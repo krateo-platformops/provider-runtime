@@ -61,8 +61,8 @@ func inputByName(t *testing.T, g *Governor, name string) InputSnapshot {
 
 func TestCgroupFixturesParse(t *testing.T) {
 	smp := cgroupFiles{dir: fixture("healthy"), memory: true}.read()
-	if !smp.cpuPressure.enabled || smp.cpuPressure.percent != 2.10 {
-		t.Errorf("cpu.pressure some avg10 = %+v, want 2.10", smp.cpuPressure)
+	if !smp.cpuPressure.enabled || smp.cpuStall != 81234567*time.Microsecond {
+		t.Errorf("cpu.pressure some total = %+v, %s, want 81.234567s", smp.cpuPressure, smp.cpuStall)
 	}
 	// (104857600 - 10485760) / 1073741824
 	if !smp.workingSet.enabled || smp.workingSet.percent < 8.78 || smp.workingSet.percent > 8.79 {
@@ -170,97 +170,176 @@ func TestStartupRampIntervalIsConfigurable(t *testing.T) {
 	}
 }
 
-// After any cut, local capacity recovers at +1 per clean RecoveryInterval, the
-// same rule as API limits, not at the startup step: a clean interval starts
-// after the last saturated sample, and a saturated sample during recovery
-// halves and restarts it.
-func TestAfterACutLocalRecoversPerCleanRecoveryInterval(t *testing.T) {
-	g, c := saturationGovernor(t, 8, "healthy", false)
-	rampToCeiling(t, g, c)
-	useFixture(g, "cpu-pressure")
-	g.sample()
-	if got := g.LocalCapacity(); got != 4 {
-		t.Fatalf("after a cut local capacity = %d, want 4", got)
-	}
+// cpuFeed is a cgroup reader whose cumulative CPU stall the test advances, a
+// second at a time, with the governor's clock.
+type cpuFeed struct {
+	g     *Governor
+	c     *clock
+	total time.Duration
+}
 
-	useFixture(g, "healthy")
-	for elapsed := time.Second; elapsed < testRecovery; elapsed += time.Second {
-		c.add(time.Second)
-		g.sample()
-		if got := g.LocalCapacity(); got != 4 {
-			t.Fatalf("%s after the cut local capacity = %d, want 4: recovery takes a whole RecoveryInterval", elapsed, got)
+// newCPUFeed returns a governor reading f, after its first sample.
+func newCPUFeed(t *testing.T, ceiling int) *cpuFeed {
+	t.Helper()
+	g, c := saturationGovernor(t, ceiling, "healthy", false)
+	f := &cpuFeed{g: g, c: c}
+	g.sat.reader = f
+	g.sample()
+	return f
+}
+
+func (f *cpuFeed) read() cgroupSample {
+	return cgroupSample{cpuPressure: reading{enabled: true}, cpuStall: f.total, workingSet: disabled(memoryInputOff)}
+}
+
+// second advances the clock by a second in which some task stalled for share
+// of the time, samples, and returns the local capacity.
+func (f *cpuFeed) second(share float64) int {
+	f.c.add(time.Second)
+	f.total += time.Duration(share * float64(time.Second))
+	f.g.sample()
+	return f.g.LocalCapacity()
+}
+
+// ramp takes clean seconds until local capacity is at the ceiling.
+func (f *cpuFeed) ramp(t *testing.T) {
+	t.Helper()
+	for range 2 * (f.g.Ceiling() - 1) {
+		f.second(0)
+	}
+	if got := f.g.LocalCapacity(); got != f.g.Ceiling() {
+		t.Fatalf("after the ramp local capacity = %d, want the ceiling %d", got, f.g.Ceiling())
+	}
+}
+
+func (f *cpuFeed) pressure(t *testing.T) float64 {
+	t.Helper()
+	return inputByName(t, f.g, InputCPUPressure).Percent
+}
+
+// CPU pressure is the share of the last CPUPressureWindow that some task
+// stalled, from the change of the cumulative counter: a stall shows in the
+// next sample, and is gone a window after it ends.
+func TestCPUPressureIsTheStallShareOverTheWindow(t *testing.T) {
+	f := newCPUFeed(t, 4)
+	for range 10 {
+		f.second(0.2)
+	}
+	if got := f.pressure(t); got < 19.99 || got > 20.01 {
+		t.Fatalf("after 10s stalled a fifth of the time, CPU pressure = %v%%, want 20", got)
+	}
+	f.second(1)
+	if got := f.pressure(t); got < 27.99 || got > 28.01 {
+		t.Fatalf("one fully stalled second after nine at a fifth: CPU pressure = %v%%, want 28", got)
+	}
+	for range 10 {
+		f.second(0)
+	}
+	if got := f.pressure(t); got != 0 {
+		t.Errorf("a window after the stall ended, CPU pressure = %v%%, want 0", got)
+	}
+}
+
+// A counter that goes backwards is another cgroup's: the window starts again
+// instead of reading the difference as a stall.
+func TestCPUStallCounterGoingBackwardsRestartsTheWindow(t *testing.T) {
+	f := newCPUFeed(t, 8)
+	f.ramp(t)
+	for range 10 {
+		f.second(0.3)
+	}
+	if got := f.pressure(t); got < 29.99 || got > 30.01 {
+		t.Fatalf("CPU pressure = %v%%, want 30", got)
+	}
+	f.total = 0
+	for i := range 12 {
+		if got := f.second(0); got != 8 {
+			t.Fatalf("%ds after the counter restarted local capacity = %d, want 8", i+1, got)
+		}
+		if got := f.pressure(t); got != 0 {
+			t.Fatalf("%ds after the counter restarted CPU pressure = %v%%, want 0", i+1, got)
 		}
 	}
-	c.add(time.Second)
-	g.sample()
-	if got := g.LocalCapacity(); got != 5 {
-		t.Fatalf("after one clean RecoveryInterval local capacity = %d, want 5", got)
-	}
+}
 
-	// A saturated sample halves and restarts the interval.
-	c.add(testRecovery - time.Second)
-	useFixture(g, "cpu-pressure")
-	g.sample()
-	if got := g.LocalCapacity(); got != 2 {
-		t.Fatalf("a saturated sample during recovery left local capacity at %d, want 5 halved to 2", got)
+// A CPU cut needs a whole window of evidence: pressure over the threshold in
+// the first seconds of a governor's life holds capacity, and doesn't cut it.
+func TestACPUCutNeedsAWholeWindow(t *testing.T) {
+	f := newCPUFeed(t, 8)
+	f.g.local.Store(&localState{capacity: 8})
+	for i := 1; i < 10; i++ {
+		if got := f.second(1); got != 8 {
+			t.Fatalf("%ds into the first window local capacity = %d, want 8: the stall isn't confirmed yet", i, got)
+		}
 	}
-	useFixture(g, "healthy")
-	c.add(testRecovery - time.Second)
-	g.sample()
-	if got := g.LocalCapacity(); got != 2 {
-		t.Errorf("local capacity = %d, want 2: the clean interval restarts at the last saturated sample", got)
-	}
-	c.add(time.Second)
-	g.sample()
-	if got := g.LocalCapacity(); got != 3 {
-		t.Errorf("local capacity = %d after a whole clean interval, want 3", got)
+	if got := f.second(1); got != 4 {
+		t.Errorf("after a whole stalled window local capacity = %d, want 8 halved to 4", got)
 	}
 }
 
-// A cut during the startup ramp ends it, even at the floor where capacity
-// can't fall: recovery is then +1 per RecoveryInterval.
-func TestACutEndsTheStartupRamp(t *testing.T) {
-	g, c := saturationGovernor(t, 8, "healthy", false)
-	g.sample()
-	c.add(2 * time.Second)
-	g.sample()
-	c.add(2 * time.Second)
-	g.sample()
-	if got := g.LocalCapacity(); got != 3 {
-		t.Fatalf("mid-ramp local capacity = %d, want 3", got)
+// CPU pressure cuts at most once per window, however long it stays over the
+// threshold: the next cut needs a window measured after the last one. The
+// floor of one call is kept.
+func TestCPUPressureCutsOncePerWindowAndFloorsAtOne(t *testing.T) {
+	f := newCPUFeed(t, 16)
+	f.ramp(t)
+	// The window holds 10%, 20%, ... of stall: over 50% at the sixth second.
+	for i := 1; i <= 5; i++ {
+		if got := f.second(1); got != 16 {
+			t.Fatalf("after %d stalled seconds (%.0f%%) local capacity = %d, want 16", i, f.pressure(t), got)
+		}
 	}
-	useFixture(g, "cpu-pressure")
-	g.sample()
-	if got := g.LocalCapacity(); got != 1 {
-		t.Fatalf("a saturated sample mid-ramp left local capacity at %d, want 3 halved to 1", got)
-	}
-	useFixture(g, "healthy")
-	c.add(2 * time.Second)
-	g.sample()
-	if got := g.LocalCapacity(); got != 1 {
-		t.Fatalf("2s after the cut local capacity = %d, want 1: the startup ramp is over", got)
-	}
-
-	floor, c2 := saturationGovernor(t, 8, "cpu-pressure", false)
-	floor.sample()
-	useFixture(floor, "healthy")
-	c2.add(2 * time.Second)
-	floor.sample()
-	if got := floor.LocalCapacity(); got != 1 {
-		t.Errorf("a saturated sample at the floor didn't end the startup ramp: local capacity = %d, want 1", got)
+	want := 16
+	for _, cut := range []int{8, 4, 2, 1, 1} {
+		if got := f.second(1); got != cut {
+			t.Fatalf("local capacity = %d, want %d halved to %d", got, want, cut)
+		}
+		want = cut
+		for i := 1; i < 10; i++ {
+			if got := f.second(1); got != want {
+				t.Fatalf("%ds after a cut, still stalled: local capacity = %d, want %d (one cut per window)", i, got, want)
+			}
+		}
 	}
 }
 
-// Saturation halves local capacity once per sample, never below 1. The one-call
-// floor is kept: with capacity at 1, one reconcile still runs.
-func TestSaturationHalvesOncePerSampleAndFloorsAtOne(t *testing.T) {
-	g, c := saturationGovernor(t, 8, "healthy", false)
-	rampToCeiling(t, g, c)
-	useFixture(g, "cpu-pressure")
-	for i, want := range []int{4, 2, 1, 1} {
-		g.sample()
-		if got := g.LocalCapacity(); got != want {
-			t.Fatalf("after saturated sample %d: local capacity = %d, want %d (halve once per sample, floor 1)", i+1, got, want)
+// After a CPU cut, capacity holds while the window still shows the stall, and
+// then rises by one per StartupRampInterval, not per RecoveryInterval.
+func TestAfterACPUCutCapacityRecoversPerRampInterval(t *testing.T) {
+	f := newCPUFeed(t, 16)
+	f.ramp(t)
+	for range 6 {
+		f.second(1)
+	}
+	if got := f.g.LocalCapacity(); got != 8 {
+		t.Fatalf("after six stalled seconds local capacity = %d, want 8", got)
+	}
+	// The six stalled seconds stay in the window, over the threshold, for
+	// four more samples; the fifth reads 50%, which is clean.
+	for i := 1; i <= 5; i++ {
+		if got := f.second(0); got != 8 {
+			t.Fatalf("%ds after the stall ended (%.0f%%) local capacity = %d, want 8", i, f.pressure(t), got)
+		}
+	}
+	for want := 9; want <= 16; want++ {
+		if got := f.second(0); got != want {
+			t.Fatalf("local capacity = %d, want %d: +1 per 2s after a CPU cut", got, want)
+		}
+		if want < 16 {
+			if got := f.second(0); got != want {
+				t.Fatalf("local capacity = %d, want %d: +1 per 2s, not per sample", got, want)
+			}
+		}
+	}
+}
+
+// Pressure over the threshold that doesn't cut still isn't clean: capacity
+// doesn't rise during the startup ramp while it lasts.
+func TestUnconfirmedCPUPressureHoldsTheStartupRamp(t *testing.T) {
+	f := newCPUFeed(t, 8)
+	for i := 1; i <= 6; i++ {
+		if got := f.second(1); got != 1 {
+			t.Fatalf("%ds of stall from the start: local capacity = %d, want 1", i, got)
 		}
 	}
 }
@@ -390,7 +469,7 @@ func (s *stubReader) read() cgroupSample {
 func TestAcquireDoesNoIO(t *testing.T) {
 	g, _ := testGovernor(t, Options{MaxConcurrentReconciles: 2, Saturation: SaturationOptions{Enabled: true, CgroupDir: fixture("healthy")}})
 	stub := &stubReader{t: t, smp: cgroupSample{
-		cpuPressure: reading{enabled: true, percent: 90},
+		cpuPressure: reading{enabled: true},
 		workingSet:  reading{enabled: true, percent: 10},
 	}}
 	g.sat.reader = stub

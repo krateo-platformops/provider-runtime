@@ -1,13 +1,20 @@
 ---
 type: Architecture
 title: provider-runtime — saturation cost model, implementation plan
-description: Plan, nothing built, for implementing the saturation cost-model design as a stack of six PRs plus the harness PR and the measurement PR, starting with the §10 Go simulation driving the real estimator and law code, with each PR's scope, design sections, tests, review focus, dependencies and size, the design's ambiguities and the premises to verify.
+description: Plan, not pursued (stopped 2026-11-13), for implementing the saturation cost-model design as a stack of six PRs plus the harness PR and the measurement PR, starting with the §10 Go simulation driving the real estimator and law code, with each PR's scope, design sections, tests, review focus, dependencies and size, the design's ambiguities and the premises to verify.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [plan, design, rate-limiting, saturation, cgroup, gc]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-13T00:00:00Z
 ---
 
 # Saturation cost model: implementation plan
+
+**Not pursued.** The user stopped this design on 2026-11-13, after
+[its review](https://github.com/krateo-platformops/provider-runtime/pull/57#issuecomment-6856212229):
+at CPU limits of 100m to 125m the implementation's own calibration lowered the
+target to about 78% of the limit. The halve-and-recover step was fixed instead
+([design-rate-limit-governor](./design-rate-limit-governor.md) §11 item 19).
+The text below is kept as the record.
 
 **Status:** approved by the user on 2026-11-09, with the decisions in §9.
 Nothing is built. The spec is

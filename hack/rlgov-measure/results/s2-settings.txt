@@ -1,0 +1,24 @@
+CPU step block s2, started 2026-11-13T16:55:35Z
+question: does provider-runtime#95's CPU step meet the user's bars of 2026-11-08, where the step before it settled at about 70% of the CPU limit with 31% less throughput?
+old image: old 0ec188ff0443809b77fa99aad43332e861467b84 sha256:b9097470ad5e3b7ef17994d5e82217248c91a914ac109e99bb50fcdbab9f0389 (main fb25bf9 plus the harness commit 3ad9055, cherry-picked: local branch measure/old-step-harness)
+new image: new95 3ad90554bbfa8944eb87a4b04c89f895eb5329ed sha256:b09e489c7a9694eb660c5187d7532fa557c86a019d37b315a54118ab810d4ab6
+arms: off (the new image, SATURATION unset), old (the old image, SATURATION=true SAT_CPU=50), new (the new image, SATURATION=true SAT_CPU=50); 3 runs each, order rotating each round, one run at a time
+workload: the CPU block re-run's (results/cpu2-settings.txt), unchanged: cpu mode, 100m limit, 512Mi, 64 Greetings, 16 workers, poll 1s, 360s per run; each Observe spends 20ms of CPU measured on its own thread, then waits 400ms. The memory input is off in every arm.
+liveness probe: incident-provider's (httpGet /healthz, periodSeconds 10, timeoutSeconds 1, failureThreshold 3)
+
+the bars, set by the user on 2026-11-08, applied to the new arm, figures from 40s on:
+- CPU used: the median over the runs of the mean cpu_ms/s is at least 90% of the limit;
+- pressure about 50: the mean over the runs of cpu.pressure some avg10 is between 40 and 60 (the band is this block's reading of "about", fixed here before run 1);
+- throughput: the median Observes per second is at least 90% of the off arm's median;
+- no restarts in any run of the new arm.
+At 250m all four decide whether #95 merges. The user set no bar for another limit: at any other limit the same four are reported as information, and decide nothing.
+
+validity, checked per run and reported, never used to drop a run: the median burn_cpu_ms/call is 20.0 to 20.5; in the off arm, CPU is at least 90% of the limit and pressure is over 50. If the off arm doesn't saturate, the block shows nothing about the step, and that is the result; the workload is not retuned.
+
+expected, written before run 1, from the step's rules and the 2026-11-08 calibration (off at 250m: pressure about 60, CPU at the limit, 11.4 Observes a second):
+- old at 250m: as on 2026-11-08, local cut from 16 towards 1 on one stall, CPU about 70% of the limit, Observes about 30% under off.
+- new at 250m: the window's share passes 50 only with most of a window near off's pressure, so local should cut from somewhere above the knee (about 5) to about half and climb back by one per 2s: local mostly between about 5 and 12, CPU at 95% of the limit or more, pressure 45 to 58, Observes within 10% of off. If so the bars are met by running close to the limit, and the step's effect shows in local, in the calls in flight and in each call's wall time, which are reported.
+- at 100m: one call's 20ms of CPU is two periods of quota, so pressure is high at any concurrency. No figure is predicted; the block reports what happens.
+
+also reported per arm: local (mean and minimum), cuts, calls in flight (median), each call's CPU stretched to wall time (median), failed probes, liveness kills.
+driver power: Now drawing from 'Battery Power'

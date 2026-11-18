@@ -357,7 +357,7 @@ func TestSetExternalCreatePending(t *testing.T) {
 		"SetsTheCorrectKey": {
 			o:    &corev1.Pod{},
 			t:    now,
-			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreatePending: now.Format(time.RFC3339)}}},
+			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreatePending: now.Format(MarkerTimeLayout)}}},
 		},
 	}
 
@@ -409,7 +409,7 @@ func TestSetExternalCreateSucceeded(t *testing.T) {
 		"SetsTheCorrectKey": {
 			o:    &corev1.Pod{},
 			t:    now,
-			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateSucceeded: now.Format(time.RFC3339)}}},
+			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateSucceeded: now.Format(MarkerTimeLayout)}}},
 		},
 	}
 
@@ -461,7 +461,7 @@ func TestSetExternalCreateFailed(t *testing.T) {
 		"SetsTheCorrectKey": {
 			o:    &corev1.Pod{},
 			t:    now,
-			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateFailed: now.Format(time.RFC3339)}}},
+			want: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AnnotationKeyExternalCreateFailed: now.Format(MarkerTimeLayout)}}},
 		},
 	}
 
@@ -592,6 +592,81 @@ func TestExternalCreateIncomplete(t *testing.T) {
 			got := ExternalCreateIncomplete(tc.o)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("ExternalCreateIncomplete(...): -want, +got:\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestExternalCreateMarkersSubSecond pins #88: markers set within the same
+// second are ordered by their times, not tied, and markers written with second
+// precision by earlier releases still order correctly against new ones.
+func TestExternalCreateMarkersSubSecond(t *testing.T) {
+	base := time.Date(2026, 11, 12, 12, 0, 5, 0, time.UTC)
+	at := func(ms int) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
+	legacy := func(t time.Time) string { return t.Format(time.RFC3339) } // what releases before #88 wrote
+
+	t.Run("RoundTripKeepsNanoseconds", func(t *testing.T) {
+		o := &corev1.Pod{}
+		want := at(0).Add(123456789 * time.Nanosecond)
+		SetExternalCreatePending(o, want)
+		if got := GetExternalCreatePending(o); !got.Equal(want) {
+			t.Errorf("GetExternalCreatePending(...) = %v, want %v", got, want)
+		}
+	})
+
+	cases := map[string]struct {
+		reason string
+		set    func(o metav1.Object)
+		want   bool
+	}{
+		"RecreateWithinTheSameSecond": {
+			reason: "A pending marker 300ms after a success in the same second is a newer create attempt: incomplete.",
+			set: func(o metav1.Object) {
+				SetExternalCreateSucceeded(o, at(100))
+				SetExternalCreatePending(o, at(400))
+			},
+			want: true,
+		},
+		"SucceededWithinTheSameSecond": {
+			reason: "A success 300ms after the pending marker in the same second closes the handshake: complete.",
+			set: func(o metav1.Object) {
+				SetExternalCreatePending(o, at(100))
+				SetExternalCreateSucceeded(o, at(400))
+			},
+			want: false,
+		},
+		"FailedWithinTheSameSecond": {
+			reason: "A failure 300ms after the pending marker in the same second closes the handshake: complete.",
+			set: func(o metav1.Object) {
+				SetExternalCreatePending(o, at(100))
+				SetExternalCreateFailed(o, at(400))
+			},
+			want: false,
+		},
+		"LegacyPendingThenNewSucceeded": {
+			reason: "A second-precision pending marker from an earlier release is truncated, so a later nanosecond success still follows it: complete.",
+			set: func(o metav1.Object) {
+				AddAnnotations(o, map[string]string{AnnotationKeyExternalCreatePending: legacy(at(700))})
+				SetExternalCreateSucceeded(o, at(900))
+			},
+			want: false,
+		},
+		"LegacySucceededThenNewPending": {
+			reason: "A nanosecond pending marker after a second-precision success from an earlier release is a newer create attempt: incomplete.",
+			set: func(o metav1.Object) {
+				AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateSucceeded: legacy(at(300))})
+				SetExternalCreatePending(o, at(600))
+			},
+			want: true,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			o := &corev1.Pod{}
+			tc.set(o)
+			if got := ExternalCreateIncomplete(o); got != tc.want {
+				t.Errorf("%s\nExternalCreateIncomplete(...) = %v, want %v; annotations %v", tc.reason, got, tc.want, o.GetAnnotations())
 			}
 		})
 	}
