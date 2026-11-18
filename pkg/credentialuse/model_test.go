@@ -611,18 +611,16 @@ func (w *world) holder(spec holderSpec, p **process) {
 func (w *world) releaser(name string, p **process, n int, cacheless bool, after *waitFor) {
 	// A releaser with caches is never quiet: its segment can run a whole R0
 	// batch against the cache without a call (§5, C-invisible). A cacheless
-	// one's waits are quiet when their condition is stable (C-stable).
+	// one's start and requeue waits are quiet; its trigger wait is a plain
+	// Wait (the user's decision: a quiet trigger would change the two-process
+	// scenario's bounded search, since a quiet resume costs no preemption).
 	var flags apimodel.Flags
 	if cacheless {
 		flags = apimodel.QuietStart
 	}
 	w.s.GoIn(w.proc(p), name, flags, func(a *apimodel.Actor) {
 		if after != nil {
-			if cacheless && after.stable {
-				a.WaitQuiet("await trigger", time.Time{}, func() bool { return after.met(w) })
-			} else {
-				a.Wait("await trigger", time.Time{}, func() bool { return after.met(w) })
-			}
+			a.Wait("await trigger", time.Time{}, func() bool { return after.met(w) })
 		}
 		batch := 0
 		a.Locals = func() []any { return []any{batch} }
@@ -1286,14 +1284,6 @@ type waitFor struct {
 	secretUIDNot types.UID
 	// The Secret is deleting or gone.
 	secretDeletingOrGone bool
-	// stable: once true, it stays true while waited on (§5, C-stable), so
-	// that a cacheless releaser's wait for it can be quiet. No scenario sets
-	// it: the stableCond marker it replaces never took effect (a func() bool
-	// parameter loses the named type, so the type assertion was always
-	// false), and the two-process scenario's trigger has always been a plain
-	// Wait. Making it quiet changes that scenario's bounded search, since a
-	// quiet resume costs no preemption, so it is left for a decision.
-	stable bool
 }
 
 // met reports whether f holds now. It only reads.
