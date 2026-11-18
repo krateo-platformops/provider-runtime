@@ -383,7 +383,12 @@ ignore):
     harness's hooks, which the static rule can't follow. Both only read,
     and a write behind them would go through the model's or a cache's write
     path, which the runtime half guards. Nor does either half see a
-    condition the files checked don't contain.
+    condition the files checked don't contain. And one route is left open
+    on purpose, since closing it would bind every production file: a
+    production file that doesn't import apimodel may use reflect, so it
+    could call `Wait` by name on an `any` that a test hands it, with an
+    `*Actor` and a writing `func() bool` literal. Nothing does this today,
+    and it takes intent.
   - **The merge audit is not a check on this.** Run 3's reduced search
     audited every prune (25,885 and 25,395) with 0 divergences while it
     missed 15 and 119 terminal states: an audit compares two paths to a

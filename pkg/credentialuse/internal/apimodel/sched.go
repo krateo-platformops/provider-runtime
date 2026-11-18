@@ -793,7 +793,11 @@ func (a *Actor) evalCond(label string, cond func() bool) bool {
 // the unreduced search can likewise defer to the actor's next visible step.
 type watched struct {
 	label string
-	code  uintptr // the condition's code: its function literal
+	// code is the condition's code pointer. reflect's Pointer doesn't
+	// promise to tell functions apart, but here it does: the static rule
+	// makes every condition its own literal, and Go doesn't fold identical
+	// functions.
+	code uintptr
 	cond  func() bool
 }
 
