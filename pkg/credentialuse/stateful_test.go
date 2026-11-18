@@ -280,14 +280,23 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	}
 	var plan []entry
 	only, jumpsVar, planVar := os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY"), os.Getenv("CREDENTIALUSE_MODEL_DIFF_JUMPS"), os.Getenv("CREDENTIALUSE_MODEL_DIFF_PLAN")
-	ci := os.Getenv("CREDENTIALUSE_MODEL_DIFF_CI") != ""
-	stateless := os.Getenv("CREDENTIALUSE_MODEL_DIFF_STATELESS") != "off"
+	ciVar, statelessVar := os.Getenv("CREDENTIALUSE_MODEL_DIFF_CI"), os.Getenv("CREDENTIALUSE_MODEL_DIFF_STATELESS")
+	ci := ciVar != ""
+	stateless := statelessVar != "off"
+	// want is the number of subtests the CI plan must start, from ciPlan:
+	// two bounds for each scenario each entry names.
+	want := 0
 	switch {
+	case ci && ciVar != "1":
+		t.Fatalf("CREDENTIALUSE_MODEL_DIFF_CI=%q: the only value is 1", ciVar)
 	case ci && (planVar != "" || only != "" || jumpsVar != ""):
 		t.Fatal("CREDENTIALUSE_MODEL_DIFF_CI is set with a measured plan (DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS): pick one")
+	case ci && statelessVar != "":
+		t.Fatal("CREDENTIALUSE_MODEL_DIFF_CI is set with DIFF_STATELESS: the CI plan says, per entry, whether it has a stateless leg")
 	case ci:
 		for _, e := range ciPlan {
 			plan = append(plan, entry{regexp.MustCompile(e.re), testJumps, e.stateless})
+			want += 2 * e.scenarios
 		}
 	case planVar != "":
 		for _, part := range strings.Split(planVar, ";") {
@@ -311,19 +320,45 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 		}
 		t.Skip("the differential runs only under a plan: CREDENTIALUSE_MODEL_DIFF_CI=1 for CI's model-differential job, or a measured plan (§11.3)")
 	}
-	for name, sc := range smallScenarios {
-		var e *entry
+	// Each scenario goes to the first entry that matches it. An entry that
+	// matches none would compare nothing and pass: a renamed scenario, or a
+	// misspelled regexp, fails here instead.
+	type run struct {
+		name string
+		e    *entry
+	}
+	var runs []run
+	matched := make([]int, len(plan))
+	for _, name := range sortedKeys(smallScenarios) {
 		for i := range plan {
 			if plan[i].re.MatchString(name) {
-				e = &plan[i]
+				runs = append(runs, run{name, &plan[i]})
+				matched[i]++
 				break
 			}
 		}
-		if e == nil {
-			continue
+	}
+	for i, n := range matched {
+		if n == 0 {
+			t.Fatalf("plan entry %q matches no scenario: it would compare nothing", plan[i].re)
 		}
+	}
+	if ci {
+		for i, e := range ciPlan {
+			if matched[i] != e.scenarios {
+				t.Fatalf("ciPlan entry %q matches %d scenarios, want %d", e.re, matched[i], e.scenarios)
+			}
+		}
+		if 2*len(runs) != want {
+			t.Fatalf("the CI plan starts %d subtests, want %d", 2*len(runs), want)
+		}
+	}
+	// The CI job checks this line against the subtests that passed.
+	t.Logf("differential plan: %d subtests", 2*len(runs))
+	for _, r := range runs {
+		sc, e := smallScenarios[r.name], r.e
 		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: e.jumps}, {Preemptions: 1, Jumps: e.jumps}} {
-			t.Run(fmt.Sprintf("%s, %+v", name, b), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s, %+v", r.name, b), func(t *testing.T) {
 				t.Parallel()
 				differential(t, sc, b, e.stateless)
 			})
@@ -337,13 +372,15 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 // 1,951,942 schedules), and AcquireAgainstRelease stateful against reduced
 // only (its stateless leg is 460 to 900 million). It is the only comparison
 // of rule R against no R that CI finishes; the rest are the VM runs of
-// §11.3.
+// §11.3. scenarios is how many scenarios each entry must match: a rename
+// that drops one fails the test, rather than shrink what CI compares.
 var ciPlan = []struct {
 	re        string
 	stateless bool
+	scenarios int
 }{
-	{`^teardown, `, true},
-	{`^acquire against release$`, false},
+	{`^teardown, `, true, 3},
+	{`^acquire against release$`, false, 1},
 }
 
 // searchResult is one search's terminal abstract states and violations.

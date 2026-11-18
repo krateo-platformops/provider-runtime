@@ -76,11 +76,21 @@ jobs:
           go-version: 'stable'
       - name: Gather dependencies
         run: go mod download
+      # A misspelled -run pattern would say "no tests to run" and exit 0, so
+      # the job also requires that as many subtests passed as the test's
+      # plan line says it started. pipefail keeps a test failure a failure
+      # through tee.
       - name: Credential-use model, rule R against no R
         env:
           CREDENTIALUSE_MODEL_DIFF_CI: "1"
           CREDENTIALUSE_MODEL_DIFF_WORKERS: "4"
-        run: go test -v -count=1 -timeout 90m -run '^TestModelStatefulAgreesWithStateless$' ./pkg/credentialuse/
+        run: |
+          set -o pipefail
+          go test -v -count=1 -timeout 90m -run '^TestModelStatefulAgreesWithStateless$' ./pkg/credentialuse/ | tee differential.log
+          want="$(sed -n 's/.*differential plan: \([0-9][0-9]*\) subtests.*/\1/p' differential.log | head -n1)"
+          passed="$(grep -c -- '--- PASS: TestModelStatefulAgreesWithStateless/' differential.log || true)"
+          echo "differential: ${passed} subtests passed, the plan started ${want:-none}"
+          test -n "$want" && test "$want" -gt 0 && test "$passed" -eq "$want"
 
   # The org's shared workflows have no golangci-lint job: component-go-checks
   # runs only go vet and gofmt. This is the same check as `make lint`.
