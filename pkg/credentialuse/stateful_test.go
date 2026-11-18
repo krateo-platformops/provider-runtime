@@ -247,10 +247,8 @@ func runner(sc func(w *world), terminal func(s *apimodel.Sched, key string, viol
 			}
 			return err
 		}
-		// Quiet segments are invisible: an unreduced run that ends with one
-		// ready but not taken ends, for comparison, where the reduced run
-		// would, after it.
-		s.Settle()
+		// No quiet segment is left to run here, reduced or not: Run returns
+		// only when no actor can go, and a ready quiet park can.
 		key := w.stateKey()
 		err := w.check()
 		if terminal != nil {
@@ -264,55 +262,84 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	if raceEnabled || os.Getenv("CREDENTIALUSE_MODEL_BOUNDS") != "" {
 		t.Skip("the differential test runs in the model step, on its own bounds")
 	}
-	// The differential is a measured run on a VM (§11.3, the user's decision
-	// of 2026-11-12), with pre-registered pass rules and its results under
-	// hack/differential-credential-use-2/: at T = 2 its stateless legs took
-	// run 3 1,953 CPU-hours on 96 vCPU. It runs only under an explicit plan,
-	// so that `go test -run '^TestModel'`, locally and in CI's model step,
-	// doesn't start it.
-	if os.Getenv("CREDENTIALUSE_MODEL_DIFF_PLAN") == "" && os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY") == "" && os.Getenv("CREDENTIALUSE_MODEL_DIFF_JUMPS") == "" {
-		t.Skip("the differential runs only under an explicit plan (CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS): " +
-			"it is a VM measurement (docs/credential-use-model-reduction.md §11.3; results in hack/differential-credential-use-2/*/RESULTS.md and t2-RESULTS.md)")
-	}
 	t.Parallel()
-	// For the measured runs of §11.3: CREDENTIALUSE_MODEL_DIFF_ONLY (a regexp)
-	// picks scenarios, and CREDENTIALUSE_MODEL_DIFF_JUMPS sets T; or
-	// CREDENTIALUSE_MODEL_DIFF_PLAN, "regexp=T;regexp=T", gives each matching
-	// scenario its own T (the first match wins).
+	// The full differential is a measured run on a VM (§11.3, the user's
+	// decision of 2026-11-12), with pre-registered pass rules and its results
+	// under hack/differential-credential-use-2/: at T = 2 its stateless legs
+	// took run 3 1,953 CPU-hours on 96 vCPU. For those runs,
+	// CREDENTIALUSE_MODEL_DIFF_ONLY (a regexp) picks scenarios, and
+	// CREDENTIALUSE_MODEL_DIFF_JUMPS sets T; or CREDENTIALUSE_MODEL_DIFF_PLAN,
+	// "regexp=T;regexp=T", gives each matching scenario its own T (the first
+	// match wins). CREDENTIALUSE_MODEL_DIFF_STATELESS=off drops the stateless
+	// leg.
+	//
+	// Without a plan, it runs ciPlan: the part that fits CI's model step, so
+	// that the step still compares rule R against no R.
 	type entry struct {
-		re    *regexp.Regexp
-		jumps int
+		re        *regexp.Regexp
+		jumps     int
+		stateless bool
 	}
-	plan := []entry{{regexp.MustCompile(os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY")), envInt("CREDENTIALUSE_MODEL_DIFF_JUMPS", testJumps)}}
-	if v := os.Getenv("CREDENTIALUSE_MODEL_DIFF_PLAN"); v != "" {
-		plan = nil
-		for _, part := range strings.Split(v, ";") {
+	var plan []entry
+	only, jumpsVar, planVar := os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY"), os.Getenv("CREDENTIALUSE_MODEL_DIFF_JUMPS"), os.Getenv("CREDENTIALUSE_MODEL_DIFF_PLAN")
+	stateless := os.Getenv("CREDENTIALUSE_MODEL_DIFF_STATELESS") != "off"
+	switch {
+	case planVar != "":
+		for _, part := range strings.Split(planVar, ";") {
 			re, n, ok := strings.Cut(part, "=")
 			jumps, err := strconv.Atoi(n)
 			if !ok || err != nil {
-				t.Fatalf("CREDENTIALUSE_MODEL_DIFF_PLAN=%q: %q isn't regexp=T", v, part)
+				t.Fatalf("CREDENTIALUSE_MODEL_DIFF_PLAN=%q: %q isn't regexp=T", planVar, part)
 			}
-			plan = append(plan, entry{regexp.MustCompile(re), jumps})
+			plan = append(plan, entry{regexp.MustCompile(re), jumps, stateless})
+		}
+	case only != "" || jumpsVar != "":
+		plan = []entry{{regexp.MustCompile(only), envInt("CREDENTIALUSE_MODEL_DIFF_JUMPS", testJumps), stateless}}
+	default:
+		// Any other CREDENTIALUSE_MODEL_DIFF_* variable means a measured run
+		// whose plan is missing, or misspelled: refuse it, rather than run
+		// CI's plan and exit 0 on a VM.
+		for _, kv := range os.Environ() {
+			if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "CREDENTIALUSE_MODEL_DIFF_") {
+				t.Fatalf("%s is set, but no plan is (CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS): a measured run needs one (§11.3)", k)
+			}
+		}
+		for _, e := range ciPlan {
+			plan = append(plan, entry{regexp.MustCompile(e.re), testJumps, e.stateless})
 		}
 	}
 	for name, sc := range smallScenarios {
-		jumps := -1
-		for _, e := range plan {
-			if e.re.MatchString(name) {
-				jumps = e.jumps
+		var e *entry
+		for i := range plan {
+			if plan[i].re.MatchString(name) {
+				e = &plan[i]
 				break
 			}
 		}
-		if jumps < 0 {
+		if e == nil {
 			continue
 		}
-		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: jumps}, {Preemptions: 1, Jumps: jumps}} {
+		for _, b := range []apimodel.Bounds{{Faults: 1, Jumps: e.jumps}, {Preemptions: 1, Jumps: e.jumps}} {
 			t.Run(fmt.Sprintf("%s, %+v", name, b), func(t *testing.T) {
 				t.Parallel()
-				differential(t, sc, b)
+				differential(t, sc, b, e.stateless)
 			})
 		}
 	}
+}
+
+// ciPlan is the differential CI's model step runs, at T = 2 and at {0,1} and
+// {1,0}, when no measured plan is given: the three Teardown scenarios with
+// the stateless leg (their largest is 1,951,942 schedules), and
+// AcquireAgainstRelease stateful against reduced only (its stateless leg is
+// 460 to 900 million). It is the only comparison of rule R against no R
+// that CI finishes; the rest are the VM runs of §11.3.
+var ciPlan = []struct {
+	re        string
+	stateless bool
+}{
+	{`^teardown, `, true},
+	{`^acquire against release$`, false},
 }
 
 // searchResult is one search's terminal abstract states and violations.
@@ -414,14 +441,13 @@ func searchOn(t *testing.T, sc func(w *world), b apimodel.Bounds, stateful, noQu
 // without the reduction, stateful without it (the stateful search is sound),
 // and stateful with it (the reduction is sound). Terminal abstract states and
 // violations must be equal; every prune is audited.
-func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
+func differential(t *testing.T, sc func(w *world), b apimodel.Bounds, withStateless bool) {
 	t.Helper()
 	// CREDENTIALUSE_MODEL_DIFF_WORKERS splits the stateless leg across that
-	// many workers (§11.2); by default it is the serial search. With
-	// CREDENTIALUSE_MODEL_DIFF_STATELESS=off there is no stateless leg, and
-	// only the stateful search and the reduced one are compared: §11.3's
-	// reduced coverage, where the stateless reference is infeasible.
-	withStateless := os.Getenv("CREDENTIALUSE_MODEL_DIFF_STATELESS") != "off"
+	// many workers (§11.2); by default it is the serial search. Without
+	// withStateless there is no stateless leg, and only the stateful search
+	// and the reduced one are compared: §11.3's reduced coverage, where the
+	// stateless reference is infeasible.
 	// The three searches are independent, so they run side by side; the
 	// stateful ones are serial, and would otherwise follow a long stateless
 	// search.
@@ -434,7 +460,7 @@ func differential(t *testing.T, sc func(w *world), b apimodel.Bounds) {
 		plain = searchOn(t, sc, b, false, true, envInt("CREDENTIALUSE_MODEL_DIFF_WORKERS", 1))
 	} else {
 		plain.res.Finished = true
-		t.Logf("no stateless leg (CREDENTIALUSE_MODEL_DIFF_STATELESS=off): stateful against reduced only")
+		t.Logf("no stateless leg: stateful against reduced only")
 	}
 	wg.Wait()
 	if withStateless && plain.res.Finished {
@@ -607,16 +633,16 @@ type quietMode struct{ off bool }
 // new base (§3) made two of CI's scenarios too large for the stateful search
 // alone: AwayAndBack with 3 live passes and TwoReleasers ran past their caps
 // (200,000 and 5,000,000 runs) without it, and finish well inside them with
-// it (hack/differential-credential-use-2/rulefix-266b29f, run C). The
-// reduction's evidence is §5's argument, with C-park and M-a checked in every
-// search, and the stateful search against the reduced one: equal terminal
-// states on five scenarios in run 3 and on DeletionsAroundTheGrace in run A,
-// at {0,1} and {1,0}.
+// it (hack/differential-credential-use-2/rulefix-266b29f, run C).
 //
-// Caveat: AwayAndBack and TwoReleasers have no such differential. The
-// stateful search without R doesn't finish on them (run 3's size tests ran
-// out their 8h cap), so there is no unreduced terminal set to compare with.
-// There, R rests on the argument, the guards and the sampled merge audit.
+// What the reduced search has been compared against (docs/credential-use-
+// model-reduction.md §7, "What ran, and the gap"): Teardown ×3 and
+// AcquireAgainstRelease in their CI form, at {0,1} and {1,0} (run 3, and
+// ciPlan on every push); Recreate only small, at T = 1; Grace only small;
+// no scenario at {1,1}; AwayAndBack and TwoReleasers not at all, since the
+// stateful search without R doesn't finish on them; and the random walks
+// not at all. Where nothing was compared, R rests on §5's argument and on
+// the checks every search runs: M-a, C-park, C-stable and the clock's.
 func defaultQuiet() quietMode {
 	return quietMode{off: os.Getenv("CREDENTIALUSE_MODEL_QUIET") == "off"}
 }
