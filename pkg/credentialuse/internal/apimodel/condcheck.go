@@ -28,10 +28,20 @@ type CondConfig struct {
 // in, whether a search reaches it or not, and writes no runtime check can
 // see, such as to a variable nobody declared.
 //
-// The rule is structural. Every call of Actor.Wait or Actor.WaitQuiet must
-// pass, as its condition, nil or a function literal written at the call
-// site; anything else is refused. In the literal, and in every function of
-// cfg.Pure, it reports:
+// The rule is structural. Actor.Wait and Actor.WaitQuiet may be used only
+// in direct calls, a.Wait(label, notBefore, cond), whose condition is nil or
+// a function literal written at the call site; anything else is refused:
+//   - a condition that is a variable, a parameter, a method value or a
+//     call's result;
+//   - any other use of either method: a method value (wt := a.Wait, a
+//     struct field holding a.WaitQuiet) or a method expression
+//     ((*Actor).Wait(a, ...));
+//   - any expression, type expressions included, whose type is an
+//     interface or a type parameter with a Wait or a WaitQuiet method,
+//     through which *Actor could be called unseen (a generic wrapper, a
+//     conversion of *Actor to such an interface).
+//
+// In the literal, and in every function of cfg.Pure, it reports:
 //   - an assignment or ++/-- to anything but a variable declared inside it
 //     (scoped as Go scopes it, block by block): a captured variable, a
 //     field, a map or slice element, or through a pointer;
@@ -64,6 +74,11 @@ func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, c
 		}
 		c.body(fd.Body, fd.Pos(), fd.End())
 	}
+	// direct holds the Wait and WaitQuiet identifiers that are a direct
+	// call's method: a.Wait(label, notBefore, cond). Every other use of
+	// either method, a method value or a method expression, is refused
+	// below, since its calls are out of the check's sight.
+	direct := map[*ast.Ident]bool{}
 	for _, f := range files {
 		allowed := map[int]bool{}
 		for _, cg := range f.Comments {
@@ -73,15 +88,30 @@ func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, c
 				}
 			}
 		}
+		var inAPIWaitQuiet func(token.Pos) bool
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && declName(fd) == "Actor.WaitQuiet" && c.info.Defs[fd.Name] != nil &&
+				c.info.Defs[fd.Name].Pkg() != nil && c.info.Defs[fd.Name].Pkg().Path() == cfg.APIModel {
+				from, to := fd.Pos(), fd.End()
+				inAPIWaitQuiet = func(p token.Pos) bool { return p >= from && p < to }
+			}
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+			if !ok || !c.isWait(call) {
+				return true
+			}
+			if selection, ok := info.Selections[sel]; !ok || selection.Kind() != types.MethodVal || len(call.Args) != 3 {
+				return true // a method expression: refused below
+			}
+			direct[sel.Sel] = true
 			// The API's own WaitQuiet hands its condition on to Wait: that
 			// is the one call whose condition is a parameter.
-			if fd, ok := n.(*ast.FuncDecl); ok && declName(fd) == "Actor.WaitQuiet" && c.info.Defs[fd.Name] != nil &&
-				c.info.Defs[fd.Name].Pkg() != nil && c.info.Defs[fd.Name].Pkg().Path() == cfg.APIModel {
-				return false
-			}
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !c.isWait(call) || len(call.Args) != 3 {
+			if inAPIWaitQuiet != nil && inAPIWaitQuiet(call.Pos()) {
 				return true
 			}
 			arg := call.Args[2]
@@ -99,8 +129,49 @@ func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, c
 			return true
 		})
 	}
+	for id, obj := range info.Uses {
+		f, _ := obj.(*types.Func)
+		if (c.method(f, "Actor", "Wait") || c.method(f, "Actor", "WaitQuiet")) && !direct[id] {
+			c.report(id, "is passed through %s used other than in a direct call (a method value or a method expression), whose calls the check can't see", id.Name)
+		}
+	}
+	// An interface, or a type parameter's constraint, with a Wait or a
+	// WaitQuiet method would let *Actor be called through it, out of the
+	// check's sight: every expression, type expression included, of such a
+	// type is refused, whichever package declares the interface.
+	seen := map[token.Pos]bool{}
+	for e, tv := range info.Types {
+		if tv.Type == nil || seen[e.Pos()] {
+			continue
+		}
+		if m := waitMethod(tv.Type); m != "" {
+			seen[e.Pos()] = true
+			c.report(e, "is of %s, whose %s method could call Actor's out of the check's sight", tv.Type, m)
+		}
+	}
 	sort.Strings(c.problems)
 	return c.problems
+}
+
+// waitMethod returns "Wait" or "WaitQuiet" if t is an interface or a type
+// parameter whose method set has a method by that name, or "".
+func waitMethod(t types.Type) string {
+	var iface *types.Interface
+	switch t := t.(type) {
+	case *types.TypeParam:
+		iface, _ = t.Constraint().Underlying().(*types.Interface)
+	default:
+		iface, _ = t.Underlying().(*types.Interface)
+	}
+	if iface == nil {
+		return ""
+	}
+	for i := range iface.NumMethods() {
+		if n := iface.Method(i).Name(); n == "Wait" || n == "WaitQuiet" {
+			return n
+		}
+	}
+	return ""
 }
 
 func declName(fd *ast.FuncDecl) string {

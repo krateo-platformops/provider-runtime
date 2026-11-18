@@ -64,7 +64,7 @@ func checkSource(t *testing.T, body string, pure ...string) []string {
 	if err != nil {
 		t.Fatalf("parse: %v\n%s", err, body)
 	}
-	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}
+	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
 	conf := types.Config{Error: func(error) {}} // a snippet may leave a variable unused
 	if _, err := conf.Check("p", fset, []*ast.File{f}, info); err != nil && !strings.Contains(err.Error(), "declared and not used") {
 		t.Fatalf("type-check: %v\n%s", err, body)
@@ -178,6 +178,38 @@ func f(a *Actor) {
 func f(a *Actor) {
 	a.Wait("x", t0, ready)
 }`, "not a function literal written at the call site"},
+		{"a method value", `func f(a *Actor) {
+	saw := 0
+	wt := a.Wait
+	wt("x", t0, func() bool { saw = 2; return true })
+	_ = saw
+}`, "method value or a method expression"},
+		{"a method expression", `func f(a *Actor) {
+	saw := 0
+	(*Actor).Wait(a, "x", t0, func() bool { saw = 2; return true })
+	_ = saw
+}`, "method value or a method expression"},
+		{"a struct field holding WaitQuiet", `type holder struct{ wq func(string, Time, func() bool) }
+func f(a *Actor) {
+	saw := 0
+	h := holder{wq: a.WaitQuiet}
+	h.wq("x", t0, func() bool { saw = 2; return true })
+	_ = saw
+}`, "method value or a method expression"},
+		{"an interface with Wait", `type waiter interface{ Wait(string, Time, func() bool) }
+func f(a *Actor) {
+	saw := 0
+	var w waiter = a
+	w.Wait("x", t0, func() bool { saw = 2; return true })
+	_ = saw
+}`, "whose Wait method could call Actor's"},
+		{"a generic wrapper", `func g[T interface{ WaitQuiet(string, Time, func() bool) }](t T, saw *int) {
+	t.WaitQuiet("x", t0, func() bool { *saw = 2; return true })
+}
+func f(a *Actor) {
+	saw := 0
+	g(a, &saw)
+}`, "whose WaitQuiet method could call Actor's"},
 		{"the directive", `func f(a *Actor) {
 	saw := 0
 	// condcheck:writes, on purpose.

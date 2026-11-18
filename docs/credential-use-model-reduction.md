@@ -326,15 +326,28 @@ ignore):
   - **Statically** (`apimodel.CheckConditions`, run by
     TestModelConditionsWriteNothing over every package under
     pkg/credentialuse that imports apimodel, and apimodel, tests included,
-    loaded with their types; in CI's coverage step and its model step). The rule is structural: every call
-    of `Actor.Wait` or `Actor.WaitQuiet` (the API's own `WaitQuiet`, which
-    hands its condition on, aside) must pass nil or a function literal
-    written at the call site; a variable, a parameter, a method value or a
-    call's result is refused. So the holder's and the releaser's waits take
-    their predicate as data (`waitFor`) and pass a literal that reads it.
-    Inside the literal, and inside every function on the check's pure list
-    (the key constructors, `ID.GroupKind`, `waitFor.met`), whose bodies the
-    same rules check:
+    loaded with their types; in CI's coverage step and its model step).
+    The rule is structural. `Actor.Wait` and `Actor.WaitQuiet` may be used
+    only in direct calls, `a.Wait(label, notBefore, cond)`, whose condition
+    is nil or a function literal written at the call site (the API's own
+    `WaitQuiet`, which hands its condition on to `Wait`, aside). The check
+    refuses:
+    - a condition that is a variable, a parameter, a method value or a
+      call's result;
+    - any other use of either method: a method value (`wt := a.Wait`, a
+      struct field holding `a.WaitQuiet`) or a method expression
+      (`(*Actor).Wait(a, …)`);
+    - any expression, type expressions included, whose type is an interface
+      or a type parameter with a `Wait` or a `WaitQuiet` method, whichever
+      package declares it: through one, `*Actor` could be called unseen (a
+      generic wrapper, a conversion of `*Actor` to such an interface).
+
+    So every condition the model can pass to `Actor`'s waits is a literal
+    the check has read. The holder's and the releaser's waits take their
+    predicate as data (`waitFor`) and pass a literal that reads it. Inside
+    the literal, and inside every function on the check's pure list (the
+    key constructors, `ID.GroupKind`, `waitFor.met`), whose bodies the same
+    rules check:
     - an assignment or `++` may target only a variable declared inside,
       resolved by type and scoped block by block as Go scopes it;
     - a channel receive or send, a select, a go and a defer are refused;
@@ -342,8 +355,11 @@ ignore):
       conversion, a literal inside the condition, `Model.Get`,
       `Cache.Pending` or a function on the pure list.
 
-    This is what catches, in every state, a write to a variable nobody
-    declared, to a world field or a counter, or through a pointer or a map.
+    For the packages it checks, this catches, in every state a condition
+    could be evaluated in, a write that the condition's own code, or a pure
+    function's, makes to anything but its own variables: to a variable
+    nobody declared, to a world field or a counter, or through a pointer or
+    a map. A write behind the two trusted reads is the runtime half's.
   - **At run time:** the scheduler compares the actor's declared locals,
     rendered deeply through pointers, maps and slices, and its inputs,
     before and after every evaluation of its condition. The harness panics
