@@ -1,6 +1,7 @@
 package credentialuse
 
 import (
+	"context"
 	"maps"
 	"slices"
 	"strings"
@@ -118,7 +119,7 @@ type holderHandler struct{ t *Tracker }
 func (h holderHandler) now() time.Time { return h.t.s.clock.Now() }
 
 func (h holderHandler) observe(m *metav1.PartialObjectMetadata) {
-	if f := h.t.s.onHolderEvent; f != nil {
+	if f := h.t.s.hooks.holderEvent; f != nil {
 		f(h.t, m)
 	}
 }
@@ -179,11 +180,16 @@ func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata) {
 func heldSelector() string { return LabelHeld + "=true" }
 
 // protectedInformer is one protected kind's label-scoped cache, shared by
-// every tracker that may hold that kind.
+// every tracker that may hold that kind. Each such tracker has its own
+// handler on it (protectedHandler).
 type protectedInformer struct {
 	gk  schema.GroupKind
+	gvr schema.GroupVersionResource
 	lw  *listWatch
 	inf cache.SharedIndexInformer
+	// stop ends the informer when a Track after Run started it; RunInformers'
+	// context ends the others.
+	stop context.CancelFunc
 
 	mu       sync.Mutex
 	trackers []*Tracker
@@ -193,6 +199,12 @@ func (p *protectedInformer) add(t *Tracker) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.trackers = append(p.trackers, t)
+}
+
+func (p *protectedInformer) remove(t *Tracker) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.trackers = slices.DeleteFunc(p.trackers, func(x *Tracker) bool { return x == t })
 }
 
 func (p *protectedInformer) snapshot() []*Tracker {
@@ -229,22 +241,52 @@ func (p *protectedInformer) inNamespace(namespace string) []*metav1.PartialObjec
 	return out
 }
 
-// protectedHandler maps protected-object events to release batches and
-// holders (§10.2), and drops written entries (§6.3):
-//   - any change to a kind's finalizer or epoch enqueues that (K, N) batch;
-//     an add is one, which covers the initial list's recheck of every hold;
+// protectedHandler is tracker t's handler on protected informer p. It maps
+// protected-object events to t's release batches and holders (§10.2), drops
+// t's written entries (§6.3), and counts t's holds in p for the held gauge
+// (§12):
+//   - any change to one of t's finalizers or epochs enqueues that (K, N)
+//     batch; an add is one, which covers the initial list's recheck of every
+//     hold;
 //   - a new deletionTimestamp enqueues the object's batches at once and
-//     again when each kind's grace ends, measured as §5 says;
-//   - leaving the cache, as a deletion does and as losing the held label
-//     does (a kubectl replace that strips our metadata, §6.5), enqueues the
-//     object's holders through each kind's index.
+//     again when t's grace ends, measured as §5 says; so does a relist that
+//     brings a deleting object under a new UID;
+//   - losing one of t's finalizers while staying in the cache, and leaving
+//     the cache, as a deletion does and as losing the held label does (a
+//     kubectl replace that strips our metadata, §6.5), enqueue the object's
+//     holders through t's index.
+//
+// Each tracker registers its own handler, so that one registered on an
+// informer that is already running gets the informer's store replayed as
+// adds before any later event, in order: a Track after Run rechecks every
+// hold already in the cache, deleting objects' graces included, without a
+// gap or a race with the events that follow (D4 of the review of #109).
+// client-go calls a handler's methods one at a time, so held needs no lock.
 type protectedHandler struct {
 	s *Shared
 	p *protectedInformer
+	t *Tracker
+
+	held int // t's (object, finalizer) pairs in p's cache
 }
 
-func (h protectedHandler) id(m *metav1.PartialObjectMetadata) ID {
+func (h *protectedHandler) id(m *metav1.PartialObjectMetadata) ID {
 	return ID{Group: h.p.gk.Group, Kind: h.p.gk.Kind, Namespace: m.Namespace, Name: m.Name}
+}
+
+func (h *protectedHandler) observe(m *metav1.PartialObjectMetadata) {
+	if f := h.s.hooks.protectedEvent; f != nil {
+		f(h.t, m)
+	}
+}
+
+// count moves t's held gauge by d pairs.
+func (h *protectedHandler) count(d int) {
+	if d == 0 {
+		return
+	}
+	h.held += d
+	h.t.setHeld(h.p.gk, h.held)
 }
 
 // holds returns each of t's finalizers on m, by holder namespace, with its
@@ -259,70 +301,91 @@ func holds(t *Tracker, m *metav1.PartialObjectMetadata) map[string]string {
 	return out
 }
 
-func (h protectedHandler) OnAdd(obj any, _ bool) {
+func (h *protectedHandler) OnAdd(obj any, _ bool) {
 	m, ok := metadataOf(obj)
 	if !ok {
 		return
 	}
+	h.observe(m)
 	id := h.id(m)
-	for _, t := range h.p.snapshot() {
-		for n := range holds(t, m) {
-			h.s.queue.Add(batchKey{t.gk, n}, id)
-		}
-		if m.DeletionTimestamp != nil {
-			h.graceTimers(t, m, id)
-		}
+	held := holds(h.t, m)
+	for n := range held {
+		h.s.queue.Add(batchKey{h.t.gk, n}, id)
 	}
+	if m.DeletionTimestamp != nil {
+		h.graceTimers(m, id)
+	}
+	h.count(len(held))
 }
 
-func (h protectedHandler) OnUpdate(oldObj, newObj any) {
+func (h *protectedHandler) OnUpdate(oldObj, newObj any) {
 	o, ok1 := metadataOf(oldObj)
 	n, ok2 := metadataOf(newObj)
 	if !ok1 || !ok2 {
 		return
 	}
+	h.observe(n)
+	t := h.t
 	id := h.id(n)
+	replaced := o.UID != n.UID
 	newlyDeleting := o.DeletionTimestamp == nil && n.DeletionTimestamp != nil
-	for _, t := range h.p.snapshot() {
-		t.ver.protectedEvent(o, n)
-		before, after := holds(t, o), holds(t, n)
-		for ns := range mergedKeys(before, after) {
-			eb, inB := before[ns]
-			ea, inA := after[ns]
-			if inB != inA || eb != ea || newlyDeleting || o.UID != n.UID {
-				h.s.queue.Add(batchKey{t.gk, ns}, id)
-			}
+	t.ver.protectedEvent(o, n)
+	before, after := holds(t, o), holds(t, n)
+	lost := false
+	for ns := range mergedKeys(before, after) {
+		eb, inB := before[ns]
+		ea, inA := after[ns]
+		if inB != inA || eb != ea || newlyDeleting || replaced {
+			h.s.queue.Add(batchKey{t.gk, ns}, id)
 		}
-		if newlyDeleting {
-			h.graceTimers(t, n, id)
-		}
+		lost = lost || (inB && (!inA || replaced))
 	}
+	if lost {
+		// The holds that were there are gone, as when the object leaves the
+		// cache: its holders' next passes write A2 again (§6.5, G4 of the
+		// review of #109).
+		t.enqueueHolders(id)
+	}
+	if replaced {
+		h.s.seen.forget(o.UID)
+	}
+	if n.DeletionTimestamp != nil && (newlyDeleting || replaced) {
+		h.graceTimers(n, id)
+	}
+	h.count(len(after) - len(before))
 }
 
-func (h protectedHandler) OnDelete(obj any) {
+func (h *protectedHandler) OnDelete(obj any) {
 	m, ok := metadataOf(obj)
 	if !ok {
 		return
 	}
+	h.observe(m)
+	t := h.t
 	id := h.id(m)
-	for _, t := range h.p.snapshot() {
-		t.ver.protectedEvent(m, nil)
-		for n := range holds(t, m) {
-			h.s.queue.Add(batchKey{t.gk, n}, id)
-		}
-		t.enqueueHolders(id)
+	t.ver.protectedEvent(m, nil)
+	held := holds(t, m)
+	for n := range held {
+		h.s.queue.Add(batchKey{t.gk, n}, id)
 	}
+	t.enqueueHolders(id)
+	// The object left the cache: its first sight goes, so that firstSight
+	// holds only deleting objects this process still sees (G6 of the review
+	// of #109). If it comes back still deleting, its grace starts again from
+	// then, which only delays a release.
+	h.s.seen.forget(m.UID)
+	h.count(-len(held))
 }
 
 // graceTimers enqueues m's batches for t again when t's grace for m ends
 // (§5, §10.2). The releaser re-checks the grace in R1, so an early or a
 // duplicate enqueue is harmless.
-func (h protectedHandler) graceTimers(t *Tracker, m *metav1.PartialObjectMetadata, id ID) {
+func (h *protectedHandler) graceTimers(m *metav1.PartialObjectMetadata, id ID) {
 	now := h.s.clock.Now()
 	first := h.s.seen.see(m.UID, now)
-	end := GraceEnd(m.DeletionTimestamp.Time, first, t.o.DeletionGrace)
-	for n := range holds(t, m) {
-		h.s.queue.AddAfter(batchKey{t.gk, n}, end.Sub(now), id)
+	end := GraceEnd(m.DeletionTimestamp.Time, first, h.t.o.DeletionGrace)
+	for n := range holds(h.t, m) {
+		h.s.queue.AddAfter(batchKey{h.t.gk, n}, end.Sub(now), id)
 	}
 }
 
@@ -360,8 +423,8 @@ func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 		maps.Equal(o.Annotations, n.Annotations) {
 		return
 	}
-	if f := h.s.onNamespaceAct; f != nil {
-		f(n.Name)
+	if f := h.s.hooks.namespaceAct; f != nil {
+		f(n)
 	}
 	for _, p := range h.s.protectedInformers() {
 		for _, m := range p.inNamespace(n.Name) {
@@ -423,15 +486,23 @@ func (v trackerViews) NamespaceDeleting(namespace string) (bool, bool) {
 }
 
 // enqueueHolders enqueues, through Options.Enqueue, every holder of t's kind
-// whose cached record names id (§10.2).
+// whose cached record names id (§10.2), and every holder whose record can't
+// be parsed. Such a record names every ID for R0 and R2 (§4), so its holder
+// may be one of id's users; its next pass rewrites the record (A1), which
+// is what makes it parseable again. Enqueueing it is never unsafe: a pass
+// only adds holds. Records are unparseable only when something other than
+// the core writes them, so these are few (N5 of the review of #109).
 func (t *Tracker) enqueueHolders(id ID) {
-	objs, err := t.holders.GetIndexer().ByIndex(refsIndex, id.String())
-	if err != nil {
-		return
-	}
-	for _, o := range objs {
-		if m, ok := o.(*metav1.PartialObjectMetadata); ok {
-			t.o.Enqueue(types.NamespacedName{Namespace: m.Namespace, Name: m.Name})
+	idx := t.holders.GetIndexer()
+	for _, key := range []string{id.String(), unparseableKey} {
+		objs, err := idx.ByIndex(refsIndex, key)
+		if err != nil {
+			continue
+		}
+		for _, o := range objs {
+			if m, ok := o.(*metav1.PartialObjectMetadata); ok {
+				t.o.Enqueue(types.NamespacedName{Namespace: m.Namespace, Name: m.Name})
+			}
 		}
 	}
 }

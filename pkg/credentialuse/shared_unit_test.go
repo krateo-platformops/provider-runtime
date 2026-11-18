@@ -12,8 +12,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	metadatafake "k8s.io/client-go/metadata/fake"
 	testingclock "k8s.io/utils/clock/testing"
 )
@@ -195,6 +197,7 @@ type countingMetrics struct {
 	mu      sync.Mutex
 	counts  map[string]int
 	reasons []string
+	held    map[string]int
 }
 
 func (m *countingMetrics) inc(name string) {
@@ -214,6 +217,31 @@ func (m *countingMetrics) Degraded(kind, reason string) {
 }
 func (m *countingMetrics) AdmissionDenied(kind string) { m.inc("admission_denied " + kind) }
 func (m *countingMetrics) ReleaseRejected(kind string) { m.inc("release_rejected " + kind) }
+func (m *countingMetrics) CRDWriteStarved(kind string) { m.inc("crd_write_starved " + kind) }
+
+// HeldObjects keeps the gauge's last value, by kind.
+func (m *countingMetrics) HeldObjects(kind string, n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.held == nil {
+		m.held = map[string]int{}
+	}
+	m.held[kind] = n
+}
+
+func (m *countingMetrics) count(name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.counts[name]
+}
+
+// heldGauge is the held gauge's last value for kind, and whether it was set.
+func (m *countingMetrics) heldGauge(kind string) (int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n, ok := m.held[kind]
+	return n, ok
+}
 
 // Class (e) of §6.2 is counted in credentialuse_admission_denied_total, for a
 // new holder and an established one alike (L3 of the review of revision 16):
@@ -290,11 +318,13 @@ func TestTrackValidates(t *testing.T) {
 		"an unmapped kind": {func(o *Options) {
 			o.Protected = []ProtectedKind{{GVK: schema.GroupVersionKind{Version: "v1", Kind: "Nope"}}}
 		}, "can't be mapped"},
-		"PerName": {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}} }, "only LabelScoped"},
-		"Content": {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Content: true}} }, "Content"},
+		"PerName":      {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}} }, "only LabelScoped"},
+		"Content":      {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Content: true}} }, "Content"},
+		"a kind twice": {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK}, {GVK: secretGVK}} }, "listed twice"},
 	}
 	md := metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme())
-	s := newShared(Clients{Metadata: md, Mapper: mapper}, SharedOptions{}, testingclock.NewFakeClock(time.Now()))
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	s := newShared(Clients{Metadata: md, Dynamic: dyn, Mapper: mapper}, SharedOptions{}, testingclock.NewFakeClock(time.Now()))
 	for name, c := range cases {
 		o := ok
 		c.change(&o)

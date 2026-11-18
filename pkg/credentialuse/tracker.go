@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -18,12 +20,26 @@ type Tracker struct {
 	s      *Shared
 	o      Options
 	gk     schema.GroupKind
+	gvr    schema.GroupVersionResource
 	prefix string
 
 	ver     *verified
 	proto   *protocol
 	holders cache.SharedIndexInformer
-	lw      *listWatch
+	// holderLW is what the holder informer lists and watches with: the
+	// core's listWatch, or the tests' wrapper of it.
+	holderLW cache.ListerWatcher
+	// stopHolders ends the holder informer when a Track after Run started
+	// it; RunInformers' context ends the others. Nil until then.
+	stopHolders context.CancelFunc
+
+	// regs are t's handlers on the protected informers, which only Track
+	// changes.
+	regs map[*protectedInformer]cache.ResourceEventHandlerRegistration
+
+	heldMu sync.Mutex
+	heldBy map[schema.GroupKind]int // the held gauge, by protected kind
+	gone   bool                     // a failed Track dropped t
 }
 
 func (s *Shared) newTracker(o Options) (*Tracker, error) {
@@ -36,7 +52,11 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Tracker{s: s, o: o, gk: gk, prefix: prefix, ver: newVerified(gk)}
+	t := &Tracker{
+		s: s, o: o, gk: gk, gvr: m.Resource, prefix: prefix, ver: newVerified(gk),
+		regs:   map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
+		heldBy: map[schema.GroupKind]int{},
+	}
 	t.proto = &protocol{
 		holder:          gk,
 		ownerFinalizers: o.OwnerFinalizers,
@@ -51,8 +71,12 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	}
 	// The holder informer's list or relist completion is a floor under
 	// every observation of the record (§6.5 L2).
-	t.lw = newListWatch(s.c.Metadata.Resource(m.Resource), "", s.clock, t.ver.listCompleted)
-	t.holders = cache.NewSharedIndexInformerWithOptions(t.lw, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
+	lw := newListWatch(s.c.Metadata, m.Resource, "", s.clock, t.listCompleted)
+	t.holderLW = lw
+	if wrap := holderListWatchSeam; wrap != nil {
+		t.holderLW = wrap(lw)
+	}
+	t.holders = cache.NewSharedIndexInformerWithOptions(t.holderLW, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
 		Indexers:          cache.Indexers{refsIndex: holderIndexer},
 		ObjectDescription: "credential-use holders " + gk.String(),
 	})
@@ -63,6 +87,80 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		return nil, err
 	}
 	return t, nil
+}
+
+// holderListWatchSeam, set only by the tests (export_test.go), wraps each
+// holder informer's listWatch: to refuse watch-list requests, count lists,
+// and end watches with a 410 (N5 of the review of #109).
+var holderListWatchSeam func(lw *listWatch) cache.ListerWatcher
+
+// listCompleted records a list or relist of the holder informer (§6.5 L2).
+func (t *Tracker) listCompleted(at time.Time) {
+	if f := t.s.hooks.beforeListRecorded; f != nil {
+		f(t)
+	}
+	t.ver.listCompleted(at)
+}
+
+func (t *Tracker) informer() informer {
+	return informer{inf: t.holders, gvr: t.gvr, what: "the holder informer of " + t.gk.String()}
+}
+
+// join registers t's handler on protected informer p. On an informer that
+// is already running, client-go replays p's cache to the new handler as
+// adds before any later event.
+func (t *Tracker) join(p *protectedInformer) error {
+	reg, err := p.inf.AddEventHandler(&protectedHandler{s: t.s, p: p, t: t})
+	if err != nil {
+		return fmt.Errorf("credential-use: joining the protected informer of %s: %w", p.gk, err)
+	}
+	t.regs[p] = reg
+	p.add(t)
+	return nil
+}
+
+// leaveAll removes t's handlers from the protected informers.
+func (t *Tracker) leaveAll() {
+	for p, reg := range t.regs {
+		_ = p.inf.RemoveEventHandler(reg)
+		p.remove(t)
+		delete(t.regs, p)
+	}
+}
+
+// stopInformers ends the holder informer, if a Track after Run started it.
+func (t *Tracker) stopInformers() {
+	if t.stopHolders != nil {
+		t.stopHolders()
+	}
+}
+
+// setHeld sets t's held pairs in protected kind pgk's cache to n, and the
+// held gauge to their sum over t's protected kinds (§12, L4): (protected
+// object, finalizer) pairs with the kind's prefix in this process's cache.
+func (t *Tracker) setHeld(pgk schema.GroupKind, n int) {
+	t.heldMu.Lock()
+	defer t.heldMu.Unlock()
+	if t.gone {
+		return
+	}
+	t.heldBy[pgk] = n
+	sum := 0
+	for _, c := range t.heldBy {
+		sum += c
+	}
+	t.o.Metrics.HeldObjects(kindLabel(t.gk), sum)
+}
+
+// dropHeld clears the held gauge of a tracker a failed Track dropped; a
+// handler that still runs then changes it no more.
+func (t *Tracker) dropHeld() {
+	t.heldMu.Lock()
+	defer t.heldMu.Unlock()
+	if !t.gone && len(t.heldBy) > 0 {
+		t.o.Metrics.HeldObjects(kindLabel(t.gk), 0)
+	}
+	t.gone = true
 }
 
 // Acquire runs on every pass of holder obj, deletion passes included, after

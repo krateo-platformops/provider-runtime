@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -187,6 +188,15 @@ func settled(t *testing.T, d *driver.Driver, nn types.NamespacedName, secret str
 // exact-version skip rule rests on (the re-review of #59). It runs on the
 // watch-list path, and again with watch-list refused so that the reflector
 // falls back to a List (#52's review).
+//
+// The order is forced, not left to timing (G1 of the review of #109): the
+// relist's recording waits until the handler has seen a relisted version,
+// or two seconds. The core records before the reflector can deliver any
+// relisted version, so its recording always waits the two seconds, and the
+// handler then sees the new lastList. A recording that came after the
+// delivery, as when the bookmark is recorded after it is passed on or a
+// List's completion at the next Watch, would wait until the handler had
+// seen the old lastList, every time.
 func TestRelistResetsRecordSince(t *testing.T) {
 	cutest.Require(t, env)
 	for _, watchList := range []bool{true, false} {
@@ -205,11 +215,25 @@ func TestRelistResetsRecordSince(t *testing.T) {
 			var mu sync.Mutex
 			var floor time.Time
 			var seen []time.Time // lastList as each holder event after the relist saw it
+			relisted := make(chan struct{})
+			var once sync.Once
 			s.OnHolderEvent(func(tk *cu.Tracker, m *metav1.PartialObjectMetadata) {
 				mu.Lock()
 				defer mu.Unlock()
 				if !floor.IsZero() && m.Name == "w" {
 					seen = append(seen, tk.LastList())
+					once.Do(func() { close(relisted) })
+				}
+			})
+			s.BeforeListRecorded(func(*cu.Tracker) {
+				mu.Lock()
+				armed := !floor.IsZero()
+				mu.Unlock()
+				if armed {
+					select {
+					case <-relisted:
+					case <-time.After(2 * time.Second):
+					}
 				}
 			})
 			running(t, s)
@@ -301,8 +325,8 @@ func TestTrackAfterStartAndTwice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Track after Run: %v", err)
 	}
-	if lists, streams := tt.HolderLists(); lists+streams == 0 {
-		t.Fatal("Track after Run returned before the new kind's informer listed")
+	if lists, streams := tt.HolderLists(); lists+streams == 0 || !tt.HolderSynced() {
+		t.Fatalf("Track after Run returned before the new kind's informer synced (%d lists, %d streams)", lists, streams)
 	}
 	td := &driver.Driver{Tracker: tt, Dynamic: env.Dynamic, Holder: cutest.TargetGVR, OwnerFinalizer: ownerFinalizer}
 	nn := types.NamespacedName{Namespace: ns, Name: "t"}
@@ -449,6 +473,12 @@ func TestRunNeedsNamespaceListAndWatch(t *testing.T) {
 // The Namespace handler acts only on a change to a credential-use.*
 // annotation or to the deletionTimestamp (L5); on a new deletionTimestamp
 // it enqueues the release batch of every held object in the namespace (§5).
+//
+// Nothing here waits on time (N4 of the review of #109). An informer
+// delivers one object's changes in order, so a change the handler acts on,
+// made after one it must ignore, is a barrier: when the second act is seen,
+// the first change has been handled, and acted on or not. The holder and
+// protected informers get barriers of their own before the drain.
 func TestNamespaceHandlerActsOnlyOnItsFields(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
@@ -462,16 +492,44 @@ func TestNamespaceHandlerActsOnlyOnItsFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	const barrier = "credential-use.krateo.io/test-barrier"
 	var mu sync.Mutex
-	acts := 0
-	s.OnNamespaceAct(func(n string) {
-		if n == ns {
+	var acts []string // each act, as the handler had the Namespace
+	s.OnNamespaceAct(func(n *metav1.PartialObjectMetadata) {
+		if n.Name == ns {
 			mu.Lock()
-			acts++
+			acts = append(acts, fmt.Sprintf("allow=%q barrier=%q deleting=%v",
+				n.Annotations[cu.AnnotationAllowHoldersFrom], n.Annotations[barrier], n.DeletionTimestamp != nil))
 			mu.Unlock()
 		}
 	})
-	actsNow := func() int { mu.Lock(); defer mu.Unlock(); return acts }
+	// seenRV records the resourceVersions the holder and protected handlers
+	// have been given, for the barriers.
+	seenRV := map[string]bool{}
+	s.OnHolderEvent(func(_ *cu.Tracker, m *metav1.PartialObjectMetadata) {
+		mu.Lock()
+		seenRV["holder "+m.ResourceVersion] = true
+		mu.Unlock()
+	})
+	s.OnProtectedEvent(func(_ *cu.Tracker, m *metav1.PartialObjectMetadata) {
+		mu.Lock()
+		seenRV["protected "+m.ResourceVersion] = true
+		mu.Unlock()
+	})
+	actsUntil := func(n int) []string {
+		t.Helper()
+		var got []string
+		cutest.Eventually(t, 30*time.Second, func() error {
+			mu.Lock()
+			defer mu.Unlock()
+			got = slices.Clone(acts)
+			if len(got) < n {
+				return fmt.Errorf("%d acts: %w", len(got), cutest.ErrNotYet)
+			}
+			return nil
+		})
+		return got
+	}
 	running(t, s)
 	d := newDriver(tr)
 	nn := types.NamespacedName{Namespace: ns, Name: "w"}
@@ -484,40 +542,68 @@ func TestNamespaceHandlerActsOnlyOnItsFields(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	allow := fmt.Sprintf("allow=%q barrier=%q deleting=false", "*", "")
 	patchNS(`{"metadata":{"labels":{"team":"a"},"annotations":{"note":"x"}}}`)
 	patchNS(`{"metadata":{"annotations":{"` + cu.AnnotationAllowHoldersFrom + `":"*"}}}`)
+	if got := actsUntil(1); !slices.Equal(got, []string{allow}) {
+		t.Fatalf("acts %q, want only the annotation change's", got)
+	}
 	cutest.Eventually(t, 30*time.Second, func() error {
-		if actsNow() != 1 {
-			return fmt.Errorf("%d acts: %w", actsNow(), cutest.ErrNotYet)
+		if enq.count(nn) == 0 {
+			return fmt.Errorf("the namespace's holders aren't enqueued: %w", cutest.ErrNotYet)
 		}
 		return nil
 	})
-	if enq.count(nn) == 0 {
-		t.Error("a credential-use.* annotation change didn't enqueue the namespace's holders")
-	}
 
-	// Take every batch queued so far, so that what follows is the
-	// deletion's own.
-	s.DrainQueue()
-	time.Sleep(time.Second) // let any event in flight arrive, and drain it too
+	// Barriers on the holder and the protected informer: a label change
+	// that enqueues nothing, seen by the handler, follows every earlier
+	// event, so that what is drained next is all that was queued before.
+	w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Patch(ctx, "w", types.MergePatchType,
+		[]byte(`{"metadata":{"labels":{"barrier":"1"}}}`), metav1.PatchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec, err := env.Kube.CoreV1().Secrets(ns).Patch(ctx, "creds", types.MergePatchType,
+		[]byte(`{"metadata":{"labels":{"barrier":"1"}}}`), metav1.PatchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutest.Eventually(t, 30*time.Second, func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		if !seenRV["holder "+w.GetResourceVersion()] || !seenRV["protected "+sec.ResourceVersion] {
+			return cutest.ErrNotYet
+		}
+		return nil
+	})
 	s.DrainQueue()
 	if queued, _ := s.QueuedBatch(widgetGK, ns); queued {
 		t.Fatal("the batch is still queued after the drain")
 	}
+
 	if err := env.Kube.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
+	}
+	deleting := fmt.Sprintf("allow=%q barrier=%q deleting=true", "*", "")
+	if got := actsUntil(2); !slices.Equal(got, []string{allow, deleting}) {
+		t.Fatalf("acts %q, want the annotation change's and the deletion's", got)
 	}
 	secret := cu.SecretRef(ns, "creds").ID()
 	cutest.Eventually(t, 30*time.Second, func() error {
 		queued, ids := s.QueuedBatch(widgetGK, ns)
-		if actsNow() != 2 || !queued || !hasID(ids, secret) {
-			return fmt.Errorf("%d acts, batch queued %v covering %v: %w", actsNow(), queued, ids, cutest.ErrNotYet)
+		if !queued || !hasID(ids, secret) {
+			return fmt.Errorf("batch queued %v covering %v: %w", queued, ids, cutest.ErrNotYet)
 		}
 		return nil
 	})
-	time.Sleep(time.Second)
-	if actsNow() != 2 {
-		t.Errorf("%d acts: the handler acted on a change that isn't its", actsNow())
+
+	// A change the handler must ignore, then a barrier it acts on: the
+	// third act must be the barrier.
+	patchNS(`{"metadata":{"labels":{"team":"b"},"annotations":{"note":"y"}}}`)
+	patchNS(`{"metadata":{"annotations":{"` + barrier + `":"1"}}}`)
+	want := []string{allow, deleting, fmt.Sprintf("allow=%q barrier=%q deleting=true", "*", "1")}
+	if got := actsUntil(3); !slices.Equal(got, want) {
+		t.Errorf("acts %q, want %q: the handler acted on a change that isn't its", got, want)
 	}
 }
 

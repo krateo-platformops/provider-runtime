@@ -3,16 +3,16 @@ package credentialuse
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/watchlist"
 	"k8s.io/utils/clock"
 )
 
@@ -38,22 +38,23 @@ type listWatch struct {
 	clock    clock.PassiveClock
 	// listed, if set, receives each list's completion time.
 	listed func(time.Time)
-
-	// For tests: refuseWatchList makes a watch-list request fail, so that
-	// the reflector falls back to a List; lists and streams count the lists
-	// that completed each way.
-	refuseWatchList atomic.Bool
-	lists, streams  atomic.Int64
-
-	mu      sync.Mutex
-	watches map[*recordingWatch]bool
+	// noWatchList: the client says it can't stream lists, as client-go's
+	// fakes do; the reflector then lists with a List.
+	noWatchList bool
 }
 
 var _ cache.ListerWatcherWithContext = (*listWatch)(nil)
 
-func newListWatch(c metadata.ResourceInterface, selector string, clk clock.PassiveClock, listed func(time.Time)) *listWatch {
-	return &listWatch{client: c, selector: selector, clock: clk, listed: listed, watches: map[*recordingWatch]bool{}}
+func newListWatch(md metadata.Interface, gvr schema.GroupVersionResource, selector string, clk clock.PassiveClock, listed func(time.Time)) *listWatch {
+	return &listWatch{
+		client: md.Resource(gvr), selector: selector, clock: clk, listed: listed,
+		noWatchList: watchlist.DoesClientNotSupportWatchListSemantics(md),
+	}
 }
+
+// IsWatchListSemanticsUnSupported passes on the client's own answer, which
+// client-go's reflector asks before it streams a list.
+func (l *listWatch) IsWatchListSemanticsUnSupported() bool { return l.noWatchList }
 
 func (l *listWatch) completed() {
 	if l.listed != nil {
@@ -70,7 +71,6 @@ func (l *listWatch) ListWithContext(ctx context.Context, options metav1.ListOpti
 		return nil, err
 	}
 	if out.Continue == "" {
-		l.lists.Add(1)
 		l.completed()
 	}
 	return out, nil
@@ -80,18 +80,12 @@ func (l *listWatch) WatchWithContext(ctx context.Context, options metav1.ListOpt
 	if l.selector != "" {
 		options.LabelSelector = l.selector
 	}
-	initial := options.SendInitialEvents != nil && *options.SendInitialEvents
-	if initial && l.refuseWatchList.Load() {
-		return nil, apierrors.NewBadRequest("credential-use test: watch-list refused")
-	}
 	w, err := l.client.Watch(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	rw := &recordingWatch{inner: w, out: make(chan watch.Event), done: make(chan struct{}), inject: make(chan watch.Event), initial: initial, lw: l}
-	l.mu.Lock()
-	l.watches[rw] = true
-	l.mu.Unlock()
+	initial := options.SendInitialEvents != nil && *options.SendInitialEvents
+	rw := &recordingWatch{inner: w, out: make(chan watch.Event), done: make(chan struct{}), initial: initial, lw: l}
 	go rw.forward()
 	return rw, nil
 }
@@ -105,17 +99,6 @@ func (l *listWatch) Watch(options metav1.ListOptions) (watch.Interface, error) {
 	return l.WatchWithContext(context.Background(), options)
 }
 
-// expire ends every open watch with a 410, as a compacted resourceVersion
-// does, so that the reflector relists: for tests (plan, PR 3).
-func (l *listWatch) expire() {
-	l.mu.Lock()
-	ws := keysOf(l.watches)
-	l.mu.Unlock()
-	for _, w := range ws {
-		w.expire()
-	}
-}
-
 // recordingWatch passes a watch's events on, recording the end of a
 // watch-list stream's initial events before it passes that bookmark on.
 type recordingWatch struct {
@@ -125,9 +108,6 @@ type recordingWatch struct {
 	once    sync.Once
 	initial bool
 	lw      *listWatch
-	// inject carries a test's 410 into the stream, which forward passes on
-	// and then ends: only forward sends on out, and only forward closes it.
-	inject chan watch.Event
 }
 
 func (w *recordingWatch) ResultChan() <-chan watch.Event { return w.out }
@@ -136,9 +116,6 @@ func (w *recordingWatch) Stop() {
 	w.once.Do(func() {
 		close(w.done)
 		w.inner.Stop()
-		w.lw.mu.Lock()
-		delete(w.lw.watches, w)
-		w.lw.mu.Unlock()
 	})
 }
 
@@ -149,19 +126,11 @@ func (w *recordingWatch) forward() {
 		select {
 		case <-w.done:
 			return
-		case ev := <-w.inject:
-			select {
-			case w.out <- ev:
-			case <-w.done:
-			}
-			go w.Stop()
-			return
 		case ev, ok := <-in:
 			if !ok {
 				return
 			}
 			if w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {
-				w.lw.streams.Add(1)
 				w.lw.completed()
 			}
 			select {
@@ -170,18 +139,6 @@ func (w *recordingWatch) forward() {
 				return
 			}
 		}
-	}
-}
-
-// expire sends a 410 Gone error event, then ends the stream.
-func (w *recordingWatch) expire() {
-	ev := watch.Event{Type: watch.Error, Object: &metav1.Status{
-		Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonExpired,
-		Message: "credential-use test: resourceVersion too old",
-	}}
-	select {
-	case w.inject <- ev:
-	case <-w.done:
 	}
 }
 
