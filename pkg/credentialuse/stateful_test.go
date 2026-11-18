@@ -268,10 +268,11 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	// CREDENTIALUSE_MODEL_DIFF_JUMPS sets T; or CREDENTIALUSE_MODEL_DIFF_PLAN,
 	// "regexp=T;regexp=T", gives each matching scenario its own T (the first
 	// match wins). CREDENTIALUSE_MODEL_DIFF_STATELESS=off drops the stateless
-	// leg.
-	//
-	// Without a plan, it runs ciPlan: the part that fits CI's model step, so
-	// that the step still compares rule R against no R.
+	// leg. With CREDENTIALUSE_MODEL_DIFF_CI=1, it runs ciPlan instead: CI's
+	// model-differential job, which compares rule R against no R on every
+	// push. Without any of them it skips, so that -run '^TestModel', in CI's
+	// model step and locally, doesn't start it; any other
+	// CREDENTIALUSE_MODEL_DIFF_* variable without a plan fails it.
 	type entry struct {
 		re        *regexp.Regexp
 		jumps     int
@@ -279,8 +280,15 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	}
 	var plan []entry
 	only, jumpsVar, planVar := os.Getenv("CREDENTIALUSE_MODEL_DIFF_ONLY"), os.Getenv("CREDENTIALUSE_MODEL_DIFF_JUMPS"), os.Getenv("CREDENTIALUSE_MODEL_DIFF_PLAN")
+	ci := os.Getenv("CREDENTIALUSE_MODEL_DIFF_CI") != ""
 	stateless := os.Getenv("CREDENTIALUSE_MODEL_DIFF_STATELESS") != "off"
 	switch {
+	case ci && (planVar != "" || only != "" || jumpsVar != ""):
+		t.Fatal("CREDENTIALUSE_MODEL_DIFF_CI is set with a measured plan (DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS): pick one")
+	case ci:
+		for _, e := range ciPlan {
+			plan = append(plan, entry{regexp.MustCompile(e.re), testJumps, e.stateless})
+		}
 	case planVar != "":
 		for _, part := range strings.Split(planVar, ";") {
 			re, n, ok := strings.Cut(part, "=")
@@ -293,17 +301,15 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	case only != "" || jumpsVar != "":
 		plan = []entry{{regexp.MustCompile(only), envInt("CREDENTIALUSE_MODEL_DIFF_JUMPS", testJumps), stateless}}
 	default:
-		// Any other CREDENTIALUSE_MODEL_DIFF_* variable means a measured run
-		// whose plan is missing, or misspelled: refuse it, rather than run
-		// CI's plan and exit 0 on a VM.
+		// Any other CREDENTIALUSE_MODEL_DIFF_* variable means a run whose
+		// plan is missing, or misspelled: refuse it, rather than skip and
+		// exit 0 on a VM.
 		for _, kv := range os.Environ() {
 			if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "CREDENTIALUSE_MODEL_DIFF_") {
-				t.Fatalf("%s is set, but no plan is (CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS): a measured run needs one (§11.3)", k)
+				t.Fatalf("%s is set, but no plan is (CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY, DIFF_JUMPS or DIFF_CI): a run needs one (§11.3)", k)
 			}
 		}
-		for _, e := range ciPlan {
-			plan = append(plan, entry{regexp.MustCompile(e.re), testJumps, e.stateless})
-		}
+		t.Skip("the differential runs only under a plan: CREDENTIALUSE_MODEL_DIFF_CI=1 for CI's model-differential job, or a measured plan (§11.3)")
 	}
 	for name, sc := range smallScenarios {
 		var e *entry
@@ -325,12 +331,13 @@ func TestModelStatefulAgreesWithStateless(t *testing.T) {
 	}
 }
 
-// ciPlan is the differential CI's model step runs, at T = 2 and at {0,1} and
-// {1,0}, when no measured plan is given: the three Teardown scenarios with
-// the stateless leg (their largest is 1,951,942 schedules), and
-// AcquireAgainstRelease stateful against reduced only (its stateless leg is
-// 460 to 900 million). It is the only comparison of rule R against no R
-// that CI finishes; the rest are the VM runs of §11.3.
+// ciPlan is the differential CI's model-differential job runs
+// (CREDENTIALUSE_MODEL_DIFF_CI=1), at T = 2 and at {0,1} and {1,0}: the
+// three Teardown scenarios with the stateless leg (their largest is
+// 1,951,942 schedules), and AcquireAgainstRelease stateful against reduced
+// only (its stateless leg is 460 to 900 million). It is the only comparison
+// of rule R against no R that CI finishes; the rest are the VM runs of
+// §11.3.
 var ciPlan = []struct {
 	re        string
 	stateless bool
@@ -635,7 +642,7 @@ type quietMode struct{ off bool }
 // What the reduced search has been compared against (docs/credential-use-
 // model-reduction.md §7, "What ran, and the gap"): Teardown ×3 and
 // AcquireAgainstRelease in their CI form, at {0,1} and {1,0} (run 3, and
-// ciPlan on every push); Recreate only small, at T = 1; Grace only small;
+// ciPlan in CI's model-differential job); Recreate only small, at T = 1; Grace only small;
 // no scenario at {1,1}; AwayAndBack and TwoReleasers not at all, since the
 // stateful search without R doesn't finish on them; and the random walks
 // not at all. Where nothing was compared, R rests on §5's argument and on

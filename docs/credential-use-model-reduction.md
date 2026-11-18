@@ -661,9 +661,9 @@ segment. §3.2 makes the two equivalent.
   compared against, exactly:
   - **Teardown ×3 and AcquireAgainstRelease, in their CI form,** at (0,1)
     and (1,0) with T = 2, stateless, stateful and reduced (run 3). CI's
-    model step re-runs this part on every push (§11.3, the CI plan):
-    Teardown with the stateless leg, AcquireAgainstRelease stateful against
-    reduced.
+    model-differential job re-runs this part on every push (§11.3, the CI
+    plan): Teardown with the stateless leg, AcquireAgainstRelease stateful
+    against reduced.
   - **Recreate, only in its small form** (2 release batches) at T = 1
     (run 3). CI runs it with 3 batches at T = 2.
   - **DeletionsAroundTheGrace, only in its small form** (2 deletion passes,
@@ -1260,24 +1260,29 @@ the rest.** In this order, each step only if the one before passes:
 A failed rule is reported with its witness, as the differential test logs
 it. Nothing is rerun to pass.
 
-**Without a measured plan, it runs CI's.** TestModelStatefulAgreesWithStateless
+**It runs only under a plan; CI's has its own job.** TestModelStatefulAgreesWithStateless
 used to run every small scenario at T = 2 with a stateless leg by default,
 which `-run '^TestModel'` matched: CI's model step started it from 1c3ff46
 on, and it can't finish there (run 3 took 1,953 CPU-hours on 96 vCPU). It
 was still running when the step hit its 90m timeout, in CI and in run C's
 replica of the step (hack/differential-credential-use-2/rulefix-266b29f).
-Now:
+The CI plan alone, beside the step's exhaustive searches, ran past 90m too
+(about 100m, at 6b1e67c). Now:
 - With CREDENTIALUSE_MODEL_DIFF_PLAN, DIFF_ONLY or DIFF_JUMPS set, it runs
   that plan: the VM measurements of this section, whose record is the
   RESULTS files under hack/differential-credential-use-2/.
-- With none of them, it runs the CI plan (`ciPlan`), at T = 2, (0,1) and
-  (1,0): the three Teardown scenarios with the stateless leg (the largest
-  is 1,951,942 schedules), and AcquireAgainstRelease stateful against
-  reduced only (its stateless leg is 460 to 900 million). It is the one
+- With CREDENTIALUSE_MODEL_DIFF_CI=1, it runs the CI plan (`ciPlan`), at
+  T = 2, (0,1) and (1,0): the three Teardown scenarios with the stateless
+  leg (the largest is 1,951,942 schedules), and AcquireAgainstRelease
+  stateful against reduced only (its stateless leg is 460 to 900 million).
+  CI runs it in its own job, `model-differential`, on its own runner, in
+  parallel with the build job (the user's decision). It is the one
   comparison of rule R against no R that CI finishes.
+- With none of them, it skips: the build job's model step, and a local
+  `-run '^TestModel'`, don't start it.
 - With another CREDENTIALUSE_MODEL_DIFF_* variable set and no plan, it
-  fails: a measured run whose plan is missing or misspelled must not run
-  the CI plan and exit 0 on a VM.
+  fails: a run whose plan is missing or misspelled must not skip and exit 0
+  on a VM.
 
 ## 12. Sleep sets under the bounds (the user's decision; spec revision 3, not implemented)
 
