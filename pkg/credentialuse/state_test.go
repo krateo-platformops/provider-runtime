@@ -604,33 +604,40 @@ func sameTimes(a, b []time.Time) bool {
 // schedules of every small scenario, at every choice and at the end, to
 // testdata/statekeys.golden: a change to how the state is walked (such as
 // the copy-free instrumentation paths) must give exactly the same keys, so
-// that terminal sets saved by earlier runs stay comparable.
+// that terminal sets saved by earlier runs stay comparable. It pins both
+// paths: unreduced (rule R off), as the saved terminal sets of the
+// differential's stateless legs are, and reduced (rule R on, the model
+// tests' default), on lines marked "reduced".
 // CREDENTIALUSE_MODEL_GOLDEN_WRITE=1 rewrites the file.
 func TestStateKeysAreStable(t *testing.T) {
 	var b strings.Builder
-	for _, name := range sortedKeys(smallScenarios) {
-		sc := smallScenarios[name]
-		b0 := apimodel.Bounds{Preemptions: 1, Faults: 1, Jumps: testJumps}
-		for seed := range int64(8) {
-			var end string
-			keys, err := apimodel.Replay(b0, nil, apimodel.Budget{Preemptions: 1, Faults: 1, Jumps: testJumps}, seed, 0, func(s *apimodel.Sched) error {
-				w := newWorld(s)
-				// The pinned keys are the unreduced search's, as the terminal
-				// sets saved by earlier runs are.
-				s.NoQuiet = true
-				sc(w)
-				s.Key = w.stateKey
-				err := s.Run()
-				end = w.stateKey()
-				return err
-			})
-			if err != nil {
-				t.Fatalf("%s, seed %d: %v", name, seed, err)
+	for _, reduced := range []bool{false, true} {
+		for _, name := range sortedKeys(smallScenarios) {
+			sc := smallScenarios[name]
+			b0 := apimodel.Bounds{Preemptions: 1, Faults: 1, Jumps: testJumps}
+			label := name
+			if reduced {
+				label = "reduced " + name
 			}
-			for _, k := range keys {
-				fmt.Fprintf(&b, "%s %d %x\n", name, seed, k)
+			for seed := range int64(8) {
+				var end string
+				keys, err := apimodel.Replay(b0, nil, apimodel.Budget{Preemptions: 1, Faults: 1, Jumps: testJumps}, seed, 0, func(s *apimodel.Sched) error {
+					w := newWorld(s)
+					s.NoQuiet = !reduced
+					sc(w)
+					s.Key = w.stateKey
+					err := s.Run()
+					end = w.stateKey()
+					return err
+				})
+				if err != nil {
+					t.Fatalf("%s, seed %d: %v", label, seed, err)
+				}
+				for _, k := range keys {
+					fmt.Fprintf(&b, "%s %d %x\n", label, seed, k)
+				}
+				fmt.Fprintf(&b, "%s %d end %x\n", label, seed, end)
 			}
-			fmt.Fprintf(&b, "%s %d end %x\n", name, seed, end)
 		}
 	}
 	const golden = "testdata/statekeys.golden"
