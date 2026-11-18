@@ -18,6 +18,11 @@ exhaustive in CI, with no cut in scope.
 - The new base multiplies every search by 70 to 110, so the user decided on
   a stateful search with a time-abstract state hash (§10). §10 is under
   review, before any code.
+- Run 3's differential found the quiet-segment reduction losing terminal
+  states, where a Wait's condition wrote an actor's local. §4 and §5 now
+  require every condition to be a guard that writes nothing (C-park), and
+  the scheduler checks it. Run 3's differential on that scenario must run
+  again.
 - The implementation goes in this order:
   1. the new base and the stateful search;
   2. the gate (§3.3, adjusted as §10.4 proposes);
@@ -230,6 +235,16 @@ its fault options.
 time jump. So does every resume from a park that isn't quiet, including the
 informer's watch and the relister's relist, whose segments are visible.
 
+**Conditions are guards (C-park).** Rule R moves a quiet segment earlier,
+and with it the park the segment ends at. That is harmless only if being
+parked does nothing. But a Wait's condition is the actor's own code, and the
+scheduler runs it whenever it looks at the actor: at every choice, for every
+parked actor. So **every Wait's condition is a guard**: it may read
+anything, and it writes nothing, not even the actor's own locals. Whatever
+the actor learns from the state, it reads in the segment after the Wait.
+This holds for every Wait, quiet or not, since the park a quiet segment ends
+at is usually not quiet. It is checked in every search (§5, C-park).
+
 **(a) is checked, not trusted (M-a).** In tests, the scheduler marks the
 running actor as inside a quiet segment, and these panic there:
 - the clock's `Now()` (passing the clock along, as `newProtocol` does, is
@@ -279,6 +294,93 @@ at all, and without it, where it is a step of its own.
 **The conditions** (partial-order reduction terms: a singleton ample set made
 of an invisible transition, independent of every other, with no cycle to
 ignore):
+
+- **C-park. A park is a state, not a process.** Both mappings say that the
+  two schedules pass through the same state at every visible step, and
+  C-independent moves a quiet resume across other steps. Both take for
+  granted that an actor changes nothing between two of its steps. In the
+  scheduler, an actor parked at a Wait runs its condition at every choice.
+  - If the condition writes, the actor takes a hidden step after every step
+    while it waits. That hidden step reads shared state, so it depends on
+    every step that changes what it reads.
+  - Rule R starts those hidden steps earlier: at the point where R runs the
+    quiet segment that ends at the Wait. So σ' takes hidden steps that σ
+    doesn't, on states that σ's actor never saw, and the two end in
+    different states.
+
+  *Obligation:* every Wait's condition is a guard, and writes nothing (§4).
+  Then a parked actor's state is constant until its next step, and the
+  conditions below hold as stated.
+
+  *Checked, not trusted:*
+  - The scheduler compares the actor's declared locals and its inputs
+    before and after every evaluation of its condition, and panics if
+    either changed.
+  - The harness panics on any change to the model, and on any write to a
+    scenario counter, while a condition runs (`Sched.InCond`).
+  - Names captured in a closure are locals (§10.1), so a write to a
+    declared one is caught. A write to an undeclared one would already
+    break §10.1's obligation, which the merge audit checks.
+
+  *Why this covers every case:*
+  - The only code of an actor that runs while it is parked is its
+    condition. A crash's restart runs inside a call step, and resets
+    process memory in place (§3.2); the scheduler's own reads (Deadlines,
+    Terms, Key, Locals) write nothing.
+  - So once no condition writes, nothing about a parked actor changes
+    between its steps. That holds whatever steps run around it, whatever
+    jumps are taken, and wherever R ran the segment that parked it.
+
+  **What run 3 found.** In DeletionsAroundTheGrace, the late deletions'
+  start is quiet. Its segment ends at a Wait for "the Secret is deleting or
+  gone".
+  - That Wait's condition stored the Secret's deletionTimestamp in `dt`
+    whenever it saw one. The segment after the Wait set `dt` to now if it
+    was still zero.
+  - Reviews 12 (D7) and 12b (R5) judged this harmless: `dt` is
+    actor-local, and the value it stores is stable. Stable isn't enough.
+    What matters is whether the condition runs at all while the Secret is
+    deleting, and that depends on when the actor reached the Wait.
+  - Unreduced, the actor can stay at its start, where no condition runs,
+    while three things happen: the Secret is deleted, the clock jumps to
+    the grace end, and the releaser's requeued batch removes the
+    finalizer. The actor then reaches the Wait with the Secret gone, so
+    `dt` is now, 1000h or more after the deletion.
+  - Reduced, R runs the start segment before the first choice. The actor
+    waits from the first step, its condition runs at the step after the
+    deletion, and `dt` is always the deletionTimestamp.
+
+  So the reduced search lost those terminal states: {1,0} 920 against
+  935, and {0,1} 4,212 against 4,331. A jump and a requeue are in every
+  dropped schedule for a reason. The Secret goes from deleting to gone only
+  by a release after the grace. While a quiet start is still pending, a
+  chosen jump is the only way past the grace: a forced jump needs nothing
+  enabled, and a ready quiet start is enabled. Replayed with rule R on, the
+  four schedules in testdata/reduced-drops.txt each end with `dt` at the
+  deletionTimestamp; with rule R off, with `dt` at now.
+
+  *The fix:* the condition only tests "deleting or gone". The segment after
+  the Wait reads the deletionTimestamp, or takes now if the Secret is gone.
+  That segment is a visible step in both searches, so both reach both
+  outcomes. This changes the scenario in both searches, not only in the
+  reduced one: `dt` is now what the actor reads when it runs, not what its
+  condition last saw. So run 3's counts for this scenario (935 and 4,331)
+  no longer apply, and its differential must run again. The evidence,
+  with rule R off on both harnesses:
+  - The four pinned schedules end at the same terminal states on the old
+    harness and the new one.
+  - The same four with the late deletions' start moved to the first step
+    end at different ones. The actor then waits from the first step and
+    resumes after the release, so `dt` is the deletionTimestamp on the old
+    harness and now on the new one.
+  - The pinned state keys (testdata/statekeys.golden) change on 23 lines,
+    all of them this scenario's and none of them terminal. Those are states
+    in which the actor waits while the Secret is deleting: the old key
+    holds the captured `dt`. Every other scenario's lines are unchanged.
+  - The real controller reads a deletionTimestamp from the object it has
+    just read, in the step that reads it (release.go, R1). The late
+    deletions are the environment, not the controller, but the model's own
+    rule is the same: a read of shared state happens in a step (§10.1).
 
 - **C-invisible.** By (b), checked by M-a's guard, a quiet segment changes
   nothing that any of these read:
@@ -385,7 +487,15 @@ segment. §3.2 makes the two equivalent.
 
 - **The guards.** These run in every model test, both searches:
   - M-a's quiet-segment guard;
-  - §3.2's stale-generation guard.
+  - §3.2's stale-generation guard;
+  - C-park's check that a Wait's condition writes nothing (§5).
+- **TestConditionIsAGuard** (apimodel, milliseconds): run 3's dropped
+  schedules in small. A Secret is deleted, then gone after a jump and a
+  requeue, and an observer with a quiet start waits for "deleting or gone".
+  - With a condition that captures the deletion, and the check off, the
+    reduced search misses the "gone" outcome.
+  - With the check on, that condition panics in both searches.
+  - With the read after the Wait, both searches reach both outcomes.
 - **The gate** (§3.3), on the new base, before the reduction.
 - **The differential test.** Compare the reduced and unreduced searches on
   the new base, for scenarios small enough to search both ways: Teardown ×3,
@@ -502,7 +612,8 @@ An abstract state has seven parts. Each is hashed canonically.
    as terms (§10.2), and, for each actor, whether its unit is stale or not
    begun. That is relative to the process's generation, not the counter.
 5. **The scheduler:** each actor's park (its label and whether it's done, its
-   notBefore as a term; a Wait's condition is a function of the state), and
+   notBefore as a term; a Wait's condition is a function of the state, and
+   writes nothing, §5, C-park), and
    the last actor, because whether a switch costs a preemption depends on
    it.
 6. **The checks, as monitors with small state.** Checking over the whole
@@ -1189,10 +1300,15 @@ independent transition can change another's cost).
     condition with read-recording on;
   - **a guard must not read the clock.** A guard that calls `Clock.Now` or
     `Sched.Now` panics. That assertion is new, and F2 rests on it;
-  - a guard may write only its actor's own variables, as the late deletions'
-    `dt` does. The write detector (§12.4) checks that it writes nothing
-    shared. **Guards are idempotent (R5):** F1 evaluates them extra times, so
-    their side effects must be a function of what they read, as `dt`'s is.
+  - **a guard writes nothing** (§5, C-park), not even its actor's own
+    variables. This revision allowed own-variable writes, as the late
+    deletions' `dt` capture, if they were idempotent (R5). Run 3 showed
+    that idempotence isn't enough: rule R changes whether such a guard runs
+    at all on a given state, so the late deletions' capture made the
+    reduced search lose terminal states. The capture now runs after the
+    Wait, and the scheduler checks every guard. F1's extra evaluations are
+    then harmless, and the write detector (§12.4) has no guard writes to
+    allow.
 - **Shared state lives only in the world and process structs (R5, R6).** A
   variable shared between actors through a closure would be invisible to F1,
   to the write detector and to the footprints. Today the harness has none
