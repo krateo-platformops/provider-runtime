@@ -1,0 +1,12 @@
+=== RUN   TestModelReducedKeepsDroppedTerminals
+=== RUN   TestModelReducedKeepsDroppedTerminals/{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelReducedKeepsDroppedTerminals/{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== RUN   TestModelReducedKeepsDroppedTerminals/{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== PAUSE TestModelReducedKeepsDroppedTerminals/{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelReducedKeepsDroppedTerminals/{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+=== CONT  TestModelReducedKeepsDroppedTerminals/{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC}
+--- PASS: TestModelReducedKeepsDroppedTerminals (0.00s)
+    --- PASS: TestModelReducedKeepsDroppedTerminals/{Preemptions:0_Faults:1_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (272.77s)
+    --- PASS: TestModelReducedKeepsDroppedTerminals/{Preemptions:1_Faults:0_Jumps:2_MaxRuns:0_Deadline:0001-01-01_00:00:00_+0000_UTC} (273.85s)
+PASS
+ok  	github.com/krateo-platformops/provider-runtime/pkg/credentialuse	273.866s

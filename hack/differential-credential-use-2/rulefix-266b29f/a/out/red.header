@@ -1,0 +1,5 @@
+source bundle src-266b29f.bundle at 266b29fa023c25b1299cd37b6711e76073bc24cf, machine n2-highcpu-8, 8 vCPU
+start 2026-11-18 03:39:56 UTC;  03:39:56 up 1 min,  0 user,  load average: 10.55, 3.04, 1.05
+env: CREDENTIALUSE_MODEL_DIFF_STATELESS=off CREDENTIALUSE_MODEL_DIFF_PLAN=^deletions around the grace=2
+run: ^TestModelStatefulAgreesWithStateless$, timeout 90m
+end 2026-11-18 03:49:27 UTC;  03:49:27 up 11 min,  0 user,  load average: 2.07, 3.27, 2.29; go test exit 0

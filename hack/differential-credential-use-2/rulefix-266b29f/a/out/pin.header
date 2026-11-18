@@ -1,0 +1,5 @@
+source bundle src-266b29f.bundle at 266b29fa023c25b1299cd37b6711e76073bc24cf, machine n2-highcpu-8, 8 vCPU
+start 2026-11-18 03:49:27 UTC;  03:49:27 up 11 min,  0 user,  load average: 2.07, 3.27, 2.29
+env: CREDENTIALUSE_MODEL_REDUCED_DROPS=1
+run: ^TestModelReducedKeepsDroppedTerminals$, timeout 60m
+end 2026-11-18 03:54:03 UTC;  03:54:03 up 15 min,  0 user,  load average: 2.57, 2.85, 2.36; go test exit 0

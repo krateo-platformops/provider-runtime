@@ -1,0 +1,56 @@
+# Rule R fix (C-park): runs A and B at 266b29f
+
+The fix is c0be9ea, a Wait's condition is a guard and writes nothing (the doc
+is 266b29f, docs/credential-use-model-reduction.md §5, C-park). It changes
+"deletions around the grace" in both searches: the late deletions' `dt` is
+read after the Wait, not captured by its condition. So run 3's results for
+that scenario (t2-RESULTS.md) were measured on the old model, and two runs
+follow, approved by the user as "A, then B if A passes":
+- **A:** the stateful search against the reduced one on the new model, and
+  TestModelReducedKeepsDroppedTerminals with CREDENTIALUSE_MODEL_REDUCED_DROPS=1.
+- **B:** the stateless re-run of the same scenario on the new model, at
+  {1,0} and {0,1}, against the stateful and reduced searches.
+
+Both runs use go1.26.10 linux-amd64 (sha256 ccfe7ae8...b20c5), a git bundle
+of 266b29f copied to the VM (no GitHub credentials there), and
+hack/credentialuse-model-vm/remote-run-bundle.sh. Project
+operations-dev-krateo-io, zone europe-west3-a, image debian-12, 20GB boot
+disk.
+
+## Local smokes, before either VM
+
+On the bundled tree, behind the load gate:
+- A at T=0 (CREDENTIALUSE_MODEL_DIFF_STATELESS=off): stateful equals reduced
+  at both bounds, 2 = 2 and 42 = 42 terminal states, 0 divergences. 28 CPU-s.
+- B at T=0, with the stateless leg on 2 workers: progress lines at 100,000
+  and 200,000 schedules (2,400 to 3,500/s), and no harness error. Stopped by
+  its watchdog, by design, at 188 CPU-s; an earlier attempt was stopped at
+  7 CPU-min with no output, because its progress interval was the default
+  1M.
+
+## Run A: results
+
+cred-rulefix-a, n2-highcpu-8. Raw output in a/out/; a/attempt1/ is the first
+launch, which exited after 8 seconds: `git bundle verify` needs a repository
+and ran outside one. The script now verifies inside the clone, and the second
+launch ran on the same VM.
+
+| run | env | wall | user + sys CPU | result |
+|---|---|---|---|---|
+| red | CREDENTIALUSE_MODEL_DIFF_STATELESS=off, DIFF_PLAN=^deletions around the grace=2 | 9:31 | 2,215 + 27 s | pass |
+| pin | CREDENTIALUSE_MODEL_REDUCED_DROPS=1 | 4:35 | 692 + 9 s | pass |
+
+| bounds | stateful runs | stateful terminal states | reduced runs | reduced terminal states | violations | audits, divergences |
+|---|---|---|---|---|---|---|
+| {1,0} | 51,847 | 935 | 29,533 | **935** | 0 | 48,657 and 26,343, 0 |
+| {0,1} | 54,822 | 4,331 | 34,446 | **4,331** | 0 | 46,515 and 26,139, 0 |
+
+Read:
+- **The reduced search now reaches every terminal state the stateful one
+  does**, at both bounds, where run 3 had 920 against 935 and 4,212 against
+  4,331. The four pinned schedules' terminal states are among them.
+- 49 CPU-min in all. The VM was up about 21 minutes (19 for the run, and a
+  restart to copy the outputs back), about $0.12. It is deleted.
+- The new model's stateful counts, 935 and 4,331, equal run 3's on the old
+  model. Equal counts don't make equal sets; B's stateless leg is the check
+  on the new model's stateful search.
