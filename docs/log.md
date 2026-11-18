@@ -4,13 +4,31 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-14T00:00:00Z
+timestamp: 2026-11-18T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-18 — v1.20.1: the external-create markers are written in UTC
+- **A patch release, cut from v1.20.0 on `release/v1.20`.** main carries the
+  unreleased credential-use stack, and the implementation plan cuts no tag
+  from main until its last PR, so a fix in the meantime ships from a release
+  branch (the user's decision).
+- **The `krateo.io/external-create-*` markers are written in UTC** (#110).
+  They were written in the process's local zone, so a container with `TZ` set
+  wrote an offset. The runtime compares parsed times and was correct either
+  way, but a consumer comparing the annotations as strings could order a
+  mixed-offset pair wrongly and read a latched create as resolved. Compare the
+  markers as parsed times, never as strings: RFC3339Nano drops trailing zeros,
+  other writers of the same names (unstructured-runtime writes RFC3339 at
+  second precision) differ, and markers aren't rewritten on upgrade, so one
+  object can carry both forms.
+- **`meta.IsActionAllowed` is deprecated** (#111). The reconciler doesn't call
+  it, and its answer for delete ignores `krateo.io/deletion-policy`. Use
+  `ShouldCreate`, `ShouldUpdate` and `ShouldDelete`.
 
 ## 2026-11-14 — v1.20.0: an opt-in capacity model, and a share per controller
 - **A minor release. Everything new is behind the saturation input**

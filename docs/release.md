@@ -9,8 +9,10 @@ timestamp: 2026-11-05T00:00:00Z
 
 # Release
 
-provider-runtime is **tag-only**: a release is a git tag on `main`, consumed
-by providers through the Go module proxy. There is no build or publish
+provider-runtime is **tag-only**: a release is a git tag on `main` (for a fix
+while main can't be tagged, on a release branch: see
+[below](#a-fix-release-while-main-cant-be-tagged)), consumed by providers
+through the Go module proxy. There is no build or publish
 workflow, no container image, no chart and no OCI artifact — this is the
 intended reality for this library, not a gap. The only thing a tag triggers is
 its release notes (see [CI](#ci)).
@@ -62,6 +64,21 @@ Notes never fail a release.
    [CI](#ci)). Because they are generated from the commits, put the reasoning
    in the annotated tag message and commit bodies. [log](./log.md) records
    only curated history.
+
+## A fix release while main can't be tagged
+
+While main carries work that mustn't ship yet (the credential-use stack: no tag
+from main until its last PR, docs/plan-credential-use-implementation.md §2), a
+fix ships from a release branch:
+
+1. Create `release/vX.Y` from the last tag `vX.Y.Z` if it doesn't exist.
+2. Merge the fix to main first, then cherry-pick it (`git cherry-pick -x`) onto
+   a branch from `release/vX.Y`, add the [log](./log.md) entry, and open a pull
+   request to `release/vX.Y`. CI runs on pull requests to `release/**`.
+3. After merge, tag `vX.Y.(Z+1)` on `release/vX.Y` and push it, then do steps
+   4 and 5 above. Add the same log entry on main.
+
+v1.20.1 shipped this way (#112).
 
 ## After a release
 
