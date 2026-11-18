@@ -136,7 +136,11 @@ TIMEOUT = int(os.environ.get("REVERT_TIMEOUT_S", "3000"))
 
 
 def go_test():
-    env = dict(os.environ, CI="1", CREDENTIALUSE_MODEL_BOUNDS=os.environ.get("REVERT_MODEL_BOUNDS", "0,1,200000;1,0,200000"))
+    # The revert check runs on the new base, unreduced (§3.3), as its stored
+    # results did: rule R is on by default in the model tests since f41b8b9,
+    # so it is pinned off here.
+    env = dict(os.environ, CI="1", CREDENTIALUSE_MODEL_QUIET="off",
+               CREDENTIALUSE_MODEL_BOUNDS=os.environ.get("REVERT_MODEL_BOUNDS", "0,1,200000;1,0,200000"))
     code, out, err = 0, "", ""
     for tests in (UNIT, MODEL):
         r = subprocess.run(["go", "test", "-count=1", "-timeout", f"{TIMEOUT}s", "-run", tests, *PKGS],
