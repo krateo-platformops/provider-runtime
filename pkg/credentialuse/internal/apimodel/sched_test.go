@@ -81,6 +81,7 @@ func TestConditionIsAGuard(t *testing.T) {
 			s.Go("observer", QuietStart, func(a *Actor) {
 				saw := 0
 				a.Locals = func() []any { return []any{saw} }
+				// condcheck:writes, on purpose: this is the defect.
 				a.Wait("deleting or gone", time.Time{}, func() bool {
 					if capture && secret == deleting {
 						saw = deleting // the defect: a condition that writes
@@ -92,7 +93,6 @@ func TestConditionIsAGuard(t *testing.T) {
 				}
 			})
 			err := s.Run()
-			s.Settle()
 			record(fmt.Sprint(secret, " ", s.Views()[2].Locals))
 			return err
 		}
@@ -175,5 +175,89 @@ func TestExploreParallelIsExplore(t *testing.T) {
 			}
 		}
 		t.Logf("%+v: %d schedules, the same with 1, 2, 3 and 8 workers", b, want.Runs)
+	}
+}
+
+// explorePanic runs Explore and returns what it panicked with, if anything.
+func explorePanic(b Bounds, noQuiet bool, scenario func(s *Sched)) (p any) {
+	defer func() { p = recover() }()
+	Explore(b, func(s *Sched) error {
+		s.NoQuiet = noQuiet
+		scenario(s)
+		return s.Run()
+	})
+	return nil
+}
+
+// The runtime half of C-park compares an actor's locals deeply: a local that
+// is a pointer or a map is the same value after a write through it, which
+// reflect.DeepEqual missed (the independent review's first two bypasses).
+// The third, a variable nobody declared, only CheckConditions can see
+// (TestCheckConditions).
+func TestConditionCheckSeesThroughLocals(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		locals func(saw *int, seen map[string]int) []any
+		write  func(saw *int, seen map[string]int)
+	}{
+		{"a pointer", func(saw *int, _ map[string]int) []any { return []any{saw} }, func(saw *int, _ map[string]int) { *saw = 1 }},
+		{"a map", func(_ *int, seen map[string]int) []any { return []any{seen} }, func(_ *int, seen map[string]int) { seen["deleting"] = 1 }},
+	} {
+		for _, noQuiet := range []bool{true, false} {
+			p := explorePanic(Bounds{}, noQuiet, func(s *Sched) {
+				flag := false
+				s.Go("deleter", 0, func(a *Actor) { _ = a.Call("delete", func() error { flag = true; return nil }) })
+				s.Go("observer", QuietStart, func(a *Actor) {
+					saw, seen := 0, map[string]int{}
+					a.Locals = func() []any { return c.locals(&saw, seen) }
+					// condcheck:writes, on purpose: the bypass under test.
+					a.Wait("deleting", time.Time{}, func() bool {
+						if flag {
+							c.write(&saw, seen)
+						}
+						return flag
+					})
+				})
+			})
+			if p == nil || !strings.Contains(fmt.Sprint(p), "C-park") {
+				t.Errorf("%s, NoQuiet=%v: want the C-park panic, got %v", c.name, noQuiet, p)
+			}
+		}
+	}
+}
+
+// C-stable is checked: a quiet park's condition that held, then stopped
+// holding before the actor resumed, panics. With rule R a ready quiet park
+// resumes at once, so only the unreduced search can see it.
+func TestQuietConditionStaysTrue(t *testing.T) {
+	p := explorePanic(Bounds{}, true, func(s *Sched) {
+		flag := 0
+		s.Go("writer", 0, func(a *Actor) {
+			_ = a.Call("set", func() error { flag = 1; return nil })
+			_ = a.Call("clear", func() error { flag = 0; return nil })
+		})
+		s.Go("waiter", 0, func(a *Actor) {
+			a.WaitQuiet("set", time.Time{}, func() bool { return flag == 1 })
+		})
+	})
+	if p == nil || !strings.Contains(fmt.Sprint(p), "C-stable") {
+		t.Errorf("want the C-stable panic, got %v", p)
+	}
+}
+
+// A quiet segment that ends at a timed park would add a deadline, and so
+// change every tick after the point rule R moves it to (§5, C-independent,
+// the clock). It panics, with R and without.
+func TestQuietSegmentKeepsTheClock(t *testing.T) {
+	for _, noQuiet := range []bool{true, false} {
+		p := explorePanic(Bounds{Jumps: 1}, noQuiet, func(s *Sched) {
+			s.Go("worker", 0, func(a *Actor) { _ = a.Call("work", func() error { return nil }) })
+			s.Go("timer", QuietStart, func(a *Actor) {
+				a.Wait("later", Start.Add(5*TimeUnit), nil)
+			})
+		})
+		if p == nil || !strings.Contains(fmt.Sprint(p), "timed park") {
+			t.Errorf("NoQuiet=%v: want the timed-park panic, got %v", noQuiet, p)
+		}
 	}
 }

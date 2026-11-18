@@ -6,7 +6,6 @@ import (
 	"iter"
 	"math"
 	"math/rand"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -202,9 +201,12 @@ type Sched struct {
 	recordKeys bool
 	keys       []string
 	maxSteps   int
-	// labelPlan, when set, is the labelled trace a replay follows
-	// (ReplayLabels); unmatched collects the entries no option matched.
+	// labelPlan is the labelled trace a replay follows (ReplayLabels), when
+	// planned; unmatched collects the entries no option matched, and
+	// pastPlan counts the choices made once it ran out.
 	labelPlan, unmatched []string
+	planned              bool
+	pastPlan             int
 	// lastOption makes a replay past its prefix take the last option every
 	// time: jumps, then faults, come last.
 	lastOption bool
@@ -243,15 +245,25 @@ func (u *Usage) Merge(o Usage) {
 // "actor:label!fault" or "jump:+d", as Trace writes them), not choice
 // indices: the declared mappings of the gate (§10.4) and debugging use it.
 // Trace entries that match no option (a quiet resume the run took silently)
-// are skipped. It returns the steps it couldn't follow.
-func ReplayLabels(b Bounds, labels []string, scenario func(s *Sched) error) ([]string, error) {
+// are skipped, and listed in the result's Unmatched. Once the trace runs
+// out, every further choice is the first option, and PastPlan counts them:
+// a replay that ends exactly where its trace does has none.
+func ReplayLabels(b Bounds, labels []string, scenario func(s *Sched) error) (LabelReplay, error) {
 	s := newSched(b, nil, nil, nil)
 	s.labelPlan = labels
+	s.planned = true
 	err := scenario(s)
-	return s.unmatched, err
+	return LabelReplay{Unmatched: s.unmatched, PastPlan: s.pastPlan}, err
 }
 
-func (s *Sched) planned(opts []option, now time.Time) option {
+// LabelReplay is what ReplayLabels couldn't follow: the trace entries no
+// option matched, and how many choices it made past the trace's end.
+type LabelReplay struct {
+	Unmatched []string
+	PastPlan  int
+}
+
+func (s *Sched) plannedOption(opts []option, now time.Time) option {
 	for len(s.labelPlan) > 0 {
 		want := s.labelPlan[0]
 		s.labelPlan = s.labelPlan[1:]
@@ -270,6 +282,7 @@ func (s *Sched) planned(opts []option, now time.Time) option {
 		}
 		s.unmatched = append(s.unmatched, want)
 	}
+	s.pastPlan++
 	s.choices = append(s.choices, 0)
 	s.options = append(s.options, len(opts))
 	return opts[0]
@@ -365,8 +378,9 @@ type Actor struct {
 	unitGen int
 
 	// quiet: the actor is parked at a quiet park (§4); nextQuiet: the park
-	// it is about to make is one.
-	quiet, nextQuiet bool
+	// it is about to make is one. condHeld: its condition has held at this
+	// park, which C-stable says it then always does.
+	quiet, nextQuiet, condHeld bool
 
 	// inputs are what the actor's code received in its current unit: call
 	// results, values it read from shared state, times it read (§10.1).
@@ -465,6 +479,7 @@ func (s *Sched) GoIn(p *Proc, name string, flags Flags, f func(a *Actor)) {
 func (a *Actor) park(label string, faultable bool, notBefore time.Time, cond func() bool) Fault {
 	a.label, a.faultable, a.notBefore, a.cond = label, faultable, notBefore, cond
 	a.quiet, a.nextQuiet = a.nextQuiet, false
+	a.condHeld = false
 	if !a.yield(struct{}{}) {
 		panic(errStopped)
 	}
@@ -560,23 +575,62 @@ func (a *Actor) WaitQuiet(label string, notBefore time.Time, cond func() bool) {
 // Settle is rule R (§4): every actor at a ready quiet park resumes now,
 // silently (no choice, no tick, no preemption, no change to last), in the
 // order the actors were added, until none is left. Run applies it before
-// every choice; the differential test applies it to an unreduced search's
-// terminal state, to compare it with a reduced one's.
+// every choice.
 func (s *Sched) Settle() {
 	for again := true; again; {
 		again = false
 		for _, a := range s.actors {
 			if a.quiet && a.enabled(s.Clock.t) {
-				a.quiet = false
 				last := s.last
-				s.inQuiet = true
-				a.resume(FaultNone)
-				s.inQuiet = false
+				s.resumeQuiet(a)
 				s.last = last
 				again = true
 			}
 		}
 	}
+}
+
+// resumeQuiet runs a's quiet segment (§4): silently in Settle, or as a step
+// of its own with rule R off. Either way M-a's guard is on, and the segment
+// must add no deadline (§5, C-independent, the clock). A segment that ended
+// at a timed park would add its notBefore as a pending deadline, so that
+// moving the segment, as R does, would change which deadlines bound the
+// ticks of the calls in between. (The term the actor's own park held goes
+// away when it resumes, in both searches; that changes only tick sizes,
+// which the abstract state doesn't depend on, §10.2's invariant.)
+func (s *Sched) resumeQuiet(a *Actor) {
+	now := s.Clock.t
+	pend := s.pending(now)
+	a.quiet = false
+	s.inQuiet = true
+	a.resume(FaultNone)
+	s.inQuiet = false
+	if !a.done && a.notBefore.After(now) {
+		panic(fmt.Sprintf("apimodel: %s's quiet segment ended at a timed park (%q, not before %s): a quiet segment must add no deadline (docs/credential-use-model-reduction.md §5, C-independent)", a.Name, a.label, a.notBefore))
+	}
+	if !sameTimeSet(pend, s.pending(now)) {
+		panic(fmt.Sprintf("apimodel: %s's quiet segment changed the pending deadlines: a quiet segment must add no deadline (docs/credential-use-model-reduction.md §5, C-independent)", a.Name))
+	}
+}
+
+func sameTimeSet(x, y []time.Time) bool {
+	set := func(ts []time.Time) map[int64]bool {
+		m := make(map[int64]bool, len(ts))
+		for _, t := range ts {
+			m[t.UnixNano()] = true
+		}
+		return m
+	}
+	a, b := set(x), set(y)
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // InQuiet reports whether a quiet segment is running: the guard of §4 (M-a).
@@ -639,9 +693,16 @@ func (a *Actor) enabled(now time.Time) bool {
 // segment, and so the park it ends at, earlier, would start it earlier. That
 // is how a condition that captured a deletion timestamp made the reduced
 // search miss terminal states (run 3, TestModelReducedKeepsDroppedTerminals).
-// So it is checked: the actor's declared locals and its inputs must be the
-// same after the condition as before, and the harness panics on a write to
-// the model or to a scenario counter while InCond.
+//
+// C-park is checked twice. Statically, CheckConditions refuses any
+// condition whose code could write, which covers states no search reaches
+// and variables nobody declared. At run time, here: the actor's declared
+// locals, compared deeply (through pointers, maps and slices), and its
+// inputs must be the same after the condition as before; and the harness
+// panics on any write to shared state while InCond.
+//
+// It also checks C-stable: at a quiet park, a condition that has held must
+// go on holding until the actor resumes.
 func (a *Actor) holds() bool {
 	if a.cond == nil {
 		return true
@@ -650,17 +711,23 @@ func (a *Actor) holds() bool {
 	if s.noCondCheck {
 		return a.cond()
 	}
-	var before []any
+	var before string
 	if a.Locals != nil {
-		before = a.Locals()
+		before = deepString(a.Locals())
 	}
 	n := len(a.inputs)
 	outer := s.inCond
 	s.inCond = true
 	ok := a.cond()
 	s.inCond = outer
-	if len(a.inputs) != n || (a.Locals != nil && !reflect.DeepEqual(before, a.Locals())) {
+	if len(a.inputs) != n || (a.Locals != nil && deepString(a.Locals()) != before) {
 		panic(fmt.Sprintf("apimodel: %s's condition at %q changed the actor's state: a Wait's condition is a guard and must change nothing (docs/credential-use-model-reduction.md §5, C-park)", a.Name, a.label))
+	}
+	if a.quiet {
+		if a.condHeld && !ok {
+			panic(fmt.Sprintf("apimodel: %s's quiet condition at %q held, then stopped holding before the actor resumed: a quiet Wait's condition must stay true once true (docs/credential-use-model-reduction.md §5, C-stable)", a.Name, a.label))
+		}
+		a.condHeld = a.condHeld || ok
 	}
 	return ok
 }
@@ -775,8 +842,8 @@ func (s *Sched) Run() error {
 			}
 		}
 		var o option
-		if s.labelPlan != nil {
-			o = s.planned(opts, now)
+		if s.planned {
+			o = s.plannedOption(opts, now)
 		} else {
 			o = opts[s.choose(len(opts))]
 		}
@@ -800,6 +867,10 @@ func (s *Sched) Run() error {
 		s.trace = append(s.trace, o.actor.Name+":"+o.actor.label+o.fault.String())
 		if o.actor.faultable {
 			s.Clock.t = now.Add(s.tick(now))
+		}
+		if quiet {
+			s.resumeQuiet(o.actor)
+			continue
 		}
 		o.actor.resume(o.fault)
 	}

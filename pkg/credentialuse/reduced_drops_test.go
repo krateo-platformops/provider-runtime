@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,18 +41,18 @@ func reducedDrops(t *testing.T) map[apimodel.Bounds][][]string {
 
 // TestModelReducedKeepsDroppedTerminals pins the defect run 3 found: on
 // DeletionsAroundTheGrace's small variant at T=2, the reduced stateful search
-// reaches fewer terminal abstract states than the unreduced one ({1,0}: 920
+// reached fewer terminal abstract states than the unreduced one ({1,0}: 920
 // against 935; {0,1}: 4212 against 4331), while the stateless and stateful
-// unreduced searches agree. The quiet-segment reduction (rule R) is unsound
-// there.
+// unreduced searches agreed. The cause was a Wait condition that wrote (§5,
+// C-park); c0be9ea fixed it, and run A (hack/differential-credential-use-2/
+// rulefix-266b29f) found the reduced search equal to the stateful one.
 //
 // The first half always runs and is fast: each recorded schedule, replayed
-// with rule R off, must still be followed step by step, end without a
-// violation, and give its terminal key. That keeps the evidence valid as the
-// model changes. The second half runs the reduced search (minutes for each
-// bound), so it runs only with CREDENTIALUSE_MODEL_REDUCED_DROPS set, and it
-// FAILS until the reduction is fixed: every replayed key must be among the
-// reduced search's terminal states.
+// with rule R off, must still be followed step by step, to its end, without
+// a violation, and give its terminal key. That keeps the evidence valid as
+// the model changes. The second half runs the reduced search (minutes for
+// each bound), so it runs only with CREDENTIALUSE_MODEL_REDUCED_DROPS set:
+// every replayed key must be among the reduced search's terminal states.
 func TestModelReducedKeepsDroppedTerminals(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
@@ -63,11 +64,11 @@ func TestModelReducedKeepsDroppedTerminals(t *testing.T) {
 			keys := make([]string, len(schedules))
 			for i, labels := range schedules {
 				var key string
-				unmatched, err := apimodel.ReplayLabels(b, labels, runner(sc, func(_ *apimodel.Sched, k string, _ []string) {
+				rep, err := apimodel.ReplayLabels(b, labels, runner(sc, func(_ *apimodel.Sched, k string, _ []string) {
 					key = k
 				}, quietMode{off: true}))
-				if len(unmatched) > 0 {
-					t.Fatalf("schedule %d: the model no longer follows steps %q", i, unmatched)
+				if len(rep.Unmatched) > 0 || rep.PastPlan > 0 {
+					t.Fatalf("schedule %d: the model no longer follows steps %q, or goes on %d steps past them", i, rep.Unmatched, rep.PastPlan)
 				}
 				if err != nil {
 					t.Fatalf("schedule %d ends in a violation or a harness error: %v", i, err)
@@ -103,21 +104,43 @@ func TestModelReducedKeepsDroppedTerminals(t *testing.T) {
 // and the unreduced one with dt at now. A reduced schedule within the bounds
 // that reaches the state is what the reduced search needs to find it; the
 // search itself runs in TestModelReducedKeepsDroppedTerminals.
+//
+// Each replay must follow its schedule exactly. With R off, every step
+// matches and none comes after the last. With R on, the steps that don't
+// match must be exactly the quiet resumes, which R takes silently, and still
+// none comes after the last.
 func TestModelReducedFollowsDroppedSchedules(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
 	}
+	quietResumes := map[string]bool{
+		"informerA:start": true, "h1:start": true, "secret:start": true, "late deletions:start": true,
+		"h1:await deletion": true, "late deletions:into the grace": true,
+	}
 	sc := smallScenarios["deletions around the grace, small"]
 	for b, schedules := range reducedDrops(t) {
 		for i, labels := range schedules {
+			var quiet []string
+			for _, l := range labels {
+				if quietResumes[l] {
+					quiet = append(quiet, l)
+				}
+			}
 			keys := map[bool]string{}
 			for _, off := range []bool{true, false} {
 				var key string
-				_, err := apimodel.ReplayLabels(b, labels, runner(sc, func(_ *apimodel.Sched, k string, _ []string) {
+				rep, err := apimodel.ReplayLabels(b, labels, runner(sc, func(_ *apimodel.Sched, k string, _ []string) {
 					key = k
 				}, quietMode{off: off}))
 				if err != nil || key == "" {
 					t.Fatalf("%+v, schedule %d, rule R off=%v: error %v, terminal key %q", b, i, off, err, key)
+				}
+				want := quiet
+				if off {
+					want = nil
+				}
+				if !slices.Equal(rep.Unmatched, want) || rep.PastPlan != 0 {
+					t.Errorf("%+v, schedule %d, rule R off=%v: unmatched steps %q (want %q), %d steps past the schedule's end", b, i, off, rep.Unmatched, want, rep.PastPlan)
 				}
 				keys[off] = key
 			}

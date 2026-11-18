@@ -181,9 +181,9 @@ func newProcess(name string, m *apimodel.Model, now time.Time) *process {
 func (p *process) restart(now time.Time) {
 	p.ver.resetForTest()
 	p.seen.resetForTest()
-	hook := p.cache.OnAccess
+	hook, write := p.cache.OnAccess, p.cache.OnWrite
 	p.cache = apimodel.NewCache(p.m, heldOnly)
-	p.cache.OnAccess = hook
+	p.cache.OnAccess, p.cache.OnWrite = hook, write
 	p.relist(now)
 }
 

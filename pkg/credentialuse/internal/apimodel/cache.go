@@ -27,6 +27,9 @@ type Cache struct {
 	// OnAccess, if set, runs on every read and every change of the cache:
 	// the harness's check that no lost unit of work touches it.
 	OnAccess func()
+	// OnWrite, if set, runs on every change of the cache (List, Next): the
+	// harness's check that no Wait condition changes it (C-park).
+	OnWrite func()
 }
 
 // A Change is what one delivery did to the cache: Old is the version it had,
@@ -49,6 +52,7 @@ func NewCache(m *Model, match func(Key, *metav1.PartialObjectMetadata) bool) *Ca
 // the changes, as a relist delivers them: only the final state of each object.
 func (c *Cache) List() []Change {
 	c.access()
+	c.write()
 	snap, seq := c.m.Snapshot()
 	next := map[Key]*metav1.PartialObjectMetadata{}
 	for i := range snap {
@@ -81,10 +85,18 @@ func (c *Cache) access() {
 	}
 }
 
+// write runs OnWrite: List and Next change the cache.
+func (c *Cache) write() {
+	if c.OnWrite != nil {
+		c.OnWrite()
+	}
+}
+
 // Next delivers the next event. ok is false when the event changed nothing
 // the cache holds.
 func (c *Cache) Next() (Change, bool) {
 	c.access()
+	c.write()
 	evs := c.m.EventsAfter(c.seq)
 	if len(evs) == 0 {
 		return Change{}, false

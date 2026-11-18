@@ -276,9 +276,11 @@ func newWorld(s *apimodel.Sched) *world {
 }
 
 // checkNotInCond panics if a Wait's condition is being evaluated: a condition
-// is a guard and writes nothing (§5, C-park). The model's changes and the
-// scenario's counters call it; the scheduler itself checks the actor's
-// locals and inputs.
+// is a guard and writes nothing (§5, C-park). Every write path to shared
+// state that goes through code calls it: the model's changes, a cache's,
+// any access to the protocol's memory, the scenario's counters and the
+// monitors. Direct writes to the world's fields are CheckConditions's to
+// refuse, and the scheduler checks the actor's own locals and inputs.
 func (w *world) checkNotInCond(what string) {
 	if w.s.InCond() {
 		panic(fmt.Sprintf("model: a Wait's condition %s (§5, C-park)\n%s", what, debug.Stack()))
@@ -308,6 +310,7 @@ func (w *world) onModelEvent(ev apimodel.Event) {
 // first, and that release read the namespace live before any deletion of it
 // (§6.4, L3).
 func (w *world) onRead(holder string, at time.Time, notFound, held bool) {
+	w.checkNotInCond("recorded a read")
 	if !held {
 		return
 	}
@@ -332,6 +335,7 @@ func (w *world) onRead(holder string, at time.Time, notFound, held bool) {
 // violation (§6.4, M4 of #59's review); and an allowed release becomes the
 // one later reads are judged against.
 func (w *world) onRelease(d ReleaseDecision, at time.Time) {
+	w.checkNotInCond("recorded a release")
 	w.releasedAny = true
 	in := d.Input
 	if isU5(in) {
@@ -370,6 +374,7 @@ func (w *world) deadlines() []time.Time {
 }
 
 func (w *world) fail(format string, args ...any) {
+	w.checkNotInCond("recorded a failure")
 	w.errs = append(w.errs, fmt.Errorf(format, args...))
 }
 
@@ -392,9 +397,17 @@ func (w *world) proc(p **process) *apimodel.Proc {
 			panic(fmt.Sprintf("model: %s, a unit of work lost to a crash, touched process %s's memory\nschedule: %s\n%s", a.Name, (*p).name, w.s.Trace(), debug.Stack()))
 		}
 	}
-	(*p).ver.onAccess = guard
-	(*p).seen.onAccess = guard
+	// A Wait's condition writes nothing (§5, C-park): it may read a cache
+	// (an informer waits on Pending), but not touch the protocol's memory,
+	// nor change a cache.
+	memory := func() {
+		w.checkNotInCond(fmt.Sprintf("touched process %s's memory", (*p).name))
+		guard()
+	}
+	(*p).ver.onAccess = memory
+	(*p).seen.onAccess = memory
 	(*p).cache.OnAccess = guard
+	(*p).cache.OnWrite = func() { w.checkNotInCond(fmt.Sprintf("changed process %s's cache", (*p).name)) }
 	// What a read of the process's memory returns is an input of the
 	// reading actor (§10.1).
 	read := func(v any) {
@@ -689,6 +702,7 @@ func (w *world) deleter(name string, keys ...apimodel.Key) {
 // incarnation of P as the model: a different or deleted one is §6.5's L6
 // window, which checkHeld counts apart.
 func (w *world) countH1(obj metav1.Object, refs []Ref, p *process) {
+	w.checkNotInCond("counted an H1 pass")
 	f, _ := FinalizerName(widgetGK, w.ns)
 	rec := ReadRecord(obj)
 	for _, r := range refs {
@@ -714,6 +728,7 @@ func (w *world) countH1(obj metav1.Object, refs []Ref, p *process) {
 // process hasn't been delivered its deletion yet. That window must close on
 // delivery, so outside it a held ref without the finalizer is a violation.
 func (w *world) checkHeld(holder string, acq Acquired, p *process) {
+	w.checkNotInCond("checked a pass")
 	f, _ := FinalizerName(widgetGK, w.ns)
 	for _, r := range acq.Held {
 		k := keyOf(r.ID())
