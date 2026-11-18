@@ -3,41 +3,52 @@ package credentialuse
 import (
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/tools/go/packages"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 )
 
 // TestConditionsWriteNothing is C-park's static check over the model's code
-// (docs/credential-use-model-reduction.md §5): no Wait condition in this
-// package or in apimodel, tests included, could write anything.
+// (docs/credential-use-model-reduction.md §5): every Wait condition in this
+// package and in apimodel, tests included, is a literal at its call site
+// that could write nothing. The packages are loaded typed, with their tests,
+// so that calls resolve by type, not by name.
 func TestConditionsWriteNothing(t *testing.T) {
-	fset := token.NewFileSet()
-	var files []*ast.File
-	for _, glob := range []string{"*.go", "internal/apimodel/*.go"} {
-		names, err := filepath.Glob(glob)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, n := range names {
-			f, err := parser.ParseFile(fset, n, nil, parser.ParseComments)
-			if err != nil {
-				t.Fatal(err)
-			}
-			files = append(files, f)
-		}
+	if raceEnabled {
+		t.Skip("a static check: once, without the race detector")
 	}
-	if len(files) < 10 {
-		t.Fatalf("parsed only %d files: the check would see nothing", len(files))
+	const apimodelPath = "github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
+	pkgs, err := packages.Load(&packages.Config{
+		Mode:  packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+		Tests: true,
+	}, ".", "./internal/apimodel")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, p := range apimodel.CheckConditions(fset, files) {
-		t.Error(p)
+	checked := map[string]bool{}
+	for _, p := range pkgs {
+		// The test variants hold every file of the package, its tests too.
+		if !strings.HasSuffix(p.ID, ".test]") {
+			continue
+		}
+		for _, e := range p.Errors {
+			t.Fatalf("%s: %v", p.ID, e)
+		}
+		cfg := apimodel.CondConfig{APIModel: apimodelPath}
+		if p.PkgPath == "github.com/krateo-platformops/provider-runtime/pkg/credentialuse" {
+			cfg.Pure = []string{"keyOf", "widgetKey", "nsKey", "ID.GroupKind", "waitFor.met"}
+		}
+		for _, problem := range apimodel.CheckConditions(p.Fset, p.Syntax, p.TypesInfo, cfg) {
+			t.Error(problem)
+		}
+		checked[p.PkgPath] = true
+	}
+	if !checked["github.com/krateo-platformops/provider-runtime/pkg/credentialuse"] || !checked[apimodelPath] {
+		t.Fatalf("checked %v: want this package and apimodel, with their tests", checked)
 	}
 }
 

@@ -423,8 +423,15 @@ func (s *Sched) Views() []ActorView {
 	return out
 }
 
-// Now returns the clock, for the state hash, without recording a read.
-func (s *Sched) Now() time.Time { return s.Clock.t }
+// Now returns the clock, for the state hash, without recording a read. A
+// quiet segment may not read it, any more than Clock.Now (§4, M-a): the
+// clock's argument (§10.2) rests on quiet segments not reading time.
+func (s *Sched) Now() time.Time {
+	if s.inQuiet {
+		panic("apimodel: a quiet segment read the clock through Sched.Now (§4, M-a)")
+	}
+	return s.Clock.t
+}
 
 // Start is the clock at the start of every schedule: on a whole hour, the
 // unit U every time constant is a multiple of (§10.2).

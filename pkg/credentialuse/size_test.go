@@ -203,11 +203,11 @@ var shrunkScenarios = map[string]func(w *world){
 		pc := newProcess("C", w.m, w.s.Now())
 		w.informer("informerA", &pa)
 		secret := SecretRef(w.ns, w.p.Name)
-		w.holder(holderSpec{name: "h1", actor: "h1@A", livePasses: 2, deletionPasses: 1, before: func(n int) func() bool {
+		w.holder(holderSpec{name: "h1", actor: "h1@A", livePasses: 2, deletionPasses: 1, before: func(n int) *waitFor {
 			if n != 1 {
 				return nil
 			}
-			return func() bool { return w.started["h1@B"] >= 2 }
+			return &waitFor{counter: w.started, key: "h1@B", atLeast: 2}
 		}}, &pa)
 		w.holder(holderSpec{
 			name: "h1", actor: "h1@B",
@@ -218,17 +218,17 @@ var shrunkScenarios = map[string]func(w *world){
 				return []Ref{secret}
 			},
 			livePasses: 2, deletionPasses: 1,
-			before: func(n int) func() bool {
+			before: func(n int) *waitFor {
 				switch n {
 				case 0:
-					return func() bool { return w.started["h1@A"] >= 1 }
+					return &waitFor{counter: w.started, key: "h1@A", atLeast: 1}
 				case 1:
-					return func() bool { return w.batchesStarted["releaserC"] >= 1 }
+					return &waitFor{counter: w.batchesStarted, key: "releaserC", atLeast: 1}
 				}
 				return nil
 			},
 		}, &pb)
-		w.releaser("releaserC", &pc, 1, true, stableCond(func() bool { return w.livePasses["h1@B"] >= 1 }))
+		w.releaser("releaserC", &pc, 1, true, &waitFor{counter: w.livePasses, key: "h1@B", atLeast: 1})
 		w.s.Go("teardown", apimodel.QuietStart, func(a *apimodel.Actor) {
 			a.WaitQuiet("live passes done", time.Time{}, func() bool {
 				return w.livePasses["h1@A"] >= 2 && w.livePasses["h1@B"] >= 2

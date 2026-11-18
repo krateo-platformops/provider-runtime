@@ -261,3 +261,19 @@ func TestQuietSegmentKeepsTheClock(t *testing.T) {
 		}
 	}
 }
+
+// Sched.Now is the clock too: a quiet segment that reads it panics (§4, M-a).
+func TestQuietSegmentCantReadSchedNow(t *testing.T) {
+	for _, noQuiet := range []bool{true, false} {
+		p := explorePanic(Bounds{}, noQuiet, func(s *Sched) {
+			s.Go("worker", 0, func(a *Actor) { _ = a.Call("work", func() error { return nil }) })
+			s.Go("reader", QuietStart, func(a *Actor) {
+				_ = s.Now()
+				_ = a.Call("read", func() error { return nil })
+			})
+		})
+		if p == nil || !strings.Contains(fmt.Sprint(p), "Sched.Now") {
+			t.Errorf("NoQuiet=%v: want the Sched.Now panic, got %v", noQuiet, p)
+		}
+	}
+}

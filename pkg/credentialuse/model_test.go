@@ -470,7 +470,7 @@ type holderSpec struct {
 	// livePasses run before the holder is deleted; deletionPasses after.
 	livePasses, deletionPasses int
 	// before, if set, returns what live pass number n waits for, or nil.
-	before func(n int) func() bool
+	before func(n int) *waitFor
 }
 
 // holder runs one holder's passes in process p, as §7.2 says a runtime
@@ -581,7 +581,7 @@ func (w *world) holder(spec holderSpec, p **process) {
 			liveIdx = i
 			if spec.before != nil {
 				if c := spec.before(i); c != nil {
-					a.WaitQuiet("await", time.Time{}, c)
+					a.WaitQuiet("await", time.Time{}, func() bool { return c.met(w) })
 				}
 			}
 			gone := run()
@@ -608,7 +608,7 @@ func (w *world) holder(spec holderSpec, p **process) {
 // waiting out each requeue. With cacheless, the protocol has no caches; with
 // after, the first batch waits until it holds, as a batch is enqueued by the
 // event it waits for.
-func (w *world) releaser(name string, p **process, n int, cacheless bool, after func() bool) {
+func (w *world) releaser(name string, p **process, n int, cacheless bool, after *waitFor) {
 	// A releaser with caches is never quiet: its segment can run a whole R0
 	// batch against the cache without a call (§5, C-invisible). A cacheless
 	// one's waits are quiet when their condition is stable (C-stable).
@@ -616,13 +616,12 @@ func (w *world) releaser(name string, p **process, n int, cacheless bool, after 
 	if cacheless {
 		flags = apimodel.QuietStart
 	}
-	_, stable := any(after).(stableCond)
 	w.s.GoIn(w.proc(p), name, flags, func(a *apimodel.Actor) {
 		if after != nil {
-			if cacheless && stable {
-				a.WaitQuiet("await trigger", time.Time{}, after)
+			if cacheless && after.stable {
+				a.WaitQuiet("await trigger", time.Time{}, func() bool { return after.met(w) })
 			} else {
-				a.Wait("await trigger", time.Time{}, after)
+				a.Wait("await trigger", time.Time{}, func() bool { return after.met(w) })
 			}
 		}
 		batch := 0
@@ -1103,11 +1102,11 @@ func TestModelTwoProcessesAcquireOneHolder(t *testing.T) {
 		pc := newProcess("C", w.m, w.s.Clock.Now())
 		w.informer("informerA", &pa)
 		secret := SecretRef(w.ns, w.p.Name)
-		w.holder(holderSpec{name: "h1", actor: "h1@A", livePasses: 2, deletionPasses: 2, before: func(n int) func() bool {
+		w.holder(holderSpec{name: "h1", actor: "h1@A", livePasses: 2, deletionPasses: 2, before: func(n int) *waitFor {
 			if n != 1 {
 				return nil
 			}
-			return func() bool { return w.started["h1@B"] >= 2 } // (4)
+			return &waitFor{counter: w.started, key: "h1@B", atLeast: 2} // (4)
 		}}, &pa)
 		w.holder(holderSpec{
 			name: "h1", actor: "h1@B",
@@ -1118,17 +1117,17 @@ func TestModelTwoProcessesAcquireOneHolder(t *testing.T) {
 				return []Ref{secret} // and back
 			},
 			livePasses: 2, deletionPasses: 2,
-			before: func(n int) func() bool {
+			before: func(n int) *waitFor {
 				switch n {
 				case 0:
-					return func() bool { return w.started["h1@A"] >= 1 } // (1)
+					return &waitFor{counter: w.started, key: "h1@A", atLeast: 1} // (1)
 				case 1:
-					return func() bool { return w.batchesStarted["releaserC"] >= 1 } // (3)
+					return &waitFor{counter: w.batchesStarted, key: "releaserC", atLeast: 1} // (3)
 				}
 				return nil
 			},
 		}, &pb)
-		w.releaser("releaserC", &pc, 1, true, stableCond(func() bool { return w.livePasses["h1@B"] >= 1 })) // (2)
+		w.releaser("releaserC", &pc, 1, true, &waitFor{counter: w.livePasses, key: "h1@B", atLeast: 1}) // (2)
 		w.s.Go("teardown", apimodel.QuietStart, func(a *apimodel.Actor) {
 			a.WaitQuiet("live passes done", time.Time{}, func() bool {
 				return w.livePasses["h1@A"] >= 2 && w.livePasses["h1@B"] >= 2
@@ -1204,18 +1203,15 @@ func TestModelRecreateBehindACachedUID(t *testing.T) {
 			first = o.UID
 			w.pinned = append(w.pinned, first)
 		}
-		w.holder(holderSpec{name: "h1", livePasses: 3, deletionPasses: 2, before: func(n int) func() bool {
+		w.holder(holderSpec{name: "h1", livePasses: 3, deletionPasses: 2, before: func(n int) *waitFor {
 			if n != 2 {
 				return nil
 			}
-			return func() bool { o, err := w.m.Get(keyOf(w.p)); return err == nil && o.UID != first }
+			return &waitFor{secretUIDNot: first}
 		}}, &pa)
 		// The Secret's deletion enqueues the batch that releases it after the
 		// grace (§5's last row: a live namespace, a live user).
-		w.releaser("releaserB", &pb, 3, true, func() bool {
-			o, err := w.m.Get(keyOf(w.p))
-			return err != nil || o.DeletionTimestamp != nil
-		})
+		w.releaser("releaserB", &pb, 3, true, &waitFor{secretDeletingOrGone: true})
 		w.s.Go("rotation", apimodel.QuietStart, func(a *apimodel.Actor) {
 			w.call(a, "delete secret", func() error { return w.m.Delete(keyOf(w.p)) })
 			// Stable while waited on: only this actor recreates the Secret.
@@ -1276,6 +1272,41 @@ func (w *world) inc(m map[string]int, k string) {
 	m[k]++
 }
 
-// stableCond marks a releaser's trigger whose condition stays true once true
-// (§5, C-stable), so that a cacheless releaser's wait for it can be quiet.
-type stableCond func() bool
+// waitFor is what a holder's live pass or a releaser's first batch waits
+// for, as data. The Wait's condition is a literal at the call site that
+// reads it through met (§5, C-park's static rule: a condition is a literal
+// written where it is passed, and calls only checked functions; met is one).
+// Exactly one of its three forms is set.
+type waitFor struct {
+	// counter[key] >= atLeast: a scenario counter's threshold.
+	counter map[string]int
+	key     string
+	atLeast int
+	// The Secret exists, with a UID other than this one: it was recreated.
+	secretUIDNot types.UID
+	// The Secret is deleting or gone.
+	secretDeletingOrGone bool
+	// stable: once true, it stays true while waited on (§5, C-stable), so
+	// that a cacheless releaser's wait for it can be quiet. No scenario sets
+	// it: the stableCond marker it replaces never took effect (a func() bool
+	// parameter loses the named type, so the type assertion was always
+	// false), and the two-process scenario's trigger has always been a plain
+	// Wait. Making it quiet changes that scenario's bounded search, since a
+	// quiet resume costs no preemption, so it is left for a decision.
+	stable bool
+}
+
+// met reports whether f holds now. It only reads.
+func (f *waitFor) met(w *world) bool {
+	switch {
+	case f.counter != nil:
+		return f.counter[f.key] >= f.atLeast
+	case f.secretUIDNot != "":
+		o, err := w.m.Get(keyOf(w.p))
+		return err == nil && o.UID != f.secretUIDNot
+	case f.secretDeletingOrGone:
+		o, err := w.m.Get(keyOf(w.p))
+		return err != nil || o.DeletionTimestamp != nil
+	}
+	return false
+}

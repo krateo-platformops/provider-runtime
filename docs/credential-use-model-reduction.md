@@ -249,8 +249,8 @@ at is usually not quiet. It is checked in every search (§5, C-park).
 
 **(a) is checked, not trusted (M-a).** In tests, the scheduler marks the
 running actor as inside a quiet segment, and these panic there:
-- the clock's `Now()` (passing the clock along, as `newProtocol` does, is
-  allowed);
+- the clock's `Now()`, and `Sched.Now` (passing the clock along, as
+  `newProtocol` does, is allowed);
 - every accessor of the model and of the harness's caches;
 - the world's counters and records.
 
@@ -316,19 +316,33 @@ ignore):
 
   *Checked, not trusted, twice.* A runtime check sees only the conditions
   a search evaluates, in the states it reaches, and only what is declared.
-  The independent review of the first check showed three writes it missed:
-  through a local that is a pointer, into a local that is a map, and to a
-  variable nobody declared. So C-park has a static half, which covers code,
-  and a runtime half, which covers what the code calls.
-  - **Statically** (`apimodel.CheckConditions`, run over this package and
-    apimodel by TestConditionsWriteNothing): every `func() bool` literal is
-    taken as a condition, and may assign or `++` only variables declared
-    inside it; it may not send, start a goroutine or defer; and it may call
-    only known read-only functions (the model's and a cache's Get, a
-    cache's Pending, the key constructors, and builtins that don't write).
-    A Wait whose condition is a method value or a top-level function is
-    refused, since the check can't see into it. This is what catches a
-    write to an undeclared variable, or to a world field, in any state.
+  The first independent review showed three writes it missed: through a
+  local that is a pointer, into a local that is a map, and to a variable
+  nobody declared. The second showed a static check that matched by name
+  evaded: a condition held in a local and passed by name, a block that
+  shadowed a variable, any method named Get. So C-park has a static half,
+  structural and typed, which covers code, and a runtime half, which covers
+  what the code calls.
+  - **Statically** (`apimodel.CheckConditions`, run by
+    TestConditionsWriteNothing over this package and apimodel, tests
+    included, loaded with their types). The rule is structural: every call
+    of `Actor.Wait` or `Actor.WaitQuiet` (the API's own `WaitQuiet`, which
+    hands its condition on, aside) must pass nil or a function literal
+    written at the call site; a variable, a parameter, a method value or a
+    call's result is refused. So the holder's and the releaser's waits take
+    their predicate as data (`waitFor`) and pass a literal that reads it.
+    Inside the literal, and inside every function on the check's pure list
+    (the key constructors, `ID.GroupKind`, `waitFor.met`), whose bodies the
+    same rules check:
+    - an assignment or `++` may target only a variable declared inside,
+      resolved by type and scoped block by block as Go scopes it;
+    - a channel receive or send, a select, a go and a defer are refused;
+    - a call must resolve, by type, to a builtin that doesn't write, a
+      conversion, a literal inside the condition, `Model.Get`,
+      `Cache.Pending` or a function on the pure list.
+
+    This is what catches, in every state, a write to a variable nobody
+    declared, to a world field or a counter, or through a pointer or a map.
   - **At run time:** the scheduler compares the actor's declared locals,
     rendered deeply through pointers, maps and slices, and its inputs,
     before and after every evaluation of its condition. The harness panics
@@ -337,9 +351,12 @@ ignore):
     any access to the protocol's memory (the verified set, first sights),
     a write to a scenario counter, and a monitor's record. This is what
     catches a read-only-looking call that writes.
-  - **What neither covers:** a function on the read-only list that starts
-    writing behind its name, in a way none of the runtime hooks see. The
-    list is short and named in the check.
+  - **What neither covers:** the two trusted reads, `Model.Get` and
+    `Cache.Pending`, are trusted, not checked: their bodies call the
+    harness's hooks, which the static rule can't follow. Both only read,
+    and a write behind them would go through the model's or a cache's write
+    path, which the runtime half guards. Nor does either half see a
+    condition the files checked don't contain.
   - **The merge audit is not a check on this.** Run 3's reduced search
     audited every prune (25,885 and 25,395) with 0 divergences while it
     missed 15 and 119 terminal states: an audit compares two paths to a
@@ -347,7 +364,9 @@ ignore):
 
   *Why this covers every case:*
   - The only code of an actor that runs while it is parked is its
-    condition, and the static half covers all of its code. A crash's restart runs inside a call step, and resets
+    condition, and the static half covers all of its code: the literal,
+    the pure functions it calls, and the two trusted reads. A crash's
+    restart runs inside a call step, and resets
     process memory in place (§3.2); the scheduler's own reads (Deadlines,
     Terms, Key, Locals) write nothing.
   - So once no condition writes, nothing about a parked actor changes

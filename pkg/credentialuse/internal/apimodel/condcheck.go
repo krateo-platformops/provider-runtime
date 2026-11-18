@@ -4,111 +4,125 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"sort"
 	"strings"
 )
 
+// CondConfig says what CheckConditions trusts.
+type CondConfig struct {
+	// APIModel is the import path of the package that declares Actor, Model
+	// and Cache: Actor's Wait and WaitQuiet are the calls checked, and
+	// Model.Get and Cache.Pending the trusted reads.
+	APIModel string
+	// Pure names functions and methods of the checked package ("keyOf",
+	// "waitFor.met") that conditions may call. Each one's body is checked by
+	// the same rules as a condition's, so it adds nothing to what is
+	// trusted.
+	Pure []string
+}
+
 // CheckConditions is C-park's static check (docs/credential-use-model-reduction.md
 // §5): a Wait's condition is a guard and writes nothing. It inspects code,
-// not runs, so it covers every state a condition could be evaluated in,
-// reached by a search or not, and writes that no runtime check can see,
-// such as to a variable the condition captures and nobody declared.
+// typed, not runs, so it covers every state a condition could be evaluated
+// in, whether a search reaches it or not, and writes no runtime check can
+// see, such as to a variable nobody declared.
 //
-// Every function literal of type func() bool in files is taken as a
-// condition: in the model's harness every such literal is one, and treating
-// all of them so errs on the safe side. Inside one, it reports:
-//   - an assignment or ++/-- to anything but a variable declared inside the
-//     literal: a captured variable, a field, a map or slice element, or
-//     through a pointer;
-//   - a send, a go or a defer statement;
-//   - a call to anything but the read-only functions in readOnlyCalls, and
-//     the builtins that don't write (len, cap, min, max).
+// The rule is structural. Every call of Actor.Wait or Actor.WaitQuiet must
+// pass, as its condition, nil or a function literal written at the call
+// site; anything else is refused. In the literal, and in every function of
+// cfg.Pure, it reports:
+//   - an assignment or ++/-- to anything but a variable declared inside it
+//     (scoped as Go scopes it, block by block): a captured variable, a
+//     field, a map or slice element, or through a pointer;
+//   - a channel receive or send, a select, a go or a defer statement;
+//   - a call that doesn't resolve, by type, to a builtin that doesn't
+//     write (len, cap, min, max), a conversion, a function literal inside
+//     it, Model.Get, Cache.Pending, or a function of cfg.Pure.
 //
-// And at every call of Wait or WaitQuiet, it reports a condition argument
-// that is a method value or a function declared at top level, whose body the
-// literal rule doesn't see.
-//
-// A literal preceded, on the line before it, by a comment containing
-// "condcheck:writes" is skipped: the tests that show what the check guards
-// against use one on purpose.
-func CheckConditions(fset *token.FileSet, files []*ast.File) []string {
-	var out []string
+// A literal whose call is preceded, on the line before, by a comment
+// containing "condcheck:writes" is skipped: the tests that show what the
+// check guards against use one on purpose. So is the body of the API's own
+// Actor.WaitQuiet, which passes its condition on to Wait.
+func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, cfg CondConfig) []string {
+	c := &condChecker{fset: fset, info: info, cfg: cfg, pure: map[string]bool{}, decls: map[string]*ast.FuncDecl{}}
+	for _, p := range cfg.Pure {
+		c.pure[p] = true
+	}
 	for _, f := range files {
-		funcs := map[string]bool{}
 		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil {
-				funcs[fd.Name.Name] = true
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				c.decls[declName(fd)] = fd
 			}
 		}
+	}
+	for _, p := range cfg.Pure {
+		fd, ok := c.decls[p]
+		if !ok {
+			c.problems = append(c.problems, fmt.Sprintf("CondConfig.Pure names %s, which isn't declared in the files checked", p))
+			continue
+		}
+		c.body(fd.Body, fd.Pos(), fd.End())
+	}
+	for _, f := range files {
 		allowed := map[int]bool{}
 		for _, cg := range f.Comments {
-			for _, c := range cg.List {
-				if strings.Contains(c.Text, "condcheck:writes") {
-					allowed[fset.Position(c.End()).Line+1] = true
+			for _, cm := range cg.List {
+				if strings.Contains(cm.Text, "condcheck:writes") {
+					allowed[fset.Position(cm.End()).Line+1] = true
 				}
 			}
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.FuncLit:
-				if isCondType(n.Type) && !allowed[fset.Position(n.Pos()).Line] {
-					c := &condChecker{fset: fset, locals: map[string]bool{}}
-					c.block(n.Body)
-					out = append(out, c.problems...)
-					return false
-				}
-			case *ast.CallExpr:
-				sel, ok := n.Fun.(*ast.SelectorExpr)
-				if !ok || (sel.Sel.Name != "Wait" && sel.Sel.Name != "WaitQuiet") || len(n.Args) != 3 {
-					return true
-				}
-				switch arg := n.Args[2].(type) {
-				case *ast.FuncLit:
-					if !isCondType(arg.Type) && !allowed[fset.Position(arg.Pos()).Line] {
-						c := &condChecker{fset: fset, locals: map[string]bool{}}
-						c.block(arg.Body)
-						out = append(out, c.problems...)
-					}
-				case *ast.SelectorExpr:
-					out = append(out, fmt.Sprintf("%s: %s's condition is a method value, which the check can't see into", fset.Position(arg.Pos()), sel.Sel.Name))
-				case *ast.Ident:
-					if funcs[arg.Name] {
-						out = append(out, fmt.Sprintf("%s: %s's condition is the function %s, which the check can't see into: pass a literal", fset.Position(arg.Pos()), sel.Sel.Name, arg.Name))
-					}
-				}
+			// The API's own WaitQuiet hands its condition on to Wait: that
+			// is the one call whose condition is a parameter.
+			if fd, ok := n.(*ast.FuncDecl); ok && declName(fd) == "Actor.WaitQuiet" && c.info.Defs[fd.Name] != nil &&
+				c.info.Defs[fd.Name].Pkg() != nil && c.info.Defs[fd.Name].Pkg().Path() == cfg.APIModel {
+				return false
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok || !c.isWait(call) || len(call.Args) != 3 {
+				return true
+			}
+			arg := call.Args[2]
+			if tv, ok := info.Types[arg]; ok && tv.IsNil() {
+				return true
+			}
+			lit, ok := arg.(*ast.FuncLit)
+			if !ok {
+				c.report(arg, "is not a function literal written at the call site, so the check can't see it: write the condition there")
+				return true
+			}
+			if !allowed[fset.Position(call.Pos()).Line] {
+				c.body(lit.Body, lit.Pos(), lit.End())
 			}
 			return true
 		})
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(c.problems)
+	return c.problems
 }
 
-// readOnlyCalls are the functions and methods a condition may call, by name:
-// the model's and a cache's reads, and the harness's key constructors.
-var readOnlyCalls = map[string]bool{
-	"Get": true, "Pending": true,
-	"keyOf": true, "widgetKey": true, "nsKey": true,
-	"len": true, "cap": true, "min": true, "max": true,
-}
-
-func isCondType(t *ast.FuncType) bool {
-	if t.Params != nil && len(t.Params.List) > 0 {
-		return false
+func declName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return fd.Name.Name
 	}
-	// An unnamed bool result: a function with a named one, such as the
-	// holder's pass (gone bool), is not a condition. A literal passed to
-	// Wait is checked whatever its form.
-	if t.Results == nil || len(t.Results.List) != 1 || len(t.Results.List[0].Names) > 0 {
-		return false
+	t := fd.Recv.List[0].Type
+	if s, ok := t.(*ast.StarExpr); ok {
+		t = s.X
 	}
-	id, ok := t.Results.List[0].Type.(*ast.Ident)
-	return ok && id.Name == "bool"
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name + "." + fd.Name.Name
+	}
+	return fd.Name.Name
 }
 
 type condChecker struct {
 	fset     *token.FileSet
-	locals   map[string]bool
+	info     *types.Info
+	cfg      CondConfig
+	pure     map[string]bool
+	decls    map[string]*ast.FuncDecl
 	problems []string
 }
 
@@ -116,159 +130,241 @@ func (c *condChecker) report(n ast.Node, format string, args ...any) {
 	c.problems = append(c.problems, fmt.Sprintf("%s: a condition %s (C-park: a Wait's condition writes nothing)", c.fset.Position(n.Pos()), fmt.Sprintf(format, args...)))
 }
 
-func (c *condChecker) block(b *ast.BlockStmt) {
-	if b == nil {
-		return
+// method reports whether f is method name of type typ in the API model.
+func (c *condChecker) method(f *types.Func, typ, name string) bool {
+	if f == nil || f.Name() != name || f.Pkg() == nil || f.Pkg().Path() != c.cfg.APIModel {
+		return false
 	}
-	for _, s := range b.List {
-		c.stmt(s)
+	sig, ok := f.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return false
 	}
+	t := sig.Recv().Type()
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	n, ok := t.(*types.Named)
+	return ok && n.Obj().Name() == typ
 }
 
-// target reports a write to e unless e is a variable declared in the literal.
-func (c *condChecker) target(n ast.Node, e ast.Expr) {
-	if id, ok := e.(*ast.Ident); ok && (id.Name == "_" || c.locals[id.Name]) {
-		return
+func (c *condChecker) callee(call *ast.CallExpr) types.Object {
+	switch f := ast.Unparen(call.Fun).(type) {
+	case *ast.Ident:
+		return c.info.Uses[f]
+	case *ast.SelectorExpr:
+		return c.info.Uses[f.Sel]
 	}
-	c.report(n, "writes %s", exprString(e))
+	return nil
 }
 
-func (c *condChecker) stmt(s ast.Stmt) {
-	switch s := s.(type) {
-	case *ast.AssignStmt:
-		for _, e := range s.Rhs {
-			c.expr(e)
+func (c *condChecker) isWait(call *ast.CallExpr) bool {
+	f, _ := c.callee(call).(*types.Func)
+	return c.method(f, "Actor", "Wait") || c.method(f, "Actor", "WaitQuiet")
+}
+
+// body checks a condition's or a pure function's body, whose own variables
+// are those declared in [from, to).
+func (c *condChecker) body(b *ast.BlockStmt, from, to token.Pos) {
+	s := scope{c, from, to}
+	if b != nil {
+		for _, st := range b.List {
+			s.stmt(st)
 		}
-		for _, e := range s.Lhs {
-			if s.Tok == token.DEFINE {
-				if id, ok := e.(*ast.Ident); ok {
-					c.locals[id.Name] = true
-					continue
-				}
-			}
-			c.target(s, e)
-			c.expr(e)
+	}
+}
+
+type scope struct {
+	c        *condChecker
+	from, to token.Pos
+}
+
+// local reports whether e is a variable declared inside the scope.
+func (s scope) local(e ast.Expr) bool {
+	id, ok := ast.Unparen(e).(*ast.Ident)
+	if !ok {
+		return false
+	}
+	if id.Name == "_" {
+		return true
+	}
+	obj := s.c.info.Defs[id]
+	if obj == nil {
+		obj = s.c.info.Uses[id]
+	}
+	v, ok := obj.(*types.Var)
+	return ok && !v.IsField() && v.Pos() >= s.from && v.Pos() < s.to
+}
+
+func (s scope) target(n ast.Node, e ast.Expr) {
+	if !s.local(e) {
+		s.c.report(n, "writes %s", exprString(e))
+	}
+}
+
+func (s scope) stmts(list []ast.Stmt) {
+	for _, st := range list {
+		s.stmt(st)
+	}
+}
+
+func (s scope) stmt(st ast.Stmt) {
+	switch st := st.(type) {
+	case *ast.AssignStmt:
+		for _, e := range st.Rhs {
+			s.expr(e)
+		}
+		for _, e := range st.Lhs {
+			s.target(st, e)
+			s.expr(e)
 		}
 	case *ast.IncDecStmt:
-		c.target(s, s.X)
+		s.target(st, st.X)
+		s.expr(st.X)
 	case *ast.DeclStmt:
-		if gd, ok := s.Decl.(*ast.GenDecl); ok {
+		if gd, ok := st.Decl.(*ast.GenDecl); ok {
 			for _, sp := range gd.Specs {
 				if vs, ok := sp.(*ast.ValueSpec); ok {
 					for _, e := range vs.Values {
-						c.expr(e)
-					}
-					for _, id := range vs.Names {
-						c.locals[id.Name] = true
+						s.expr(e)
 					}
 				}
 			}
 		}
 	case *ast.ExprStmt:
-		c.expr(s.X)
+		s.expr(st.X)
 	case *ast.ReturnStmt:
-		for _, e := range s.Results {
-			c.expr(e)
+		for _, e := range st.Results {
+			s.expr(e)
 		}
 	case *ast.IfStmt:
-		if s.Init != nil {
-			c.stmt(s.Init)
+		if st.Init != nil {
+			s.stmt(st.Init)
 		}
-		c.expr(s.Cond)
-		c.block(s.Body)
-		if s.Else != nil {
-			c.stmt(s.Else)
+		s.expr(st.Cond)
+		s.stmts(st.Body.List)
+		if st.Else != nil {
+			s.stmt(st.Else)
 		}
 	case *ast.BlockStmt:
-		c.block(s)
+		s.stmts(st.List)
 	case *ast.ForStmt:
-		if s.Init != nil {
-			c.stmt(s.Init)
+		if st.Init != nil {
+			s.stmt(st.Init)
 		}
-		if s.Cond != nil {
-			c.expr(s.Cond)
+		if st.Cond != nil {
+			s.expr(st.Cond)
 		}
-		if s.Post != nil {
-			c.stmt(s.Post)
+		if st.Post != nil {
+			s.stmt(st.Post)
 		}
-		c.block(s.Body)
+		s.stmts(st.Body.List)
 	case *ast.RangeStmt:
-		c.expr(s.X)
-		for _, e := range []ast.Expr{s.Key, s.Value} {
-			if e == nil {
-				continue
+		s.expr(st.X)
+		if tv, ok := s.c.info.Types[st.X]; ok {
+			if _, isChan := tv.Type.Underlying().(*types.Chan); isChan {
+				s.c.report(st, "receives from a channel")
 			}
-			if id, ok := e.(*ast.Ident); ok && s.Tok == token.DEFINE {
-				c.locals[id.Name] = true
-				continue
-			}
-			c.target(s, e)
 		}
-		c.block(s.Body)
+		for _, e := range []ast.Expr{st.Key, st.Value} {
+			if e != nil {
+				s.target(st, e)
+			}
+		}
+		s.stmts(st.Body.List)
 	case *ast.SwitchStmt:
-		if s.Init != nil {
-			c.stmt(s.Init)
+		if st.Init != nil {
+			s.stmt(st.Init)
 		}
-		if s.Tag != nil {
-			c.expr(s.Tag)
+		if st.Tag != nil {
+			s.expr(st.Tag)
 		}
-		for _, cc := range s.Body.List {
-			for _, e := range cc.(*ast.CaseClause).List {
-				c.expr(e)
+		for _, cc := range st.Body.List {
+			if clause, ok := cc.(*ast.CaseClause); ok {
+				for _, e := range clause.List {
+					s.expr(e)
+				}
+				s.stmts(clause.Body)
 			}
-			for _, st := range cc.(*ast.CaseClause).Body {
-				c.stmt(st)
-			}
 		}
+	case *ast.LabeledStmt:
+		s.stmt(st.Stmt)
 	case *ast.BranchStmt, *ast.EmptyStmt:
 	case *ast.SendStmt:
-		c.report(s, "sends on a channel")
+		s.c.report(st, "sends on a channel")
+	case *ast.SelectStmt:
+		s.c.report(st, "selects on channels")
 	case *ast.GoStmt:
-		c.report(s, "starts a goroutine")
+		s.c.report(st, "starts a goroutine")
 	case *ast.DeferStmt:
-		c.report(s, "defers a call")
+		s.c.report(st, "defers a call")
 	default:
-		c.report(s, "has a statement the check doesn't know (%T)", s)
+		s.c.report(st, "has a statement the check doesn't know (%T)", st)
 	}
 }
 
-func (c *condChecker) expr(e ast.Expr) {
+func (s scope) expr(e ast.Expr) {
 	ast.Inspect(e, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.FuncLit:
-			// A closure inside a condition is part of it: its writes to the
-			// condition's own variables are fine, any other is not.
-			inner := &condChecker{fset: c.fset, locals: map[string]bool{}}
-			for k := range c.locals {
-				inner.locals[k] = true
-			}
-			if n.Type.Params != nil {
-				for _, p := range n.Type.Params.List {
-					for _, id := range p.Names {
-						inner.locals[id.Name] = true
-					}
-				}
-			}
-			inner.block(n.Body)
-			c.problems = append(c.problems, inner.problems...)
+			// A closure inside a condition is part of it, in its scope.
+			s.stmts(n.Body.List)
 			return false
+		case *ast.UnaryExpr:
+			if n.Op == token.ARROW {
+				s.c.report(n, "receives from a channel")
+			}
 		case *ast.CallExpr:
-			name := ""
-			switch f := n.Fun.(type) {
-			case *ast.Ident:
-				name = f.Name
-			case *ast.SelectorExpr:
-				name = f.Sel.Name
-			case *ast.FuncLit:
-				return true
-			}
-			// Not even a closure held in a local: what it holds is unknown.
-			if !readOnlyCalls[name] {
-				c.report(n, "calls %s, which isn't known to be read-only", exprString(n.Fun))
-			}
+			s.call(n)
 		}
 		return true
 	})
+}
+
+var readOnlyBuiltins = map[string]bool{"len": true, "cap": true, "min": true, "max": true, "real": true, "imag": true, "complex": true}
+
+func (s scope) call(call *ast.CallExpr) {
+	if tv, ok := s.c.info.Types[call.Fun]; ok && tv.IsType() {
+		return // a conversion
+	}
+	if _, ok := ast.Unparen(call.Fun).(*ast.FuncLit); ok {
+		return // its body is checked as part of the condition
+	}
+	switch f := s.c.callee(call).(type) {
+	case *types.Builtin:
+		if readOnlyBuiltins[f.Name()] {
+			return
+		}
+	case *types.Func:
+		if s.c.method(f, "Model", "Get") || s.c.method(f, "Cache", "Pending") {
+			return
+		}
+		if s.c.pure[pureName(f)] && f.Pkg() != nil && s.c.declIn(f) {
+			return
+		}
+	}
+	s.c.report(call, "calls %s, which isn't known to be read-only", exprString(call.Fun))
+}
+
+// declIn reports whether f is the function the checked files declare under
+// its name, so that a same-named function elsewhere isn't trusted.
+func (c *condChecker) declIn(f *types.Func) bool {
+	fd, ok := c.decls[pureName(f)]
+	return ok && c.info.Defs[fd.Name] == f
+}
+
+func pureName(f *types.Func) string {
+	sig, ok := f.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return f.Name()
+	}
+	t := sig.Recv().Type()
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	if n, ok := t.(*types.Named); ok {
+		return n.Obj().Name() + "." + f.Name()
+	}
+	return f.Name()
 }
 
 func exprString(e ast.Expr) string {
@@ -285,6 +381,8 @@ func exprString(e ast.Expr) string {
 		return "(" + exprString(e.X) + ")"
 	case *ast.CallExpr:
 		return exprString(e.Fun) + "(...)"
+	case *ast.FuncLit:
+		return "a function literal"
 	}
 	return fmt.Sprintf("%T", e)
 }
