@@ -17,7 +17,8 @@ import (
 // The markers are always written in UTC (formatMarker). Compare them as
 // parsed times, never as strings: RFC3339Nano drops trailing zeros, so
 // "10:00:00Z" sorts after "10:00:00.1Z" although it is earlier, and a marker
-// written with a zone offset by an earlier release sorts by its local clock.
+// written with a zone offset by an earlier release, or by another writer of
+// the same annotation names, sorts by its local clock.
 const MarkerTimeLayout = time.RFC3339Nano
 
 // formatMarker renders t for an external-create marker: in UTC, so that every
