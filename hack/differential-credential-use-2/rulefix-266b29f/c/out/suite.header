@@ -1,0 +1,5 @@
+source bundle src-ed7f68e.bundle at ed7f68e3d8e031d157a4078015f79a54a3780eda, machine n2-highcpu-8, 8 vCPU
+start 2026-11-18 07:18:16 UTC;  07:18:16 up 47 min,  0 user,  load average: 1.49, 1.62, 1.72
+env: CREDENTIALUSE_MODEL_QUIET=1 GOMAXPROCS=4
+run: ^TestModel, timeout 90m
+end 2026-11-18 08:48:20 UTC;  08:48:20 up  2:17,  0 user,  load average: 4.00, 4.00, 3.93; go test exit 1

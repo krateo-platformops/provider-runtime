@@ -89,3 +89,40 @@ Read:
 - Run 3's results for the other five scenarios stand. The fix changes only
   this scenario's harness, and its checks never fired on the others (the
   pinned state keys of every other small scenario are byte-identical).
+
+## Run C: rule R in CI's model step (at ed7f68e)
+
+The user's decision on #59's CI failure: measure, then R on in CI, with the
+caps unchanged. cred-rulefix-c, n2-highcpu-8, a bundle of ed7f68e, two runs
+with CREDENTIALUSE_MODEL_QUIET=1. Raw output in c/out/.
+
+**Run 1, the two scenarios that ran past their caps**, at CI's profiles and
+caps (go test exit 0, 45:15 wall, 5,135 s user CPU):
+
+| test, profile | cap | runs | distinct states | finished | audits, divergences |
+|---|---|---|---|---|---|
+| AwayAndBack/3, 1 fault | 200,000 | 60,098 | 121,929 | yes | 428, 0 |
+| AwayAndBack/3, 1 preemption | 200,000 | 90,999 | 190,961 | yes | 698, 0 |
+| AwayAndBack/3, 1 preemption, 1 fault | 5,000,000 | 1,443,687 | 2,495,170 | yes | sampled, 0 |
+| AwayAndBack/4, 1 fault | 200,000 | 14,703 | 32,154 | yes | 108, 0 |
+| AwayAndBack/4, 1 preemption | 200,000 | 19,258 | 42,577 | yes | 151, 0 |
+| AwayAndBack/4, 1 preemption, 1 fault | 5,000,000 | 341,909 | | yes | sampled, 0 |
+| TwoReleasers, 1 fault | 200,000 | 64,695 | 113,872 | yes | sampled, 0 |
+| TwoReleasers, 1 preemption | 200,000 | 110,100 | 187,985 | yes | sampled, 0 |
+
+Subtest wall: AwayAndBack/3 2,480 s, AwayAndBack/4 707 s, TwoReleasers
+221 s. Without R (CI at 266b29f): AwayAndBack/3 stopped at its caps
+unfinished (211,334 and 268,512 states at 200,000; 4,641,511 at 5,000,000),
+and TwoReleasers at 200,000 (196,793 and 201,755 states).
+
+**Run 2, the whole `^TestModel` step**, as CI runs it, with GOMAXPROCS=4 for
+a GitHub runner's 4 vCPU and the step's 90m timeout: **it timed out.** Every
+scenario test passed inside it (AwayAndBack/3 in 2,488 s, AcquireAgainstRelease
+871 s, AwayAndBack/4 694 s, TwoReleasers 431 s, DeletionsAroundTheGrace 115 s,
+Recreate 31 s, the rest under 11 s). What was still running at 90m was
+**TestModelStatefulAgreesWithStateless**, which `^TestModel` matches: its
+default plan is every small scenario at T = 2 with a stateless leg, the
+searches that took run 3 1,953 CPU-hours on 96 vCPU. It was also among the
+tests running at CI's own timeouts since 1c3ff46.
+
+The VM was up about 2h20m in all, about $0.80. It is deleted.

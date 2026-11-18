@@ -1,0 +1,71 @@
+=== RUN   TestModelTwoReleasers
+=== PAUSE TestModelTwoReleasers
+=== RUN   TestModelAwayAndBack
+=== RUN   TestModelAwayAndBack/3_live_passes
+=== PAUSE TestModelAwayAndBack/3_live_passes
+=== RUN   TestModelAwayAndBack/4_live_passes
+=== PAUSE TestModelAwayAndBack/4_live_passes
+=== CONT  TestModelAwayAndBack/3_live_passes
+=== CONT  TestModelAwayAndBack/4_live_passes
+    model_test.go:1009: away and back, 4 live passes, 1 fault: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 108 audits, 0 divergences
+    model_test.go:1009: away and back, 4 live passes, 1 fault: stateful: 32154 distinct states, 14703 runs, 10852 pruned; the counts below are distinct states
+    model_test.go:1009: away and back, 4 live passes, 1 fault: 14703 schedules, finished=true
+    model_test.go:1009: away and back, 4 live passes, 1 fault: capacity used (§10.2): at most 27 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 944ns
+    model_test.go:1009: away and back, 4 live passes, 1 fault: 29.31s; 3173 schedules released, 0 released over a live user (U5), 0 reached L6, 0 reached H1's state, 17012 had a deleting holder read what it held
+    model_test.go:1009: away and back, 4 live passes, 1 preemption: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 151 audits, 0 divergences
+    model_test.go:1009: away and back, 4 live passes, 1 preemption: stateful: 42577 distinct states, 19258 runs, 15168 pruned; the counts below are distinct states
+    model_test.go:1009: away and back, 4 live passes, 1 preemption: 19258 schedules, finished=true
+    model_test.go:1009: away and back, 4 live passes, 1 preemption: capacity used (§10.2): at most 27 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 943ns
+    model_test.go:1009: away and back, 4 live passes, 1 preemption: 36.776s; 4220 schedules released, 1102 released over a live user (U5), 0 reached L6, 0 reached H1's state, 16281 had a deleting holder read what it held
+=== NAME  TestModelAwayAndBack/3_live_passes
+    model_test.go:1009: away and back, 3 live passes, 1 fault: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 428 audits, 0 divergences
+    model_test.go:1009: away and back, 3 live passes, 1 fault: stateful: 121929 distinct states, 60098 runs, 42778 pruned; the counts below are distinct states
+    model_test.go:1009: away and back, 3 live passes, 1 fault: 60098 schedules, finished=true
+    model_test.go:1009: away and back, 3 live passes, 1 fault: capacity used (§10.2): at most 24 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 944ns
+    model_test.go:1009: away and back, 3 live passes, 1 fault: 1m44.035s; 16536 schedules released, 0 released over a live user (U5), 0 reached L6, 0 reached H1's state, 54508 had a deleting holder read what it held
+    model_test.go:1009: away and back, 3 live passes, 1 preemption: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 698 audits, 0 divergences
+    model_test.go:1009: away and back, 3 live passes, 1 preemption: stateful: 190961 distinct states, 90999 runs, 69787 pruned; the counts below are distinct states
+    model_test.go:1009: away and back, 3 live passes, 1 preemption: 90999 schedules, finished=true
+    model_test.go:1009: away and back, 3 live passes, 1 preemption: capacity used (§10.2): at most 24 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 943ns
+    model_test.go:1009: away and back, 3 live passes, 1 preemption: 2m39.092s; 21333 schedules released, 6969 released over a live user (U5), 0 reached L6, 0 reached H1's state, 78613 had a deleting holder read what it held
+=== NAME  TestModelAwayAndBack/4_live_passes
+    model_test.go:1009: away and back, 4 live passes, 1 preemption, 1 fault: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 2733 audits, 0 divergences
+    model_test.go:1009: away and back, 4 live passes, 1 preemption, 1 fault: stateful: 632516 distinct states, 341909 runs, 273362 pruned; the counts below are distinct states
+    model_test.go:1009: away and back, 4 live passes, 1 preemption, 1 fault: 341909 schedules, finished=true
+    model_test.go:1009: away and back, 4 live passes, 1 preemption, 1 fault: capacity used (§10.2): at most 31 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 940ns
+    model_test.go:1009: away and back, 4 live passes, 1 preemption, 1 fault: 10m40.261s; 67630 schedules released, 17051 released over a live user (U5), 0 reached L6, 241 reached H1's state, 301508 had a deleting holder read what it held
+    model_test.go:1009: away and back, 4 live passes, random: 2 preemptions, 1 fault: seed 1794983595491979079 (CREDENTIALUSE_MODEL_SEED=1794983595491979079 replays it)
+    model_test.go:1009: away and back, 4 live passes, random: 2 preemptions, 1 fault: 400 schedules, finished=true
+    model_test.go:1009: away and back, 4 live passes, random: 2 preemptions, 1 fault: capacity used (§10.2): at most 22 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 946ns
+    model_test.go:1009: away and back, 4 live passes, random: 2 preemptions, 1 fault: 490ms; 201 schedules released, 72 released over a live user (U5), 1 reached L6, 0 reached H1's state, 151 had a deleting holder read what it held
+=== NAME  TestModelAwayAndBack/3_live_passes
+    model_test.go:1009: away and back, 3 live passes, 1 preemption, 1 fault: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 11254 audits, 0 divergences
+    model_test.go:1009: away and back, 3 live passes, 1 preemption, 1 fault: stateful: 2495170 distinct states, 1443687 runs, 1125421 pruned; the counts below are distinct states
+    model_test.go:1009: away and back, 3 live passes, 1 preemption, 1 fault: 1443687 schedules, finished=true
+    model_test.go:1009: away and back, 3 live passes, 1 preemption, 1 fault: capacity used (§10.2): at most 28 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 939ns
+    model_test.go:1009: away and back, 3 live passes, 1 preemption, 1 fault: 36m56.374s; 323946 schedules released, 71629 released over a live user (U5), 0 reached L6, 0 reached H1's state, 1044189 had a deleting holder read what it held
+    model_test.go:1009: away and back, 3 live passes, random: 2 preemptions, 1 fault: seed 1794983595491979079 (CREDENTIALUSE_MODEL_SEED=1794983595491979079 replays it)
+    model_test.go:1009: away and back, 3 live passes, random: 2 preemptions, 1 fault: 400 schedules, finished=true
+    model_test.go:1009: away and back, 3 live passes, random: 2 preemptions, 1 fault: capacity used (§10.2): at most 22 calls between jumps (K = 512), 2 jumps chosen or forced, smallest tick 943ns
+    model_test.go:1009: away and back, 3 live passes, random: 2 preemptions, 1 fault: 363ms; 255 schedules released, 54 released over a live user (U5), 0 reached L6, 0 reached H1's state, 52 had a deleting holder read what it held
+--- PASS: TestModelAwayAndBack (0.00s)
+    --- PASS: TestModelAwayAndBack/4_live_passes (706.84s)
+    --- PASS: TestModelAwayAndBack/3_live_passes (2479.86s)
+=== CONT  TestModelTwoReleasers
+    model_test.go:986: two releasers, 1 fault: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 360 audits, 0 divergences
+    model_test.go:986: two releasers, 1 fault: stateful: 113872 distinct states, 64695 runs, 36015 pruned; the counts below are distinct states
+    model_test.go:986: two releasers, 1 fault: 64695 schedules, finished=true
+    model_test.go:986: two releasers, 1 fault: capacity used (§10.2): at most 20 calls between jumps (K = 512), 3 jumps chosen or forced, smallest tick 941ns
+    model_test.go:986: two releasers, 1 fault: 1m21.34s; 18384 schedules released, 0 released over a live user (U5), 0 reached L6, 0 reached H1's state, 49577 had a deleting holder read what it held
+    model_test.go:986: two releasers, 1 preemption: merge audit: every 100 prunes from offset 76 (seed 1794983595491979079): 780 audits, 0 divergences
+    model_test.go:986: two releasers, 1 preemption: stateful: 187985 distinct states, 110100 runs, 78062 pruned; the counts below are distinct states
+    model_test.go:986: two releasers, 1 preemption: 110100 schedules, finished=true
+    model_test.go:986: two releasers, 1 preemption: capacity used (§10.2): at most 20 calls between jumps (K = 512), 3 jumps chosen or forced, smallest tick 941ns
+    model_test.go:986: two releasers, 1 preemption: 2m19.611s; 29404 schedules released, 0 released over a live user (U5), 0 reached L6, 0 reached H1's state, 81156 had a deleting holder read what it held
+    model_test.go:986: two releasers, random: 2 preemptions, 1 fault: seed 1794983595491979079 (CREDENTIALUSE_MODEL_SEED=1794983595491979079 replays it)
+    model_test.go:986: two releasers, random: 2 preemptions, 1 fault: 400 schedules, finished=true
+    model_test.go:986: two releasers, random: 2 preemptions, 1 fault: capacity used (§10.2): at most 15 calls between jumps (K = 512), 3 jumps chosen or forced, smallest tick 940ns
+    model_test.go:986: two releasers, random: 2 preemptions, 1 fault: 398ms; 160 schedules released, 0 released over a live user (U5), 0 reached L6, 0 reached H1's state, 28 had a deleting holder read what it held
+--- PASS: TestModelTwoReleasers (221.35s)
+PASS
+ok  	github.com/krateo-platformops/provider-runtime/pkg/credentialuse	2701.253s
