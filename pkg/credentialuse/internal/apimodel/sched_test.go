@@ -292,17 +292,32 @@ func TestQuietSegmentKeepsTheClock(t *testing.T) {
 }
 
 // A stateful search merges states by key, and the key leaves C-stable's
-// watch out: a state reached again with another watch panics, rather than
-// merge away a check (§5, C-stable).
-func TestVisitedWatchIsAFunctionOfTheKey(t *testing.T) {
+// watch out. An arrival may be pruned only by a visit whose watch contains
+// its own, since that visit's continuation checked at least as much; a
+// prune that would drop a watched condition panics. Both directions.
+func TestVisitedPrunesOnlyUnderAWiderWatch(t *testing.T) {
+	set := func(ks ...string) map[string]bool {
+		m := map[string]bool{}
+		for _, k := range ks {
+			m[k] = true
+		}
+		return m
+	}
+	b := Budget{Preemptions: 1, Faults: 1, Jumps: 1}
 	v := NewVisited()
-	v.checkWatch("k", "waiter:set; ")
-	v.checkWatch("k", "waiter:set; ")
-	v.checkWatch("other", "")
+	if v.see("k", b, set("a@x:1", "a@x:2"), nil) {
+		t.Fatal("the first arrival was pruned")
+	}
+	if !v.see("k", b, set("a@x:1"), nil) || !v.see("k", b, nil, nil) {
+		t.Error("an arrival with a narrower watch wasn't pruned")
+	}
+	if v.see("k", Budget{Preemptions: 2, Faults: 1, Jumps: 1}, set("b@y:9"), nil) {
+		t.Error("an arrival with a larger budget was pruned")
+	}
 	defer func() {
 		if p := recover(); p == nil || !strings.Contains(fmt.Sprint(p), "C-stable") {
-			t.Errorf("want the C-stable watch panic, got %v", p)
+			t.Errorf("an arrival with a wider watch: want the C-stable panic, got %v", p)
 		}
 	}()
-	v.checkWatch("k", "")
+	v.see("k", b, set("a@x:1", "a@x:3"), nil)
 }

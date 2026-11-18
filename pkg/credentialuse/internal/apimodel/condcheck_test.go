@@ -2,6 +2,7 @@ package apimodel
 
 import (
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -60,16 +61,21 @@ func impure(w *W) bool { w.started["a"]++; return true }
 func checkSource(t *testing.T, body string, pure ...string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "cond.go", prelude+"\n"+body, parser.ParseComments)
+	src := prelude + "\n" + body
+	// A snippet with imports puts them after the package clause.
+	if imports, rest, ok := strings.Cut(body, "\n---\n"); ok {
+		src = strings.Replace(prelude, "package p\n", "package p\n\n"+imports+"\n", 1) + "\n" + rest
+	}
+	f, err := parser.ParseFile(fset, "cond.go", src, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse: %v\n%s", err, body)
 	}
 	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
-	conf := types.Config{Error: func(error) {}} // a snippet may leave a variable unused
+	conf := types.Config{Error: func(error) {}, Importer: importer.ForCompiler(fset, "source", nil)} // a snippet may leave a variable unused
 	if _, err := conf.Check("p", fset, []*ast.File{f}, info); err != nil && !strings.Contains(err.Error(), "declared and not used") {
 		t.Fatalf("type-check: %v\n%s", err, body)
 	}
-	return CheckConditions(fset, []*ast.File{f}, info, CondConfig{APIModel: "p", Pure: append([]string{"keyOf", "pure"}, pure...)})
+	return CheckConditions(fset, []*ast.File{f}, info, CondConfig{APIModel: "p", Pure: append([]string{"keyOf", "pure"}, pure...), NoReflect: true})
 }
 
 // CheckConditions refuses every way a condition could write that the two
@@ -210,6 +216,32 @@ func f(a *Actor) {
 	saw := 0
 	g(a, &saw)
 }`, "whose WaitQuiet method could call Actor's"},
+		{"reflect, calling Wait by name", `import "reflect"
+---
+func f(a *Actor) {
+	saw := 0
+	cond := reflect.ValueOf(func() bool { saw = 2; return true })
+	reflect.ValueOf(a).MethodByName("Wait").Call([]reflect.Value{reflect.ValueOf("x"), reflect.ValueOf(t0), cond})
+	_ = saw
+}`, "through reflect"},
+		{"reflect, Wait as a function value", `import "reflect"
+---
+func f(a *Actor) {
+	saw := 0
+	wt := reflect.ValueOf(a).MethodByName("Wait").Interface().(func(string, Time, func() bool))
+	wt("x", t0, func() bool { saw = 2; return true })
+	_ = saw
+}`, "through reflect"},
+		{"unsafe, writing a parked actor's condition", `import "unsafe"
+---
+type parked struct{ cond func() bool }
+func f(p *parked) {
+	saw := 0
+	*(*func() bool)(unsafe.Pointer(&p.cond)) = func() bool { saw = 2; return true }
+	_ = saw
+}`, "through unsafe"},
+		{"an unrelated Wait is not one", `type group interface{ Wait() error }
+func f(g group) error { return g.Wait() }`, ""},
 		{"the directive", `func f(a *Actor) {
 	saw := 0
 	// condcheck:writes, on purpose.

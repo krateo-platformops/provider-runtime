@@ -6,7 +6,9 @@ import (
 	"iter"
 	"math"
 	"math/rand"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -308,52 +310,26 @@ func (b Budget) dominates(o Budget) bool {
 // Visited is a stateful search's memory: every abstract state reached, with
 // the budgets it was reached with, none dominated by another (§10.3).
 type Visited struct {
-	m map[string][]Budget
+	m map[string][]visit
 	// witness[key] is the first path that reached the state, and the
 	// budget it had, for the merge audit (§10.5).
 	witness map[string]Witness
 	// States counts distinct abstract states; Flagged counts, per flag the
 	// scenario's key reports, the distinct states in which it is set.
 	States int
-	// watches[key] is C-stable's watch (watched) at the state: the key
-	// leaves it out, so a merge is sound only if it is a function of the
-	// key, which checkWatch asserts.
-	watches map[string]string
+}
+
+// A visit is one budget a state was searched with, and the C-stable watch
+// (watched) its continuation ran under: the key leaves the watch out, so a
+// prune must check it (see).
+type visit struct {
+	b     Budget
+	watch map[string]bool
 }
 
 // NewVisited returns an empty memory.
 func NewVisited() *Visited {
-	return &Visited{m: map[string][]Budget{}, witness: map[string]Witness{}, watches: map[string]string{}}
-}
-
-// checkWatch panics if key was reached before with another C-stable watch:
-// merging the two states would drop a check that only one of them has to
-// run (§5, C-stable).
-func (v *Visited) checkWatch(key, watch string) {
-	if prev, ok := v.watches[key]; ok {
-		if prev != watch {
-			panic(fmt.Sprintf("apimodel: a state was reached with two different C-stable watches (%q and %q): the watch must be a function of the state's key, or a merge would drop a check (docs/credential-use-model-reduction.md §5, C-stable)", prev, watch))
-		}
-		return
-	}
-	v.watches[key] = watch
-}
-
-// watchSig is every actor's C-stable watch, as the labels of the quiet parks
-// it has left since its last visible step.
-func (s *Sched) watchSig() string {
-	var b strings.Builder
-	for _, a := range s.actors {
-		if len(a.watch) == 0 {
-			continue
-		}
-		b.WriteString(a.Name + ":")
-		for _, w := range a.watch {
-			b.WriteString(w.label + ";")
-		}
-		b.WriteString(" ")
-	}
-	return b.String()
+	return &Visited{m: map[string][]visit{}, witness: map[string]Witness{}}
 }
 
 // A Witness is a path to a state: its choices, and the budget it had left
@@ -364,27 +340,57 @@ type Witness struct {
 	Key     string
 }
 
-// see reports whether key was reached with a budget that dominates b; if
-// not, it records b, dropping the budgets b dominates.
-func (v *Visited) see(key string, b Budget, choices []int) bool {
-	bs, ok := v.m[key]
-	for _, o := range bs {
-		if o.dominates(b) {
-			return true
+// see reports whether key was reached with a budget that dominates b, and
+// so whether this arrival is pruned; if not, it records b, dropping the
+// budgets b dominates.
+//
+// The key leaves C-stable's watch out (§5, C-stable). A prune is sound only
+// if the visit that covers it ran under at least the arrival's watch: then
+// its continuation checked every condition the arrival would have, and
+// more. So an arrival is pruned by a dominating visit whose watch contains
+// its own; a dominating visit whose watch doesn't panics, rather than
+// merge away a check.
+func (v *Visited) see(key string, b Budget, watch map[string]bool, choices []int) bool {
+	vs, ok := v.m[key]
+	for _, o := range vs {
+		if !o.b.dominates(b) {
+			continue
 		}
+		if !subset(watch, o.watch) {
+			panic(fmt.Sprintf("apimodel: a state was reached with a C-stable watch (%v) that the visit pruning it didn't run under (%v): the merge would drop a check (docs/credential-use-model-reduction.md §5, C-stable)", sortedSet(watch), sortedSet(o.watch)))
+		}
+		return true
 	}
 	if !ok {
 		v.States++
 		v.witness[key] = Witness{slices.Clone(choices), b, key}
 	}
-	keep := bs[:0]
-	for _, o := range bs {
-		if !b.dominates(o) {
+	keep := vs[:0]
+	for _, o := range vs {
+		if !b.dominates(o.b) {
 			keep = append(keep, o)
 		}
 	}
-	v.m[key] = append(keep, b)
+	v.m[key] = append(keep, visit{b, watch})
 	return false
+}
+
+func subset(x, y map[string]bool) bool {
+	for k := range x {
+		if !y[k] {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedSet(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // An Actor is one coroutine of a scenario.
@@ -417,6 +423,9 @@ type Actor struct {
 	// of the quiet parks it has left since its last visible step (watched).
 	quiet, nextQuiet, condHeld bool
 	watch                      []watched
+	// condPos is the position of the Wait the actor is parked at, and
+	// nextPos WaitQuiet's, handed to Wait.
+	condPos, nextPos string
 
 	// inputs are what the actor's code received in its current unit: call
 	// results, values it read from shared state, times it read (§10.1).
@@ -585,9 +594,22 @@ func (a *Actor) Stale() bool {
 // write nothing, not even the actor's own locals; what the actor learns, it
 // reads in the code after the Wait (§5, C-park, checked by holds).
 func (a *Actor) Wait(label string, notBefore time.Time, cond func() bool) {
+	pos := a.nextPos
+	a.nextPos = ""
+	if pos == "" {
+		pos = callerPos(1)
+	}
 	a.unitGen = 0
 	a.inputs = nil
+	a.condPos = pos
 	a.park(label, false, notBefore, cond)
+}
+
+// callerPos is the file and line of the call skip frames above its caller:
+// a park's position, which names its condition in C-stable's watch.
+func callerPos(skip int) string {
+	_, file, line, _ := runtime.Caller(skip + 1)
+	return file + ":" + strconv.Itoa(line)
 }
 
 // callInput is a call that ran, as recorded among the actor's inputs: its
@@ -612,6 +634,7 @@ func CallInput(v any) (label string, fault Fault, ok bool) {
 // it.
 func (a *Actor) WaitQuiet(label string, notBefore time.Time, cond func() bool) {
 	a.nextQuiet = true
+	a.nextPos = callerPos(1)
 	a.Wait(label, notBefore, cond)
 }
 
@@ -645,7 +668,7 @@ func (s *Sched) resumeQuiet(a *Actor) {
 	now := s.Clock.t
 	pend := s.pending(now)
 	if a.cond != nil {
-		a.watch = append(a.watch, watched{a.label, a.cond})
+		a.watch = append(a.watch, watched{a.label, a.condPos, a.cond})
 	}
 	a.quiet = false
 	s.inQuiet = true
@@ -798,8 +821,23 @@ func (a *Actor) evalCond(label string, cond func() bool) bool {
 // condition. Without R the same watch runs from the quiet resume step, which
 // the unreduced search can likewise defer to the actor's next visible step.
 type watched struct {
-	label string
-	cond  func() bool
+	label, pos string
+	cond       func() bool
+}
+
+// watchSet is every actor's C-stable watch, each condition named by its
+// actor and the position of the Wait that parked it (§5, C-stable).
+func (s *Sched) watchSet() map[string]bool {
+	var out map[string]bool
+	for _, a := range s.actors {
+		for _, w := range a.watch {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[a.Name+"@"+w.pos] = true
+		}
+	}
+	return out
 }
 
 // checkWatches is C-stable's check after a step (watched).
@@ -906,8 +944,7 @@ func (s *Sched) Run() error {
 			}
 			b := Budget{s.bounds.Preemptions - s.preemptions, s.bounds.Faults - s.faults, s.bounds.Jumps - s.jumps}
 			k := s.Key() + "\x00last=" + last
-			s.visited.checkWatch(k, s.watchSig())
-			if s.visited.see(k, b, s.choices) {
+			if s.visited.see(k, b, s.watchSet(), s.choices) {
 				s.pruned = true
 				s.prunedAt = Witness{slices.Clone(s.choices), b, k}
 				s.prunedKey = k

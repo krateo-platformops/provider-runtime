@@ -15,9 +15,10 @@ import (
 
 // TestModelConditionsWriteNothing is C-park's static check over the model's
 // code (docs/credential-use-model-reduction.md §5): every Wait condition in
-// every package under pkg/credentialuse that imports apimodel, and in
-// apimodel itself, tests included, is a literal at its call site that could
-// write nothing. The packages are loaded typed, with their tests, so that
+// every package under pkg/credentialuse, tests included, is a literal at its
+// call site that could write nothing; and no package but apimodel imports
+// reflect or unsafe. Every package, not only those that import apimodel: one
+// could call Wait on an *Actor it got from elsewhere. The packages are loaded typed, with their tests, so that
 // calls resolve by type, not by name. It is static analysis, not a search:
 // it runs in CI's coverage step, under the race detector, and, by its name,
 // in the model step, whose log lists it.
@@ -27,7 +28,7 @@ func TestModelConditionsWriteNothing(t *testing.T) {
 		apimodelPath = self + "/internal/apimodel"
 	)
 	pkgs, err := packages.Load(&packages.Config{
-		Mode:  packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+		Mode:  packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
 		Tests: true,
 	}, "./...")
 	if err != nil {
@@ -47,13 +48,10 @@ func TestModelConditionsWriteNothing(t *testing.T) {
 	}
 	var checked []string
 	for path, p := range chosen {
-		if _, imports := p.Imports[apimodelPath]; !imports && path != apimodelPath {
-			continue
-		}
 		for _, e := range p.Errors {
 			t.Fatalf("%s: %v", p.ID, e)
 		}
-		cfg := apimodel.CondConfig{APIModel: apimodelPath}
+		cfg := apimodel.CondConfig{APIModel: apimodelPath, NoReflect: path != apimodelPath}
 		if path == self {
 			cfg.Pure = []string{"keyOf", "widgetKey", "nsKey", "ID.GroupKind", "waitFor.met"}
 		}

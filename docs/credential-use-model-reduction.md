@@ -325,8 +325,10 @@ ignore):
   what the code calls.
   - **Statically** (`apimodel.CheckConditions`, run by
     TestModelConditionsWriteNothing over every package under
-    pkg/credentialuse that imports apimodel, and apimodel, tests included,
-    loaded with their types; in CI's coverage step and its model step).
+    pkg/credentialuse, tests included, loaded with their types; in CI's
+    coverage step and its model step). Every package, not only those that
+    import apimodel: one could call `Wait` on an `*Actor` it got from
+    elsewhere.
     The rule is structural. `Actor.Wait` and `Actor.WaitQuiet` may be used
     only in direct calls, `a.Wait(label, notBefore, cond)`, whose condition
     is nil or a function literal written at the call site (the API's own
@@ -338,9 +340,15 @@ ignore):
       struct field holding `a.WaitQuiet`) or a method expression
       (`(*Actor).Wait(a, …)`);
     - any expression, type expressions included, whose type is an interface
-      or a type parameter with a `Wait` or a `WaitQuiet` method, whichever
-      package declares it: through one, `*Actor` could be called unseen (a
-      generic wrapper, a conversion of `*Actor` to such an interface).
+      or a type parameter with a `Wait` or a `WaitQuiet` method of
+      `Actor`'s signature (a string, a time, a `func() bool`, no result),
+      whichever package declares it: through one, `*Actor` could be called
+      unseen (a generic wrapper, a conversion of `*Actor` to such an
+      interface). An unrelated `Wait`, such as `Wait() error`, isn't one;
+    - any import of reflect or unsafe, in every package but apimodel
+      (whose `deepString` uses reflect): reflect could call `Wait` by name
+      or as a function value, and unsafe could write a parked actor's
+      condition, past both halves.
 
     So every condition the model can pass to `Actor`'s waits is a literal
     the check has read. The holder's and the releaser's waits take their
@@ -522,16 +530,29 @@ ignore):
   reduced in CI get the check too.
 
   *The watch and the stateful search.* The watch is scheduler state that
-  the abstract state's key (§10.1) leaves out. Merging two states with
-  equal keys and different watches would drop a check one of them still
-  has to run. The watch is the list of quiet parks an actor has left since
-  its last visible step; in the model's scenarios the park an actor sits
-  at, with its locals, fixes which quiet parks led there (a holder at its
-  pass's first call came through that pass's wait or through none, and
-  its pass number is a local). Rather than widen the key, which would
-  change every recorded key and state count, the stateful search asserts
-  it: `Visited` records each key's watch, and a state reached again with
-  another one panics.
+  the abstract state's key (§10.1) leaves out, so a prune must account for
+  it. Pruning an arrival at a visited state is sound exactly when the visit
+  that covers it ran under at least the arrival's watch: that visit's
+  continuation evaluated every condition the arrival's would have, after
+  the same steps, and perhaps more. A wider arrival is not covered: its
+  continuation would check a condition the visit didn't. So `Visited`
+  records the watch with each budget it stores, and an arrival that a
+  dominating visit would prune is pruned only if its watch is a subset of
+  that visit's; otherwise the search panics, rather than merge away a
+  check. Widening the key instead would change every recorded key and
+  state count.
+
+  *What names a watched condition.* A watch entry is the actor and the
+  position of the `Wait` that parked it, not the park's label, which two
+  waits could share. One position can still build different conditions
+  from what its closure captures: the holder's "await" is one call site
+  for every live pass, each with its pass's `waitFor`. What a condition
+  captures is fixed by the actor's state, which is in the key: the
+  holder's pass number is a declared local, and selects the pass's
+  `waitFor`; every other quiet condition in the model captures only the
+  world and values fixed when the scenario is built. So at equal keys,
+  equal actor and position mean the same condition, and the subset test
+  compares conditions.
 - **C-progress.** Every quiet segment reaches a park, and no cycle of quiet
   parks runs without a call. So R terminates.
 

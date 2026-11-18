@@ -20,6 +20,11 @@ type CondConfig struct {
 	// the same rules as a condition's, so it adds nothing to what is
 	// trusted.
 	Pure []string
+	// NoReflect refuses any import of reflect or unsafe: either could call
+	// Actor's waits, or write a parked actor's condition, out of the check's
+	// sight. Set for every package but the API model's, which uses reflect
+	// to render locals (deepString) and declares the waits itself.
+	NoReflect bool
 }
 
 // CheckConditions is C-park's static check (docs/credential-use-model-reduction.md
@@ -73,6 +78,15 @@ func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, c
 			continue
 		}
 		c.body(fd.Body, fd.Pos(), fd.End())
+	}
+	if cfg.NoReflect {
+		for _, f := range files {
+			for _, im := range f.Imports {
+				if path := strings.Trim(im.Path.Value, `"`); path == "reflect" || path == "unsafe" {
+					c.report(im, "could be reached through %s, which the check can't follow: the package may not import it", path)
+				}
+			}
+		}
 	}
 	// direct holds the Wait and WaitQuiet identifiers that are a direct
 	// call's method: a.Wait(label, notBefore, cond). Every other use of
@@ -144,7 +158,7 @@ func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, c
 		if tv.Type == nil || seen[e.Pos()] {
 			continue
 		}
-		if m := waitMethod(tv.Type); m != "" {
+		if m := c.waitMethod(tv.Type); m != "" {
 			seen[e.Pos()] = true
 			c.report(e, "is of %s, whose %s method could call Actor's out of the check's sight", tv.Type, m)
 		}
@@ -154,8 +168,10 @@ func CheckConditions(fset *token.FileSet, files []*ast.File, info *types.Info, c
 }
 
 // waitMethod returns "Wait" or "WaitQuiet" if t is an interface or a type
-// parameter whose method set has a method by that name, or "".
-func waitMethod(t types.Type) string {
+// parameter with a method by that name whose signature is the one Actor's
+// has, (label string, notBefore time.Time, cond func() bool), so that *Actor
+// could be called through it; or "". An unrelated Wait() isn't one.
+func (c *condChecker) waitMethod(t types.Type) string {
 	var iface *types.Interface
 	switch t := t.(type) {
 	case *types.TypeParam:
@@ -167,11 +183,34 @@ func waitMethod(t types.Type) string {
 		return ""
 	}
 	for i := range iface.NumMethods() {
-		if n := iface.Method(i).Name(); n == "Wait" || n == "WaitQuiet" {
+		m := iface.Method(i)
+		if n := m.Name(); (n == "Wait" || n == "WaitQuiet") && c.waitSignature(m.Type()) {
 			return n
 		}
 	}
 	return ""
+}
+
+// waitSignature reports whether t is a signature with Actor.Wait's
+// parameters and results: a string, a time named Time, a func() bool, and
+// nothing back.
+func (c *condChecker) waitSignature(t types.Type) bool {
+	sig, ok := t.(*types.Signature)
+	if !ok || sig.Results().Len() != 0 || sig.Params().Len() != 3 || sig.Variadic() {
+		return false
+	}
+	if b, ok := sig.Params().At(0).Type().Underlying().(*types.Basic); !ok || b.Kind() != types.String {
+		return false
+	}
+	if n, ok := sig.Params().At(1).Type().(*types.Named); !ok || n.Obj().Name() != "Time" {
+		return false
+	}
+	f, ok := sig.Params().At(2).Type().Underlying().(*types.Signature)
+	if !ok || f.Params().Len() != 0 || f.Results().Len() != 1 {
+		return false
+	}
+	b, ok := f.Results().At(0).Type().Underlying().(*types.Basic)
+	return ok && b.Kind() == types.Bool
 }
 
 func declName(fd *ast.FuncDecl) string {
