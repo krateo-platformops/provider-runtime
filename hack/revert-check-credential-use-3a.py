@@ -81,7 +81,7 @@ MUTANTS = [
      [("idx := t.holders.GetIndexer()\n\tfor _, key := range []string{id.String(), unparseableKey} {",
        "idx := t.holders.GetIndexer()\n\tfor _, key := range []string{id.String()} {")]),
     ("the held gauge isn't reported", "tracker.go",
-     [("\tt.o.Metrics.HeldObjects(kindLabel(t.gk), sum)\n", "\t_ = sum\n")]),
+     [("\tsinkMetrics{t}.HeldObjects(kindLabel(t.gk), sum)\n", "\t_ = sum\n")]),
     # shared.go: Run's checks and shutdown (§7.3, §7.5; N2, G6).
     ("start doesn't check the namespace verbs", "shared.go",
      [("\tif err := s.canAccess(ctx, namespaceGVR, \"get\", \"list\", \"watch\"); err != nil {\n\t\treturn fmt.Errorf(\"%w (%w)\", errNamespaceSync, err)\n\t}\n", "")]),
@@ -92,25 +92,50 @@ MUTANTS = [
        "\tif s.c.Dynamic == nil {\n\t\treturn nil\n\t}\n\tfor _, verb := range verbs {")]),
     ("RunInformers leaves the queue running", "shared.go",
      [("\tdefer s.queue.ShutDown()\n", "")]),
-    # shared.go: Track (§7.3; D2, D3, D4).
-    ("Tracks don't wait for each other", "shared.go",
-     [("\ts.trackMu.Lock()\n\ts.trackWaiting.Add(-1)\n\tdefer s.trackMu.Unlock()\n", "\ts.trackWaiting.Add(-1)\n")]),
-    ("a Track after Run doesn't check the verbs", "shared.go",
-     [("\tfor _, inf := range starting {\n\t\tif err := inf.preflight(ictx, s); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n", "")]),
-    ("a failed Track leaves its tracker", "shared.go",
-     [("\t\tdelete(s.trackers, gk)\n", "")]),
-    ("a failed Track leaves its protected informers", "shared.go",
-     [("\t\tfor pgk := range fresh {\n\t\t\tdelete(s.protected, pgk)\n\t\t}\n", "")]),
+    # shared.go: Track (§7.3; D2, D3, D4, and items 2–4 of the re-review).
+    ("a Track doesn't wait for another of its kind", "shared.go",
+     [("\t\tother := s.tracking[gk]\n", "\t\tvar other *inflight\n")]),
+    ("Tracks of different kinds wait for each other", "shared.go",
+     [("\t\tother := s.tracking[gk]\n", "\t\tvar other *inflight\n\t\tfor _, x := range s.tracking {\n\t\t\tother = x\n\t\t}\n")]),
+    ("a Track doesn't stop when RunInformers ends", "shared.go",
+     [("\t\tcase <-s.runDone:\n\t\t\tcancel()\n", "\t\tcase <-s.runDone:\n")]),
+    ("a Track after Run doesn't check the holders' verbs", "shared.go",
+     [("\tif err := t.informer().preflight(ctx, s); err != nil {\n\t\treturn err\n\t}\n\thctx", "\thctx")]),
+    ("a Track after Run doesn't check a protected informer's verbs", "shared.go",
+     [("\t\terr := p.informer().preflight(ctx, s)\n", "\t\tvar err error\n")]),
+    ("nobody starts a protected informer created after Run", "shared.go",
+     [("\tstarter := !p.starting\n", "\tstarter := false\n")]),
+    ("a failed Track keeps its claims", "shared.go",
+     [("\t\tstops := s.releaseLocked(ps)\n", "\t\tvar stops []context.CancelFunc\n")]),
+    ("an informer nobody claims isn't removed", "shared.go",
+     [("\t\tif s.protected[p.gk] == p {\n\t\t\tdelete(s.protected, p.gk)\n\t\t}\n", "")]),
     ("a failed Track's handlers stay", "shared.go",
-     [("\t\tt.leaveAll()\n\t\ts.mu.Lock()\n\t\tdelete(s.trackers, gk)", "\t\ts.mu.Lock()\n\t\tdelete(s.trackers, gk)")]),
+     [("\t\tt.stopInformers()\n\t\tt.leaveAll()\n", "\t\tt.stopInformers()\n")]),
     ("a failed Track's informers keep running", "shared.go",
-     [("\t\tt.stopInformers()\n\t\tfor _, p := range fresh {\n\t\t\tp.stop()\n\t\t}\n", "")]),
+     [("\t\tt.stopInformers()\n\t\tt.leaveAll()\n", "\t\tt.leaveAll()\n"),
+      ("\t\tfor _, stop := range stops {\n\t\t\tstop()\n\t\t}\n", "\t\t_ = stops\n")]),
     ("a Track after Run doesn't wait for the replay", "shared.go",
-     [("\tfor _, p := range joined {\n\t\tif err := s.waitSynced(ictx, t.regs[p].HasSynced,",
-       "\tfor _, p := range joined[:0] {\n\t\tif err := s.waitSynced(ictx, t.regs[p].HasSynced,")]),
+     [("\tfor _, p := range ps {\n\t\tif err := s.waitSynced(ctx, t.regs[p].HasSynced,",
+       "\tfor _, p := range ps[:0] {\n\t\tif err := s.waitSynced(ctx, t.regs[p].HasSynced,")]),
+    # shared.go and tracker.go: equal Options, and the sinks (N1, the user's
+    # decision of 2026-11-18).
     ("a second Track with other options returns the first tracker", "shared.go",
-     [("\t\tif !equalOptions(prev.o, o) {\n\t\t\treturn nil, fmt.Errorf(\"credential-use: %s is already tracked with other options\", gk)\n\t\t}\n\t\treturn prev, nil",
-       "\t\treturn prev, nil")]),
+     [("\t\t\tif !equalOptions(t.o, o) {\n\t\t\t\treturn nil, fmt.Errorf(\"credential-use: %s is already tracked with other options\", gk)\n\t\t\t}\n\t\t\tt.rebind(o)",
+       "\t\t\tt.rebind(o)")]),
+    ("Protected is compared in order", "shared.go",
+     [("\t\tsameSet(a.Protected, b.Protected) &&", "\t\tlen(a.Protected) == len(b.Protected) && (len(a.Protected) == 0 || a.Protected[0] == b.Protected[0]) &&")]),
+    ("OwnerFinalizers are compared in order", "shared.go",
+     [("\t\tsameSet(a.OwnerFinalizers, b.OwnerFinalizers) &&", "\t\tlen(a.OwnerFinalizers) == len(b.OwnerFinalizers) && (len(a.OwnerFinalizers) == 0 || a.OwnerFinalizers[0] == b.OwnerFinalizers[0]) &&")]),
+    ("MaxDepth isn't compared", "shared.go",
+     [("\t\ta.MaxDepth == b.MaxDepth && a.DeletionGrace == b.DeletionGrace &&", "\t\ta.DeletionGrace == b.DeletionGrace &&")]),
+    ("ProbeInterval isn't compared", "shared.go",
+     [("\t\ta.ProbeInterval == b.ProbeInterval && a.DisownInterval == b.DisownInterval &&", "\t\ta.DisownInterval == b.DisownInterval &&")]),
+    ("a rebind keeps the old sinks", "tracker.go",
+     [("\tt.sink = sinksOf(o)\n\tt.sinkMu.Unlock()", "\tt.sinkMu.Unlock()")]),
+    ("a rebind doesn't wait for calls in flight", "tracker.go",
+     [("\tt.sinkMu.RLock()\n\tdefer t.sinkMu.RUnlock()\n\tt.sink.enqueue(nn)", "\tt.sinkMu.RLock()\n\tf := t.sink.enqueue\n\tt.sinkMu.RUnlock()\n\tf(nn)")]),
+    ("the new Metrics doesn't get the held gauge", "tracker.go",
+     [("\tt.sinkMu.Unlock()\n\tt.reportHeld()", "\tt.sinkMu.Unlock()")]),
     ("Disown's bound isn't checked", "shared.go",
      [("\tif time.Duration(o.DisownPasses)*o.DisownInterval < 2*o.TimeoutBound {", "\tif false {")]),
     ("a refused Track doesn't stop Run", "shared.go",
@@ -157,7 +182,9 @@ TESTS = ("^(TestRelistResetsRecordSince|TestTrackAfterStartAndTwice|TestPublishe
          "TestNamespaceHandlerActsOnlyOnItsFields|TestStrippingEnqueuesTheHolders|TestDeletingSecretRefusesANewHolder|"
          "TestBatchQueue.*|TestAdmissionDenialIsCounted|TestPublishedSettingsCompareAsValues|TestTrackValidates|"
          "TestConcurrentTracksWaitForTheSync|TestFailedTrackLeavesNothing|TestTrackAfterRunRechecksTheSharedCache|"
-         "TestProtectedHandler|TestRunInformersShutsTheQueueDown|TestRunInformersChecksAccess|TestPublishConfig)$")
+         "TestProtectedHandler|TestRunInformersShutsTheQueueDown|TestRunInformersChecksAccess|TestPublishConfig|"
+         "TestTrackOfOneKindDoesntWaitForAnother|TestTrackStopsWaitingWhenRunInformersFails|"
+         "TestEqualOptionsComparesEveryOtherField|TestTrackRebindsTheSinks|TestRebindWaitsForCallsInFlight)$")
 
 
 class Run:
