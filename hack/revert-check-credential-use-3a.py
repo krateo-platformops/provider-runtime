@@ -28,18 +28,27 @@ FILES = ["listwatch.go", "informers.go", "shared.go", "setup.go", "tracker.go", 
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
-    # listwatch.go: the relist floor (§6.5 L2, A20).
+    # listwatch.go: the relist floor (§6.5 L2, A20), and its order (G1 of the
+    # review of #109).
     ("a List's completion isn't recorded", "listwatch.go",
-     [("\tif out.Continue == \"\" {\n\t\tl.lists.Add(1)\n\t\tl.completed()\n", "\tif out.Continue == \"\" {\n\t\tl.lists.Add(1)\n")]),
+     [("\t\tl.completed()\n\t}\n\treturn out, nil", "\t}\n\treturn out, nil")]),
     ("a watch-list stream's completion isn't recorded", "listwatch.go",
-     [("\t\t\t\tw.lw.streams.Add(1)\n\t\t\t\tw.lw.completed()\n", "\t\t\t\tw.lw.streams.Add(1)\n")]),
+     [("\t\t\t\tw.lw.completed()\n", "")]),
+    ("the bookmark is recorded after it is passed on", "listwatch.go",
+     [("\t\t\tif w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {\n\t\t\t\tw.lw.completed()\n\t\t\t}\n"
+       "\t\t\tselect {\n\t\t\tcase w.out <- ev:\n\t\t\tcase <-w.done:\n\t\t\t\treturn\n\t\t\t}\n",
+       "\t\t\tselect {\n\t\t\tcase w.out <- ev:\n\t\t\tcase <-w.done:\n\t\t\t\treturn\n\t\t\t}\n"
+       "\t\t\tif w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {\n\t\t\t\tw.lw.completed()\n\t\t\t}\n")]),
+    ("a List's completion is recorded at the next Watch", "listwatch.go",
+     [("\t\tl.completed()\n\t}\n\treturn out, nil", "\t}\n\treturn out, nil"),
+      ("func (l *listWatch) WatchWithContext(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {\n",
+       "func (l *listWatch) WatchWithContext(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {\n"
+       "\tif options.SendInitialEvents == nil || !*options.SendInitialEvents {\n\t\tl.completed()\n\t}\n")]),
     ("the holder informer's lists don't reach the verified set", "tracker.go",
-     [("s.clock, t.ver.listCompleted)", "s.clock, nil)")]),
-    # informers.go: the handlers (§6.3, §10.2, §11.3).
+     [("\tt.ver.listCompleted(at)\n", "")]),
+    # informers.go: the holder and Namespace handlers (§6.3, §10.2, §11.3).
     ("a holder update doesn't reach the verified set", "informers.go",
      [("\th.t.ver.holderEvent(n.UID, n, at)\n", "")]),
-    ("a protected object leaving the cache doesn't enqueue its holders", "informers.go",
-     [("\t\tt.enqueueHolders(id)\n\t}\n}\n\n// graceTimers", "\t}\n}\n\n// graceTimers")]),
     ("the Namespace handler acts on every change", "informers.go",
      [("\tif !newlyDeleting && (o.DeletionTimestamp == nil) == (n.DeletionTimestamp == nil) &&\n\t\tmaps.Equal(o.Annotations, n.Annotations) {\n\t\treturn\n\t}\n",
        "\t_ = maps.Equal(o.Annotations, n.Annotations)\n")]),
@@ -47,27 +56,96 @@ MUTANTS = [
      [("\t\t\t\tif newlyDeleting {\n\t\t\t\t\tfor ns := range holds(t, m) {", "\t\t\t\tif false {\n\t\t\t\t\tfor ns := range holds(t, m) {")]),
     ("the Namespace handler doesn't enqueue holders", "informers.go",
      [("\t\t\t\tt.enqueueHolders(id)\n\t\t\t\tif newlyDeleting {", "\t\t\t\tif newlyDeleting {")]),
-    # shared.go and setup.go: setup (§7.3, §7.5).
+    # informers.go: the protected handler (G2, G4, G5, G6, N3, N5).
+    ("a protected add enqueues nothing", "informers.go",
+     [("\t\th.s.queue.Add(batchKey{h.t.gk, n}, id)\n", "\t\t_ = n\n")]),
+    ("a protected update enqueues nothing", "informers.go",
+     [("newlyDeleting || replaced {\n\t\t\th.s.queue.Add(batchKey{t.gk, ns}, id)\n", "newlyDeleting || replaced {\n")]),
+    ("a protected update doesn't reach the verified set", "informers.go",
+     [("\tt.ver.protectedEvent(o, n)\n", "")]),
+    ("a deletion's grace sets no timer", "informers.go",
+     [("\t\th.s.queue.AddAfter(batchKey{h.t.gk, n}, end.Sub(now), id)\n", "\t\t_, _, _ = end, id, n\n")]),
+    ("a deleting object under a new UID gets no grace timer", "informers.go",
+     [("\tif n.DeletionTimestamp != nil && (newlyDeleting || replaced) {", "\tif n.DeletionTimestamp != nil && newlyDeleting {")]),
+    ("losing a finalizer doesn't enqueue the holders", "informers.go",
+     [("\t\tlost = lost || (inB && (!inA || replaced))\n", "")]),
+    ("a protected object leaving the cache doesn't enqueue its holders", "informers.go",
+     [("\tt.enqueueHolders(id)\n\t// The object left the cache", "\t// The object left the cache")]),
+    ("a deleted object's first sight is kept", "informers.go",
+     [("\th.s.seen.forget(m.UID)\n\th.count(-len(held))", "\th.count(-len(held))")]),
+    ("a replaced object's first sight is kept", "informers.go",
+     [("\t\th.s.seen.forget(o.UID)\n", "")]),
+    ("the held gauge counts objects, not pairs", "informers.go",
+     [("\th.count(len(held))\n", "\th.count(min(len(held), 1))\n")]),
+    ("an unparseable record's holder isn't enqueued", "informers.go",
+     [("idx := t.holders.GetIndexer()\n\tfor _, key := range []string{id.String(), unparseableKey} {",
+       "idx := t.holders.GetIndexer()\n\tfor _, key := range []string{id.String()} {")]),
+    ("the held gauge isn't reported", "tracker.go",
+     [("\tt.o.Metrics.HeldObjects(kindLabel(t.gk), sum)\n", "\t_ = sum\n")]),
+    # shared.go: Run's checks and shutdown (§7.3, §7.5; N2, G6).
     ("start doesn't check the namespace verbs", "shared.go",
-     [("\tif err := s.canWatchNamespaces(ctx); err != nil {\n\t\treturn err\n\t}\n", "")]),
+     [("\tif err := s.canAccess(ctx, namespaceGVR, \"get\", \"list\", \"watch\"); err != nil {\n\t\treturn fmt.Errorf(\"%w (%w)\", errNamespaceSync, err)\n\t}\n", "")]),
+    ("start doesn't check the informers' verbs", "shared.go",
+     [("\tfor _, inf := range infs {\n\t\tif err := inf.preflight(ctx, s); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n", "")]),
+    ("without a dynamic client the check passes", "shared.go",
+     [("\tif s.c.Dynamic == nil {\n\t\treturn errors.New(\"credential-use: Clients.Dynamic is required\")\n\t}\n\tfor _, verb := range verbs {",
+       "\tif s.c.Dynamic == nil {\n\t\treturn nil\n\t}\n\tfor _, verb := range verbs {")]),
+    ("RunInformers leaves the queue running", "shared.go",
+     [("\tdefer s.queue.ShutDown()\n", "")]),
+    # shared.go: Track (§7.3; D2, D3, D4).
+    ("Tracks don't wait for each other", "shared.go",
+     [("\ts.trackMu.Lock()\n\ts.trackWaiting.Add(-1)\n\tdefer s.trackMu.Unlock()\n", "\ts.trackWaiting.Add(-1)\n")]),
+    ("a Track after Run doesn't check the verbs", "shared.go",
+     [("\tfor _, inf := range starting {\n\t\tif err := inf.preflight(ictx, s); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n", "")]),
+    ("a failed Track leaves its tracker", "shared.go",
+     [("\t\tdelete(s.trackers, gk)\n", "")]),
+    ("a failed Track leaves its protected informers", "shared.go",
+     [("\t\tfor pgk := range fresh {\n\t\t\tdelete(s.protected, pgk)\n\t\t}\n", "")]),
+    ("a failed Track's handlers stay", "shared.go",
+     [("\t\tt.leaveAll()\n\t\ts.mu.Lock()\n\t\tdelete(s.trackers, gk)", "\t\ts.mu.Lock()\n\t\tdelete(s.trackers, gk)")]),
+    ("a failed Track's informers keep running", "shared.go",
+     [("\t\tt.stopInformers()\n\t\tfor _, p := range fresh {\n\t\t\tp.stop()\n\t\t}\n", "")]),
+    ("a Track after Run doesn't wait for the replay", "shared.go",
+     [("\tfor _, p := range joined {\n\t\tif err := s.waitSynced(ictx, t.regs[p].HasSynced,",
+       "\tfor _, p := range joined[:0] {\n\t\tif err := s.waitSynced(ictx, t.regs[p].HasSynced,")]),
     ("a second Track with other options returns the first tracker", "shared.go",
-     [("\t\tif !equalOptions(t.o, o) {\n\t\t\treturn nil, fmt.Errorf(\"credential-use: %s is already tracked with other options\", gk)\n\t\t}\n\t\treturn t, nil\n\t}\n\ts.mu.Unlock()",
-       "\t\treturn t, nil\n\t}\n\ts.mu.Unlock()")]),
+     [("\t\tif !equalOptions(prev.o, o) {\n\t\t\treturn nil, fmt.Errorf(\"credential-use: %s is already tracked with other options\", gk)\n\t\t}\n\t\treturn prev, nil",
+       "\t\treturn prev, nil")]),
     ("Disown's bound isn't checked", "shared.go",
      [("\tif time.Duration(o.DisownPasses)*o.DisownInterval < 2*o.TimeoutBound {", "\tif false {")]),
     ("a refused Track doesn't stop Run", "shared.go",
      [("\t\ts.setupErr = errors.Join(s.setupErr, err)\n", "")]),
+    # setup.go: the published settings (§7.3, L3, L4; G3).
     ("published settings that disagree are accepted", "setup.go",
-     [("\t\t\tif d := disagreement(want, got); d != \"\" {", "\t\t\tif d := disagreement(want, got); false && d != \"\" {")]),
+     [("\t\tif d := disagreement(want, got); d != \"\" {", "\t\tif d := disagreement(want, got); false && d != \"\" {")]),
     ("the settings aren't published", "setup.go",
      [("\t\t_, err = crds.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})\n", "\t\t_, _ = types.MergePatchType, patch\n\t\terr = nil\n")]),
-    # queue.go: buffering and timers (M1 of the review of revision 16).
+    ("the patch isn't guarded by the resourceVersion", "setup.go",
+     [("\t\t\t\"resourceVersion\": crd.GetResourceVersion(),\n", "\t\t\t\"name\":            crd.GetName(),\n")]),
+    ("every patch error is retried", "setup.go",
+     [("\t\tif Classify(err) != ClassConflict {", "\t\tif false && Classify(err) != ClassConflict {")]),
+    ("the attempts aren't bounded at five", "setup.go",
+     [("\tfor range maxCRDWriteAttempts {", "\tfor range 2 * maxCRDWriteAttempts {")]),
+    ("no read after the last conflict", "setup.go",
+     [("\tif _, done, err := check(); err != nil || done {\n\t\treturn err\n\t}\n\to.Metrics.CRDWriteStarved", "\to.Metrics.CRDWriteStarved")]),
+    ("a starved write isn't counted", "setup.go",
+     [("\to.Metrics.CRDWriteStarved(kindLabel(gk))\n", "")]),
+    # queue.go: buffering, timers, and the lock order with the clock (M1 of
+    # the review of revision 16; D1 of the review of #109).
     ("the queue drops what a batch covered before", "queue.go",
      [("\tset := q.pending[k]\n\tif set == nil {", "\tset := map[ID]bool(nil)\n\tif set == nil {")]),
     ("a key added during work isn't queued again", "queue.go",
      [("\tif _, again := q.pending[k]; again && !q.queued[k] && !q.stopped {", "\tif false {")]),
     ("ShutDown leaves the timers running", "queue.go",
-     [("\tfor t := range q.timers {\n\t\tt.Stop()\n\t}\n", "")]),
+     [("\tfor _, t := range stop {\n\t\tt.Stop()\n\t}\n", "")]),
+    ("AddAfter calls the clock under the queue's lock", "queue.go",
+     [("\te := &queueTimer{}\n\tq.mu.Lock()\n\tif q.stopped {\n\t\tq.mu.Unlock()\n\t\treturn\n\t}\n\tq.timers[e] = true\n\tq.mu.Unlock()\n\n\tt := q.clock.AfterFunc(",
+       "\te := &queueTimer{}\n\tq.mu.Lock()\n\tdefer q.mu.Unlock()\n\tif q.stopped {\n\t\treturn\n\t}\n\tq.timers[e] = true\n\te.t = q.clock.AfterFunc("),
+      ("\t})\n\n\tq.mu.Lock()\n\tlive := q.timers[e]\n\tif live {\n\t\te.t = t\n\t}\n\tq.mu.Unlock()\n\tif !live {",
+       "\t})\n\tif false {\n\t\tt := e.t")]),
+    ("ShutDown stops the timers under the queue's lock", "queue.go",
+     [("\tq.cond.Broadcast()\n\tq.mu.Unlock()\n\tfor _, t := range stop {\n\t\tt.Stop()\n\t}\n",
+       "\tfor _, t := range stop {\n\t\tt.Stop()\n\t}\n\tq.cond.Broadcast()\n\tq.mu.Unlock()\n")]),
     # acquire.go: class (e) is counted (L3 of the review of revision 16).
     ("class (e) isn't counted", "acquire.go",
      [("\t\t\t\tp.reports.AdmissionDenied(p.holder)\n", "")]),
@@ -77,7 +155,9 @@ EQUIVALENT = {}
 
 TESTS = ("^(TestRelistResetsRecordSince|TestTrackAfterStartAndTwice|TestPublishedSettings|TestRunNeedsNamespaceListAndWatch|"
          "TestNamespaceHandlerActsOnlyOnItsFields|TestStrippingEnqueuesTheHolders|TestDeletingSecretRefusesANewHolder|"
-         "TestBatchQueue.*|TestAdmissionDenialIsCounted|TestPublishedSettingsCompareAsValues|TestTrackValidates)$")
+         "TestBatchQueue.*|TestAdmissionDenialIsCounted|TestPublishedSettingsCompareAsValues|TestTrackValidates|"
+         "TestConcurrentTracksWaitForTheSync|TestFailedTrackLeavesNothing|TestTrackAfterRunRechecksTheSharedCache|"
+         "TestProtectedHandler|TestRunInformersShutsTheQueueDown|TestRunInformersChecksAccess|TestPublishConfig)$")
 
 
 class Run:
