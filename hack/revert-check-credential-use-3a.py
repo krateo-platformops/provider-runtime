@@ -102,9 +102,31 @@ MUTANTS = [
     ("a Track after Run doesn't check the holders' verbs", "shared.go",
      [("\tif err := t.informer().preflight(ctx, s); err != nil {\n\t\treturn err\n\t}\n\thctx", "\thctx")]),
     ("a Track after Run doesn't check a protected informer's verbs", "shared.go",
-     [("\t\terr := p.informer().preflight(ctx, s)\n", "\t\tvar err error\n")]),
+     [("\t\terr := p.informer().preflight(check, s)\n", "\t\tvar err error\n\t\t_ = check\n")]),
     ("nobody starts a protected informer created after Run", "shared.go",
      [("\tstarter := !p.starting\n", "\tstarter := false\n")]),
+    ("a Track that didn't start a shared informer doesn't wait for it", "shared.go",
+     [("\tif starter {\n\t\ts.startShared(ictx, p)\n\t}\n\treturn s.waitShared(ctx, p)",
+       "\tif !starter {\n\t\treturn nil\n\t}\n\ts.startShared(ictx, p)\n\treturn s.waitShared(ctx, p)")]),
+    ("a shared informer runs under its starter's budget", "shared.go",
+     [("\tif starter {\n\t\ts.startShared(ictx, p)\n\t}\n", "\tif starter {\n\t\ts.startShared(ctx, p)\n\t}\n")]),
+    ("a shared informer's forbidden list isn't its start error", "shared.go",
+     [("\t\t\tp.fail(fmt.Errorf(\"%w: the protected informer of %s: %w\", errForbidden, p.gk, err))\n", "\t\t\t_ = err\n")]),
+    ("an informer another Track claims is removed", "shared.go",
+     [("\t\tif p.claims > 0 || p.runOwned {", "\t\tif p.runOwned {")]),
+    ("a Track joins before its holder sync", "shared.go",
+     [("\thctx, stop := context.WithCancel(ictx)\n\tt.stopHolders = stop\n"
+       "\tif err := s.startAndSync(hctx, ctx, t.holders, \"the holder informer of \"+t.gk.String()); err != nil {\n\t\treturn err\n\t}\n"
+       "\tfor _, p := range ps {\n\t\tif err := p.ensureStarted(ctx, ictx, s); err != nil {\n\t\t\treturn err\n\t\t}\n"
+       "\t\tif err := t.join(p); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n",
+       "\tfor _, p := range ps {\n\t\tif err := p.ensureStarted(ctx, ictx, s); err != nil {\n\t\t\treturn err\n\t\t}\n"
+       "\t\tif err := t.join(p); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n"
+       "\thctx, stop := context.WithCancel(ictx)\n\tt.stopHolders = stop\n"
+       "\tif err := s.startAndSync(hctx, ctx, t.holders, \"the holder informer of \"+t.gk.String()); err != nil {\n\t\treturn err\n\t}\n")]),
+    ("a cancelled Track is held against Run", "shared.go",
+     [("\t\tif caller.Err() != nil {\n\t\t\treturn err\n\t\t}\n\t\treturn s.setupFailed(err)", "\t\treturn s.setupFailed(err)")]),
+    ("a Track ignores its caller's ctx", "shared.go",
+     [("\tctx, cancel := context.WithTimeout(parent, s.timeout())", "\tctx, cancel := context.WithTimeout(context.WithoutCancel(parent), s.timeout())")]),
     ("a failed Track keeps its claims", "shared.go",
      [("\t\tstops := s.releaseLocked(ps)\n", "\t\tvar stops []context.CancelFunc\n")]),
     ("an informer nobody claims isn't removed", "shared.go",
@@ -184,7 +206,9 @@ TESTS = ("^(TestRelistResetsRecordSince|TestTrackAfterStartAndTwice|TestPublishe
          "TestConcurrentTracksWaitForTheSync|TestFailedTrackLeavesNothing|TestTrackAfterRunRechecksTheSharedCache|"
          "TestProtectedHandler|TestRunInformersShutsTheQueueDown|TestRunInformersChecksAccess|TestPublishConfig|"
          "TestTrackOfOneKindDoesntWaitForAnother|TestTrackStopsWaitingWhenRunInformersFails|"
-         "TestEqualOptionsComparesEveryOtherField|TestTrackRebindsTheSinks|TestRebindWaitsForCallsInFlight)$")
+         "TestEqualOptionsComparesEveryOtherField|TestTrackRebindsTheSinks|TestRebindWaitsForCallsInFlight|"
+         "TestSharedInformerWaitersKeepTheirOwnBudget|TestSharedInformerStartFailureReachesEveryTrack|TestTrackJoinsAfterItsHolderSync|"
+         "TestTrackHonoursTheCallersContext)$")
 
 
 class Run:
