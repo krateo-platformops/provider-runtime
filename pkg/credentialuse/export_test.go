@@ -83,3 +83,10 @@ func (t *Tracker) RefuseWatchList(refuse bool) { t.testLW().refuseWatchList.Stor
 func (t *Tracker) HolderLists() (lists, streams int64) {
 	return t.testLW().lists.Load(), t.testLW().streams.Load()
 }
+
+// HookCalls sets functions that run before and after every API call the
+// trackers' protocols and the janitor make: an error from before fails the
+// call. Set it before Track.
+func (s *Shared) HookCalls(before func(ctx context.Context, c Call) error, after func(c Call, err error)) {
+	s.hooks.wrapServer = func(srv server) server { return hookServer{server: srv, before: before, after: after} }
+}

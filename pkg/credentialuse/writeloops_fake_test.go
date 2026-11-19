@@ -101,31 +101,59 @@ func (r *fakeRig) takeEvents() []string {
 	}
 }
 
-// hookServer lets a test act before a server call, or fail it.
+// A Call is one API call the protocol or the janitor makes, as a hook sees
+// it.
+type Call struct {
+	Op        string // get, patch or list
+	GK        schema.GroupKind
+	Namespace string
+	Name      string
+	PatchType types.PatchType
+}
+
+// hookServer lets a test act before a server call, or fail it, and see its
+// result.
 type hookServer struct {
 	server
-	before func(ctx context.Context, op string, gk schema.GroupKind, name string) error
+	before func(ctx context.Context, c Call) error
+	after  func(c Call, err error)
 }
 
-func (h hookServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
-	if err := h.before(ctx, "get", gk, name); err != nil {
-		return nil, err
+func (h hookServer) call(ctx context.Context, c Call, f func() error) error {
+	if h.before != nil {
+		if err := h.before(ctx, c); err != nil {
+			return err
+		}
 	}
-	return h.server.Get(ctx, gk, ns, name)
+	err := f()
+	if h.after != nil {
+		h.after(c, err)
+	}
+	return err
 }
 
-func (h hookServer) Patch(ctx context.Context, gk schema.GroupKind, ns, name string, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
-	if err := h.before(ctx, "patch", gk, name); err != nil {
-		return nil, err
-	}
-	return h.server.Patch(ctx, gk, ns, name, pt, data)
+func (h hookServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (out *metav1.PartialObjectMetadata, err error) {
+	err = h.call(ctx, Call{Op: "get", GK: gk, Namespace: ns, Name: name}, func() error {
+		out, err = h.server.Get(ctx, gk, ns, name)
+		return err
+	})
+	return out, err
 }
 
-func (h hookServer) List(ctx context.Context, gk schema.GroupKind, ns string) ([]metav1.PartialObjectMetadata, error) {
-	if err := h.before(ctx, "list", gk, ""); err != nil {
-		return nil, err
-	}
-	return h.server.List(ctx, gk, ns)
+func (h hookServer) Patch(ctx context.Context, gk schema.GroupKind, ns, name string, pt types.PatchType, data []byte) (out *metav1.PartialObjectMetadata, err error) {
+	err = h.call(ctx, Call{Op: "patch", GK: gk, Namespace: ns, Name: name, PatchType: pt}, func() error {
+		out, err = h.server.Patch(ctx, gk, ns, name, pt, data)
+		return err
+	})
+	return out, err
+}
+
+func (h hookServer) List(ctx context.Context, gk schema.GroupKind, ns string) (out []metav1.PartialObjectMetadata, err error) {
+	err = h.call(ctx, Call{Op: "list", GK: gk, Namespace: ns}, func() error {
+		out, err = h.server.List(ctx, gk, ns)
+		return err
+	})
+	return out, err
 }
 
 var fWidgetNS = func() string { f, _ := FinalizerName(widgetGK, "ns"); return f }()
@@ -268,8 +296,8 @@ func TestReleaseLoopBacksOff(t *testing.T) {
 	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
 	var gets atomic.Int32
 	r.s.hooks.wrapServer = func(srv server) server {
-		return hookServer{server: srv, before: func(_ context.Context, op string, gk schema.GroupKind, _ string) error {
-			if op == "get" && gk == secretGroupKind && gets.Add(1) == 1 {
+		return hookServer{server: srv, before: func(_ context.Context, c Call) error {
+			if c.Op == "get" && c.GK == secretGroupKind && gets.Add(1) == 1 {
 				return apierrors.NewInternalError(errors.New("test: once"))
 			}
 			return nil
@@ -317,8 +345,8 @@ func TestReleaseLoopKeepsAnInterruptedBatch(t *testing.T) {
 	inGet := make(chan struct{})
 	var once sync.Once
 	r.s.hooks.wrapServer = func(srv server) server {
-		return hookServer{server: srv, before: func(ctx context.Context, op string, gk schema.GroupKind, _ string) error {
-			if op == "get" && gk == secretGroupKind {
+		return hookServer{server: srv, before: func(ctx context.Context, c Call) error {
+			if c.Op == "get" && c.GK == secretGroupKind {
 				once.Do(func() { close(inGet) })
 				<-ctx.Done()
 				return ctx.Err()

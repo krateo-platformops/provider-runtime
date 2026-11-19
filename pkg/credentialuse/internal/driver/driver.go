@@ -25,7 +25,11 @@ import (
 
 // A Driver reconciles one holder kind.
 type Driver struct {
+	// Tracker is the kind's tracker. Nil runs the loop without
+	// credential-use, as today's providers do: the control that must wedge
+	// in a namespace teardown (§14). Refs then names what Connect reads.
 	Tracker        *cu.Tracker
+	Refs           cu.RefsFunc
 	Dynamic        dynamic.Interface
 	Holder         schema.GroupVersionResource
 	OwnerFinalizer string
@@ -78,18 +82,27 @@ func (d *Driver) Reconcile(ctx context.Context, nn types.NamespacedName) (Result
 	}
 
 	// §7.2 item 2: Acquire, before anything reads a protected object.
-	a, err := d.Tracker.Acquire(ctx, obj)
-	res.Acquired = a
-	if errors.Is(err, cu.ErrHolderConflict) {
-		res.Requeue = true
-		return res, nil
-	}
-	if err != nil {
-		return res, err
-	}
-	if a.MustNotConnect {
-		res.Requeue = true
-		return res, nil
+	var a cu.Acquired
+	if d.Tracker != nil {
+		a, err = d.Tracker.Acquire(ctx, obj)
+		res.Acquired = a
+		if errors.Is(err, cu.ErrHolderConflict) {
+			res.Requeue = true
+			return res, nil
+		}
+		if err != nil {
+			return res, err
+		}
+		if a.MustNotConnect {
+			res.Requeue = true
+			return res, nil
+		}
+	} else {
+		refs, err := d.Refs(obj)
+		if err != nil {
+			return res, err
+		}
+		a.Held = refs
 	}
 
 	// Connect: read every held ref.
@@ -111,7 +124,10 @@ func (d *Driver) Reconcile(ctx context.Context, nn types.NamespacedName) (Result
 		if owned {
 			d.record("delete %s", nn)
 		}
-		changed := d.Tracker.Forget(obj)
+		changed := false
+		if d.Tracker != nil {
+			changed = d.Tracker.Forget(obj)
+		}
 		if !owned && !changed {
 			return res, nil
 		}
@@ -125,9 +141,11 @@ func (d *Driver) Reconcile(ctx context.Context, nn types.NamespacedName) (Result
 
 	if !owned {
 		// §7.2 item 3: BeforeEstablish, just before the owner finalizer.
-		if err := d.Tracker.BeforeEstablish(ctx, obj, a); err != nil {
-			res.Requeue = true
-			return res, nil
+		if d.Tracker != nil {
+			if err := d.Tracker.BeforeEstablish(ctx, obj, a); err != nil {
+				res.Requeue = true
+				return res, nil
+			}
 		}
 		obj.SetFinalizers(append(obj.GetFinalizers(), d.OwnerFinalizer))
 		if err := d.update(ctx, r, obj); err != nil {
