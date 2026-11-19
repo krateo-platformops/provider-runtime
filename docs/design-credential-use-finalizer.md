@@ -1880,6 +1880,21 @@ denied there (class (d) of §6.2, RBAC), Acquire returns an error: fail
 closed for a new holder, fail open for an established one (§8). The doc text says so, and that such
 refs need §13's cluster-scoped RBAC.
 
+**What is restricted.** Only the protected-object informers, one per
+listed namespace. The holder informers and the Namespace informer stay
+cluster-wide, as §13's ClusterRole verbs on the holder kind and on
+namespaces already allow: the release batches start from holder events
+(§10.2), and §5's namespace rows read every namespace.
+
+**A deletion outside the cached namespaces** reaches no informer, so
+nothing enqueues the object's batch or starts its grace timer. The rule:
+when a pass's A2 holds an object outside the cached namespaces and A2's
+response shows it being deleted, the acquirer enqueues the object's
+(K, N) batch, and R1 measures the grace from that first sight (§5, L4).
+The cost is liveness only: such an object is released on the next pass of
+a holder that reads it, not at once, and never earlier than the table of
+§5 allows (PR 3b, 2026-11-19).
+
 ### 10.6 PerName mode: the index ConfigMap (M1)
 
 Under `resourceNames` RBAC a tracker can't list a protected kind, so it
