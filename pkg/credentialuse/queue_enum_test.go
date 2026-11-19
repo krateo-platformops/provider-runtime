@@ -23,6 +23,7 @@ package credentialuse
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -291,8 +292,10 @@ func ops(spec string) []enumOp {
 			out = append(out, enumOp{kind: kind, key: rest[:1], id: rest[1:]})
 		case strings.HasPrefix(f, "get") || strings.HasPrefix(f, "done"):
 			kind := strings.TrimRight(f, "0123456789")
-			var w int
-			fmt.Sscanf(f[len(kind):], "%d", &w)
+			w, err := strconv.Atoi(f[len(kind):])
+			if err != nil {
+				panic(fmt.Sprintf("scenario op %q: %v", f, err))
+			}
 			out = append(out, enumOp{kind: kind, worker: w})
 		default:
 			out = append(out, enumOp{kind: f})

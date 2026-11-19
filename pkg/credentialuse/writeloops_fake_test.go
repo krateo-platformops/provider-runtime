@@ -195,7 +195,7 @@ func TestReleaseLoopKeepsForTheGraceAndReports(t *testing.T) {
 
 	eventually(t, "the Secret to be reported waiting", func() bool {
 		evs := strings.Join(r.peekEvents(), "\n")
-		return strings.Contains(evs, EventWaitingForUsers) && strings.Contains(evs, EventCredentialDeleting)
+		return strings.Contains(evs, EventWaitingForUsers) && strings.Contains(evs, EventProtectedDeleting)
 	})
 	evs := r.takeEvents()
 	var waiting, deletingEv string
@@ -203,7 +203,7 @@ func TestReleaseLoopKeepsForTheGraceAndReports(t *testing.T) {
 		switch {
 		case strings.Contains(e, EventWaitingForUsers):
 			waiting = e
-		case strings.Contains(e, EventCredentialDeleting):
+		case strings.Contains(e, EventProtectedDeleting):
 			deletingEv = e
 		}
 	}
@@ -654,7 +654,7 @@ func TestReportKeptWarnsTheLiveUsers(t *testing.T) {
 	var warned, waiting int
 	for _, e := range evs {
 		switch {
-		case strings.Contains(e, EventCredentialDeleting):
+		case strings.Contains(e, EventProtectedDeleting):
 			warned++
 		case strings.Contains(e, EventWaitingForUsers):
 			waiting++

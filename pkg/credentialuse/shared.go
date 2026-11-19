@@ -332,7 +332,9 @@ func (s *Shared) Run(ctx context.Context) error {
 	select {
 	case err := <-informers:
 		cancel()
-		<-writes
+		// The write loops end because the informers did, so their error
+		// adds nothing to the informers'.
+		_ = <-writes
 		return err
 	case err := <-writes:
 		cancel()

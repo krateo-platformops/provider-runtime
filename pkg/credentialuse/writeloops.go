@@ -203,10 +203,12 @@ func (b *batchBackoff) reset(k batchKey) {
 	delete(b.failures, k)
 }
 
-// The events of §12 that the release loop records.
+// The events of §12 that the release loop records: WaitingForCredentialUsers
+// on a protected object kept for its users, and CredentialDeleting on each
+// live user of one.
 const (
-	EventWaitingForUsers    = "WaitingForCredentialUsers"
-	EventCredentialDeleting = "CredentialDeleting"
+	EventWaitingForUsers   = "WaitingForCredentialUsers"
+	EventProtectedDeleting = "CredentialDeleting"
 )
 
 // reportKept records §12's events for the objects being deleted that a
@@ -240,7 +242,7 @@ func (s *Shared) reportKept(t *Tracker, k batchKey, kept []Kept) {
 				continue
 			}
 			holder := ID{Group: t.gk.Group, Kind: t.gk.Kind, Namespace: u.Namespace, Name: u.Name}
-			s.events.record(s.events.regarding(holder), "Warning", EventCredentialDeleting,
+			s.events.record(s.events.regarding(holder), "Warning", EventProtectedDeleting,
 				fmt.Sprintf("%s is being deleted and is kept for this object's kind: %s", what, kp.Why))
 		}
 	}

@@ -329,7 +329,7 @@ func TestNamespaceTeardown(t *testing.T) {
 		}
 	}
 
-	t.Run("with credential-use", func(t *testing.T) {
+	t.Run("with the tracker", func(t *testing.T) {
 		r := newWriteRig(t, env.Config, cu.SharedOptions{}, nil, nil)
 		ns := env.Namespace(t, "teardown")
 		// 1. A namespace, a Secret, and two Widgets naming it.
@@ -367,7 +367,7 @@ func TestNamespaceTeardown(t *testing.T) {
 		})
 	})
 
-	t.Run("control: without credential-use it wedges", func(t *testing.T) {
+	t.Run("control: without the tracker it wedges", func(t *testing.T) {
 		c := newController(t)
 		c.start(&driver.Driver{Dynamic: env.Dynamic, Holder: cutest.WidgetGVR, OwnerFinalizer: ownerFinalizer, Refs: secretRefs})
 		ns := env.Namespace(t, "control")

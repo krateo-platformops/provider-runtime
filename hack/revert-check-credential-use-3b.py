@@ -54,7 +54,7 @@ MUTANTS = [
     ("no WaitingForCredentialUsers", "writeloops.go",
      [("\t\ts.events.record(s.events.regarding(kp.P), \"Normal\", EventWaitingForUsers, note)\n", "\t\t_ = note\n")]),
     ("no CredentialDeleting", "writeloops.go",
-     [("\t\t\ts.events.record(s.events.regarding(holder), \"Warning\", EventCredentialDeleting,", "\t\t\t_, _ = holder, fmt.Sprint(")]),
+     [("\t\t\ts.events.record(s.events.regarding(holder), \"Warning\", EventProtectedDeleting,", "\t\t\t_, _ = holder, fmt.Sprint(")]),
     ("CredentialDeleting warns the deleting users too", "writeloops.go",
      [("\t\t\tif deleting[u] {\n\t\t\t\tcontinue\n\t\t\t}\n", "")]),
     # janitor.go: the label janitor (§10.1, §6.2 L1).
