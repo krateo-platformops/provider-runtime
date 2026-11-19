@@ -207,7 +207,7 @@ func TestRelistResetsRecordSince(t *testing.T) {
 			nn := types.NamespacedName{Namespace: ns, Name: "w"}
 
 			s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
-			tr, err := s.Track(widgetOptions(func(types.NamespacedName) {}))
+			tr, err := s.Track(context.Background(), widgetOptions(func(types.NamespacedName) {}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -295,19 +295,19 @@ func TestTrackAfterStartAndTwice(t *testing.T) {
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
 	enq := func(types.NamespacedName) {}
 	o := widgetOptions(enq)
-	w, err := s.Track(o)
+	w, err := s.Track(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	running(t, s)
 
-	again, err := s.Track(o)
+	again, err := s.Track(context.Background(), o)
 	if err != nil || again != w {
 		t.Fatalf("Track with equal Options = %p, %v; want the same tracker %p", again, err, w)
 	}
 	other := o
 	other.ProbeInterval = time.Second
-	if _, err := s.Track(other); err == nil || !strings.Contains(err.Error(), "other options") {
+	if _, err := s.Track(context.Background(), other); err == nil || !strings.Contains(err.Error(), "other options") {
 		t.Errorf("Track with different Options = %v, want an error", err)
 	}
 
@@ -321,7 +321,7 @@ func TestTrackAfterStartAndTwice(t *testing.T) {
 	}
 	to := widgetOptions(enq)
 	to.Holder = cutest.TargetGVK
-	tt, err := s.Track(to)
+	tt, err := s.Track(context.Background(), to)
 	if err != nil {
 		t.Fatalf("Track after Run: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestPublishedSettings(t *testing.T) {
 	}
 
 	first := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
-	if _, err := first.Track(widgetOptions(func(types.NamespacedName) {})); err != nil {
+	if _, err := first.Track(context.Background(), widgetOptions(func(types.NamespacedName) {})); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := read(), `{"deletionGrace":"60s","disownPasses":5,"disownInterval":"60s","timeoutBound":"90s"}`; got != want {
@@ -377,7 +377,7 @@ func TestPublishedSettings(t *testing.T) {
 	o := widgetOptions(func(types.NamespacedName) {})
 	o.DeletionGrace = 30 * time.Second
 	second := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
-	if _, err := second.Track(o); err == nil || !strings.Contains(err.Error(), "deletionGrace") {
+	if _, err := second.Track(context.Background(), o); err == nil || !strings.Contains(err.Error(), "deletionGrace") {
 		t.Errorf("a process with another deletionGrace: Track = %v, want it refused", err)
 	}
 	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -390,7 +390,7 @@ func TestPublishedSettings(t *testing.T) {
 	o.TimeoutBound = 90 * time.Second
 	o.DisownInterval = time.Minute
 	third := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
-	if _, err := third.Track(o); err != nil {
+	if _, err := third.Track(context.Background(), o); err != nil {
 		t.Errorf("a process that agrees: %v", err)
 	}
 
@@ -401,7 +401,7 @@ func TestPublishedSettings(t *testing.T) {
 	o.OwnerFinalizers = []string{ownerFinalizer, "credentialuse.test.krateo.io/old-owner"}
 	o.Refs = func(metav1.Object) ([]cu.Ref, error) { return nil, errors.New("no refs today") }
 	fourth := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
-	tr, err := fourth.Track(o)
+	tr, err := fourth.Track(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestNamespaceHandlerActsOnlyOnItsFields(t *testing.T) {
 
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
 	enq := &enqueued{}
-	tr, err := s.Track(widgetOptions(enq.add))
+	tr, err := s.Track(context.Background(), widgetOptions(enq.add))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +628,7 @@ func TestStrippingEnqueuesTheHolders(t *testing.T) {
 	createWidget(t, ns, "w", "creds")
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
 	enq := &enqueued{}
-	tr, err := s.Track(widgetOptions(enq.add))
+	tr, err := s.Track(context.Background(), widgetOptions(enq.add))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -674,7 +674,7 @@ func TestDeletingSecretRefusesANewHolder(t *testing.T) {
 	}
 	createWidget(t, ns, "w", "creds")
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
-	tr, err := s.Track(widgetOptions(func(types.NamespacedName) {}))
+	tr, err := s.Track(context.Background(), widgetOptions(func(types.NamespacedName) {}))
 	if err != nil {
 		t.Fatal(err)
 	}

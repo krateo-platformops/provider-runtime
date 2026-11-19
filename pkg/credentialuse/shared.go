@@ -80,7 +80,11 @@ type Options struct {
 	Protected []ProtectedKind
 	// MaxDepth bounds the levels of Next followed (§9.1); the default is 3.
 	MaxDepth int
-	// Enqueue adds a holder to the caller's queue (§10.2). Required.
+	// Enqueue adds a holder to the caller's queue (§10.2). Required. It
+	// must not block or call Track: a Track with equal Options rebinds it,
+	// and the rebind waits for the calls in flight, so that none reaches
+	// the old one after Track returns (§7.3). An unbounded queue's Add, such
+	// as a workqueue's, is fine.
 	Enqueue func(holder types.NamespacedName)
 	// DeletionGrace is §5's grace; the default is 60s.
 	DeletionGrace time.Duration
@@ -96,8 +100,10 @@ type Options struct {
 	// and publishes it (§7.3). provider-runtime passes its timeout plus
 	// grace, 90s.
 	TimeoutBound time.Duration
-	Logger       logging.Logger
-	Metrics      MetricsRecorder
+	// Logger and Metrics are rebound with Enqueue, and the same rule holds:
+	// neither may block or call Track.
+	Logger  logging.Logger
+	Metrics MetricsRecorder
 }
 
 // RefsFunc names what obj reads to reach its external system. It must make
@@ -161,8 +167,10 @@ type Shared struct {
 	// a Track after start stops waiting for informers it will never sync.
 	runDone chan struct{}
 
-	// syncTimeout bounds each informer's first sync.
-	syncTimeout time.Duration
+	// syncTimeout, a time.Duration, bounds each informer's first sync, and
+	// each of a Track's two budgets (see Track). Atomic, so that tests can
+	// change it between Tracks.
+	syncTimeout atomic.Int64
 	// synced: RunInformers' informers have all synced.
 	synced atomic.Bool
 
@@ -202,18 +210,18 @@ type sharedClock interface {
 
 func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 	s := &Shared{
-		c:           c,
-		o:           o,
-		clock:       clk,
-		queue:       newBatchQueue(clk),
-		seen:        newFirstSight(),
-		events:      newEventSink(c.Events, c.Mapper, clk),
-		trackers:    map[schema.GroupKind]*Tracker{},
-		tracking:    map[schema.GroupKind]*inflight{},
-		runDone:     make(chan struct{}),
-		protected:   map[schema.GroupKind]*protectedInformer{},
-		syncTimeout: 2 * time.Minute,
+		c:         c,
+		o:         o,
+		clock:     clk,
+		queue:     newBatchQueue(clk),
+		seen:      newFirstSight(),
+		events:    newEventSink(c.Events, c.Mapper, clk),
+		trackers:  map[schema.GroupKind]*Tracker{},
+		tracking:  map[schema.GroupKind]*inflight{},
+		runDone:   make(chan struct{}),
+		protected: map[schema.GroupKind]*protectedInformer{},
 	}
+	s.syncTimeout.Store(int64(2 * time.Minute))
 	if c.Metadata != nil {
 		s.nsLW = newListWatch(c.Metadata, namespaceGVR, "", clk, nil)
 		s.namespaces = cache.NewSharedIndexInformerWithOptions(s.nsLW, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
@@ -383,10 +391,14 @@ func (s *Shared) startAndSync(run, wait context.Context, inf cache.SharedIndexIn
 	return s.waitSynced(wait, inf.HasSynced, what, forbidden)
 }
 
+// timeout is syncTimeout.
+func (s *Shared) timeout() time.Duration { return time.Duration(s.syncTimeout.Load()) }
+
 // waitSynced waits until synced reports true, for at most syncTimeout. An
 // error on forbidden fails it at once.
 func (s *Shared) waitSynced(ctx context.Context, synced func() bool, what string, forbidden <-chan error) error {
-	syncCtx, cancel := context.WithTimeout(ctx, s.syncTimeout)
+	limit := s.timeout()
+	syncCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	done := make(chan bool, 1)
 	go func() { done <- cache.WaitForCacheSync(syncCtx.Done(), synced) }()
@@ -396,7 +408,7 @@ func (s *Shared) waitSynced(ctx context.Context, synced func() bool, what string
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("credential-use: %s didn't sync within %s", what, s.syncTimeout)
+			return fmt.Errorf("credential-use: %s didn't sync within %s", what, limit)
 		}
 		return nil
 	case err := <-forbidden:
@@ -436,24 +448,52 @@ func (s *Shared) setupFailed(err error) error {
 // adding waits for it to end, then gets that tracker or, if that Track
 // failed, adds the kind itself, since a failed Track leaves nothing behind
 // (D2 and D3 of the review of #109). No lock is held across an API call, so
-// a slow Track of one kind never delays another's. A Track gives up after
-// syncTimeout, and at once when a RunInformers that started returns.
-func (s *Shared) Track(o Options) (*Tracker, error) {
+// a slow Track of one kind never delays another's.
+//
+// Deadlines. ctx is the caller's: when it ends, as when a manager shuts
+// down, a pending Track stops at once and returns an error that wraps
+// ctx.Err(). Beyond that, Track bounds itself, with two budgets of two
+// minutes each. The first covers waiting for another Track of the
+// same kind to end. The second covers this Track's own work: publishing the
+// settings, the RBAC checks, and waiting for each informer the kind needs to
+// sync. So a Track returns within about four minutes, and at once when a
+// RunInformers that started has returned. A protected informer that a Track
+// after Run creates is shared: it runs under RunInformers' context, not the
+// Track's, and every Track that needs it waits for it on its own budget. A
+// Track therefore fails only on its own budget or on a real start error,
+// never because another Track ran out of time (the re-review of #109).
+//
+// Errors, and what to do about each:
+//   - "already tracked with other options": this call's Options differ from
+//     the tracker's; the caller's mistake, and retrying won't help.
+//   - a setup refusal before any API call (validate's messages), or settings
+//     that disagree with those published on the CRD: configuration; fix it
+//     and restart. Before Run, it also makes Run fail.
+//   - "grant ... on ..." or "forbidden": missing RBAC; grant it, then Track
+//     again.
+//   - "waiting for another Track of the kind", "didn't sync within": a
+//     budget ran out, with the API server slow or unreachable; Track again
+//     later.
+//   - "RunInformers has ended": the informers stopped, or failed to start;
+//     the process is stopping, and a Track can't succeed.
+//   - "abandoned", wrapping ctx.Err() (errors.Is(err, context.Canceled) or
+//     context.DeadlineExceeded): the caller's ctx ended. Nothing is
+//     recorded against Run, so a Track cancelled before Run doesn't stop
+//     the process from starting.
+//
+// A failed Track leaves nothing behind, so Tracking again is always safe.
+func (s *Shared) Track(ctx context.Context, o Options) (*Tracker, error) {
 	o, err := s.validate(o)
 	if err != nil {
 		return nil, s.setupFailed(err)
 	}
 	gk := o.Holder.GroupKind()
+	if err := ctx.Err(); err != nil {
+		return nil, s.abandonedOr(ctx, gk, err)
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.syncTimeout)
-	defer cancel()
-	go func() {
-		select {
-		case <-s.runDone:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	wait, cancelWait := s.trackCtx(ctx)
+	defer cancelWait()
 
 	var mine *inflight
 	for mine == nil {
@@ -477,9 +517,9 @@ func (s *Shared) Track(o Options) (*Tracker, error) {
 			select {
 			case <-other.done:
 				s.trackWaiting.Add(-1)
-			case <-ctx.Done():
+			case <-wait.Done():
 				s.trackWaiting.Add(-1)
-				return nil, s.trackFailed(gk, fmt.Errorf("waiting for another Track of the kind: %w", ctx.Err()))
+				return nil, s.abandonedOr(ctx, gk, s.trackFailed(gk, fmt.Errorf("waiting for another Track of the kind: %w", wait.Err())))
 			}
 		}
 	}
@@ -489,7 +529,36 @@ func (s *Shared) Track(o Options) (*Tracker, error) {
 		s.mu.Unlock()
 		close(mine.done)
 	}()
-	return s.track(ctx, o, mine)
+	work, cancel := s.trackCtx(ctx)
+	defer cancel()
+	t, err := s.track(ctx, work, o, mine)
+	if err != nil {
+		return nil, s.abandonedOr(ctx, gk, err)
+	}
+	return t, nil
+}
+
+// abandonedOr is err, or, when the caller's ctx has ended, the error that
+// says so and wraps ctx.Err().
+func (s *Shared) abandonedOr(ctx context.Context, gk schema.GroupKind, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	return fmt.Errorf("credential-use: tracking %s was abandoned: %w (%v)", gk, ctx.Err(), err)
+}
+
+// trackCtx is one of a Track's budgets: syncTimeout under the caller's
+// parent, ended at once when a RunInformers that started returns.
+func (s *Shared) trackCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(parent, s.timeout())
+	go func() {
+		select {
+		case <-s.runDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 // An inflight is a Track adding its kind: done is closed when it ends, and
@@ -510,15 +579,23 @@ func (s *Shared) trackFailed(gk schema.GroupKind, err error) error {
 	}
 }
 
-// track adds kind o.Holder, which no other Track is adding.
-func (s *Shared) track(ctx context.Context, o Options, mine *inflight) (*Tracker, error) {
+// track adds kind o.Holder, which no other Track is adding, within ctx, its
+// budget under the caller's caller.
+func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (*Tracker, error) {
 	gk := o.Holder.GroupKind()
+	// setupFailed records a failure against Run, unless the caller gave up.
+	setupFailed := func(err error) error {
+		if caller.Err() != nil {
+			return err
+		}
+		return s.setupFailed(err)
+	}
 	if err := s.publishConfig(ctx, o); err != nil {
-		return nil, s.setupFailed(err)
+		return nil, setupFailed(err)
 	}
 	t, err := s.newTracker(o)
 	if err != nil {
-		return nil, s.setupFailed(err)
+		return nil, setupFailed(err)
 	}
 	// Build the protected informers that may be missing before taking mu:
 	// the mapper may call the API server.
@@ -526,7 +603,7 @@ func (s *Shared) track(ctx context.Context, o Options, mine *inflight) (*Tracker
 	for _, pk := range o.Protected {
 		p, err := s.newProtectedInformer(pk.GVK)
 		if err != nil {
-			return nil, s.setupFailed(err)
+			return nil, setupFailed(err)
 		}
 		built[pk.GVK.GroupKind()] = p
 	}
@@ -555,7 +632,7 @@ func (s *Shared) track(ctx context.Context, o Options, mine *inflight) (*Tracker
 				t.leaveAll()
 				s.releaseLocked(ps)
 				s.mu.Unlock()
-				return nil, s.setupFailed(err)
+				return nil, setupFailed(err)
 			}
 		}
 		s.trackers[gk] = t
@@ -647,10 +724,10 @@ func (s *Shared) setStop(p *protectedInformer, stop context.CancelFunc) {
 	p.stop = stop
 }
 
-// ensureStarted starts p under ictx, if neither RunInformers nor another
-// Track has, after checking this process may list and watch it, and waits
-// for its sync for as long as ctx allows. Every caller gets the starter's
-// result.
+// ensureStarted has p started, if neither RunInformers nor another Track
+// has started it, and waits for its first sync on ctx, this Track's budget.
+// Every Track that needs p gets the result of p's start, and none the
+// deadline of another.
 func (p *protectedInformer) ensureStarted(ctx, ictx context.Context, s *Shared) error {
 	s.mu.Lock()
 	if p.runOwned {
@@ -661,20 +738,61 @@ func (p *protectedInformer) ensureStarted(ctx, ictx context.Context, s *Shared) 
 	p.starting = true
 	s.mu.Unlock()
 	if starter {
-		err := p.informer().preflight(ctx, s)
-		if err == nil {
-			pctx, pstop := context.WithCancel(ictx)
-			s.setStop(p, pstop)
-			err = s.startAndSync(pctx, ctx, p.inf, "the protected informer of "+p.gk.String())
-		}
-		p.startErr = err
-		close(p.started)
+		s.startShared(ictx, p)
 	}
+	return s.waitShared(ctx, p)
+}
+
+// startShared starts p for every Track that needs it, under RunInformers'
+// context ictx rather than a Track's (the re-review of #109). Its RBAC check
+// has syncTimeout of its own. A refused check, or a list or watch the server
+// forbids, is p's start error.
+func (s *Shared) startShared(ictx context.Context, p *protectedInformer) {
+	pctx, pstop := context.WithCancel(ictx)
+	s.setStop(p, pstop)
+	_ = p.inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
+		if apierrors.IsForbidden(err) {
+			p.fail(fmt.Errorf("%w: the protected informer of %s: %w", errForbidden, p.gk, err))
+		}
+	})
+	go func() {
+		check, cancel := context.WithTimeout(pctx, s.timeout())
+		err := p.informer().preflight(check, s)
+		cancel()
+		if err != nil {
+			p.fail(err)
+			return
+		}
+		p.inf.RunWithContext(pctx)
+	}()
+}
+
+// fail records err as p's start error, once.
+func (p *protectedInformer) fail(err error) {
+	p.failOnce.Do(func() {
+		p.startErr = err
+		close(p.failed)
+	})
+}
+
+// waitShared waits for p's first sync for as long as ctx allows, or until
+// p's start fails.
+func (s *Shared) waitShared(ctx context.Context, p *protectedInformer) error {
+	done := make(chan bool, 1)
+	go func() { done <- cache.WaitForCacheSync(ctx.Done(), p.inf.HasSynced) }()
 	select {
-	case <-p.started:
+	case ok := <-done:
+		if ok {
+			return nil
+		}
+		select {
+		case <-p.failed:
+			return p.startErr
+		default:
+		}
+		return fmt.Errorf("credential-use: the protected informer of %s didn't sync within this Track's budget: %w", p.gk, ctx.Err())
+	case <-p.failed:
 		return p.startErr
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
@@ -785,7 +903,7 @@ func (s *Shared) newProtectedInformer(gvk schema.GroupVersionKind) (*protectedIn
 	if err != nil {
 		return nil, err
 	}
-	p := &protectedInformer{gk: gvk.GroupKind(), gvr: m.Resource, started: make(chan struct{})}
+	p := &protectedInformer{gk: gvk.GroupKind(), gvr: m.Resource, failed: make(chan struct{})}
 	p.lw = newListWatch(s.c.Metadata, m.Resource, heldSelector(), s.clock, nil)
 	p.inf = cache.NewSharedIndexInformerWithOptions(p.lw, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
 		Indexers:          cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},

@@ -194,8 +194,10 @@ type protectedInformer struct {
 	runOwned bool
 	starting bool
 	stop     context.CancelFunc
-	// started is closed once a Track's start of it has a result, startErr.
-	started  chan struct{}
+	// failed is closed when a Track after Run's start of it fails, with
+	// startErr.
+	failed   chan struct{}
+	failOnce sync.Once
 	startErr error
 
 	mu       sync.Mutex

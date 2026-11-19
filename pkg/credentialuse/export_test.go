@@ -31,7 +31,7 @@ func (s *Shared) OnNamespaceAct(f func(n *metav1.PartialObjectMetadata)) { s.hoo
 func (s *Shared) BeforeListRecorded(f func(t *Tracker)) { s.hooks.beforeListRecorded = f }
 
 // SetSyncTimeout bounds each informer's first sync.
-func (s *Shared) SetSyncTimeout(d time.Duration) { s.syncTimeout = d }
+func (s *Shared) SetSyncTimeout(d time.Duration) { s.syncTimeout.Store(int64(d)) }
 
 // QueuedBatch reports whether the batch of holder kind gk in namespace ns is
 // waiting, and the protected objects it covers.

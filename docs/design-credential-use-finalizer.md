@@ -1005,6 +1005,11 @@ type Options struct {
 	// required: §7.3 checks DisownPasses × DisownInterval against twice it,
 	// and publishes it. provider-runtime passes its timeout plus grace, 90s.
 	TimeoutBound   time.Duration
+	// Enqueue, Logger and Metrics are the kind's sinks; an equal Track
+	// rebinds them (§7.3). None of them may block or call Track: the rebind
+	// waits for the calls in flight, which is what guarantees that no event
+	// reaches an old sink once Track returns, so a sink that blocks would
+	// block Track.
 	Logger         logging.Logger
 	Metrics        MetricsRecorder
 }
@@ -1035,7 +1040,9 @@ func (s *Shared) Run(ctx context.Context) error
 // Track adds a holder kind. It can be called before or after Run, for kinds
 // discovered at runtime (§7.3). It is idempotent per holder GroupKind, and
 // a second Track with equal Options rebinds Enqueue, Logger and Metrics.
-func (s *Shared) Track(o Options) (*Tracker, error)
+// When ctx ends, a pending Track stops and returns an error wrapping
+// ctx.Err().
+func (s *Shared) Track(ctx context.Context, o Options) (*Tracker, error)
 
 func (t *Tracker) Acquire(ctx context.Context, obj metav1.Object) (Acquired, error)
 func (t *Tracker) BeforeEstablish(ctx context.Context, obj metav1.Object, a Acquired) error

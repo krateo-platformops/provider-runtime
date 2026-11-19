@@ -328,7 +328,7 @@ func TestTrackValidates(t *testing.T) {
 	for name, c := range cases {
 		o := ok
 		c.change(&o)
-		_, err := s.Track(o)
+		_, err := s.Track(context.Background(), o)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: Track = %v, want an error containing %q", name, err, c.want)
 		}

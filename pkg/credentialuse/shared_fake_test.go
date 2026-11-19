@@ -164,7 +164,7 @@ func newFakeRig(t *testing.T, objs ...runtime.Object) *fakeRig {
 		return true, obj, nil
 	})
 	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper}, SharedOptions{}, r.clk)
-	r.s.syncTimeout = 20 * time.Second
+	r.s.syncTimeout.Store(int64(20 * time.Second))
 	return r
 }
 
@@ -182,7 +182,7 @@ func (r *fakeRig) options(gk schema.GroupKind, protected ...ProtectedKind) Optio
 
 func (r *fakeRig) track(t *testing.T, gk schema.GroupKind, protected ...ProtectedKind) *Tracker {
 	t.Helper()
-	tr, err := r.s.Track(r.options(gk, protected...))
+	tr, err := r.s.Track(context.Background(), r.options(gk, protected...))
 	if err != nil {
 		t.Fatalf("Track(%s): %v", gk, err)
 	}
@@ -304,7 +304,7 @@ func TestConcurrentTracksWaitForTheSync(t *testing.T) {
 		synced bool
 	}
 	track := func(out chan<- result) {
-		tr, err := r.s.Track(r.options(widgetGK))
+		tr, err := r.s.Track(context.Background(), r.options(widgetGK))
 		res := result{t: tr, err: err}
 		if tr != nil {
 			res.synced = tr.holders.HasSynced()
@@ -350,7 +350,7 @@ func TestTrackOfOneKindDoesntWaitForAnother(t *testing.T) {
 	entered, release := r.gateList("gadgets")
 	gadget := make(chan error, 1)
 	go func() {
-		_, err := r.s.Track(r.options(gadgetGK))
+		_, err := r.s.Track(context.Background(), r.options(gadgetGK))
 		gadget <- err
 	}()
 	select {
@@ -360,7 +360,7 @@ func TestTrackOfOneKindDoesntWaitForAnother(t *testing.T) {
 	}
 	widget := make(chan error, 1)
 	go func() {
-		_, err := r.s.Track(r.options(widgetGK))
+		_, err := r.s.Track(context.Background(), r.options(widgetGK))
 		widget <- err
 	}()
 	select {
@@ -382,7 +382,7 @@ func TestTrackOfOneKindDoesntWaitForAnother(t *testing.T) {
 // timeout (the re-review of #109).
 func TestTrackStopsWaitingWhenRunInformersFails(t *testing.T) {
 	r := newFakeRig(t)
-	r.s.syncTimeout = 10 * time.Minute
+	r.s.syncTimeout.Store(int64(10 * time.Minute))
 	r.track(t, widgetGK) // the Secret informer is RunInformers'
 	// RunInformers' first list of the Secrets waits, and is then
 	// forbidden, which fails RunInformers.
@@ -397,7 +397,7 @@ func TestTrackStopsWaitingWhenRunInformersFails(t *testing.T) {
 	}
 	tracked := make(chan error, 1)
 	go func() {
-		_, err := r.s.Track(r.options(gadgetGK))
+		_, err := r.s.Track(context.Background(), r.options(gadgetGK))
 		tracked <- err
 	}()
 	secrets := r.protectedOf(secretGroupKind)
@@ -421,10 +421,209 @@ func TestTrackStopsWaitingWhenRunInformersFails(t *testing.T) {
 	}
 }
 
+// claimsOf is p's claims.
+func (r *fakeRig) claimsOf(p *protectedInformer) int {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	return p.claims
+}
+
+// Two kinds share a protected informer a Track after Run creates. It runs
+// under RunInformers' context, and each Track waits for it on its own
+// budget: the first Track's budget running out fails that Track only, the
+// informer stays while the second claims it, and the second syncs (the
+// re-review of #109).
+func TestSharedInformerWaitersKeepTheirOwnBudget(t *testing.T) {
+	r := newFakeRig(t)
+	r.run(t)
+	entered, release := r.gateList("configmaps")
+	cm := []ProtectedKind{{GVK: configMapGVK}}
+	r.s.syncTimeout.Store(int64(2 * time.Second))
+	first := make(chan error, 1)
+	go func() {
+		_, err := r.s.Track(context.Background(), r.options(gadgetGK, cm...))
+		first <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the ConfigMap informer never listed")
+	}
+	p := r.protectedOf(configMapGK)
+	r.s.syncTimeout.Store(int64(10 * time.Second))
+	second := make(chan error, 1)
+	go func() {
+		_, err := r.s.Track(context.Background(), r.options(widgetGK, cm...))
+		second <- err
+	}()
+	eventually(t, "both Tracks to claim the ConfigMap informer", func() bool { return r.claimsOf(p) == 2 })
+	select {
+	case err := <-first:
+		if err == nil {
+			t.Fatal("the first Track synced through a held list")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the first Track outlived its budget")
+	}
+	if r.protectedOf(configMapGK) != p || r.claimsOf(p) != 1 {
+		t.Fatal("the first Track's failure took the informer the second still claims")
+	}
+	close(release)
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Errorf("the second Track = %v, want it synced on its own budget", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the second Track didn't return")
+	}
+}
+
+// Two kinds share a protected informer a Track after Run creates, and its
+// start fails: the Track that started it and the one waiting for it both
+// get the start's error at once, not at the end of their budgets, and the
+// informer goes once neither claims it.
+func TestSharedInformerStartFailureReachesEveryTrack(t *testing.T) {
+	r := newFakeRig(t)
+	r.s.syncTimeout.Store(int64(10 * time.Minute))
+	r.run(t)
+	entered, release := r.gateList("configmaps")
+	r.forbidList.Store("configmaps", true)
+	cm := []ProtectedKind{{GVK: configMapGVK}}
+	errs := make(chan error, 2)
+	go func() {
+		_, err := r.s.Track(context.Background(), r.options(gadgetGK, cm...))
+		errs <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the ConfigMap informer never listed")
+	}
+	p := r.protectedOf(configMapGK)
+	go func() {
+		_, err := r.s.Track(context.Background(), r.options(widgetGK, cm...))
+		errs <- err
+	}()
+	eventually(t, "both Tracks to claim the ConfigMap informer", func() bool { return r.claimsOf(p) == 2 })
+	close(release)
+	for range 2 {
+		select {
+		case err := <-errs:
+			if err == nil || !strings.Contains(err.Error(), "forbidden") {
+				t.Errorf("Track = %v, want the informer's start error", err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("a Track kept waiting after the shared informer's start failed")
+		}
+	}
+	if r.protectedOf(configMapGK) != nil {
+		t.Error("the informer whose start failed stayed after both Tracks gave it up")
+	}
+}
+
+// A Track after Run joins the shared protected informers only once its
+// holder informer has listed, so that an object leaving a shared cache
+// enqueues its holders from a full index (the re-review of #109).
+func TestTrackJoinsAfterItsHolderSync(t *testing.T) {
+	r := newFakeRig(t)
+	r.track(t, widgetGK)
+	r.run(t)
+	secrets := r.protectedOf(secretGroupKind)
+	var joined atomic.Int32 // at the Gadget's first holder list: 1 not joined, 2 joined
+	var once sync.Once
+	r.md.PrependReactor("list", "gadgets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		once.Do(func() {
+			if len(secrets.snapshot()) == 2 {
+				joined.Store(2)
+			} else {
+				joined.Store(1)
+			}
+		})
+		return false, nil, nil
+	})
+	r.track(t, gadgetGK)
+	switch joined.Load() {
+	case 0:
+		t.Fatal("the Gadget's holders were never listed")
+	case 2:
+		t.Error("the Gadget's tracker joined the Secret informer before its holder informer listed")
+	}
+	if len(secrets.snapshot()) != 2 {
+		t.Error("the Gadget's tracker didn't join the Secret informer")
+	}
+}
+
+// The caller's ctx aborts a pending Track, whether it is working or waiting
+// for another Track of its kind: it returns at once with an error that
+// wraps ctx.Err(), and leaves nothing behind. A Track cancelled before Run
+// isn't held against Run.
+func TestTrackHonoursTheCallersContext(t *testing.T) {
+	t.Run("after Run", func(t *testing.T) {
+		r := newFakeRig(t)
+		r.s.syncTimeout.Store(int64(10 * time.Minute))
+		r.run(t)
+		entered, release := r.gateList("gadgets")
+		defer close(release)
+		workCtx, cancelWork := context.WithCancel(context.Background())
+		waitCtx, cancelWait := context.WithCancel(context.Background())
+		working, waiting := make(chan error, 1), make(chan error, 1)
+		go func() {
+			_, err := r.s.Track(workCtx, r.options(gadgetGK))
+			working <- err
+		}()
+		select {
+		case <-entered:
+		case <-time.After(20 * time.Second):
+			t.Fatal("the Gadget's holders were never listed")
+		}
+		go func() {
+			_, err := r.s.Track(waitCtx, r.options(gadgetGK))
+			waiting <- err
+		}()
+		eventually(t, "the second Track to wait", func() bool { return r.s.trackWaiting.Load() == 1 })
+		for _, c := range []struct {
+			what   string
+			cancel context.CancelFunc
+			errs   chan error
+		}{{"waiting", cancelWait, waiting}, {"working", cancelWork, working}} {
+			c.cancel()
+			select {
+			case err := <-c.errs:
+				if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "abandoned") {
+					t.Errorf("the %s Track = %v, want it abandoned, wrapping context.Canceled", c.what, err)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatalf("the %s Track ignored its caller's cancellation", c.what)
+			}
+		}
+		if r.tracked(gadgetGK) {
+			t.Error("a cancelled Track left its tracker")
+		}
+	})
+	t.Run("before Run", func(t *testing.T) {
+		r := newFakeRig(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		// The caller gives up while the settings are being published, and
+		// the read fails as a real client's would.
+		r.dyn.PrependReactor("get", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+			cancel()
+			return true, nil, context.Canceled
+		})
+		if _, err := r.s.Track(ctx, r.options(gadgetGK)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Track cancelled while publishing = %v, want context.Canceled", err)
+		}
+		if _, err := r.s.Track(ctx, r.options(gadgetGK)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Track with an ended ctx = %v, want context.Canceled", err)
+		}
+		r.run(t) // fails the test if Run refuses to start
+	})
+}
+
 // D3: a Track after Run that fails rolls back everything it created, on
 // each way it can fail: the holder informer can't sync, a protected
-// informer it created can't sync, and the RBAC check before they start
-// fails. A later Track of the kind then works.
+// informer it created can't sync, and the RBAC check of the holders or of
+// a protected kind fails. A later Track of the kind then works.
 func TestFailedTrackLeavesNothing(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -487,7 +686,7 @@ func TestFailedTrackLeavesNothing(t *testing.T) {
 			r.md.PrependReactor("list", "configmaps", catch)
 
 			c.fail(r)
-			_, err := r.s.Track(r.options(gadgetGK, c.protected...))
+			_, err := r.s.Track(context.Background(), r.options(gadgetGK, c.protected...))
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("Track = %v, want an error containing %q", err, c.want)
 			}
@@ -524,7 +723,7 @@ func TestFailedTrackLeavesNothing(t *testing.T) {
 			})
 
 			c.allow(r)
-			g, err := r.s.Track(r.options(gadgetGK, c.protected...))
+			g, err := r.s.Track(context.Background(), r.options(gadgetGK, c.protected...))
 			if err != nil {
 				t.Fatalf("Track after the cause is gone: %v", err)
 			}
@@ -1019,7 +1218,7 @@ func TestTrackRebindsTheSinks(t *testing.T) {
 				violations.Add(1)
 			}
 		}
-		got, err := r.s.Track(o)
+		got, err := r.s.Track(context.Background(), o)
 		if err != nil || got != tr {
 			t.Fatalf("rebind %d: Track = %p, %v; want the tracker %p", i, got, err, tr)
 		}
@@ -1031,7 +1230,7 @@ func TestTrackRebindsTheSinks(t *testing.T) {
 		// to it is a violation.
 		o2 := r.options(widgetGK)
 		o2.Enqueue = func(types.NamespacedName) {}
-		if _, err := r.s.Track(o2); err != nil {
+		if _, err := r.s.Track(context.Background(), o2); err != nil {
 			t.Fatal(err)
 		}
 		retired.Store(true)
@@ -1062,7 +1261,7 @@ func TestRebindWaitsForCallsInFlight(t *testing.T) {
 			note("the old call ended")
 		})
 	}
-	tr, err := r.s.Track(o)
+	tr, err := r.s.Track(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1070,7 +1269,7 @@ func TestRebindWaitsForCallsInFlight(t *testing.T) {
 	<-entered
 	o2 := r.options(widgetGK)
 	o2.Enqueue = func(types.NamespacedName) {}
-	if _, err := r.s.Track(o2); err != nil {
+	if _, err := r.s.Track(context.Background(), o2); err != nil {
 		t.Fatal(err)
 	}
 	note("Track returned")
