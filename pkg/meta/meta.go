@@ -13,7 +13,19 @@ import (
 // accepts values with or without a fractional second, so markers written
 // with second precision by earlier releases still read back: a truncated
 // value can only be earlier than the event it records, never later.
+//
+// The markers are always written in UTC (formatMarker). Compare them as
+// parsed times, never as strings: RFC3339Nano drops trailing zeros, so
+// "10:00:00Z" sorts after "10:00:00.1Z" although it is earlier, and a marker
+// written with a zone offset by an earlier release, or by another writer of
+// the same annotation names, sorts by its local clock.
 const MarkerTimeLayout = time.RFC3339Nano
+
+// formatMarker renders t for an external-create marker: in UTC, so that every
+// marker carries the same offset whatever the process's time zone.
+func formatMarker(t time.Time) string {
+	return t.UTC().Format(MarkerTimeLayout)
+}
 
 const (
 	// AnnotationKeyExternalName is the key in the annotations map of a
@@ -226,7 +238,7 @@ func GetExternalCreatePending(o metav1.Object) time.Time {
 // SetExternalCreatePending sets the time at which the external resource was
 // most recently pending creation to the supplied time.
 func SetExternalCreatePending(o metav1.Object, t time.Time) {
-	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreatePending: t.Format(MarkerTimeLayout)})
+	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreatePending: formatMarker(t)})
 }
 
 // GetExternalCreateSucceeded returns the time at which the external resource
@@ -243,7 +255,7 @@ func GetExternalCreateSucceeded(o metav1.Object) time.Time {
 // SetExternalCreateSucceeded sets the time at which the external resource was
 // most recently created to the supplied time.
 func SetExternalCreateSucceeded(o metav1.Object, t time.Time) {
-	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateSucceeded: t.Format(MarkerTimeLayout)})
+	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateSucceeded: formatMarker(t)})
 }
 
 // GetExternalCreateFailed returns the time at which the external resource
@@ -260,7 +272,7 @@ func GetExternalCreateFailed(o metav1.Object) time.Time {
 // SetExternalCreateFailed sets the time at which the external resource most
 // recently failed to create.
 func SetExternalCreateFailed(o metav1.Object, t time.Time) {
-	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateFailed: t.Format(MarkerTimeLayout)})
+	AddAnnotations(o, map[string]string{AnnotationKeyExternalCreateFailed: formatMarker(t)})
 }
 
 // ExternalCreateIncomplete returns true if creation of the external resource
@@ -324,7 +336,13 @@ func IsVerbose(o metav1.Object) bool {
 	return o.GetAnnotations()[AnnotationKeyConnectorVerbose] == "true"
 }
 
-// IsActionAllowed determines if action is allowed to be performed on Object
+// IsActionAllowed determines if action is allowed to be performed on Object.
+//
+// Deprecated: the reconciler doesn't use it, and its answer for delete
+// differs from what the reconciler does: it ignores
+// krateo.io/deletion-policy, so under the default policy it allows a delete
+// that orphan forbids. Use ShouldCreate, ShouldUpdate and ShouldDelete, the
+// predicates the reconciler's gates call.
 func IsActionAllowed(o metav1.Object, action string) bool {
 	p := o.GetAnnotations()[AnnotationKeyManagementPolicy]
 	if len(p) == 0 {

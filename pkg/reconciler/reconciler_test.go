@@ -391,7 +391,7 @@ func TestReconciler(t *testing.T) {
 							want := &fake.Managed{}
 							meta.SetExternalCreatePending(want, now.Time)
 							want.SetConditions(prv1.NotObserved(), prv1.ReconcileError(errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve),
-								errFmtCreateWaitsOnObserve, now.Format(time.RFC3339))))
+								errFmtCreateWaitsOnObserve, now.UTC().Format(time.RFC3339))))
 							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {
 								reason := "An Observe error on an unresolved create should name the pending create in the conditioned status."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
@@ -412,7 +412,7 @@ func TestReconciler(t *testing.T) {
 					})),
 				},
 			},
-			want: want{err: errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve), errFmtCreateWaitsOnObserve, now.Format(time.RFC3339))},
+			want: want{err: errors.Wrapf(errors.Wrap(errBoom, errReconcileObserve), errFmtCreateWaitsOnObserve, now.UTC().Format(time.RFC3339))},
 		},
 		"CreationGracePeriod": {
 			reason: "If our resource appears not to exist during the creation grace period we should return early.",
