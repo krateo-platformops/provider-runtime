@@ -67,9 +67,12 @@ type rig struct {
 }
 
 type recordingReports struct {
-	degraded []string
-	rejected []ID
+	degraded         []string
+	rejected         []ID
+	admissionDenials int
 }
+
+func (r *recordingReports) AdmissionDenied(schema.GroupKind) { r.admissionDenials++ }
 
 func (r *recordingReports) Degraded(_ schema.GroupKind, reason string) {
 	r.degraded = append(r.degraded, reason)

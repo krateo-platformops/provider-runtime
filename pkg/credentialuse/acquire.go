@@ -220,6 +220,9 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			a.Degraded, a.Err = true, err
 			p.reports.Degraded(p.holder, "Deleting")
 		default:
+			if class == ClassAdmissionDenied {
+				p.reports.AdmissionDenied(p.holder)
+			}
 			return fail(fmt.Errorf("credential-use: holding %s: %w", id, err), class.String())
 		}
 	}

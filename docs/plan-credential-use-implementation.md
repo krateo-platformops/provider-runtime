@@ -23,7 +23,8 @@ are still correct at `cfd9b0f`.
 ## 1. Summary
 
 The suggested six PRs would make PRs 1 and 2 about 5,000 lines each, too
-large for a concurrency review. So the stack has **eleven**. The main changes
+large for a concurrency review. So the stack has **eleven**, twelve since PR 3
+was split into 3a and 3b (the user's decision, 2026-11-18). The main changes
 from the suggested shape:
 
 - **The protocol and its in-memory model come before any informer** (PRs 1
@@ -41,7 +42,8 @@ from the suggested shape:
 |---|---|---|---|---|---|
 | 1 | `credentialuse`: vocabulary, classification, patch builders, premise envtest | §3, §4, §6.2 (table and R3 patch), §2 | 700 / 1,400 | — | light (patch semantics) |
 | 2 | Protocol core, verified sets, in-memory API model with schedules | §5, §6.1–§6.8, §14 model | 1,300 / 2,900 | 1 | **yes** |
-| 3 | `Shared` and `Tracker` on client-go: LabelScoped Secrets, release loop, prober | §7.1–§7.3, §10.1–§10.3, §10.5, §12 (core part) | 2,300 / 2,500 | 2 | **yes** |
+| 3a | `Shared` and `Tracker` on client-go: the server, the ListerWatcher, the informers, setup and the published settings | §7.1–§7.3, §10.1, §10.2, §6.5 L2, §12 (the interface) | 1,800 / 1,000 | 2 | **yes** |
+| 3b | The write loops: release loop, prober, janitor; namespace-restricted caches | §10.1–§10.3, §10.5, §12 (core part) | 900 / 1,700 | 3a | **yes** |
 | 4 | Chains: `Next`, `Resolved`, `Guaranteed`, content caches, enqueue on change | §9.1–§9.3, §10.4, §6.2 A2 for custom resources | 800 / 1,000 | 3 | **yes** |
 | 5 | The cross-namespace consent gate and the `unheld` annotation | §11.3, §9.4, §9.2 (L1), §10.2 (L2) | 900 / 1,200 | 4 | **yes** |
 | 6 | Disown and `DisownPrefix` | §7.4, §11.5, §10.6.8 (3) | 700 / 900 | 3 (stacked on 5) | **yes** |
@@ -51,7 +53,7 @@ from the suggested shape:
 | 10 | `scaletozero.WithHeld` and `WithHeldIndex` | §11.6, §10.6.5 | 250 / 450 | 8 (stacked on 9) | light |
 | 11 | Docs and the `log.md` entry | §11.5, §13, §16 doc text | ~900 doc lines | 10 | — |
 
-That is about **10,350 lines of production Go and 14,950 of tests**,
+That is about **10,750 lines of production Go and 15,150 of tests** (after PR 3's split into 3a and 3b),
 including the model (about 1,400) and the envtest harness (about 300). §7
 explains the estimates.
 
@@ -285,6 +287,11 @@ call yield to the scheduler, does any production path bypass `server` or
 
 ### PR 3: `Shared` and `Tracker` on client-go: LabelScoped Secrets, release loop, prober
 
+**Split in two** (the user's decision, 2026-11-18): **PR 3a** is the
+read side, **PR 3b** the write loops, each with its own independent review.
+The scope and the tests below are PR 3's as planned; the lists after them
+say which half each item lands in.
+
 **Scope.**
 
 - `shared.go`, `track.go`, `setup.go`: `NewShared`, `Run`, and `Track`.
@@ -385,6 +392,58 @@ unreleased and nothing imports it, so neither is visible to anyone.
   finalizer with no users;
 - **drain:** cancel between A1 and A2, between R1 and R3, and in the middle
   of a batch. Restart, and assert convergence with no violation.
+
+**PR 3a** (branch `feat/credential-use-3a-informers`, depends on PR 2):
+
+- `server.go`, `listwatch.go`, `informers.go`, and `shared.go`, `tracker.go`,
+  `setup.go` for `NewShared`, `Track` and the published settings; `events.go`
+  and `metrics.go` (the `MetricsRecorder` interface, with nop defaults and
+  throttled events; the OpenTelemetry implementation is PR 7's); the
+  driver. The (K, N) batch queue (`queue.go`) is created by `NewShared` and
+  runs its timers on an injectable clock, so that PR 3b's ordering tests
+  drive it; its handlers enqueue into it, and nothing drains it until PR 3b.
+- The design's §7.1 sketch gains `RunInformers(ctx)` and
+  `RunWriteLoops(ctx)`, with `Run` running both: the two runnables of
+  §7.5 (IP4, the user's decision), read-only informers without leader
+  election and write loops with it. PR 3a has `RunInformers`, and `Run`
+  runs it; PR 3b adds `RunWriteLoops`. `HasSynced` reports the informers'
+  first sync.
+- §12's gauges and events split by what computes them (the review of
+  #109): the held gauge, `credentialuse_held_objects`, is PR 3a's, counted
+  from the protected informers' finalizers; the waiting gauge,
+  `credentialuse_waiting_objects`, and the `CredentialDeleting` and
+  `WaitingForCredentialUsers` events are PR 3b's, since only the release
+  loop knows which deletions wait for users.
+- Tests: the relist (watch-list and List), its order forced; `Track` after
+  start and twice, concurrent `Track`s, a failed `Track`'s rollback, and a
+  `Track` after start that rechecks a shared cache; the published settings
+  and both owner finalizers, and the CRD write's guard, retries and bound;
+  start fails without the verbs each informer needs; the protected,
+  Namespace and holder handlers; `kubectl replace`-style stripping; a
+  Secret already being deleted gives a new holder `MustNotConnect`; class
+  (e) counted; the held gauge; the queue's buffering, deduplication,
+  timers, shutdown and lock order; setup's refusals.
+- `hack/revert-check-credential-use-3a.py`, with its output.
+
+**PR 3b** (branch `feat/credential-use-3b-…`, depends on PR 3a):
+
+- `releaseloop.go` with `RunWriteLoops` and the write loops' `Start`
+  rescan, `prober.go`, `janitor.go`, and the namespace-restricted caches
+  with the live fallback (§10.5).
+- The queue's checking (the user's decision): deterministic unit tests that
+  drive every ordering of enqueue, `AddAfter` firing, pre-`Run` buffering,
+  rescan, drain and stop that can be enumerated, on the injectable clock,
+  plus the stress and drain tests under `-race`.
+- Tests: the krateo-057 teardown; U5 and the grace; the namespace deletion
+  after the grace and the holder deletion between R2 and R3; a user past the
+  grace and a changed ref; the prober; the rescan and buffered events; R3
+  rejected; two `RefsFunc` versions with the churn measured; R0 with a
+  deleting user; the namespace-restricted live read; stress; drain.
+- The release loop ignores a batch whose holder kind has no tracker: a
+  `Track` after start that failed and rolled back may have left batches
+  and `AddAfter` timers for its kind in the shared queue, from the replay
+  of a shared cache (the re-review of #109).
+- `hack/revert-check-credential-use-3b.py`, with its output.
 
 **Reviewer attack** (§14): the label-scoped informer's handling of objects
 that lose the label; the prober's cap and rotation; two processes for one
@@ -1119,7 +1178,8 @@ with 1,600 of tests; `pkg/scaletozero` is 347 with 1,040).
 |---|---|---|---|
 | 1 | 700 | 1,400 | includes the envtest harness (about 300) |
 | 2 | 1,300 | 2,900 | the model is about 1,400 of that |
-| 3 | 2,300 | 2,500 | the largest; the driver is about 300 of the tests |
+| 3a | 1,800 | 1,000 | includes the driver (about 160) |
+| 3b | 900 | 1,700 | the queue's ordering tests, stress and drain |
 | 4 | 800 | 1,000 | |
 | 5 | 900 | 1,200 | |
 | 6 | 700 | 900 | |
@@ -1128,10 +1188,10 @@ with 1,600 of tests; `pkg/scaletozero` is 347 with 1,040).
 | 9 | 1,200 | 1,400 | the provisioner is about 600 |
 | 10 | 250 | 450 | |
 | 11 | — | — | about 900 lines of docs |
-| **Total** | **about 10,350** | **about 14,950** | |
+| **Total** | **about 10,750** | **about 15,150** | after the split of PR 3 |
 
-PR 3 is the one most likely to need splitting during review. If so, the
-prober and the janitor move to a PR 3b of about 500 lines.
+PR 3 was split into 3a and 3b before review (the user's decision,
+2026-11-18). 3a's sizes are measured; 3b's are estimates.
 
 ## 8. The user's decisions
 

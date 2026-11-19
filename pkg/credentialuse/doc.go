@@ -23,8 +23,17 @@
 //   - Decide and the user predicates: §5's table and §6.1's rules, as pure
 //     functions.
 //
-// Nothing here talks to an API server, and nothing in provider-runtime uses
-// this package yet.
+// On top of it (plan, PRs 2 and 3a):
+//
+//   - the protocol: A1 and A2, BeforeEstablish and Forget, and R0 to R3,
+//     over a narrow server interface and the verified sets (§6);
+//   - the client-go runtime: NewShared and Track, which build the core's
+//     own metadata informers on a ListerWatcher that records each list's
+//     completion (§6.5 L2), publish a kind's shared settings on its CRD
+//     (§7.3), and queue release batches from the informers' events (§10.2).
+//     The write loops that drain that queue come with PR 3b.
+//
+// Nothing in provider-runtime uses this package yet.
 //
 // # Dependencies
 //
