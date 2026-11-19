@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -791,4 +792,71 @@ func (v modelViews) NamespaceDeleting(ns string) (bool, bool) {
 		return false, false
 	}
 	return o.DeletionTimestamp != nil, true
+}
+
+// A batch reports every object being deleted that it keeps, with why and
+// the users as it saw them, wherever it decides (§12): R0, from the caches,
+// for a user that is being deleted; R1, inside the grace; and R2, for a
+// namespace being deleted.
+func TestReleaseReportsWhatItKeeps(t *testing.T) {
+	ctx := context.Background()
+	p := SecretRef("ns", "s").ID()
+	h := types.NamespacedName{Namespace: "ns", Name: "h"}
+	t.Run("R0, a deleting user", func(t *testing.T) {
+		r := newRig(t)
+		heldSecret(r, "example.com/other")
+		userOf(r, "h", true)
+		must(r.m.Delete(secretKey("ns", "s")))
+		must(r.m.Delete(widgetKey("ns", "h")))
+		r.views = modelViews{m: r.m}
+		res, err := r.p.release(ctx, "ns", []ID{p})
+		if err != nil || len(r.srv.calls) != 0 {
+			t.Fatalf("release = %+v, %v, calls %v; want R0 to settle it", res, err, r.srv.calls)
+		}
+		if len(res.Kept) != 1 || res.Kept[0].P != p || res.Kept[0].Why != KeptUserDeleting ||
+			!slices.Equal(res.Kept[0].Users, []types.NamespacedName{h}) || !slices.Equal(res.Kept[0].DeletingUsers, []types.NamespacedName{h}) {
+			t.Errorf("kept = %+v, want P kept for its deleting user h", res.Kept)
+		}
+	})
+	t.Run("R1, the grace", func(t *testing.T) {
+		r := newRig(t)
+		heldSecret(r, "example.com/other")
+		userOf(r, "h", true)
+		must(r.m.Delete(secretKey("ns", "s")))
+		r.views = modelViews{m: r.m}
+		res, err := r.p.release(ctx, "ns", []ID{p})
+		if err != nil || len(res.Kept) != 1 {
+			t.Fatalf("release = %+v, %v", res, err)
+		}
+		k := res.Kept[0]
+		if k.P != p || k.Why != KeptGrace || k.GraceEnd.IsZero() || !k.GraceEnd.Equal(res.RequeueAt) ||
+			!slices.Equal(k.Users, []types.NamespacedName{h}) || len(k.DeletingUsers) != 0 {
+			t.Errorf("kept = %+v, requeue %s; want the grace, its end, and the live user", k, res.RequeueAt)
+		}
+	})
+	t.Run("R2, a namespace being deleted", func(t *testing.T) {
+		r := newRig(t)
+		heldSecret(r, "example.com/other")
+		userOf(r, "h", true)
+		must(r.m.Delete(secretKey("ns", "s")))
+		sawDeletion(r)
+		r.tick(2 * time.Minute)
+		must(r.m.Delete(nsKey("ns")))
+		res, err := r.p.release(ctx, "ns", []ID{p})
+		if err != nil || len(res.Kept) != 1 {
+			t.Fatalf("release = %+v, %v", res, err)
+		}
+		if k := res.Kept[0]; k.Why != KeptNamespaceDeleting || !slices.Equal(k.Users, []types.NamespacedName{h}) {
+			t.Errorf("kept = %+v; want the namespace row, with the user from R2's list", k)
+		}
+	})
+	t.Run("nothing for a live object", func(t *testing.T) {
+		r := newRig(t)
+		heldSecret(r)
+		userOf(r, "h", true)
+		res, err := r.p.release(ctx, "ns", []ID{p})
+		if err != nil || len(res.Kept) != 0 {
+			t.Errorf("release = %+v, %v; want nothing kept to report", res, err)
+		}
+	})
 }

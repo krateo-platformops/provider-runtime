@@ -48,12 +48,41 @@ type ReleaseDecision struct {
 	GraceEnd time.Time
 }
 
+// A KeptReason is why a batch kept a protected object that is being
+// deleted (§12).
+type KeptReason string
+
+const (
+	// KeptGrace: its grace runs (§5's live-namespace row).
+	KeptGrace KeptReason = "its grace is running"
+	// KeptNamespaceDeleting: its namespace is being deleted, and it has
+	// users (§5).
+	KeptNamespaceDeleting KeptReason = "its namespace is being deleted and it has users"
+	// KeptUserDeleting: a user of it is being deleted and still needs it
+	// (§5, U5).
+	KeptUserDeleting KeptReason = "a user of it is being deleted and still needs it"
+)
+
+// A Kept is a protected object being deleted that a batch kept for its
+// users, with the users as the batch saw them: the caches for R0 and R1's
+// grace, R2's live list after it. The release loop reports it (§12).
+type Kept struct {
+	P             ID
+	Why           KeptReason
+	GraceEnd      time.Time
+	Users         []types.NamespacedName
+	DeletingUsers []types.NamespacedName
+}
+
 // ReleaseResult is what one batch did.
 type ReleaseResult struct {
 	// Released are the objects whose finalizer for (K, N) R3 removed.
 	Released []ID
 	// Decisions are §5's decisions, one per object that reached R2.
 	Decisions []ReleaseDecision
+	// Kept are the objects being deleted that the batch kept, wherever it
+	// decided to keep them: R0, R1's grace, or R2.
+	Kept []Kept
 	// RequeueAt, when set, is when the batch must run again: the end of a
 	// grace, or a restored epoch's recheck. It is absolute, the deadline
 	// itself rather than a duration from some reading of the clock, so the
@@ -91,13 +120,15 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 	var errs []error
 
 	// R0. The fast path, from the caches.
-	cachedUsers := map[ID]int{}
+	cachedUsers := map[ID]cachedUse{}
 	var todo []ID
 	for _, id := range SortedIDs(pending) {
-		users, keep := p.fastKeep(id, n)
-		cachedUsers[id] = users
-		if !keep {
+		u := p.fastKeep(id, n)
+		cachedUsers[id] = u
+		if !u.keep {
 			todo = append(todo, id)
+		} else if u.deleting {
+			res.Kept = append(res.Kept, Kept{P: id, Why: KeptUserDeleting, Users: u.users, DeletingUsers: u.deletingUsers})
 		}
 	}
 
@@ -144,8 +175,9 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				r.graceEnd = GraceEnd(m.DeletionTimestamp.Time, p.seen.see(m.UID, now), p.grace)
 				// Inside the grace, in a namespace last seen live, with users:
 				// nothing to decide until the grace ends (§6.2 R1).
-				if now.Before(r.graceEnd) && cachedUsers[id] > 0 && !p.namespaceDeletingCached(id.Namespace) {
+				if u := cachedUsers[id]; now.Before(r.graceEnd) && len(u.users) > 0 && !p.namespaceDeletingCached(id.Namespace) {
 					res.requeueAt(now, r.graceEnd)
+					res.Kept = append(res.Kept, Kept{P: id, Why: KeptGrace, GraceEnd: r.graceEnd, Users: u.users, DeletingUsers: u.deletingUsers})
 					continue
 				}
 			}
@@ -206,21 +238,35 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				NamespaceDeleting: nsDeleting[r.id.Namespace],
 				GraceOver:         r.meta.DeletionTimestamp != nil && !now.Before(r.graceEnd),
 			}
+			var users, deletingUsers []types.NamespacedName
 			for i := range holders {
+				nn := types.NamespacedName{Namespace: holders[i].Namespace, Name: holders[i].Name}
 				if IsUser(&holders[i], r.id, p.ownerFinalizers) {
 					in.Users++
+					users = append(users, nn)
 				}
 				if IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {
 					in.DeletingUsers++
+					deletingUsers = append(deletingUsers, nn)
 				}
 			}
 			d := Decide(in)
 			res.Decisions = append(res.Decisions, ReleaseDecision{P: r.id, Input: in, Decision: d, NamespaceReadAt: nsReadAt[r.id.Namespace], GraceEnd: r.graceEnd})
+			kept := Kept{P: r.id, GraceEnd: r.graceEnd, Users: users, DeletingUsers: deletingUsers}
 			switch d {
 			case Keep:
+				if in.Deleting {
+					kept.Why = KeptUserDeleting
+					if in.NamespaceDeleting {
+						kept.Why = KeptNamespaceDeleting
+					}
+					res.Kept = append(res.Kept, kept)
+				}
 				continue
 			case WaitForGrace:
 				res.requeueAt(now, r.graceEnd)
+				kept.Why = KeptGrace
+				res.Kept = append(res.Kept, kept)
 				continue
 			}
 			pt, err := ReleasePatch(r.meta, p.holder, n)
@@ -248,27 +294,40 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 	return res, errors.Join(errs...)
 }
 
+// cachedUse is R0's reading of one object's users in the caches.
+type cachedUse struct {
+	users, deletingUsers []types.NamespacedName
+	// deleting: the cached object is being deleted.
+	deleting bool
+	// keep: the cache already settles the batch for the object.
+	keep bool
+}
+
 // fastKeep is R0 for one object (§6.2): it reports the cached users of P in
 // n, and whether the cache already settles the batch for P. A stale cache can
 // only keep a hold longer.
-func (p *protocol) fastKeep(id ID, n string) (users int, keep bool) {
+func (p *protocol) fastKeep(id ID, n string) cachedUse {
+	var u cachedUse
 	cached, ok := p.views.Protected(id)
-	deletingUsers := 0
 	for _, h := range p.views.HoldersNaming(id, n) {
+		nn := types.NamespacedName{Namespace: h.Namespace, Name: h.Name}
 		if IsUser(h, id, p.ownerFinalizers) {
-			users++
+			u.users = append(u.users, nn)
 		}
 		if IsDeletingUser(h, id, p.ownerFinalizers) {
-			deletingUsers++
+			u.deletingUsers = append(u.deletingUsers, nn)
 		}
 	}
 	if !ok {
-		return users, false
+		return u
 	}
-	if cached.DeletionTimestamp == nil {
-		return users, users > 0
+	u.deleting = cached.DeletionTimestamp != nil
+	if !u.deleting {
+		u.keep = len(u.users) > 0
+	} else {
+		u.keep = len(u.deletingUsers) > 0
 	}
-	return users, deletingUsers > 0
+	return u
 }
 
 func (p *protocol) namespaceDeletingCached(ns string) bool {
