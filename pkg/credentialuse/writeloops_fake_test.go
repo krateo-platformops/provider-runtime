@@ -691,3 +691,50 @@ func TestWriteLoopsWaitForTheInformers(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A batch that asks to run again at a grace's end does, on the queue's
+// clock: outside the cached namespaces no informer sets a timer for the
+// deletion, so the batch's own RequeueAt is the only way back.
+func TestReleaseLoopRequeuesAtTheGracesEnd(t *testing.T) {
+	ctx := context.Background()
+	out := heldObject(secretGVK, "out", "s", "u-out", widgetGK, "out")
+	out.Finalizers = append(out.Finalizers, "example.com/other")
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}},
+		namespaceObject("in"), namespaceObject("out"), out, holderObject("out", "h", secretID("out", "s")))
+	r.setRefs("h", SecretRef("out", "s"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	r.runWrites(t)
+	// The holder's initial list enqueued the Secret's batch, which keeps
+	// it for its user, with no timer.
+	k := batchKey{widgetGK, "out"}
+	eventually(t, "the initial batch", func() bool {
+		return r.s.queue.Len() == 0 && !r.working(k) && slices.ContainsFunc(r.md.Actions(), func(a clienttesting.Action) bool {
+			return a.GetVerb() == "list" && a.GetResource().Resource == "widgets" && a.GetNamespace() == "out"
+		})
+	})
+	if r.queueTimers() != 0 {
+		t.Fatalf("%d timers after a batch that kept a live Secret", r.queueTimers())
+	}
+
+	// The Secret starts deleting. Nothing caches it, so only the holder's
+	// next pass, which holds it, enqueues its batch.
+	obj := r.secretMeta(t, "out", "s")
+	if err := r.md.Tracker().Update(secretsGVR, deleting(obj, r.clk.Now()), "out"); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := r.md.Tracker().Get(widgetsGVR, "out", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, err := tr.Acquire(ctx, holder.(*metav1.PartialObjectMetadata).DeepCopy()); err != nil || len(a.Held) != 1 {
+		t.Fatalf("Acquire = %+v, %v", a, err)
+	}
+	f := mustFinalizer(widgetGK, "out")
+	eventually(t, "the batch to wait for the grace", func() bool { return r.queueTimers() == 1 })
+	if !hasFinalizer(r.secretMeta(t, "out", "s"), f) {
+		t.Fatal("released inside the grace")
+	}
+	r.clk.Step(DefaultDeletionGrace)
+	eventually(t, "the release at the grace's end", func() bool { return !hasFinalizer(r.secretMeta(t, "out", "s"), f) })
+}
