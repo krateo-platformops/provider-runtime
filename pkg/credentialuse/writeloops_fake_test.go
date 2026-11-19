@@ -382,15 +382,33 @@ func TestJanitor(t *testing.T) {
 		m.Labels[MarkerLabel(widgetGK)] = "true"
 		return m
 	}
-	t.Run("removes the labels", func(t *testing.T) {
-		r := newFakeRig(t, namespaceObject("ns"), stripped())
+	cleaned := func(r *fakeRig) bool {
+		l := r.secretMeta(t, "ns", "s").Labels
+		return l[LabelHeld] == "" && l[MarkerLabel(widgetGK)] == ""
+	}
+	t.Run("an object the informer delivers", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"))
 		r.track(t, widgetGK)
 		r.run(t)
 		r.runWrites(t)
-		eventually(t, "the labels to go", func() bool {
-			l := r.secretMeta(t, "ns", "s").Labels
-			return l[LabelHeld] == "" && l[MarkerLabel(widgetGK)] == ""
-		})
+		if err := r.md.Tracker().Create(secretsGVR, stripped(), "ns"); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "the labels to go", func() bool { return cleaned(r) })
+	})
+	t.Run("an object the rescan finds", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"), stripped())
+		r.track(t, widgetGK)
+		r.run(t)
+		// What the informers queued before the write loops is lost, as on a
+		// process whose queue started after its informers had seen it.
+		for r.s.janitor.Len() > 0 {
+			id, _ := r.s.janitor.Get()
+			r.s.janitor.Forget(id)
+			r.s.janitor.Done(id)
+		}
+		r.runWrites(t)
+		eventually(t, "the labels to go", func() bool { return cleaned(r) })
 	})
 	t.Run("a rejected patch is reported", func(t *testing.T) {
 		r := newFakeRig(t, namespaceObject("ns"), stripped())
@@ -609,5 +627,67 @@ func TestNamespaceRestrictedCaches(t *testing.T) {
 	tr.heldDeleting(secretID("in", "s"), "in")
 	if got := r.queued(widgetGK, "in"); got != nil {
 		t.Errorf("a deleting Secret inside the caches was enqueued by the pass (%v): its informer does that", got)
+	}
+}
+
+// A batch added with no objects covers every cached object that carries
+// the kind's finalizer for its namespace.
+func TestReleaseBatchFillsAnEmptyBatch(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.s.releaseBatch(context.Background(), batchKey{widgetGK, "ns"}, nil)
+	if hasFinalizer(r.secretMeta(t, "ns", "s"), fWidgetNS) {
+		t.Error("an empty batch released nothing")
+	}
+}
+
+// CredentialDeleting goes to the live users of a kept object only: the
+// deleting ones are named in WaitingForCredentialUsers.
+func TestReportKeptWarnsTheLiveUsers(t *testing.T) {
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	live, gone := types.NamespacedName{Namespace: "ns", Name: "live"}, types.NamespacedName{Namespace: "ns", Name: "going"}
+	r.s.reportKept(tr, batchKey{widgetGK, "ns"}, []Kept{{P: secretID("ns", "s"), Why: KeptUserDeleting,
+		Users: []types.NamespacedName{live, gone}, DeletingUsers: []types.NamespacedName{gone}}})
+	evs := r.takeEvents()
+	var warned, waiting int
+	for _, e := range evs {
+		switch {
+		case strings.Contains(e, EventCredentialDeleting):
+			warned++
+		case strings.Contains(e, EventWaitingForUsers):
+			waiting++
+			if !strings.Contains(e, "being deleted: ns/going") || !strings.Contains(e, "2 user(s)") {
+				t.Errorf("WaitingForCredentialUsers = %q; want both users counted and the deleting one named", e)
+			}
+		}
+	}
+	if warned != 1 || waiting != 1 {
+		t.Errorf("events %q; want one CredentialDeleting, for the live user, and one WaitingForCredentialUsers", evs)
+	}
+}
+
+// RunWriteLoops waits for the informers' first sync before it rescans and
+// takes batches: a batch queued while the informers are still syncing
+// waits. It is held for two seconds; the write loops that don't wait take
+// it at once.
+func TestWriteLoopsWaitForTheInformers(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	r.track(t, widgetGK)
+	entered, release := r.gateList("namespaces")
+	defer close(release)
+	r.s.queue.Add(batchKey{widgetGK, "ns"}, secretID("ns", "s"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = r.s.RunInformers(ctx) }()
+	<-entered
+	r.runWrites(t)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if r.s.queue.Len() == 0 {
+			t.Fatal("the write loops took a batch before the informers had synced")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

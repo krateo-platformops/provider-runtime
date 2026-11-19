@@ -925,8 +925,8 @@ func TestProtectedHandler(t *testing.T) {
 		if !slices.Equal(r.queued(widgetGK, "ns"), []ID{id}) || !slices.Equal(r.queued(widgetGK, "other"), []ID{id}) {
 			t.Errorf("batches %v, %v; want the Secret in both", r.queued(widgetGK, "ns"), r.queued(widgetGK, "other"))
 		}
-		if gauge() != 2 {
-			t.Errorf("held gauge %d, want 2", gauge())
+		if gauge() != 2 || r.metrics.waitingGauge(kind) != 0 {
+			t.Errorf("held gauge %d, waiting %d; want 2 and 0: a live object waits for nothing", gauge(), r.metrics.waitingGauge(kind))
 		}
 		r.drain()
 	})
@@ -973,6 +973,9 @@ func TestProtectedHandler(t *testing.T) {
 		if r.queued(widgetGK, "ns") == nil || r.queued(widgetGK, "other") == nil {
 			t.Error("the deletion didn't enqueue its batches")
 		}
+		if n := r.metrics.waitingGauge(kind); n != 1 {
+			t.Errorf("waiting gauge %d, want 1: one object, whatever its finalizers", n)
+		}
 		r.drain()
 		r.clk.Step(DefaultDeletionGrace)
 		if !slices.Equal(r.queued(widgetGK, "ns"), []ID{id}) || !slices.Equal(r.queued(widgetGK, "other"), []ID{id}) {
@@ -1015,8 +1018,8 @@ func TestProtectedHandler(t *testing.T) {
 		if got := r.enq.take(); !maps.Equal(got, wantHolders) {
 			t.Errorf("holders enqueued %v, want %v", got, wantHolders)
 		}
-		if r.queued(widgetGK, "ns") == nil || gauge() != 0 {
-			t.Errorf("batch %v, held gauge %d; want the batch, and 0", r.queued(widgetGK, "ns"), gauge())
+		if r.queued(widgetGK, "ns") == nil || gauge() != 0 || r.metrics.waitingGauge(kind) != 0 {
+			t.Errorf("batch %v, held gauge %d, waiting %d; want the batch, and 0 and 0", r.queued(widgetGK, "ns"), gauge(), r.metrics.waitingGauge(kind))
 		}
 	})
 }
