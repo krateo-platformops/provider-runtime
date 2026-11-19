@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/metadata"
 	metadatafake "k8s.io/client-go/metadata/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/events"
 	testingclock "k8s.io/utils/clock/testing"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -82,6 +83,24 @@ type fakeRig struct {
 	// its reactors run under one lock, so a reactor that blocks blocks
 	// every call.
 	listGate atomic.Pointer[func(resource string)]
+
+	// events records the core's events; refs are each holder's refs, by
+	// name, for the trackers' RefsFunc.
+	events *events.FakeRecorder
+	refsMu sync.Mutex
+	refs   map[string][]Ref
+}
+
+func (r *fakeRig) refsOf(obj metav1.Object) ([]Ref, error) {
+	r.refsMu.Lock()
+	defer r.refsMu.Unlock()
+	return slices.Clone(r.refs[obj.GetName()]), nil
+}
+
+func (r *fakeRig) setRefs(holder string, refs ...Ref) {
+	r.refsMu.Lock()
+	defer r.refsMu.Unlock()
+	r.refs[holder] = refs
 }
 
 // gatedMetadata is the fake metadata client, with the rig's list gate.
@@ -138,11 +157,21 @@ func crdOf(gk schema.GroupKind) *unstructured.Unstructured {
 
 func newFakeRig(t *testing.T, objs ...runtime.Object) *fakeRig {
 	t.Helper()
-	mapper := meta.NewDefaultRESTMapper(nil)
+	return newFakeRigWith(t, SharedOptions{}, objs...)
+}
+
+// newFakeRigWith is newFakeRig with SharedOptions o.
+func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fakeRig {
+	t.Helper()
+	// Default versions, so that the server maps a GroupKind as the API
+	// server's discovery would.
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Version: "v1"}, {Group: widgetGK.Group, Version: "v1"}})
 	for _, gvk := range []schema.GroupVersionKind{widgetGK.WithVersion("v1"), gadgetGK.WithVersion("v1"), secretGVK, configMapGVK} {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
-	r := &fakeRig{clk: testingclock.NewFakeClock(time.Now()), metrics: &countingMetrics{}, enq: &enqueueLog{}}
+	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
+	r := &fakeRig{clk: testingclock.NewFakeClock(time.Now()), metrics: &countingMetrics{}, enq: &enqueueLog{},
+		events: events.NewFakeRecorder(10000), refs: map[string][]Ref{}}
 	scheme := metadatafake.NewTestScheme()
 	if err := metav1.AddMetaToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -164,7 +193,7 @@ func newFakeRig(t *testing.T, objs ...runtime.Object) *fakeRig {
 		_ = unstructured.SetNestedField(obj.Object, !denied, "status", "allowed")
 		return true, obj, nil
 	})
-	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper}, SharedOptions{}, r.clk)
+	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper, Events: r.events}, o, r.clk)
 	r.s.syncTimeout.Store(int64(20 * time.Second))
 	return r
 }
@@ -173,7 +202,7 @@ func (r *fakeRig) options(gk schema.GroupKind, protected ...ProtectedKind) Optio
 	return Options{
 		Holder:          gk.WithVersion("v1"),
 		OwnerFinalizers: ownerFinalizers,
-		Refs:            func(metav1.Object) ([]Ref, error) { return nil, nil },
+		Refs:            r.refsOf,
 		Enqueue:         r.enq.add,
 		TimeoutBound:    90 * time.Second,
 		Metrics:         r.metrics,
@@ -265,7 +294,7 @@ func (r *fakeRig) tracked(gk schema.GroupKind) bool {
 func (r *fakeRig) protectedOf(gk schema.GroupKind) *protectedInformer {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
-	return r.s.protected[gk]
+	return r.s.protected[protKey{gk, ""}]
 }
 
 // heldObject is a protected object of kind gvk carrying finalizer and epoch
@@ -273,6 +302,7 @@ func (r *fakeRig) protectedOf(gk schema.GroupKind) *protectedInformer {
 func heldObject(gvk schema.GroupVersionKind, ns, name string, uid types.UID, k schema.GroupKind, namespaces ...string) *metav1.PartialObjectMetadata {
 	m := &metav1.PartialObjectMetadata{TypeMeta: metav1.TypeMeta{APIVersion: gvk.GroupVersion().String(), Kind: gvk.Kind}}
 	m.Namespace, m.Name, m.UID = ns, name, uid
+	m.ResourceVersion = "1"
 	m.Labels = map[string]string{LabelHeld: "true"}
 	m.Annotations = map[string]string{}
 	for _, n := range namespaces {
@@ -739,7 +769,7 @@ func TestFailedTrackLeavesNothing(t *testing.T) {
 						started = append(started, g.t.holders)
 					}
 				case "configmaps":
-					if p := r.s.protected[configMapGK]; p != nil {
+					if p := r.s.protected[protKey{configMapGK, ""}]; p != nil {
 						started = append(started, p.inf)
 					}
 				}
@@ -991,16 +1021,25 @@ func TestProtectedHandler(t *testing.T) {
 	})
 }
 
-// G6: the queue shuts down when RunInformers' context ends, which stops
-// the grace timers.
+// G6: the queues shut down when RunInformers' context ends, which stops
+// the grace timers. The janitor's workqueue keeps a heartbeat ticker on the
+// clock, which the fake clock never removes, so the test counts waiters:
+// the grace timer's must be gone.
 func TestRunInformersShutsTheQueueDown(t *testing.T) {
 	r := newFakeRig(t)
 	stop := r.run(t)
+	before := r.clk.Waiters()
 	r.s.queue.AddAfter(batchKey{widgetGK, "ns"}, time.Minute)
+	if r.clk.Waiters() != before+1 {
+		t.Fatalf("AddAfter left %d waiters, want %d", r.clk.Waiters(), before+1)
+	}
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
-	if r.clk.HasWaiters() {
+	if !r.s.janitor.ShuttingDown() {
+		t.Error("the janitor's queue outlived RunInformers")
+	}
+	if r.clk.Waiters() != before {
 		t.Error("a grace timer outlived RunInformers")
 	}
 	r.s.queue.Add(batchKey{widgetGK, "ns"})

@@ -160,6 +160,8 @@ func (h holderHandler) OnDelete(obj any) {
 	}
 	h.t.ver.holderEvent(m.UID, nil, h.now())
 	h.enqueue(m, nil)
+	// A holder that is gone waits for no Missing ref (§10.3).
+	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)
 }
 
 // enqueue adds the batch of every ID in old's and cur's records.
@@ -184,6 +186,7 @@ func heldSelector() string { return LabelHeld + "=true" }
 // handler on it (protectedHandler).
 type protectedInformer struct {
 	gk  schema.GroupKind
+	ns  string // the namespace it is restricted to (§10.5), or ""
 	gvr schema.GroupVersionResource
 	lw  *listWatch
 	inf cache.SharedIndexInformer
@@ -276,7 +279,8 @@ type protectedHandler struct {
 	p *protectedInformer
 	t *Tracker
 
-	held int // t's (object, finalizer) pairs in p's cache
+	held    int // t's (object, finalizer) pairs in p's cache
+	waiting int // p's cached objects being deleted that carry one of t's finalizers
 }
 
 func (h *protectedHandler) id(m *metav1.PartialObjectMetadata) ID {
@@ -289,13 +293,23 @@ func (h *protectedHandler) observe(m *metav1.PartialObjectMetadata) {
 	}
 }
 
-// count moves t's held gauge by d pairs.
-func (h *protectedHandler) count(d int) {
-	if d == 0 {
+// count moves t's gauges: d held pairs, and w waiting objects.
+func (h *protectedHandler) count(d, w int) {
+	if d == 0 && w == 0 {
 		return
 	}
 	h.held += d
-	h.t.setHeld(h.p.gk, h.held)
+	h.waiting += w
+	h.t.setCounts(h.p.key(), h.held, h.waiting)
+}
+
+// waits reports whether m counts as waiting for t's users: it is being
+// deleted and carries one of t's finalizers.
+func waits(m *metav1.PartialObjectMetadata, held map[string]string) int {
+	if m.DeletionTimestamp != nil && len(held) > 0 {
+		return 1
+	}
+	return 0
 }
 
 // holds returns each of t's finalizers on m, by holder namespace, with its
@@ -324,7 +338,7 @@ func (h *protectedHandler) OnAdd(obj any, _ bool) {
 	if m.DeletionTimestamp != nil {
 		h.graceTimers(m, id)
 	}
-	h.count(len(held))
+	h.count(len(held), waits(m, held))
 }
 
 func (h *protectedHandler) OnUpdate(oldObj, newObj any) {
@@ -361,7 +375,7 @@ func (h *protectedHandler) OnUpdate(oldObj, newObj any) {
 	if n.DeletionTimestamp != nil && (newlyDeleting || replaced) {
 		h.graceTimers(n, id)
 	}
-	h.count(len(after) - len(before))
+	h.count(len(after)-len(before), waits(n, after)-waits(o, before))
 }
 
 func (h *protectedHandler) OnDelete(obj any) {
@@ -383,7 +397,7 @@ func (h *protectedHandler) OnDelete(obj any) {
 	// of #109). If it comes back still deleting, its grace starts again from
 	// then, which only delays a release.
 	h.s.seen.forget(m.UID)
-	h.count(-len(held))
+	h.count(-len(held), -waits(m, held))
 }
 
 // graceTimers enqueues m's batches for t again when t's grace for m ends
@@ -458,7 +472,7 @@ type trackerViews struct{ t *Tracker }
 var _ views = trackerViews{}
 
 func (v trackerViews) Protected(id ID) (*metav1.PartialObjectMetadata, bool) {
-	p := v.t.s.protectedInformer(id.GroupKind())
+	p := v.t.s.protectedFor(id)
 	if p == nil || !p.inf.HasSynced() {
 		return nil, false
 	}

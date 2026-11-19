@@ -45,9 +45,15 @@ type listWatch struct {
 
 var _ cache.ListerWatcherWithContext = (*listWatch)(nil)
 
-func newListWatch(md metadata.Interface, gvr schema.GroupVersionResource, selector string, clk clock.PassiveClock, listed func(time.Time)) *listWatch {
+// newListWatch lists and watches gvr through md, in namespace, or in every
+// namespace when it is "".
+func newListWatch(md metadata.Interface, gvr schema.GroupVersionResource, namespace, selector string, clk clock.PassiveClock, listed func(time.Time)) *listWatch {
+	var client metadata.ResourceInterface = md.Resource(gvr)
+	if namespace != "" {
+		client = md.Resource(gvr).Namespace(namespace)
+	}
 	return &listWatch{
-		client: md.Resource(gvr), selector: selector, clock: clk, listed: listed,
+		client: client, selector: selector, clock: clk, listed: listed,
 		noWatchList: watchlist.DoesClientNotSupportWatchListSemantics(md),
 	}
 }

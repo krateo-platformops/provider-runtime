@@ -101,12 +101,25 @@ func widgetOptions(enq func(types.NamespacedName)) cu.Options {
 	}
 }
 
-// running starts s, fails t on a Run error, and waits until it has synced.
+// running starts s, informers and write loops, fails t on a Run error, and
+// waits until it has synced.
 func running(t *testing.T, s *cu.Shared) context.CancelFunc {
+	t.Helper()
+	return runningWith(t, s, s.Run)
+}
+
+// runningInformers starts only s's informers, for a test that inspects the
+// batch queue, which the release loop would drain.
+func runningInformers(t *testing.T, s *cu.Shared) context.CancelFunc {
+	t.Helper()
+	return runningWith(t, s, s.RunInformers)
+}
+
+func runningWith(t *testing.T, s *cu.Shared, run func(context.Context) error) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
-	go func() { errc <- s.Run(ctx) }()
+	go func() { errc <- run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-errc; err != nil && !errors.Is(err, context.Canceled) {
@@ -530,7 +543,7 @@ func TestNamespaceHandlerActsOnlyOnItsFields(t *testing.T) {
 		})
 		return got
 	}
-	running(t, s)
+	runningInformers(t, s)
 	d := newDriver(tr)
 	nn := types.NamespacedName{Namespace: ns, Name: "w"}
 	pass(t, d, nn)

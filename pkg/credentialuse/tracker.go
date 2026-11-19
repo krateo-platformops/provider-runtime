@@ -39,9 +39,16 @@ type Tracker struct {
 	// changes.
 	regs map[*protectedInformer]cache.ResourceEventHandlerRegistration
 
-	heldMu sync.Mutex
-	heldBy map[schema.GroupKind]int // the held gauge, by protected kind
-	gone   bool                     // a failed Track dropped t
+	// heldMu guards the gauges' counts, by protected informer: held
+	// (object, finalizer) pairs, and waiting objects (§12).
+	heldMu    sync.Mutex
+	heldBy    map[protKey]int
+	waitingBy map[protKey]int
+	gone      bool // a failed Track dropped t
+
+	// missing are the refs a holder's pass last found Missing, for the
+	// prober (§10.3).
+	missing *missingRefs
 
 	// sinkMu guards sink. Every call to a sink holds it for reading, so
 	// that rebind, which holds it for writing, returns only once no call to
@@ -75,6 +82,12 @@ func (t *Tracker) enqueue(nn types.NamespacedName) {
 	t.sinkMu.RLock()
 	defer t.sinkMu.RUnlock()
 	t.sink.enqueue(nn)
+}
+
+func (t *Tracker) sinkInfo(msg string, keysAndValues ...any) {
+	t.sinkMu.RLock()
+	defer t.sinkMu.RUnlock()
+	t.sink.logger.Info(msg, keysAndValues...)
 }
 
 func (t *Tracker) warn(msg string, keysAndValues ...any) {
@@ -143,25 +156,28 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	}
 	t := &Tracker{
 		s: s, o: o, gk: gk, gvr: m.Resource, prefix: prefix, ver: newVerified(gk),
-		regs:   map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
-		heldBy: map[schema.GroupKind]int{},
-		sink:   sinksOf(o),
+		regs:      map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
+		heldBy:    map[protKey]int{},
+		waitingBy: map[protKey]int{},
+		missing:   newMissingRefs(),
+		sink:      sinksOf(o),
 	}
 	t.proto = &protocol{
 		holder:          gk,
 		ownerFinalizers: o.OwnerFinalizers,
 		grace:           o.DeletionGrace,
 		clock:           s.clock,
-		srv:             clientServer{md: s.c.Metadata, mapper: s.c.Mapper},
+		srv:             s.newServer(),
 		views:           trackerViews{t},
 		ver:             t.ver,
 		seen:            s.seen,
 		reports:         coreReports{metrics: sinkMetrics{t}, events: s.events},
 		newEpoch:        NewEpoch,
+		heldDeleting:    t.heldDeleting,
 	}
 	// The holder informer's list or relist completion is a floor under
 	// every observation of the record (§6.5 L2).
-	lw := newListWatch(s.c.Metadata, m.Resource, "", s.clock, t.listCompleted)
+	lw := newListWatch(s.c.Metadata, m.Resource, "", "", s.clock, t.listCompleted)
 	t.holderLW = lw
 	if wrap := holderListWatchSeam; wrap != nil {
 		t.holderLW = wrap(lw)
@@ -202,7 +218,7 @@ func (t *Tracker) informer() informer {
 func (t *Tracker) join(p *protectedInformer) error {
 	reg, err := p.inf.AddEventHandler(&protectedHandler{s: t.s, p: p, t: t})
 	if err != nil {
-		return fmt.Errorf("credential-use: joining the protected informer of %s: %w", p.gk, err)
+		return fmt.Errorf("credential-use: joining %s: %w", p.what(), err)
 	}
 	t.regs[p] = reg
 	p.add(t)
@@ -225,16 +241,21 @@ func (t *Tracker) stopInformers() {
 	}
 }
 
-// setHeld sets t's held pairs in protected kind pgk's cache to n, and the
-// held gauge to their sum over t's protected kinds (§12, L4): (protected
-// object, finalizer) pairs with the kind's prefix in this process's cache.
-func (t *Tracker) setHeld(pgk schema.GroupKind, n int) {
+// setCounts sets what t holds in protected informer pk's cache, and the
+// gauges to their sums over t's protected informers (§12): held, the
+// (object, finalizer) pairs with the kind's prefix (L4); waiting, the
+// objects being deleted that carry one of the kind's finalizers. The
+// releaser removes a finalizer as soon as §5 lets it, so a deleting object
+// that still carries one is waiting for the kind's users, or for the grace.
+// Counting from the caches keeps the gauge right on every replica, not only
+// on the one whose write loops run.
+func (t *Tracker) setCounts(pk protKey, held, waiting int) {
 	t.heldMu.Lock()
 	defer t.heldMu.Unlock()
 	if t.gone {
 		return
 	}
-	t.heldBy[pgk] = n
+	t.heldBy[pk], t.waitingBy[pk] = held, waiting
 	t.reportHeldLocked()
 }
 
@@ -248,20 +269,25 @@ func (t *Tracker) reportHeld() {
 }
 
 func (t *Tracker) reportHeldLocked() {
-	sum := 0
+	held, waiting := 0, 0
 	for _, c := range t.heldBy {
-		sum += c
+		held += c
 	}
-	sinkMetrics{t}.HeldObjects(kindLabel(t.gk), sum)
+	for _, c := range t.waitingBy {
+		waiting += c
+	}
+	sinkMetrics{t}.HeldObjects(kindLabel(t.gk), held)
+	sinkMetrics{t}.WaitingObjects(kindLabel(t.gk), waiting)
 }
 
-// dropHeld clears the held gauge of a tracker a failed Track dropped; a
-// handler that still runs then changes it no more.
+// dropHeld clears the gauges of a tracker a failed Track dropped; a handler
+// that still runs then changes them no more.
 func (t *Tracker) dropHeld() {
 	t.heldMu.Lock()
 	defer t.heldMu.Unlock()
 	if !t.gone && len(t.heldBy) > 0 {
 		sinkMetrics{t}.HeldObjects(kindLabel(t.gk), 0)
+		sinkMetrics{t}.WaitingObjects(kindLabel(t.gk), 0)
 	}
 	t.gone = true
 }
@@ -290,8 +316,34 @@ func (t *Tracker) Acquire(ctx context.Context, obj metav1.Object) (Acquired, err
 	if err != nil {
 		return a, err
 	}
+	t.noteMissing(obj, a)
 	t.reportOutcome(obj, a)
 	return a, nil
+}
+
+// noteMissing keeps the prober's refs (§10.3): a ref this pass found Missing
+// is due again at the shortest backoff, and the holder no longer waits for
+// any other ref it was missing.
+func (t *Tracker) noteMissing(obj metav1.Object, a Acquired) {
+	holder := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	var missing []ID
+	for _, u := range a.Unheld {
+		if u.Reason == ReasonMissing {
+			missing = append(missing, u.Ref.ID())
+		}
+	}
+	t.missing.set(holder, missing, t.s.clock.Now(), t.o.ProbeInterval)
+}
+
+// heldDeleting is told of an object an A2 held whose response shows it being
+// deleted. Outside the protected caches (SharedOptions.Namespaces, §10.5) no
+// informer delivers that deletion, so the object's batch is enqueued here:
+// R1 then measures the grace from this first sight. Inside them, the
+// informer does it.
+func (t *Tracker) heldDeleting(id ID, namespace string) {
+	if !t.s.cached(id) {
+		t.s.queue.Add(batchKey{t.gk, namespace}, id)
+	}
 }
 
 // reportOutcome records §12's event for a degraded pass, on the holder.
@@ -317,7 +369,10 @@ func (t *Tracker) BeforeEstablish(ctx context.Context, obj metav1.Object, a Acqu
 // Forget removes the record from obj in memory, just before the caller's
 // write that removes its owner finalizer, so that both go in one write
 // (§7.2 item 4). It is mandatory. It reports whether anything changed.
-func (t *Tracker) Forget(obj metav1.Object) bool { return t.proto.forget(obj) }
+func (t *Tracker) Forget(obj metav1.Object) bool {
+	t.missing.set(types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, nil, t.s.clock.Now(), t.o.ProbeInterval)
+	return t.proto.forget(obj)
+}
 
 // Users returns the holders of this kind in namespace that use p, read live
 // (§6.1): for diagnostics and tests. The release loop decides from its own
