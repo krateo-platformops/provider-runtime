@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/metadata"
 	metadatafake "k8s.io/client-go/metadata/fake"
@@ -518,7 +519,69 @@ func TestSharedInformerStartFailureReachesEveryTrack(t *testing.T) {
 		}
 	}
 	if r.protectedOf(configMapGK) != nil {
-		t.Error("the informer whose start failed stayed after both Tracks gave it up")
+		t.Fatal("the informer whose start failed stayed after both Tracks gave it up")
+	}
+	if !eventuallyStopped(p.inf) {
+		t.Error("the informer whose start failed kept running after both Tracks gave it up")
+	}
+
+	// The grant is back: a Track now starts a fresh informer, and syncs.
+	r.forbidList.Delete("configmaps")
+	if _, err := r.s.Track(context.Background(), r.options(gadgetGK, cm...)); err != nil {
+		t.Fatalf("Track after the grant = %v", err)
+	}
+	if q := r.protectedOf(configMapGK); q == nil || q == p {
+		t.Error("the Track after the grant didn't start a fresh informer")
+	}
+}
+
+// eventuallyStopped reports whether inf stops within 20 seconds.
+func eventuallyStopped(inf interface{ IsStopped() bool }) bool {
+	deadline := time.Now().Add(20 * time.Second)
+	for !inf.IsStopped() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// A 403 after a shared informer's first sync isn't its start error: the
+// reflector retries, the informer recovers, and a later Track that needs it
+// succeeds (the final review of #109). The reviewer's probe: the first
+// watch of the ConfigMaps ends, the next one is forbidden once, and the
+// ones after pass.
+func TestATransient403AfterSyncDoesntPoisonASharedInformer(t *testing.T) {
+	r := newFakeRig(t)
+	r.run(t)
+	first := watch.NewFake()
+	var calls atomic.Int32
+	r.md.PrependWatchReactor("configmaps", func(clienttesting.Action) (bool, watch.Interface, error) {
+		switch calls.Add(1) {
+		case 1:
+			return true, first, nil
+		case 2:
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "", errors.New("test: a transient 403"))
+		}
+		return false, nil, nil
+	})
+	cm := []ProtectedKind{{GVK: configMapGVK}}
+	r.track(t, widgetGK, cm...)
+	p := r.protectedOf(configMapGK)
+	eventually(t, "the ConfigMap informer's first watch", func() bool { return calls.Load() >= 1 })
+	first.Stop()
+	// The watch error handler runs before the reflector watches again, so
+	// a third watch means the 403 has been handled.
+	eventually(t, "the ConfigMap informer to watch again after the 403", func() bool { return calls.Load() >= 3 })
+	if !p.inf.HasSynced() {
+		t.Fatal("the ConfigMap informer lost its sync")
+	}
+	if _, err := r.s.Track(context.Background(), r.options(gadgetGK, cm...)); err != nil {
+		t.Errorf("Track after a transient 403 = %v, want the shared informer used", err)
+	}
+	if r.protectedOf(configMapGK) != p {
+		t.Error("the shared informer was replaced")
 	}
 }
 

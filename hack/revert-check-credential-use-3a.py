@@ -16,7 +16,9 @@ set (CI=1 makes an envtest fail rather than skip without it).
 Usage:
   python3 hack/revert-check-credential-use-3a.py > hack/revert-check-credential-use-3a.txt
 
-REVERT_TIMEOUT_S sets go test's timeout per run (default 900).
+REVERT_TIMEOUT_S sets go test's timeout per run (default 900). REVERT_ONLY, a
+regular expression, runs only the mutants whose names it matches, for a run
+over a small delta; the full run's output stays the record for the rest.
 """
 import hashlib, os, re, signal, subprocess, sys, time
 
@@ -127,6 +129,8 @@ MUTANTS = [
      [("\t\tif caller.Err() != nil {\n\t\t\treturn err\n\t\t}\n\t\treturn s.setupFailed(err)", "\t\treturn s.setupFailed(err)")]),
     ("a Track ignores its caller's ctx", "shared.go",
      [("\tctx, cancel := context.WithTimeout(parent, s.timeout())", "\tctx, cancel := context.WithTimeout(context.WithoutCancel(parent), s.timeout())")]),
+    ("a 403 after a shared informer's sync is its start error", "shared.go",
+     [("\t\tif apierrors.IsForbidden(err) && !p.inf.HasSynced() {", "\t\tif apierrors.IsForbidden(err) {")]),
     ("a failed Track keeps its claims", "shared.go",
      [("\t\tstops := s.releaseLocked(ps)\n", "\t\tvar stops []context.CancelFunc\n")]),
     ("an informer nobody claims isn't removed", "shared.go",
@@ -208,7 +212,7 @@ TESTS = ("^(TestRelistResetsRecordSince|TestTrackAfterStartAndTwice|TestPublishe
          "TestTrackOfOneKindDoesntWaitForAnother|TestTrackStopsWaitingWhenRunInformersFails|"
          "TestEqualOptionsComparesEveryOtherField|TestTrackRebindsTheSinks|TestRebindWaitsForCallsInFlight|"
          "TestSharedInformerWaitersKeepTheirOwnBudget|TestSharedInformerStartFailureReachesEveryTrack|TestTrackJoinsAfterItsHolderSync|"
-         "TestTrackHonoursTheCallersContext)$")
+         "TestTrackHonoursTheCallersContext|TestATransient403AfterSyncDoesntPoisonASharedInformer)$")
 
 
 class Run:
@@ -281,8 +285,15 @@ def on_signal(signum, _frame):
 signal.signal(signal.SIGTERM, on_signal)
 signal.signal(signal.SIGINT, on_signal)
 
+ONLY = os.environ.get("REVERT_ONLY")
+if ONLY:
+    print(f"only the mutants matching {ONLY!r}\n")
 counts = {}
+run = 0
 for num, (name, f, edits) in enumerate(MUTANTS, 1):
+    if ONLY and not re.search(ONLY, name):
+        continue
+    run += 1
     full = os.path.join(ROOT, PKG, f)
     src = open(full).read()
     bad = [old for old, _ in edits if src.count(old) != 1]
@@ -306,5 +317,5 @@ for num, (name, f, edits) in enumerate(MUTANTS, 1):
     counts[state] = counts.get(state, 0) + 1
     print(f"{state:9} {name}\n          {detail}\n          mutant {num}: {began} to {utc()}", flush=True)
 
-print("\n" + " ".join(f"{k}={v}" for k, v in sorted(counts.items())) + f" of {len(MUTANTS)}")
+print("\n" + " ".join(f"{k}={v}" for k, v in sorted(counts.items())) + f" of {run}" + (f" (of {len(MUTANTS)})" if ONLY else ""))
 print("tree restored" if digest() == start else "TREE DIFFERS FROM THE START")

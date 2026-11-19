@@ -746,12 +746,17 @@ func (p *protectedInformer) ensureStarted(ctx, ictx context.Context, s *Shared) 
 // startShared starts p for every Track that needs it, under RunInformers'
 // context ictx rather than a Track's (the re-review of #109). Its RBAC check
 // has syncTimeout of its own. A refused check, or a list or watch the server
-// forbids, is p's start error.
+// forbids before p's first sync, is p's start error: every Track that
+// claimed p fails with it, and p is removed and stopped when the last of
+// them lets go, so that a Track after the grant starts a fresh informer. A
+// 403 after the first sync isn't a start error: the reflector retries, as
+// for any watch error, and p recovers once the grant is back (the final
+// review of #109).
 func (s *Shared) startShared(ictx context.Context, p *protectedInformer) {
 	pctx, pstop := context.WithCancel(ictx)
 	s.setStop(p, pstop)
 	_ = p.inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
-		if apierrors.IsForbidden(err) {
+		if apierrors.IsForbidden(err) && !p.inf.HasSynced() {
 			p.fail(fmt.Errorf("%w: the protected informer of %s: %w", errForbidden, p.gk, err))
 		}
 	})
