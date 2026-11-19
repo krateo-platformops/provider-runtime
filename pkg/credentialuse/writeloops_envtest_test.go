@@ -54,10 +54,9 @@ func resetPublished(t *testing.T, gvr schema.GroupVersionResource) {
 // Every Connect failure is recorded, with whether the holder was being
 // deleted then.
 type controller struct {
-	t   *testing.T
-	d   *driver.Driver
-	q   chan types.NamespacedName
-	ctx context.Context
+	t *testing.T
+	d *driver.Driver
+	q chan types.NamespacedName
 
 	mu       sync.Mutex
 	failures []string // Connect failures of holders being deleted: §14's I1
@@ -108,7 +107,6 @@ func (c *controller) start(d *driver.Driver) {
 		d.Connect = c.connect
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c.ctx = ctx
 	done := make(chan struct{})
 	var once sync.Once
 	c.cancel = cancel
