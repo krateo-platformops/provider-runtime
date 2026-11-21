@@ -358,6 +358,10 @@ func (w *stressWorld) describe(ctx context.Context, ns string) string {
 func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, chained bool) {
 	resetPublished(t, cutest.WidgetGVR)
 	resetPublished(t, cutest.TargetGVR)
+	t.Cleanup(func() {
+		resetPublished(t, cutest.WidgetGVR)
+		resetPublished(t, cutest.TargetGVR)
+	})
 	w := &stressWorld{t: t, holders: map[string][]stressHolder{}, chained: chained}
 	for range n {
 		w.procs = append(w.procs, startStressProcess(t, so, chained))
