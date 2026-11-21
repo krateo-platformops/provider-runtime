@@ -27,7 +27,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG = "pkg/credentialuse/"
-FILES = ["writeloops.go", "janitor.go", "prober.go", "tracker.go", "informers.go", "shared.go", "listwatch.go", "release.go", "acquire.go"]
+FILES = ["writeloops.go", "janitor.go", "prober.go", "tracker.go", "informers.go", "shared.go", "listwatch.go", "release.go", "acquire.go", "uncached.go"]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -38,18 +38,18 @@ MUTANTS = [
     ("the write loops don't rescan", "writeloops.go",
      [("\ts.rescan()\n\n\tctx, cancel", "\n\tctx, cancel")]),
     ("a batch of an untracked kind is worked with another tracker", "writeloops.go",
-     [("\tt := s.tracker(k.Holder)\n\tif t == nil {\n\t\treturn\n\t}",
-       "\tt := s.tracker(k.Holder)\n\tif t == nil {\n\t\tif all := s.trackerList(); len(all) > 0 {\n\t\t\tt = all[0]\n\t\t} else {\n\t\t\treturn\n\t\t}\n\t}")]),
+     [("\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\treturn\n\t}",
+       "\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\tif all := s.trackerList(); len(all) > 0 {\n\t\t\tt = all[0]\n\t\t} else {\n\t\t\treturn\n\t\t}\n\t}")]),
     ("an empty batch isn't filled", "writeloops.go",
-     [("\tif len(ids) == 0 {\n\t\tids = s.heldIn(t, k.Namespace)", "\tif false {\n\t\tids = s.heldIn(t, k.Namespace)")]),
+     [("\tif len(ids) == 0 {\n\t\tvar err error\n\t\tids, err = s.heldIn(ctx, t, k.Namespace)", "\tif false {\n\t\tvar err error\n\t\tids, err = s.heldIn(ctx, t, k.Namespace)")]),
     ("RequeueAt isn't honoured", "writeloops.go",
      [("\tif !res.RequeueAt.IsZero() {\n\t\ts.queue.AddAfter(", "\tif false {\n\t\ts.queue.AddAfter(")]),
     ("a failed batch isn't retried", "writeloops.go",
-     [("\t\ts.queue.AddAfter(k, d, ids...)\n\t\treturn", "\t\t_ = d\n\t\treturn")]),
+     [("\ts.queue.AddAfter(k, d, ids...)\n}", "\t_ = d\n}")]),
     ("the backoff doesn't double", "writeloops.go",
      [("\t\td *= 2\n", "\t\td *= 1\n")]),
     ("an interrupted batch waits a backoff", "writeloops.go",
-     [("\t\tif ctx.Err() != nil {\n\t\t\ts.queue.Add(k, ids...)\n\t\t\treturn\n\t\t}\n", "")]),
+     [("\tif ctx.Err() != nil {\n\t\ts.queue.Add(k, ids...)\n\t\treturn\n\t}\n\td := s.backoff.fail(k)", "\td := s.backoff.fail(k)")]),
     # writeloops.go: §12's events.
     ("no WaitingForCredentialUsers", "writeloops.go",
      [("\t\ts.events.record(s.events.regarding(kp.P), \"Normal\", EventWaitingForUsers, note)\n", "\t\t_ = note\n")]),
@@ -109,6 +109,37 @@ MUTANTS = [
      [("\t\t\t\t\tres.Kept = append(res.Kept, Kept{P: id, Why: KeptGrace, GraceEnd: r.graceEnd, Users: u.users, DeletingUsers: u.deletingUsers})\n", "")]),
     ("R2's namespace row is reported as a deleting user", "release.go",
      [("\t\t\t\t\tif in.NamespaceDeleting {\n\t\t\t\t\t\tkept.Why = KeptNamespaceDeleting\n\t\t\t\t\t}\n", "")]),
+    # The review of #114, defect 1: a batch of a kind being tracked waits for its Track.
+    ("a batch of a kind being tracked is dropped", "shared.go",
+     [("\tif in := s.tracking[k.Holder]; in != nil {\n\t\tin.parked = append(in.parked, parkedBatch{key: k, ids: append([]ID(nil), ids...)})\n\t}\n", "")]),
+    ("a parked batch isn't requeued when its Track succeeds", "shared.go",
+     [("\t\tfor _, b := range parked {\n\t\t\ts.queue.Add(b.key, b.ids...)\n\t\t}\n", "\t\t_ = parked\n")]),
+    # §10.5, the user's decision of 2026-11-19: held objects outside the caches.
+    ("the write loops' start doesn't recheck outside the caches", "writeloops.go",
+     [("\t\ts.recheckUncached(ctx, trackers)\n", "\t\t_ = trackers\n")]),
+    ("a Track after the write loops start doesn't recheck outside the caches", "shared.go",
+     [("\t\t\t\ts.recheckUncached(wctx, []*Tracker{t})\n", "")]),
+    ("an uncached namespace's deletion enqueues nothing", "informers.go",
+     [("\t\th.s.uncachedDeleting(n.Name)\n", "")]),
+    ("an empty batch outside the caches isn't filled live", "writeloops.go",
+     [("\tif !s.namespaceCached(n) {\n\t\tlive, err := s.liveHeldIn(ctx, t, n)", "\tif false {\n\t\tlive, err := s.liveHeldIn(ctx, t, n)")]),
+    ("a restricted cache doesn't need a cluster-wide list", "shared.go",
+     [("clusterList: p.ns != \"\"}", "clusterList: false}")]),
+    ("the waiting gauge misses kept objects outside the caches", "tracker.go",
+     [("\twaiting += len(t.waitingUncached)\n", "")]),
+    # The review of #114's gaps: the prober's drops and retry, the janitor's retries, the marker sweep.
+    ("the prober keeps a deleted holder's refs", "informers.go",
+     [("\th.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)\n", "")]),
+    ("the prober keeps a forgotten holder's refs", "tracker.go",
+     [("\tt.missing.set(types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, nil, t.s.clock.Now(), t.o.ProbeInterval)\n\treturn t.proto.forget(obj)", "\treturn t.proto.forget(obj)")]),
+    ("a LIST that fails otherwise isn't put back on its backoff", "prober.go",
+     [("\t\t\tdefault:\n\t\t\t\tfor _, id := range ids {\n\t\t\t\t\tt.missing.retry(id, now)\n\t\t\t\t}\n\t\t\t\tcontinue", "\t\t\tdefault:\n\t\t\t\tcontinue")]),
+    ("the janitor gives up on a changed object", "janitor.go",
+     [("\t\t\t\ts.janitorState.build(id, m.ResourceVersion)\n\t\t\t\tchanged = true", "\t\t\t\ts.janitorState.build(id, m.ResourceVersion)")]),
+    ("the janitor doesn't retry a failure", "janitor.go",
+     [("\t\t\tq.AddRateLimited(id)\n", "")]),
+    ("objects that kept only a marker aren't swept", "uncached.go",
+     [("\tif err := s.sweepMarkers(ctx, ts); err != nil {\n\t\treturn err\n\t}\n", "")]),
 ]
 
 EQUIVALENT = {}
@@ -151,6 +182,20 @@ KILLERS = {
     "R0's keep isn't reported": 'TestReleaseReportsWhatItKeeps|TestAHolderDeletionBetweenR2AndR3',
     "R1's grace isn't reported": 'TestReleaseReportsWhatItKeeps|TestReleaseLoopKeepsForTheGraceAndReports',
     "R2's namespace row is reported as a deleting user": 'TestReleaseReportsWhatItKeeps|TestANamespaceDeletionJustAfterTheGrace',
+    'a batch of a kind being tracked is dropped': 'TestReleaseLoopParksBatchesOfAKindBeingTracked',
+    "a parked batch isn't requeued when its Track succeeds": 'TestReleaseLoopParksBatchesOfAKindBeingTracked',
+    "the write loops' start doesn't recheck outside the caches": 'TestUncachedHoldsAreRecheckedWhenTheWriteLoopsStart',
+    "a Track after the write loops start doesn't recheck outside the caches": 'TestATrackAfterTheWriteLoopsStartRechecksOutsideTheCaches',
+    "an uncached namespace's deletion enqueues nothing": 'TestAnUncachedNamespaceDeletionReleasesItsHolds',
+    "an empty batch outside the caches isn't filled live": 'TestAnUncachedNamespaceDeletionReleasesItsHolds',
+    "a restricted cache doesn't need a cluster-wide list": 'TestRestrictedCachesNeedAClusterList',
+    'the waiting gauge misses kept objects outside the caches': 'TestTheWaitingGaugeCountsKeptObjectsOutsideTheCaches',
+    "the prober keeps a deleted holder's refs": 'TestProber',
+    "the prober keeps a forgotten holder's refs": 'TestProber',
+    "a LIST that fails otherwise isn't put back on its backoff": 'TestProber',
+    'the janitor gives up on a changed object': 'TestJanitor',
+    "the janitor doesn't retry a failure": 'TestJanitor',
+    "objects that kept only a marker aren't swept": 'TestJanitor',
 }
 
 ALL = sorted({t for ts in KILLERS.values() for t in ts.split("|")})
