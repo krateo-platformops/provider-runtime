@@ -74,16 +74,23 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 	}
 	s.mu.Unlock()
 	defer func() {
+		// Ending ctx under mu stops endTracking from starting a recheck
+		// (it adds to writeWG only under mu while ctx is live), so the Wait
+		// below races no Add. writeCtx stays set until this run has fully
+		// stopped, so another RunWriteLoops can't start in between and have
+		// its count cleared, or its rechecks waited on, by this one.
 		s.mu.Lock()
-		s.writeCtx = nil
-		s.mu.Unlock()
 		cancel()
+		s.mu.Unlock()
 		s.writeWG.Wait()
 		// What the release loop counted outside the caches is stale once it
 		// stops: only the process that runs the write loops reports it.
 		for _, t := range s.trackerList() {
 			t.clearUncached()
 		}
+		s.mu.Lock()
+		s.writeCtx = nil
+		s.mu.Unlock()
 	}()
 	s.rescan()
 	var wg sync.WaitGroup

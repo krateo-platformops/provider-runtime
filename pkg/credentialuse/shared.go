@@ -693,6 +693,9 @@ func (s *Shared) endTracking(gk schema.GroupKind, mine *inflight) {
 	// outside the caches that their start gave the kinds tracked before
 	// (§10.5); the replay of the caches covers the cached objects.
 	wctx := s.writeCtx
+	if wctx != nil && wctx.Err() != nil {
+		wctx = nil // the write loops are stopping
+	}
 	if t != nil && wctx != nil {
 		s.writeWG.Add(1)
 	}
