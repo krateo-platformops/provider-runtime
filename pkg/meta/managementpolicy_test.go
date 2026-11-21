@@ -185,7 +185,7 @@ func TestPaddedValuesMeanTheirTrimmedValue(t *testing.T) {
 	for _, tc := range cases {
 		o, trimmed := policyObject(tc.mp, tc.dp), policyObject(tc.trimmedMP, tc.trimmedDP)
 		for _, c := range []struct {
-			name            string
+			name           string
 			got, want, old bool
 		}{
 			{"ShouldCreate", ShouldCreate(o), ShouldCreate(trimmed), oldShouldCreate(tc.mp)},

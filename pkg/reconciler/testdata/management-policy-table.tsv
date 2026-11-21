@@ -14,9 +14,9 @@ unset	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-
 unset	orphan	drifted	1	0	1	0	false	True	Available	-	True	ReconcileSuccess	-	UpdatedExternalResource	-	after=1m0s
 unset	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 unset	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-unset	orphaned	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
-unset	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-unset	orphaned	drifted	1	0	1	0	false	True	Available	-	True	ReconcileSuccess	-	UpdatedExternalResource	-	after=1m0s
+unset	orphaned	absent	1	1	0	0	false	False	Creating	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	CreatedExternalResource	-	rate-limited
+unset	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+unset	orphaned	drifted	1	0	1	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	UpdatedExternalResource	-	after=1m0s
 unset	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 unset	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 default	unset	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
@@ -34,9 +34,9 @@ default	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-
 default	orphan	drifted	1	0	1	0	false	True	Available	-	True	ReconcileSuccess	-	UpdatedExternalResource	-	after=1m0s
 default	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 default	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-default	orphaned	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
-default	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-default	orphaned	drifted	1	0	1	0	false	True	Available	-	True	ReconcileSuccess	-	UpdatedExternalResource	-	after=1m0s
+default	orphaned	absent	1	1	0	0	false	False	Creating	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	CreatedExternalResource	-	rate-limited
+default	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+default	orphaned	drifted	1	0	1	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	UpdatedExternalResource	-	after=1m0s
 default	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 default	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-create-update	unset	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
@@ -54,108 +54,108 @@ observe-create-update	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	Reco
 observe-create-update	orphan	drifted	1	0	1	0	false	True	Available	-	True	ReconcileSuccess	-	UpdatedExternalResource	-	after=1m0s
 observe-create-update	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-create-update	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-create-update	orphaned	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
-observe-create-update	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-create-update	orphaned	drifted	1	0	1	0	false	True	Available	-	True	ReconcileSuccess	-	UpdatedExternalResource	-	after=1m0s
+observe-create-update	orphaned	absent	1	1	0	0	false	False	Creating	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	CreatedExternalResource	-	rate-limited
+observe-create-update	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+observe-create-update	orphaned	drifted	1	0	1	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	UpdatedExternalResource	-	after=1m0s
 observe-create-update	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-create-update	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-delete	unset	absent	1	0	0	0	false	False	Unavailable	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-delete	unset	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe,delete" withholds create	True	ReconcileSuccess	-	-	-	after=1m0s
 observe-delete	unset	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-delete	unset	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-delete	unset	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,delete" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe-delete	unset	deleting-present	1	0	0	1	false	False	Deleting	-	True	ReconcileSuccess	-	DeletedExternalResource	-	rate-limited
 observe-delete	unset	deleting-absent	1	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-delete	delete	absent	1	0	0	0	false	False	Unavailable	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-delete	delete	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe,delete" withholds create	True	ReconcileSuccess	-	-	-	after=1m0s
 observe-delete	delete	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-delete	delete	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-delete	delete	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,delete" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe-delete	delete	deleting-present	1	0	0	1	false	False	Deleting	-	True	ReconcileSuccess	-	DeletedExternalResource	-	rate-limited
 observe-delete	delete	deleting-absent	1	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-delete	orphan	absent	1	0	0	0	false	False	Unavailable	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-delete	orphan	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe,delete" withholds create	True	ReconcileSuccess	-	-	-	after=1m0s
 observe-delete	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-delete	orphan	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-delete	orphan	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,delete" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe-delete	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-delete	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-delete	orphaned	absent	1	0	0	0	false	False	Unavailable	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-delete	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-delete	orphaned	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-delete	orphaned	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe,delete" withholds create	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+observe-delete	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+observe-delete	orphaned	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,delete" withholds update	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
 observe-delete	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-delete	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe	unset	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
+observe	unset	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	ReconcileError	observe failed: external resource does not exist	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
 observe	unset	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe	unset	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe	unset	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe	unset	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe	unset	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe	delete	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
+observe	delete	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	ReconcileError	observe failed: external resource does not exist	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
 observe	delete	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe	delete	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe	delete	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe	delete	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe	delete	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe	orphan	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
+observe	orphan	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	ReconcileError	observe failed: external resource does not exist	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
 observe	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe	orphan	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe	orphan	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe	orphaned	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
-observe	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe	orphaned	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe	orphaned	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
+observe	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+observe	orphaned	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
 observe	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-create	unset	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
-observe-create	unset	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-create	unset	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-create	unset	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
+observe-create	unset	up-to-date	1	0	0	0	false	True	Available	-	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	-	-	after=1m0s
+observe-create	unset	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	-	-	after=1m0s
 observe-create	unset	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-create	unset	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-create	delete	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
-observe-create	delete	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-create	delete	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-create	delete	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
+observe-create	delete	up-to-date	1	0	0	0	false	True	Available	-	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	-	-	after=1m0s
+observe-create	delete	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	-	-	after=1m0s
 observe-create	delete	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-create	delete	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-create	orphan	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
-observe-create	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-create	orphan	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-create	orphan	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
+observe-create	orphan	up-to-date	1	0	0	0	false	True	Available	-	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	-	-	after=1m0s
+observe-create	orphan	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only)	-	-	after=1m0s
 observe-create	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-create	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe-create	orphaned	absent	1	0	0	0	false	False	Unavailable	-	False	ReconcileError	observe failed: external resource does not exist	CannotObserveExternalResource	observe failed: external resource does not exist	rate-limited
-observe-create	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe-create	orphaned	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe-create	orphaned	absent	1	0	0	0	false	False	CreateWithheldByPolicy	the external resource does not exist, and krateo.io/management-policy "observe" withholds create	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only); also, krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	ExternalResourceAbsentUnderPolicy	observe failed: external resource does not exist	rate-limited
+observe-create	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only); also, krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+observe-create	orphaned	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe" withholds update	False	ManagementPolicyInvalid	krateo.io/management-policy "observe-create": unknown verb "observe-create" (want a comma-separated set of observe, create, update, delete, or one of default, observe-create-update, observe-delete, observe); acting on nothing (observe only); also, krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
 observe-create	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe-create	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe,create	unset	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
 observe,create	unset	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe,create	unset	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe,create	unset	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe,create	unset	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe,create	unset	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe,create	delete	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
 observe,create	delete	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe,create	delete	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe,create	delete	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe,create	delete	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe,create	delete	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe,create	orphan	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
 observe,create	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe,create	orphan	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe,create	orphan	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 observe,create	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe,create	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-observe,create	orphaned	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
-observe,create	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-observe,create	orphaned	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+observe,create	orphaned	absent	1	1	0	0	false	False	Creating	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	CreatedExternalResource	-	rate-limited
+observe,create	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+observe,create	orphaned	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
 observe,create	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 observe,create	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 create	unset	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
 create	unset	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-create	unset	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+create	unset	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 create	unset	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 create	unset	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 create	delete	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
 create	delete	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-create	delete	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+create	delete	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 create	delete	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 create	delete	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 create	orphan	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
 create	orphan	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-create	orphan	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+create	orphan	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	True	ReconcileSuccess	-	-	-	after=1m0s
 create	orphan	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 create	orphan	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
-create	orphaned	absent	1	1	0	0	false	False	Creating	-	True	ReconcileSuccess	-	CreatedExternalResource	-	rate-limited
-create	orphaned	up-to-date	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
-create	orphaned	drifted	1	0	0	0	false	True	Available	-	True	ReconcileSuccess	-	-	-	after=1m0s
+create	orphaned	absent	1	1	0	0	false	False	Creating	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	CreatedExternalResource	-	rate-limited
+create	orphaned	up-to-date	1	0	0	0	false	True	Available	-	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
+create	orphaned	drifted	1	0	0	0	false	True	UpdateWithheldByPolicy	the external resource differs from the desired state, and krateo.io/management-policy "observe,create" withholds update	False	DeletionPolicyInvalid	krateo.io/deletion-policy "orphaned" is not "delete" or "orphan"; the external resource is kept	-	-	after=1m0s
 create	orphaned	deleting-present	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
 create	orphaned	deleting-absent	0	0	0	0	true	(gone)	(gone)	(gone)	(gone)	(gone)	(gone)	-	-	none
