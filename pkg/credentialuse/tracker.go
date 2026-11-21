@@ -185,6 +185,12 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		contentCache:    trackerViews{t},
 		contents:        dynamicContent{dyn: s.c.Dynamic, mapper: s.c.Mapper},
 		listers:         s.o.Listers,
+		namespaceViews:  trackerViews{t},
+		backoff:         newConsentBackoff(o.PollInterval),
+		unheldReads:     s.unheldReads,
+		enqueueBatch: func(id ID, ns string) {
+			s.queue.Add(batchKey{gk, ns}, id)
+		},
 	}
 	for _, pk := range o.Protected {
 		if pk.Content {

@@ -92,6 +92,10 @@ type Options struct {
 	Protected []ProtectedKind
 	// MaxDepth bounds the levels of Next followed (§9.1); the default is 3.
 	MaxDepth int
+	// PollInterval is the holder's poll interval: it caps the backoff of a
+	// failed consent read's requeues (§11.3, M2); the default is 60s,
+	// provider-runtime's.
+	PollInterval time.Duration
 	// Enqueue adds a holder to the caller's queue (§10.2). Required. It
 	// must not block or call Track: a Track with equal Options rebinds it,
 	// and the rebind waits for the calls in flight, so that none reaches
@@ -124,6 +128,7 @@ type RefsFunc func(obj metav1.Object) ([]Ref, error)
 
 // The defaults of Options (§7.1).
 const (
+	DefaultPollInterval   = 60 * time.Second
 	DefaultDeletionGrace  = 60 * time.Second
 	DefaultProbeInterval  = 15 * time.Second
 	DefaultDisownInterval = 60 * time.Second
@@ -157,6 +162,8 @@ type Shared struct {
 	queue  *batchQueue
 	seen   *firstSight
 	events *eventSink
+	// unheldReads is the shared live read of unheld hops (§9.4).
+	unheldReads *sharedReads
 	// janitor queues protected objects whose labels the janitor may clean
 	// (§10.1); janitorState and backoff are the janitor's and the release
 	// loop's memory across attempts.
@@ -237,18 +244,21 @@ type sharedClock interface {
 
 func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 	s := &Shared{
-		c:         c,
-		o:         o,
-		clock:     clk,
-		queue:     newBatchQueue(clk),
-		janitor:   newJanitorQueue(clk),
-		syncedCh:  make(chan struct{}),
-		seen:      newFirstSight(),
-		events:    newEventSink(c.Events, c.Mapper, clk),
-		trackers:  map[schema.GroupKind]*Tracker{},
-		tracking:  map[schema.GroupKind]*inflight{},
-		runDone:   make(chan struct{}),
-		protected: map[protKey]*protectedInformer{},
+		c:        c,
+		o:        o,
+		clock:    clk,
+		queue:    newBatchQueue(clk),
+		janitor:  newJanitorQueue(clk),
+		syncedCh: make(chan struct{}),
+		seen:     newFirstSight(),
+		events:   newEventSink(c.Events, c.Mapper, clk),
+		// unheldReads shares the live read of an unheld hop among every
+		// holder kind of the process (§9.4).
+		unheldReads: newSharedReads(clk),
+		trackers:    map[schema.GroupKind]*Tracker{},
+		tracking:    map[schema.GroupKind]*inflight{},
+		runDone:     make(chan struct{}),
+		protected:   map[protKey]*protectedInformer{},
 	}
 	s.syncTimeout.Store(int64(2 * time.Minute))
 	if c.Metadata != nil {
@@ -1014,7 +1024,10 @@ func (s *Shared) validate(o Options) (Options, error) {
 	if o.MaxDepth == 0 {
 		o.MaxDepth = DefaultMaxDepth
 	}
-	if o.DeletionGrace < 0 || o.ProbeInterval < 0 || o.DisownInterval < 0 || o.DisownPasses < 0 || o.MaxDepth < 0 {
+	if o.PollInterval == 0 {
+		o.PollInterval = DefaultPollInterval
+	}
+	if o.DeletionGrace < 0 || o.ProbeInterval < 0 || o.DisownInterval < 0 || o.DisownPasses < 0 || o.MaxDepth < 0 || o.PollInterval < 0 {
 		return o, fmt.Errorf("credential-use: %s: a negative option", gk)
 	}
 	if time.Duration(o.DisownPasses)*o.DisownInterval < 2*o.TimeoutBound {
@@ -1058,7 +1071,8 @@ func equalOptions(a, b Options) bool {
 		sameSet(a.Protected, b.Protected) &&
 		a.MaxDepth == b.MaxDepth && a.DeletionGrace == b.DeletionGrace &&
 		a.ProbeInterval == b.ProbeInterval && a.DisownInterval == b.DisownInterval &&
-		a.DisownPasses == b.DisownPasses && a.TimeoutBound == b.TimeoutBound
+		a.DisownPasses == b.DisownPasses && a.TimeoutBound == b.TimeoutBound &&
+		a.PollInterval == b.PollInterval
 }
 
 // sameSet reports whether a and b hold the same elements, ignoring order

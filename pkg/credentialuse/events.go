@@ -26,6 +26,15 @@ const eventCap = 4096
 const (
 	EventDegraded        = "CredentialUseDegraded"
 	EventReleaseRejected = "CredentialReleaseRejected"
+	// EventRefNotHeld (Warning, on the holder): a cross-namespace ref isn't
+	// held, for want of consent; Connect reads it as today (§11.3).
+	EventRefNotHeld = "CredentialRefNotHeld"
+	// EventConsentWithdrawn (Warning, on the target and the holder): a hold
+	// was released because its target withdrew consent (§11.3).
+	EventConsentWithdrawn = "CredentialConsentWithdrawn"
+	// EventConsentWildcardIgnored (Warning, on a Namespace): "*" in a
+	// Namespace's allow-holders-from is ignored (§11.3).
+	EventConsentWildcardIgnored = "CredentialConsentWildcardIgnored"
 )
 
 // eventSink records the core's events through Clients.Events, throttled.
@@ -110,6 +119,40 @@ func (r coreReports) Degraded(holder schema.GroupKind, reason string) {
 
 func (r coreReports) AdmissionDenied(holder schema.GroupKind) {
 	r.metrics.AdmissionDenied(kindLabel(holder))
+}
+
+// holderRef is holder h, of kind gk, as an event's object.
+func (e *eventSink) holderRef(gk schema.GroupKind, h metav1.Object) runtime.Object {
+	o := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: h.GetNamespace(), Name: h.GetName(), UID: h.GetUID()}}
+	if e.mapper != nil {
+		if m, err := e.mapper.RESTMapping(gk); err == nil {
+			o.SetGroupVersionKind(m.GroupVersionKind)
+			return o
+		}
+	}
+	o.SetGroupVersionKind(gk.WithVersion("v1"))
+	return o
+}
+
+func (r coreReports) RefNotHeld(holder schema.GroupKind, h metav1.Object, ref ID) {
+	r.metrics.RefsNotHeld(kindLabel(holder))
+	if r.events == nil {
+		return
+	}
+	r.events.record(r.events.holderRef(holder, h), "Warning", EventRefNotHeld,
+		"ref "+unheldRef(ref)+" is not held: allow-holders-from on it or on Namespace "+ref.Namespace+
+			" doesn't name "+h.GetNamespace()+"; it is read as before, without protection (credential-use.krateo.io/unheld)")
+}
+
+func (r coreReports) ConsentWithdrawn(holder schema.GroupKind, h metav1.Object, ref ID) {
+	r.metrics.ConsentWithdrawn(kindLabel(holder))
+	if r.events == nil {
+		return
+	}
+	note := "hold on " + unheldRef(ref) + " released: holders from " + h.GetNamespace() +
+		" are no longer allowed (allow-holders-from on it and on Namespace " + ref.Namespace + ")"
+	r.events.record(r.events.holderRef(holder, h), "Warning", EventConsentWithdrawn, note)
+	r.events.record(r.events.regarding(ref), "Warning", EventConsentWithdrawn, note)
 }
 
 func (r coreReports) ReleaseRejected(holder schema.GroupKind, p ID, resourceVersion string) {

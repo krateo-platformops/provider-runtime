@@ -242,15 +242,6 @@ func TestChainFailures(t *testing.T) {
 			t.Fatalf("acquire = %+v, %v; want both Targets held, once", a, err)
 		}
 	})
-	t.Run("a ref in another namespace with a Next isn't followed yet", func(t *testing.T) {
-		r, _ := chainRig(t)
-		ref := targetRef("kt")
-		ref.Namespace = "other"
-		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{ref})
-		if err != nil || !a.MustNotConnect || !errors.Is(a.Err, errUnheldChainNotYet) {
-			t.Fatalf("acquire = %+v, %v", a, err)
-		}
-	})
 	t.Run("a Missing hop isn't followed, and BeforeEstablish won't establish when it appears", func(t *testing.T) {
 		r, fc := chainRig(t)
 		h := r.holder(t, "h", false)

@@ -1232,12 +1232,12 @@ func TestPublishConfig(t *testing.T) {
 // unkeyed literal compiling, so that it is put in compared or left out of it
 // here, as a function or a sink: Refs, Enqueue, Logger and Metrics.
 var _ = Options{
-	schema.GroupVersionKind{}, []string(nil), RefsFunc(nil), []ProtectedKind(nil), 0,
+	schema.GroupVersionKind{}, []string(nil), RefsFunc(nil), []ProtectedKind(nil), 0, 0,
 	func(types.NamespacedName) {}, 0, 0, 0, 0, 0, logging.Logger(nil), MetricsRecorder(nil),
 }
 
 func TestEqualOptionsComparesEveryOtherField(t *testing.T) {
-	compared := []string{"Holder", "OwnerFinalizers", "Protected", "MaxDepth",
+	compared := []string{"Holder", "OwnerFinalizers", "Protected", "MaxDepth", "PollInterval",
 		"DeletionGrace", "ProbeInterval", "DisownInterval", "DisownPasses", "TimeoutBound"}
 	r := newFakeRig(t)
 	base, err := r.s.validate(r.options(widgetGK, ProtectedKind{GVK: secretGVK}, ProtectedKind{GVK: configMapGVK}))
@@ -1259,6 +1259,7 @@ func TestEqualOptionsComparesEveryOtherField(t *testing.T) {
 		"OwnerFinalizers": func(o *Options) { o.OwnerFinalizers = []string{"a"} },
 		"Protected":       func(o *Options) { o.Protected = o.Protected[:1] },
 		"MaxDepth":        func(o *Options) { o.MaxDepth++ },
+		"PollInterval":    func(o *Options) { o.PollInterval++ },
 		"DeletionGrace":   func(o *Options) { o.DeletionGrace++ },
 		"ProbeInterval":   func(o *Options) { o.ProbeInterval++ },
 		"DisownInterval":  func(o *Options) { o.DisownInterval++ },

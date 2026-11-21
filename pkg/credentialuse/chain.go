@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/utils/clock"
 )
 
 // A Lister reads one object of a kind from the caller's cache, for a
@@ -53,10 +56,6 @@ func (d dynamicContent) Content(ctx context.Context, gk schema.GroupKind, namesp
 var (
 	// errChainTooDeep: a Next named refs below MaxDepth (§9.1).
 	errChainTooDeep = errors.New("credential-use: the chain is deeper than MaxDepth")
-	// errUnheldChainNotYet: a ref in another namespace has a Next. Following
-	// an unheld hop needs the shared live read, which comes with consent
-	// (§9.4; plan, PR 5).
-	errUnheldChainNotYet = errors.New("credential-use: a ref in another namespace with a Next isn't supported yet")
 	// errNextNeedsContent: a held ref has a Next, but its kind isn't
 	// Content, so a re-point of it would go unseen (§10.4).
 	errNextNeedsContent = errors.New("credential-use: a ref with a Next must be of a protected kind with Content")
@@ -131,4 +130,71 @@ func follow(r Ref, obj *unstructured.Unstructured) ([]Ref, error) {
 		return nil, fmt.Errorf("credential-use: following %s: %w", r.ID(), err)
 	}
 	return refs, nil
+}
+
+// unheldReadTTL is how long a live read of an unheld hop is shared (§9.4,
+// L6).
+const unheldReadTTL = 10 * time.Second
+
+// sharedReads shares the live read of unheld hops among a process's holders
+// (§9.4): a hop isn't labelled, so it isn't cached, and many holders may name
+// one. A read is reused for unheldReadTTL; a NotFound is shared too, any
+// other failure isn't. No release decision reads it: it only decides which
+// refs lie behind the hop, each then gated and held on its own.
+type sharedReads struct {
+	clock clock.PassiveClock
+	mu    sync.Mutex
+	m     map[ID]sharedRead
+}
+
+type sharedRead struct {
+	obj *unstructured.Unstructured
+	err error
+	at  time.Time
+}
+
+func newSharedReads(c clock.PassiveClock) *sharedReads {
+	return &sharedReads{clock: c, m: map[ID]sharedRead{}}
+}
+
+// get returns hop id, read through c, from a read shared for unheldReadTTL.
+// A nil sharedReads reads every time.
+func (s *sharedReads) get(ctx context.Context, c contentReader, id ID) (*unstructured.Unstructured, error) {
+	if s == nil {
+		u, err := c.Content(ctx, id.GroupKind(), id.Namespace, id.Name)
+		if err != nil {
+			return nil, err
+		}
+		return asCached(u), nil
+	}
+	now := s.clock.Now()
+	s.mu.Lock()
+	if e, ok := s.m[id]; ok && now.Sub(e.at) < unheldReadTTL {
+		s.mu.Unlock()
+		if e.err != nil {
+			return nil, e.err
+		}
+		return e.obj.DeepCopy(), nil
+	}
+	s.mu.Unlock()
+	u, err := c.Content(ctx, id.GroupKind(), id.Namespace, id.Name)
+	if err != nil && Classify(err) != ClassNotFound {
+		return nil, err
+	}
+	e := sharedRead{err: err, at: now}
+	if err == nil {
+		e.obj = asCached(u)
+	}
+	s.mu.Lock()
+	for k, old := range s.m {
+		if now.Sub(old.at) >= unheldReadTTL {
+			delete(s.m, k)
+		}
+	}
+	s.m[id] = e
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return e.obj.DeepCopy(), nil
 }

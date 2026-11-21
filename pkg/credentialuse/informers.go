@@ -96,7 +96,11 @@ func contentOf(obj any) (*unstructured.Unstructured, bool) {
 func othersView(u *unstructured.Unstructured) map[string]any {
 	c := u.DeepCopy()
 	c.SetLabels(dropKeys(c.GetLabels(), isCredentialUseKey))
-	c.SetAnnotations(dropKeys(c.GetAnnotations(), isCredentialUseKey))
+	// Consent is written by the target's owner, not by the tracker: a change
+	// to it is someone else's (§11.3; the review of #122).
+	c.SetAnnotations(dropKeys(c.GetAnnotations(), func(k string) bool {
+		return isCredentialUseKey(k) && k != AnnotationAllowHoldersFrom
+	}))
 	fs := slices.DeleteFunc(c.GetFinalizers(), isCredentialUseKey)
 	if len(fs) == 0 {
 		fs = nil // absent and empty are one
@@ -536,8 +540,21 @@ func mergedKeys(a, b map[string]string) map[string]bool {
 // too (§5's namespace rows).
 type namespaceHandler struct{ s *Shared }
 
-func (namespaceHandler) OnAdd(any, bool) {}
-func (namespaceHandler) OnDelete(any)    {}
+func (h namespaceHandler) OnAdd(obj any, _ bool) { h.wildcard(obj) }
+
+// wildcard warns on a Namespace whose allow-holders-from names "*", which is
+// ignored there (§11.3).
+func (h namespaceHandler) wildcard(obj any) {
+	m, ok := metadataOf(obj)
+	if !ok || !hasWildcard(m.Annotations[AnnotationAllowHoldersFrom]) {
+		return
+	}
+	ref := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: m.Name, UID: m.UID}}
+	ref.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"})
+	h.s.events.record(ref, "Warning", EventConsentWildcardIgnored,
+		`"*" in allow-holders-from is ignored on a Namespace: name the holder namespaces, or set "*" on each object meant for every namespace`)
+}
+func (namespaceHandler) OnDelete(any) {}
 
 func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 	o, ok1 := metadataOf(oldObj)
@@ -552,6 +569,9 @@ func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 	}
 	if f := h.s.hooks.namespaceAct; f != nil {
 		f(n)
+	}
+	if o.Annotations[AnnotationAllowHoldersFrom] != n.Annotations[AnnotationAllowHoldersFrom] {
+		h.wildcard(n)
 	}
 	if newlyDeleting {
 		// Outside the caches no informer delivers the deletion of the
@@ -587,6 +607,23 @@ func (v trackerViews) Content(id ID) (*unstructured.Unstructured, bool) {
 		return nil, false
 	}
 	return p.getContent(id.Namespace, id.Name)
+}
+
+// NamespaceConsent returns namespace's cached allow-holders-from, and whether
+// the cache knows it (§11.3): an unsynced cache, or one without it, doesn't.
+func (v trackerViews) NamespaceConsent(namespace string) (string, bool) {
+	if !v.t.s.namespaces.HasSynced() {
+		return "", false
+	}
+	obj, ok, err := v.t.s.namespaces.GetStore().GetByKey(namespace)
+	if err != nil || !ok {
+		return "", false
+	}
+	m, ok := metadataOf(obj)
+	if !ok {
+		return "", false
+	}
+	return m.Annotations[AnnotationAllowHoldersFrom], true
 }
 
 func (v trackerViews) Protected(id ID) (*metav1.PartialObjectMetadata, bool) {
