@@ -15,8 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/krateo-platformops/plumbing/managementpolicy"
-
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/errors"
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
@@ -1108,7 +1106,7 @@ func TestReconciler(t *testing.T) {
 							})
 							// D4: the reconciler also reports the withheld create on Ready.
 							want.SetConditions(
-								prv1.CreateWithheldByPolicy(createWithheldMessage(managementpolicy.Parse(meta.ManagementPolicyObserve))),
+								prv1.CreateWithheldByPolicy(createWithheldMessage(want)),
 								prv1.ReconcileError(errors.Wrap(errors.New(errExternalResourceNotExist), errReconcileObserve)),
 							)
 							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {

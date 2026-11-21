@@ -374,6 +374,10 @@ func checkMgmtTableContracts(t *testing.T, rows [][]string) {
 				t.Errorf("%s: Synced reason %s; an invalid deletion policy is reported on every pass", key, r[col["synced-reason"]])
 			}
 		}
+		if (r[col["ready-reason"]] == string(prv1.ReasonCreateWithheldByPolicy) || r[col["ready-reason"]] == string(prv1.ReasonUpdateWithheldByPolicy)) &&
+			!strings.Contains(r[col["ready-message"]], fmt.Sprintf("%q", r[0])) {
+			t.Errorf("%s: Ready message %q doesn't quote the policy as written, %q", key, r[col["ready-message"]], r[0])
+		}
 		if r[2] == "absent" && !d.May(managementpolicy.Create) && r[col["ready-reason"]] != string(prv1.ReasonCreateWithheldByPolicy) {
 			t.Errorf("%s: Ready reason %s; an absent resource with create withheld is CreateWithheldByPolicy (D4)", key, r[col["ready-reason"]])
 		}
@@ -388,7 +392,11 @@ func checkMgmtTableContracts(t *testing.T, rows [][]string) {
 		}
 		n++
 		o := byKey[[3]string{"observe,create", k[1], k[2]}]
-		if !cmp.Equal(r[3:], o[3:]) {
+		// Ready's message quotes the annotation as written, so it is the one
+		// cell where the two may differ; it is checked below.
+		rc, oc := append([]string(nil), r[3:]...), append([]string(nil), o[3:]...)
+		rc[col["ready-message"]-3], oc[col["ready-message"]-3] = "", ""
+		if !cmp.Equal(rc, oc) {
 			t.Errorf("create/%s/%s differs from observe,create (D3: observe is implied):\n%q\n%q", k[1], k[2], r[3:], o[3:])
 		}
 	}

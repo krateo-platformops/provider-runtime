@@ -35,7 +35,7 @@ const messageUpdateWithheld = "updates are withheld by policy"
 //
 // ReconcilePaused and ReconcileDeferred are left alone: no pass ran, and they
 // say why. Ready is never touched.
-func policySynced(managed resource.Managed) {
+func policySynced(managed resource.Managed, start passConditions) {
 	c := managed.GetCondition(prv1.TypeSynced)
 	if c.Reason != prv1.ReasonReconcileSuccess && c.Reason != prv1.ReasonReconcileError {
 		return
@@ -47,15 +47,50 @@ func policySynced(managed resource.Managed) {
 		if d.DeletionInvalid != "" {
 			msg += "; also, " + d.DeletionInvalid
 		}
-		managed.SetConditions(prv1.ManagementPolicyInvalid(msg))
+		managed.SetConditions(start.keep(prv1.ManagementPolicyInvalid(msg)))
 	case d.DeletionInvalid != "":
-		managed.SetConditions(prv1.DeletionPolicyInvalid(d.DeletionInvalid))
+		managed.SetConditions(start.keep(prv1.DeletionPolicyInvalid(d.DeletionInvalid)))
 	}
 }
 
+// passConditions is Ready and Synced as a pass read them, before it set any.
+type passConditions struct{ ready, synced prv1.Condition }
+
+// keep returns the condition the pass read when c equals it in type, status,
+// reason and message, so its LastTransitionTime stays the one of the real
+// transition; otherwise it returns c. Without it a policy report the pass
+// writes again would carry a new time on every pass: Observe sets Ready, and
+// each path sets Synced, before the report is set again over them, and
+// ConditionedStatus.SetConditions gives a condition that differs from the
+// stored one the time it is given. Each pass would then write a changed
+// status, and a controller that watches its objects would reconcile again at
+// once.
+func (s passConditions) keep(c prv1.Condition) prv1.Condition {
+	var read prv1.Condition
+	switch c.Type {
+	case prv1.TypeReady:
+		read = s.ready
+	case prv1.TypeSynced:
+		read = s.synced
+	default:
+		return c
+	}
+	if read.Equal(c) {
+		return read
+	}
+	return c
+}
+
+// policyValue is krateo.io/management-policy as written on the object, for a
+// message: an invalid value parses to observe only, and the message must
+// quote what the object says.
+func policyValue(managed resource.Managed) string {
+	return managed.GetAnnotations()[managementpolicy.AnnotationKey]
+}
+
 // createWithheldMessage is the message of CreateWithheldByPolicy.
-func createWithheldMessage(p managementpolicy.Policy) string {
-	return fmt.Sprintf("the external resource does not exist, and %s %q withholds create", managementpolicy.AnnotationKey, p.String())
+func createWithheldMessage(managed resource.Managed) string {
+	return fmt.Sprintf("the external resource does not exist, and %s %q withholds create", managementpolicy.AnnotationKey, policyValue(managed))
 }
 
 // updateWithheldReady is Ready for a resource that differs from the desired
@@ -63,9 +98,9 @@ func createWithheldMessage(p managementpolicy.Policy) string {
 // UpdateWithheldByPolicy: the resource works, but its drift isn't corrected.
 // Any other Ready keeps its status and reason, the provider's health verdict,
 // with "updates are withheld by policy" added to its message.
-func updateWithheldReady(ready prv1.Condition, p managementpolicy.Policy) prv1.Condition {
+func updateWithheldReady(ready prv1.Condition, managed resource.Managed) prv1.Condition {
 	if ready.Status == metav1.ConditionTrue {
-		return prv1.UpdateWithheldByPolicy(fmt.Sprintf("the external resource differs from the desired state, and %s %q withholds update", managementpolicy.AnnotationKey, p.String()))
+		return prv1.UpdateWithheldByPolicy(fmt.Sprintf("the external resource differs from the desired state, and %s %q withholds update", managementpolicy.AnnotationKey, policyValue(managed)))
 	}
 	// A Ready that Observe didn't rewrite this pass may carry the note
 	// already: add it once.
