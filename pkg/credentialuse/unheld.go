@@ -31,6 +31,9 @@ type UnheldEntry struct {
 	Since  time.Time `json:"since,omitzero"`
 	// Count is the number of entries left out, on the More entry only.
 	Count int `json:"count,omitempty"`
+
+	// listed: the entry was in the annotation the pass found. Not written.
+	listed bool
 }
 
 // unheldRef is how the annotation names a ref: <namespace>/<Kind>/<name>,
@@ -75,8 +78,22 @@ func encodeUnheld(entries []UnheldEntry) (*string, error) {
 		}
 		return 0
 	}
+	// Among NotConsented entries, those already listed come first: a ref
+	// trimmed into More isn't in the annotation, so it comes back as new, and
+	// must not displace a listed one, or the list would rotate, and be
+	// rewritten, on every pass. Withdrawals keep their real since, most
+	// recent first.
+	listedFirst := func(a, b UnheldEntry) int {
+		if rank(a) == 0 || a.listed == b.listed {
+			return 0
+		}
+		if a.listed {
+			return -1
+		}
+		return 1
+	}
 	slices.SortStableFunc(es, func(a, b UnheldEntry) int {
-		return cmp.Or(cmp.Compare(rank(a), rank(b)), b.Since.Compare(a.Since), cmp.Compare(a.Ref, b.Ref))
+		return cmp.Or(cmp.Compare(rank(a), rank(b)), listedFirst(a, b), b.Since.Compare(a.Since), cmp.Compare(a.Ref, b.Ref))
 	})
 	if len(es) > maxUnheld {
 		more := len(es) - (maxUnheld - 1)

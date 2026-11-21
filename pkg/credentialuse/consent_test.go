@@ -55,6 +55,7 @@ func consentRig(t *testing.T, nsConsent string) (*rig, *[]batchCall) {
 	must(r.m.Create(nsKey("other"), metav1.ObjectMeta{Annotations: ann}))
 	r.p.namespaceViews = modelNamespaces{m: r.m}
 	r.p.backoff = newConsentBackoff(time.Minute)
+	r.p.reported = newReportedSet()
 	r.p.unheldReads = newSharedReads(rigClock{r})
 	var batches []batchCall
 	r.p.enqueueBatch = func(id ID, ns string) { batches = append(batches, batchCall{id, ns, len(r.srv.calls)}) }
@@ -577,6 +578,9 @@ func TestAWithdrawnRefLeavesTheRecordEvenWithAHopUnfollowed(t *testing.T) {
 // A1 patch, with the record).
 func TestOneWriteForANewHoldAndANewUnheldEntry(t *testing.T) {
 	r, _ := consentRig(t, "")
+	// A clock that moves on every read, as a real one does between a pass's
+	// two A1s: both must still compute one list, from one read.
+	r.p.clock = tickingClock{r}
 	must(r.m.Create(secretKey("ns", "home"), metav1.ObjectMeta{}))
 	must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{}))
 	r.holder(t, "h", false)
@@ -593,3 +597,109 @@ func TestOneWriteForANewHoldAndANewUnheldEntry(t *testing.T) {
 		t.Errorf("record %v, unheld %v", ReadRecord(h).IDs, ReadUnheld(h.Annotations))
 	}
 }
+
+// BeforeEstablish never pins a ref in another namespace without a live yes
+// (§11.3; the review of #123): a Missing one that appears may still not
+// consent.
+func TestBeforeEstablishGatesACrossNamespaceRef(t *testing.T) {
+	ctx := context.Background()
+	for _, consent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("consent %v", consent), func(t *testing.T) {
+			r, batches := consentRig(t, "")
+			a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{otherSecret()})
+			if err != nil || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonMissing {
+				t.Fatalf("acquire = %+v, %v", a, err)
+			}
+			meta := metav1.ObjectMeta{}
+			if consent {
+				meta.Annotations = map[string]string{AnnotationAllowHoldersFrom: "ns"}
+			}
+			must(r.m.Create(secretKey("other", "s"), meta))
+			if err := r.p.beforeEstablish(ctx, r.get(t, widgetKey("ns", "h")), a); err != nil {
+				t.Fatal(err)
+			}
+			if held(r, t) != consent {
+				t.Errorf("held = %v, want %v: BeforeEstablish holds a cross-namespace ref only on a live yes", held(r, t), consent)
+			}
+			if consent && (len(*batches) != 1 || (*batches)[0].id != otherSecretID()) {
+				t.Errorf("batches = %+v: BeforeEstablish's A2 enqueues its own batch too", *batches)
+			}
+		})
+	}
+}
+
+// Past maxUnheld entries the list is stable (the review of #123): a ref
+// trimmed into More comes back each pass as if new, and mustn't displace a
+// listed one, rewrite the holder, move a since, or be reported again.
+func TestUnheldPastTheCapIsStable(t *testing.T) {
+	ctx := context.Background()
+	r, _ := consentRig(t, "")
+	var refs []Ref
+	for i := range maxUnheld + 1 {
+		name := fmt.Sprintf("s%02d", i)
+		must(r.m.Create(secretKey("other", name), metav1.ObjectMeta{}))
+		refs = append(refs, SecretRef("other", name))
+	}
+	r.holder(t, "h", false)
+	if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), refs); err != nil {
+		t.Fatal(err)
+	}
+	first := r.get(t, widgetKey("ns", "h")).Annotations[AnnotationUnheld]
+	for pass := 2; pass <= 4; pass++ {
+		r.tick(time.Minute)
+		r.srv.calls = nil
+		if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), refs); err != nil {
+			t.Fatal(err)
+		}
+		if n := countCalls(r.srv.calls, "patch Widget/h"); n != 0 {
+			t.Errorf("pass %d: %d holder writes, want none when nothing changed", pass, n)
+		}
+		if got := r.get(t, widgetKey("ns", "h")).Annotations[AnnotationUnheld]; got != first {
+			t.Errorf("pass %d: the list changed:\n%s\n%s", pass, first, got)
+		}
+	}
+	if len(r.rep.notHeld) != maxUnheld+1 {
+		t.Errorf("RefNotHeld reported %d times, want %d: once per ref", len(r.rep.notHeld), maxUnheld+1)
+	}
+}
+
+// Any live read that succeeds resets the backoff (§11.3; the review of
+// #123), whatever it answered.
+func TestTheBackoffResetsOnAnySuccessfulRead(t *testing.T) {
+	ctx := context.Background()
+	r, _ := consentRig(t, "ns")
+	must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{}))
+	if _, err := r.p.acquire(ctx, r.holder(t, "h", true), []Ref{otherSecret()}); err != nil {
+		t.Fatal(err)
+	}
+	failing := true
+	r.srv.before = func(op, kind, name string) error {
+		if failing && op == "get" && kind == "Namespace" {
+			return apierrors.NewServiceUnavailable("overloaded")
+		}
+		return nil
+	}
+	for range 3 {
+		_, _ = r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), []Ref{otherSecret()})
+	}
+	// A read that succeeds and finds no consent: the hold goes, and the
+	// backoff resets.
+	failing = false
+	setConsent(t, r, nsKey("other"), "")
+	if a, _ := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), []Ref{otherSecret()}); a.RetryAfter != 0 || len(a.Held) != 0 {
+		t.Fatalf("acquire = %+v", a)
+	}
+	failing = true
+	if a, _ := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), []Ref{otherSecret()}); a.RetryAfter != time.Second {
+		t.Errorf("RetryAfter = %v after a successful read that found no consent, want 1s", a.RetryAfter)
+	}
+}
+
+// tickingClock is the rig's clock, a second later on every read.
+type tickingClock struct{ r *rig }
+
+func (c tickingClock) Now() time.Time {
+	c.r.now = c.r.now.Add(time.Second)
+	return c.r.now
+}
+func (c tickingClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }

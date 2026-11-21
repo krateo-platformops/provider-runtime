@@ -122,6 +122,7 @@ type protocol struct {
 	// without cross-namespace refs needs none of them.
 	namespaceViews namespaceViews
 	backoff        *consentBackoff
+	reported       *reportedSet
 	unheldReads    *sharedReads
 	enqueueBatch   func(id ID, holderNamespace string)
 }
@@ -238,6 +239,10 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// reason; keepEntry, those whose state this pass couldn't learn, which
 	// keep their unheld entry as it was.
 	liveOK := map[ID]bool{}
+	// readOK: a live consent read of the ref succeeded this pass, whatever it
+	// answered; its backoff goes back to 1s (§11.3).
+	readOK := map[ID]bool{}
+	var passNow time.Time // the pass's time for a new unheld entry
 	cross := map[ID]bool{}
 	notHeld := map[ID]string{}
 	keepEntry := map[ID]bool{}
@@ -273,8 +278,9 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			p.reports.ConsentWithdrawn(p.holder, obj, id)
 		default:
 			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonNotConsented})
-			if !listed[unheldRef(id)] {
-				// Reported once, when the ref first goes unheld.
+			if !listed[unheldRef(id)] && p.reported.first(consentKey{obj.GetUID(), id}) {
+				// Reported once, when the ref first goes unheld: neither its
+				// unheld entry, nor this process, has seen it.
 				p.reports.RefNotHeld(p.holder, obj, id)
 			}
 		}
@@ -333,8 +339,11 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			// The gate, before A1: live in the adding direction, and from
 			// the cache on a pass that may skip A2 (§11.3, M1).
 			cross[id] = true
-			switch g := p.gate(ctx, obj, id, rec0.Names(id) && !deleting); g {
+			g := p.gate(ctx, obj, id, rec0.Names(id) && !deleting)
+			readOK[id] = g == gateHoldLive || g == gateNotHeld || g == gateMissing
+			switch g {
 			case gateHoldLive, gateHoldCached:
+				p.reported.clear(consentKey{obj.GetUID(), id})
 				liveOK[id] = g == gateHoldLive
 				byID[id] = r
 				toHold = append(toHold, id)
@@ -376,7 +385,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		want := exact()
 		var unheldNow *[]UnheldEntry
 		if last := !chained && len(next) == 0; last {
-			u := p.unheldEntries(obj, notHeld, keepEntry)
+			u := p.unheldEntries(obj, notHeld, keepEntry, &passNow)
 			unheldNow = &u
 		} else if rec := ReadRecord(obj); !rec.Unparseable {
 			want = SortedIDs(append(want, rec.IDs...))
@@ -407,7 +416,9 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				// The gate read consent from the cache, and the skip didn't
 				// hold: every A2 of a cross-namespace ref follows a live
 				// consent read in the same pass (§11.3, rule 1).
-				switch p.liveConsent(ctx, obj, id) {
+				g := p.liveConsent(ctx, obj, id)
+				readOK[id] = readOK[id] || g != gateUnknown
+				switch g {
 				case gateHoldLive:
 					liveOK[id] = true
 				case gateNotHeld:
@@ -491,15 +502,15 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		// against MaxDepth.
 		level = slices.DeleteFunc(next, func(r Ref) bool { return seen[r.ID()] })
 	}
-	for id := range cross {
-		if liveOK[id] {
+	for id := range readOK {
+		if readOK[id] {
 			p.backoff.succeed(consentKey{obj.GetUID(), id})
 		}
 	}
 
 	// The last A1: exactly the chain, and the unheld list with it, in one
 	// patch (§11.3). It writes nothing when neither changed.
-	unheld := p.unheldEntries(obj, notHeld, keepEntry)
+	unheld := p.unheldEntries(obj, notHeld, keepEntry, &passNow)
 	if _, err := p.announce(ctx, obj, exact(), &unheld, &a); err != nil {
 		if errors.Is(err, ErrHolderConflict) {
 			return a, err
@@ -677,16 +688,30 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 			continue
 		}
 		id := u.Ref.ID()
-		_, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
-		switch Classify(err) {
-		case ClassNotFound:
-			continue
-		case ClassNone:
-		default:
-			return fmt.Errorf("credential-use: checking %s before establishing: %w", id, err)
+		cross := id.Namespace != obj.GetNamespace()
+		if cross {
+			// A ref in another namespace is held only on a live yes, here as
+			// in every pass (§11.3): a Missing one that appeared may still
+			// not consent. Without one it stays unheld, as the next pass
+			// will find it; the holder may establish without it.
+			if p.liveConsent(ctx, obj, id) != gateHoldLive {
+				continue
+			}
+		} else {
+			_, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+			switch Classify(err) {
+			case ClassNotFound:
+				continue
+			case ClassNone:
+			default:
+				return fmt.Errorf("credential-use: checking %s before establishing: %w", id, err)
+			}
 		}
 		if class, err := p.write(ctx, id, obj.GetNamespace()); class != ClassNone {
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)
+		}
+		if cross && p.enqueueBatch != nil {
+			p.enqueueBatch(id, obj.GetNamespace()) // §11.3 rule 3, as after any A2
 		}
 		if u.Ref.Next != nil {
 			// It is held now, but what it leads to isn't: establishing now
@@ -713,6 +738,8 @@ func (p *protocol) forget(obj metav1.Object) bool {
 	delete(an, AnnotationUnheld)
 	obj.SetAnnotations(an)
 	p.ver.forgot(obj.GetUID())
+	p.backoff.forget(obj.GetUID())
+	p.reported.forget(obj.GetUID())
 	return true
 }
 

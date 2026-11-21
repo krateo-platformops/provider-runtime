@@ -50,8 +50,8 @@ MUTANTS = [
      [('\t\t\t\treturn gateHoldCached\n\t\t\t}\n\t\t}\n\t}',
        '\t\t\t\treturn gateHoldCached\n\t\t\t}\n\t\t\treturn gateNotHeld\n\t\t}\n\t}')]),
     ('a deleting holder reads consent from the cache', 'acquire.go',
-     [('\t\t\tswitch g := p.gate(ctx, obj, id, rec0.Names(id) && !deleting); g {',
-       '\t\t\tswitch g := p.gate(ctx, obj, id, rec0.Names(id)); g {')]),
+     [('\t\t\tg := p.gate(ctx, obj, id, rec0.Names(id) && !deleting)',
+       '\t\t\tg := p.gate(ctx, obj, id, rec0.Names(id))')]),
     ('an A2 rests on a cached consent', 'acquire.go',
      [('\t\t\tif !held && cross[id] && !liveOK[id] {',
        '\t\t\tif false && !held && cross[id] && !liveOK[id] {')]),
@@ -62,8 +62,8 @@ MUTANTS = [
      [('\tnext := 2 * d\n',
        '\tnext := d\n')]),
     ("a read that succeeds doesn't reset the backoff", 'acquire.go',
-     [('\t\tif liveOK[id] {\n\t\t\tp.backoff.succeed(consentKey{obj.GetUID(), id})\n\t\t}',
-       '\t\t_ = liveOK[id]')]),
+     [('\t\tif readOK[id] {\n\t\t\tp.backoff.succeed(consentKey{obj.GetUID(), id})\n\t\t}',
+       '\t\t_ = readOK[id]')]),
     ('NotFound is retried', 'consent.go',
      [('\tns, err := p.srv.Get(ctx, namespaceGroupKind, "", id.Namespace)\n\tswitch Classify(err) {\n\tcase ClassNone:\n\tcase ClassNotFound:\n\t\treturn gateMissing',
        '\tns, err := p.srv.Get(ctx, namespaceGroupKind, "", id.Namespace)\n\tswitch Classify(err) {\n\tcase ClassNone:\n\tcase ClassNotFound:\n\t\treturn gateUnknown')]),
@@ -77,7 +77,7 @@ MUTANTS = [
      [('\t\tcase rec0.Names(id):\n\t\t\treason = UnheldConsentWithdrawn',
        '\t\tcase false:\n\t\t\treason = UnheldConsentWithdrawn')]),
     ('RefNotHeld is reported on every pass', 'acquire.go',
-     [('\t\t\tif !listed[unheldRef(id)] {',
+     [('\t\t\tif !listed[unheldRef(id)] && p.reported.first(consentKey{obj.GetUID(), id}) {',
        '\t\t\tif true {')]),
     ('since moves on every pass', 'consent.go',
      [('\t\tcase had && (e.Reason == reason || reason == UnheldNotConsented):',
@@ -109,6 +109,24 @@ MUTANTS = [
     ("a consent change counts as the tracker's own", 'informers.go',
      [('\t\treturn isCredentialUseKey(k) && k != AnnotationAllowHoldersFrom',
        '\t\treturn isCredentialUseKey(k)')]),
+    ('BeforeEstablish pins without consent', 'acquire.go',
+     [('\t\t\tif p.liveConsent(ctx, obj, id) != gateHoldLive {\n\t\t\t\tcontinue\n\t\t\t}',
+       '\t\t\tif false {\n\t\t\t\tcontinue\n\t\t\t}')]),
+    ("BeforeEstablish's A2 enqueues no batch", 'acquire.go',
+     [('\t\tif cross && p.enqueueBatch != nil {\n\t\t\tp.enqueueBatch(id, obj.GetNamespace())',
+       '\t\tif false && cross && p.enqueueBatch != nil {\n\t\t\tp.enqueueBatch(id, obj.GetNamespace())')]),
+    ('a trimmed ref displaces a listed one', 'unheld.go',
+     [('\t\tif rank(a) == 0 || a.listed == b.listed {',
+       '\t\tif true {')]),
+    ('a trimmed ref is reported again', 'acquire.go',
+     [('\t\t\tif !listed[unheldRef(id)] && p.reported.first(consentKey{obj.GetUID(), id}) {',
+       '\t\t\tif !listed[unheldRef(id)] {')]),
+    ("a no-consent read doesn't reset the backoff", 'acquire.go',
+     [('\t\t\treadOK[id] = g == gateHoldLive || g == gateNotHeld || g == gateMissing',
+       '\t\t\treadOK[id] = g == gateHoldLive')]),
+    ("a pass's two A1s read the clock twice", 'consent.go',
+     [('\t\t\tif now.IsZero() {\n\t\t\t\t*now = p.clock.Now().UTC().Truncate(time.Second)\n\t\t\t}',
+       '\t\t\t*now = p.clock.Now().UTC().Truncate(time.Second)')]),
 ]
 
 EQUIVALENT = {
@@ -117,6 +135,12 @@ EQUIVALENT = {
     # (§11.3 rule 1): with the cache read at the gate, the live read still
     # comes before any write, at A2 time. The explicit rule stays, for clarity.
     'a deleting holder reads consent from the cache': 'a deleting pass reads consent live at A2 time anyway',
+    # Reading the clock for each new entry, not once per pass: a pass's second
+    # A1 sees the entries its first wrote, so the two never disagree, and a
+    # pass with no new entry still reads no clock (the model's rule). Only
+    # the since of several entries made in one pass may differ by a tick,
+    # each still the time its ref entered the state (§11.3).
+    "a pass's two A1s read the clock twice": 'each new entry still gets the time its state began',
 }
 
 # The tests that must kill each mutant: each runs the tests aimed at its
@@ -148,6 +172,12 @@ KILLERS = {
     'a withdrawn ref stays with an unfollowed hop': 'TestAWithdrawnRefLeavesTheRecordEvenWithAHopUnfollowed',
     "a consent change doesn't enqueue the holders": 'TestConsentWithdrawalReleasesTheHold',
     "a consent change counts as the tracker's own": 'TestForeignChange',
+    'BeforeEstablish pins without consent': 'TestBeforeEstablishGatesACrossNamespaceRef',
+    "BeforeEstablish's A2 enqueues no batch": 'TestBeforeEstablishGatesACrossNamespaceRef',
+    'a trimmed ref displaces a listed one': 'TestUnheldPastTheCapIsStable',
+    'a trimmed ref is reported again': 'TestUnheldPastTheCapIsStable',
+    "a no-consent read doesn't reset the backoff": 'TestTheBackoffResetsOnAnySuccessfulRead',
+    "a pass's two A1s read the clock twice": 'TestUnheldPastTheCapIsStable|TestOneWriteForANewHoldAndANewUnheldEntry|TestStateKeysAreStable',
 }
 
 ALL = sorted({t for ts in KILLERS.values() for t in ts.split("|")})

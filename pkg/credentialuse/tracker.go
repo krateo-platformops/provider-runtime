@@ -187,6 +187,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		listers:         s.o.Listers,
 		namespaceViews:  trackerViews{t},
 		backoff:         newConsentBackoff(o.PollInterval),
+		reported:        newReportedSet(),
 		unheldReads:     s.unheldReads,
 		enqueueBatch: func(id ID, ns string) {
 			s.queue.Add(batchKey{gk, ns}, id)

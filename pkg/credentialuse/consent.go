@@ -64,6 +64,9 @@ func newConsentBackoff(max time.Duration) *consentBackoff {
 
 // fail returns the requeue after a failed read, and doubles the next.
 func (b *consentBackoff) fail(k consentKey) time.Duration {
+	if b == nil {
+		return consentRetryMin
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	d := b.at[k]
@@ -80,6 +83,9 @@ func (b *consentBackoff) fail(k consentKey) time.Duration {
 
 // succeed resets k's backoff.
 func (b *consentBackoff) succeed(k consentKey) {
+	if b == nil {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.at, k)
@@ -87,6 +93,9 @@ func (b *consentBackoff) succeed(k consentKey) {
 
 // forget drops every entry of holder, when it is forgotten.
 func (b *consentBackoff) forget(holder types.UID) {
+	if b == nil {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for k := range b.at {
@@ -160,16 +169,18 @@ func (p *protocol) liveConsent(ctx context.Context, obj metav1.Object, id ID) ga
 // entry for each ref dropped for want of consent, keeping its since while
 // its state lasts; the entries of refs whose state this pass couldn't learn,
 // as they were; and nothing for a ref held or no longer named.
-func (p *protocol) unheldEntries(obj metav1.Object, notHeld map[ID]string, keep map[ID]bool) []UnheldEntry {
+//
+// now is the pass's time for a new entry, read once, on the first new entry:
+// in the model a clock read is a scheduled input, and a pass with no new
+// entry must not add one; and both of a pass's A1s must compute one list.
+func (p *protocol) unheldEntries(obj metav1.Object, notHeld map[ID]string, keep map[ID]bool, now *time.Time) []UnheldEntry {
 	prev := map[string]UnheldEntry{}
 	for _, e := range ReadUnheld(obj.GetAnnotations()) {
 		if e.Reason != unheldMore {
+			e.listed = true
 			prev[e.Ref] = e
 		}
 	}
-	// The clock is read only for a new entry: in the model a clock read is a
-	// scheduled input, and a pass with no new entry must not add one.
-	var now time.Time
 	var out []UnheldEntry
 	for id, reason := range notHeld {
 		ref := unheldRef(id)
@@ -180,9 +191,9 @@ func (p *protocol) unheldEntries(obj metav1.Object, notHeld map[ID]string, keep 
 			// entry and its since stay.
 		default:
 			if now.IsZero() {
-				now = p.clock.Now().UTC().Truncate(time.Second)
+				*now = p.clock.Now().UTC().Truncate(time.Second)
 			}
-			e = UnheldEntry{Ref: ref, Reason: reason, Since: now}
+			e = UnheldEntry{Ref: ref, Reason: reason, Since: *now}
 		}
 		out = append(out, e)
 	}
@@ -192,4 +203,52 @@ func (p *protocol) unheldEntries(obj metav1.Object, notHeld map[ID]string, keep 
 		}
 	}
 	return out
+}
+
+// reportedSet remembers, in memory, which (holder, ref) pairs have been
+// reported not held, so CredentialRefNotHeld goes once per ref even when the
+// unheld list is trimmed past maxUnheld (§11.3). A nil set remembers nothing.
+type reportedSet struct {
+	mu sync.Mutex
+	m  map[consentKey]bool
+}
+
+func newReportedSet() *reportedSet { return &reportedSet{m: map[consentKey]bool{}} }
+
+// first reports whether k is new, and remembers it.
+func (r *reportedSet) first(k consentKey) bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.m[k] {
+		return false
+	}
+	r.m[k] = true
+	return true
+}
+
+// clear forgets k, once its ref is held again.
+func (r *reportedSet) clear(k consentKey) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.m, k)
+}
+
+// forget drops every pair of holder.
+func (r *reportedSet) forget(holder types.UID) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k := range r.m {
+		if k.holder == holder {
+			delete(r.m, k)
+		}
+	}
 }

@@ -622,9 +622,20 @@ of tests.
 - **A withdrawn ref leaves the record even when a hop is unfollowed** in the
   same pass: the record's refs are kept for the unfollowed hop, never one
   whose consent was withdrawn.
-- **`CredentialRefNotHeld` and its metric are reported once per ref**, when
-  its `unheld` entry first appears; `CredentialConsentWithdrawn` once per
-  release.
+- **`CredentialRefNotHeld` and its metric are reported once per (holder,
+  ref) per process**: when its `unheld` entry first appears, remembered in
+  memory too, so a ref trimmed into `More` isn't reported again. A restart,
+  or another process that reconciles the holder, reports it once more.
+  `CredentialConsentWithdrawn` is reported once per release.
+- **Past 16 entries the list is stable**: among `NotConsented` entries, those
+  already listed come before ones that aren't, so a ref trimmed into `More`,
+  which comes back each pass as if new, never displaces a listed one; a pass
+  computes one list for both of its A1s (from the review of #123).
+- **`BeforeEstablish` holds a ref outside the holder's namespace only on a
+  live yes**, and enqueues the release batch after that A2 (the review of
+  #123).
+- **Any live consent read that succeeds resets the backoff**, whether it
+  found consent, none, or a NotFound.
 - **Any change to a held object's `allow-holders-from` enqueues its holders**,
   whatever its kind, and the self-write filter counts it as someone else's
   write (carried from PR 4's review, #122).
@@ -897,6 +908,13 @@ a grant past the acquirer's retry budget.
 
 **Depends on:** PR 8. **Size:** about 1,200 lines of production code and
 1,400 of tests.
+
+**Carried from PR 5's review** (#123): PR 5 tested the late A2 of §11.3
+rule 3 with a two-process envtest, where the A2's own informer event also
+enqueues the release batch. In PerNamePoll mode no watch delivers it, so the
+acquirer's self-enqueued batch is the only backstop: this PR adds the model
+schedule the plan lists for PR 5, a concurrent A2 landing after the release
+and caught by the batch its own write enqueued, with no informer event.
 
 ### PR 10: `scaletozero.WithHeld` and `WithHeldIndex`
 
