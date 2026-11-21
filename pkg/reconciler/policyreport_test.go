@@ -333,3 +333,52 @@ func TestDeletingKeepsItsTransitionTime(t *testing.T) {
 		t.Errorf("after pass 2: Ready %s at %v, want Deleting at %v", got.Reason, got.LastTransitionTime, old)
 	}
 }
+
+// TestCreatingKeepsItsTransitionTime: inside the create-recovery window (a
+// recent external-create-pending marker, the resource not observed yet) every
+// pass refuses to create and sets Ready=Creating again after Observe set its
+// own Ready. Creating must keep the time of its real transition.
+func TestCreatingKeepsItsTransitionTime(t *testing.T) {
+	old := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	w := newWidget("w", map[string]string{})
+	w.SetFinalizers([]string{FinalizerName})
+	meta.SetExternalCreatePending(w, time.Now())
+	s := newTraceServer(t, w)
+	var calls mgmtTableCalls
+	r := NewReconciler(&fake.Manager{Client: s.c, Scheme: s.scheme}, resource.ManagedKind(widgetGVK),
+		WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
+			return mgmtTableClient(mgmtTableStates[0], &calls), nil
+		})),
+		WithRecorder(&eventCapture{}),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	key := reqFor("w").NamespacedName
+
+	_, _ = r.Reconcile(ctx, reqFor("w"))
+	stored := &Widget{}
+	if err := s.raw.Get(ctx, key, stored); err != nil {
+		t.Fatal(err)
+	}
+	c := stored.GetCondition(prv1.TypeReady)
+	if c.Reason != prv1.ReasonCreating {
+		t.Fatalf("after pass 1: Ready %s, want Creating (the recovery window)", c.Reason)
+	}
+	c.LastTransitionTime = old
+	stored.SetConditions(prv1.Condition{Type: prv1.TypeReady}) // differs, so the next call replaces it
+	stored.SetConditions(c)
+	if err := s.raw.Status().Update(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = r.Reconcile(ctx, reqFor("w"))
+	if err := s.raw.Get(ctx, key, stored); err != nil {
+		t.Fatal(err)
+	}
+	if calls.observe != 2 || calls.create != 0 {
+		t.Fatalf("observe %d, create %d; want 2 and 0: the passes weren't in the recovery window", calls.observe, calls.create)
+	}
+	if got := stored.GetCondition(prv1.TypeReady); got.Reason != prv1.ReasonCreating || !got.LastTransitionTime.Equal(&old) {
+		t.Errorf("after pass 2: Ready %s at %v, want Creating at %v", got.Reason, got.LastTransitionTime, old)
+	}
+}
