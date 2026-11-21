@@ -72,6 +72,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/krateo-platformops/plumbing/managementpolicy"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -334,6 +335,12 @@ func mgmtTSVSafe(s string) string {
 //   - D2: a value that does not parse acts on nothing: no Create, Update or
 //     Delete call.
 //   - D3: "create" is "observe,create": the two rows agree on every cell.
+//   - D2 reporting: outside a deletion, an invalid management policy reads
+//     Synced=ManagementPolicyInvalid, and else an invalid deletion policy
+//     DeletionPolicyInvalid, whatever the pass concluded.
+//   - D4: an absent resource with create withheld reads
+//     Ready=CreateWithheldByPolicy, and a drifted one with update withheld
+//     (the harness's Observe reports it healthy) True/UpdateWithheldByPolicy.
 func checkMgmtTableContracts(t *testing.T, rows [][]string) {
 	t.Helper()
 	col := map[string]int{}
@@ -353,6 +360,30 @@ func checkMgmtTableContracts(t *testing.T, rows [][]string) {
 		if r[0] == "observe-create" && (r[col["create"]] != "0" || r[col["update"]] != "0" || r[col["delete"]] != "0") {
 			t.Errorf("%s: create=%s update=%s delete=%s; a policy that does not parse acts on nothing (D2)", key, r[col["create"]], r[col["update"]], r[col["delete"]])
 		}
+		if r[2] == "deleting-present" || r[2] == "deleting-absent" {
+			continue
+		}
+		d := meta.ManagementDecision(mgmtTableObjectAnnotations(r[0], r[1]))
+		switch {
+		case d.Policy.Invalid != "":
+			if r[col["synced-reason"]] != string(prv1.ReasonManagementPolicyInvalid) {
+				t.Errorf("%s: Synced reason %s; an invalid management policy wins over the pass's outcome", key, r[col["synced-reason"]])
+			}
+		case d.DeletionInvalid != "":
+			if r[col["synced-reason"]] != string(prv1.ReasonDeletionPolicyInvalid) {
+				t.Errorf("%s: Synced reason %s; an invalid deletion policy is reported on every pass", key, r[col["synced-reason"]])
+			}
+		}
+		if (r[col["ready-reason"]] == string(prv1.ReasonCreateWithheldByPolicy) || r[col["ready-reason"]] == string(prv1.ReasonUpdateWithheldByPolicy)) &&
+			!strings.Contains(r[col["ready-message"]], fmt.Sprintf("%q", r[0])) {
+			t.Errorf("%s: Ready message %q doesn't quote the policy as written, %q", key, r[col["ready-message"]], r[0])
+		}
+		if r[2] == "absent" && !d.May(managementpolicy.Create) && r[col["ready-reason"]] != string(prv1.ReasonCreateWithheldByPolicy) {
+			t.Errorf("%s: Ready reason %s; an absent resource with create withheld is CreateWithheldByPolicy (D4)", key, r[col["ready-reason"]])
+		}
+		if r[2] == "drifted" && !d.May(managementpolicy.Update) && (r[col["ready-status"]] != "True" || r[col["ready-reason"]] != string(prv1.ReasonUpdateWithheldByPolicy)) {
+			t.Errorf("%s: Ready %s/%s; a healthy drifted resource with update withheld is True/UpdateWithheldByPolicy (D4)", key, r[col["ready-status"]], r[col["ready-reason"]])
+		}
 	}
 	n := 0
 	for k, r := range byKey {
@@ -361,7 +392,11 @@ func checkMgmtTableContracts(t *testing.T, rows [][]string) {
 		}
 		n++
 		o := byKey[[3]string{"observe,create", k[1], k[2]}]
-		if !cmp.Equal(r[3:], o[3:]) {
+		// Ready's message quotes the annotation as written, so it is the one
+		// cell where the two may differ; it is checked below.
+		rc, oc := append([]string(nil), r[3:]...), append([]string(nil), o[3:]...)
+		rc[col["ready-message"]-3], oc[col["ready-message"]-3] = "", ""
+		if !cmp.Equal(rc, oc) {
 			t.Errorf("create/%s/%s differs from observe,create (D3: observe is implied):\n%q\n%q", k[1], k[2], r[3:], o[3:])
 		}
 	}
@@ -472,4 +507,19 @@ func TestTheDeleteGateRereadsThePolicyAfterConnect(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mgmtTableObjectAnnotations is an object carrying a row's two policy cells
+// ("unset" is the annotation absent).
+func mgmtTableObjectAnnotations(mp, dp string) *fake.Managed {
+	m := &fake.Managed{}
+	a := map[string]string{}
+	if mp != "unset" {
+		a[meta.AnnotationKeyManagementPolicy] = mp
+	}
+	if dp != "unset" {
+		a[meta.AnnotationKeyDeletionPolicy] = dp
+	}
+	m.SetAnnotations(a)
+	return m
 }

@@ -1104,7 +1104,11 @@ func TestReconciler(t *testing.T) {
 							want.SetAnnotations(map[string]string{
 								meta.AnnotationKeyManagementPolicy: meta.ManagementPolicyObserve,
 							})
-							want.SetConditions(prv1.ReconcileError(errors.Wrap(errors.New(errExternalResourceNotExist), errReconcileObserve)))
+							// D4: the reconciler also reports the withheld create on Ready.
+							want.SetConditions(
+								prv1.CreateWithheldByPolicy(createWithheldMessage(want)),
+								prv1.ReconcileError(errors.Wrap(errors.New(errExternalResourceNotExist), errReconcileObserve)),
+							)
 							if diff := cmp.Diff(want, obj, test.EquateConditions()); diff != "" {
 								reason := "Resource does not exist should be reported as a conditioned status when ObserveOnly."
 								t.Errorf("\nReason: %s\n-want, +got:\n%s", reason, diff)
