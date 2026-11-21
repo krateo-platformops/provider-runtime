@@ -60,6 +60,9 @@ func TestForeignChange(t *testing.T) {
 		{"someone else's finalizer", func(u *unstructured.Unstructured) {
 			u.SetFinalizers([]string{"example.com/other", "example.com/more"})
 		}, true},
+		{"consent, written by the target's owner (§11.3)", func(u *unstructured.Unstructured) {
+			u.SetAnnotations(map[string]string{"note": "a", AnnotationAllowHoldersFrom: "team-a"})
+		}, true},
 		{"a deletionTimestamp", func(u *unstructured.Unstructured) {
 			now := metav1.Now()
 			u.SetDeletionTimestamp(&now)

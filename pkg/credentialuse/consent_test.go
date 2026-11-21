@@ -379,6 +379,13 @@ func TestConsentReadFailures(t *testing.T) {
 			t.Errorf("unheld = %+v: an unread consent isn't a state to record", u)
 		}
 	})
+	t.Run("a Namespace that's gone is Missing, not a retry", func(t *testing.T) {
+		r, _ := consentRig(t, "ns")
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{SecretRef("gone", "s")})
+		if err != nil || a.RetryAfter != 0 || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonMissing {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+	})
 	t.Run("NotFound is Missing, not a retry", func(t *testing.T) {
 		r, _ := consentRig(t, "ns")
 		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{otherSecret()})
@@ -528,4 +535,61 @@ func TestConsentChains(t *testing.T) {
 			t.Errorf("%d reads after 11s, want 2", reads())
 		}
 	})
+}
+
+// TestAWithdrawnRefLeavesTheRecordEvenWithAHopUnfollowed: a hop that can't be
+// held keeps the record's refs (§9.1), but never one whose target withdrew
+// consent this pass (§11.3).
+func TestAWithdrawnRefLeavesTheRecordEvenWithAHopUnfollowed(t *testing.T) {
+	ctx := context.Background()
+	r, _ := consentRig(t, "")
+	fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+	r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
+	r.p.contents = fc
+	r.target(fc, "kt", "Secret", "home")
+	must(r.m.Create(secretKey("ns", "home"), metav1.ObjectMeta{}))
+	must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{Annotations: map[string]string{AnnotationAllowHoldersFrom: "ns"}}))
+	refs := []Ref{targetRef("kt"), otherSecret()}
+	if a, err := r.p.acquire(ctx, r.holder(t, "h", true), refs); err != nil || len(a.Held) != 3 {
+		t.Fatalf("pass 1: acquire = %+v, %v", a, err)
+	}
+	// The hop goes, and consent is withdrawn, in one pass.
+	data := []byte(`{"metadata":{"finalizers":null}}`)
+	if _, err := r.m.Patch(targetKey("kt"), types.MergePatchType, data); err != nil {
+		t.Fatal(err)
+	}
+	must(r.m.Delete(targetKey("kt")))
+	setConsent(t, r, secretKey("other", "s"), "")
+	if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), refs); err != nil {
+		t.Fatal(err)
+	}
+	rec := ReadRecord(r.get(t, widgetKey("ns", "h")))
+	if rec.Names(otherSecretID()) {
+		t.Errorf("record = %v: the withdrawn ref was kept with the unfollowed hop's", rec.IDs)
+	}
+	if !rec.Names(SecretRef("ns", "home").ID()) {
+		t.Errorf("record = %v: the Secret behind the unfollowed hop was dropped", rec.IDs)
+	}
+}
+
+// TestOneWriteForANewHoldAndANewUnheldEntry: a pass that adds a held ref and
+// lists another as unheld writes the holder once (§11.3: unheld goes in the
+// A1 patch, with the record).
+func TestOneWriteForANewHoldAndANewUnheldEntry(t *testing.T) {
+	r, _ := consentRig(t, "")
+	must(r.m.Create(secretKey("ns", "home"), metav1.ObjectMeta{}))
+	must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{}))
+	r.holder(t, "h", false)
+	r.srv.calls = nil
+	a, err := r.p.acquire(context.Background(), r.get(t, widgetKey("ns", "h")), []Ref{SecretRef("ns", "home"), otherSecret()})
+	if err != nil || len(a.Held) != 1 || len(a.Unheld) != 1 {
+		t.Fatalf("acquire = %+v, %v", a, err)
+	}
+	if n := countCalls(r.srv.calls, "patch Widget/h"); n != 1 {
+		t.Errorf("%d holder writes, want 1: %v", n, r.srv.calls)
+	}
+	h := r.get(t, widgetKey("ns", "h"))
+	if !ReadRecord(h).Names(SecretRef("ns", "home").ID()) || len(ReadUnheld(h.Annotations)) != 1 {
+		t.Errorf("record %v, unheld %v", ReadRecord(h).IDs, ReadUnheld(h.Annotations))
+	}
 }

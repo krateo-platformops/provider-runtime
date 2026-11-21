@@ -600,12 +600,45 @@ it reset only on a successful read (M2 of #52's review)?
 **Depends on:** PR 4. **Size:** about 900 lines of production code and 1,200
 of tests.
 
-**Carried from PR 4's review** (#122): the self-write filter sets aside
-every `credential-use.` annotation, and `credential-use.krateo.io/allow-holders-from`
-is one that a human writes. So a consent change on a content kind's object
-would be taken for the tracker's own write and enqueue no holder. PR 5 must
-either keep that key in the filter's comparison or enqueue on a consent
-change by its own path.
+**What the build settled** (2026-11-21), where §11.3 left room:
+
+- **The gate runs before each level's A1.** A ref the record names, on a
+  pass that isn't deleting, may be held on a cached yes (the object's and its
+  Namespace's cached `allow-holders-from`); anything else, a cached no or a
+  cache that can't answer included, is read live. When the cached yes's A2
+  can't be skipped, consent is read live before that A2, so every A2 of a
+  cross-namespace ref follows a live read in the same pass.
+- **A level that leads nowhere further writes the chain and `unheld` in one
+  A1**; any other level only adds to the record, and the pass's last A1, a
+  no-op when nothing changed, writes exactly the chain and `unheld`. So a
+  withdrawal's removal and its entry land in one patch, and so do a new hold
+  and a new entry.
+- **A failed live read of a ref not yet held** holds nothing that pass:
+  `Acquired.Unheld` says `ConsentUnreadable`, `RetryAfter` backs off, and no
+  `unheld` entry is written, since nothing was learnt.
+- **A cross-namespace ref whose object or Namespace is NotFound** is Missing:
+  recorded, as any Missing ref, and given no A2, so a recreated object is
+  never pinned before its consent is read.
+- **A withdrawn ref leaves the record even when a hop is unfollowed** in the
+  same pass: the record's refs are kept for the unfollowed hop, never one
+  whose consent was withdrawn.
+- **`CredentialRefNotHeld` and its metric are reported once per ref**, when
+  its `unheld` entry first appears; `CredentialConsentWithdrawn` once per
+  release.
+- **Any change to a held object's `allow-holders-from` enqueues its holders**,
+  whatever its kind, and the self-write filter counts it as someone else's
+  write (carried from PR 4's review, #122).
+- **`Options.PollInterval`** (default 60s) caps the consent-read backoff; two
+  Tracks of a kind must agree on it.
+- **A `*` on a Namespace** gets the `CredentialConsentWildcardIgnored`
+  Warning event on that Namespace.
+- **`since` reads the clock only for a new entry**, so a pass adds no
+  scheduled input to the model, whose state keys are unchanged.
+- **The late-A2 schedule is an envtest with two processes**
+  (`TestALateA2AfterAWithdrawalIsReleased`), not a model schedule. In the
+  watched modes the A2's own informer event also enqueues the batch, so it
+  proves no finalizer is stranded, not that the self-enqueue alone suffices;
+  that is PerNamePoll's case (PR 9).
 
 ### PR 6: Disown and `DisownPrefix`
 

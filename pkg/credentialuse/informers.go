@@ -468,7 +468,11 @@ func (h *protectedHandler) OnUpdate(oldObj, newObj any) {
 		}
 		lost = lost || (inB && (!inA || replaced))
 	}
-	if lost || h.p.content && (o.Generation != n.Generation || foreignChange(oldObj, newObj)) {
+	consentChanged := o.Annotations[AnnotationAllowHoldersFrom] != n.Annotations[AnnotationAllowHoldersFrom]
+	if lost || consentChanged || h.p.content && (o.Generation != n.Generation || foreignChange(oldObj, newObj)) {
+		// A change to the object's consent reaches its holders too, of any
+		// kind: their next passes read it live before dropping or adding a
+		// hold (§11.3).
 		// The holds that were there are gone, as when the object leaves the
 		// cache: its holders' next passes write A2 again (§6.5, G4 of the
 		// review of #109). And a content kind's object, which leads on to
