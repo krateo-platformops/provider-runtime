@@ -88,7 +88,17 @@ func (c *controller) connect(ctx context.Context, holder types.NamespacedName, r
 	if f := c.beforeConnect.Load(); f != nil {
 		(*f)(ctx, holder, ref)
 	}
-	_, err := env.Kube.CoreV1().Secrets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	var err error
+	switch ref.GroupKind {
+	case cutest.TargetGVK.GroupKind():
+		// A chain's intermediate object (§9): read as a provider's Connect
+		// reads a KubernetesTarget.
+		_, err = env.Dynamic.Resource(cutest.TargetGVR).Namespace(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	case schema.GroupKind{Kind: "ConfigMap"}:
+		_, err = env.Kube.CoreV1().ConfigMaps(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	default:
+		_, err = env.Kube.CoreV1().Secrets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	}
 	if err != nil {
 		h, herr := env.Dynamic.Resource(c.d.Holder).Namespace(holder.Namespace).Get(ctx, holder.Name, metav1.GetOptions{})
 		if herr == nil && h.GetDeletionTimestamp() != nil {
@@ -194,6 +204,9 @@ func (r *writeRig) kill() {
 func newWriteRig(t *testing.T, cfg *rest.Config, so cu.SharedOptions, change func(o *cu.Options), before func(*cu.Shared)) *writeRig {
 	t.Helper()
 	resetPublished(t, cutest.WidgetGVR)
+	// Registered first, so it runs last, after the rig has stopped: a test
+	// leaves no published settings behind for the next (§7.3).
+	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
 	r := &writeRig{c: newController(t), events: events.NewFakeRecorder(100000)}
 	clients := clientsFor(t, cfg)
 	clients.Events = r.events
@@ -602,7 +615,8 @@ func TestANamespaceDeletionJustAfterTheGrace(t *testing.T) {
 // reads it. Then the user goes, and the Secret with it.
 func TestAHolderDeletionBetweenR2AndR3(t *testing.T) {
 	cutest.Require(t, env)
-	var ns string
+	// Before the rig: its call hook reads ns on the write loops' goroutines.
+	ns := env.Namespace(t, "r2r3")
 	var r *writeRig
 	var armed, fired atomic.Bool
 	a2Done, r3Done, r2Again := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -642,7 +656,6 @@ func TestAHolderDeletionBetweenR2AndR3(t *testing.T) {
 			}
 		})
 	})
-	ns = env.Namespace(t, "r2r3")
 	createSecret(t, ns, "creds")
 	createWidget(t, ns, "w", "creds")
 	hold := func(context.Context, types.NamespacedName, cu.Ref) {

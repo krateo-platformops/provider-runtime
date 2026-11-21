@@ -53,15 +53,23 @@ type stressProcess struct {
 	ctrls []*controller
 }
 
-func startStressProcess(t *testing.T, so cu.SharedOptions) *stressProcess {
+func startStressProcess(t *testing.T, so cu.SharedOptions, chained bool) *stressProcess {
 	t.Helper()
 	p := &stressProcess{s: cu.NewShared(clientsFor(t, env.Config), so)}
-	for _, k := range stressKinds {
+	kinds := stressKinds
+	if chained {
+		// Widgets only, which reach their Secrets through Targets (§9).
+		kinds = stressKinds[:1]
+	}
+	for _, k := range kinds {
 		c := newController(t)
 		o := widgetOptions(c.enqueue)
 		o.Holder = k.gvk
 		o.DeletionGrace = testGrace
 		o.ProbeInterval = time.Second
+		if chained {
+			chainOptions(&o)
+		}
 		tr, err := p.s.Track(context.Background(), o)
 		if err != nil {
 			t.Fatal(err)
@@ -95,11 +103,12 @@ func TestStress(t *testing.T) {
 	cutest.Require(t, env)
 	d := stressDuration(t)
 	for _, n := range []int{2, 3} {
-		t.Run(fmt.Sprintf("%d processes, no leader election", n), func(t *testing.T) { stress(t, n, d, cu.SharedOptions{}) })
+		t.Run(fmt.Sprintf("%d processes, no leader election", n), func(t *testing.T) { stress(t, n, d, cu.SharedOptions{}, false) })
 	}
 	t.Run("2 processes, every hold outside the caches", func(t *testing.T) {
-		stress(t, 2, d, cu.SharedOptions{Namespaces: []string{env.Namespace(t, "stresscached")}})
+		stress(t, 2, d, cu.SharedOptions{Namespaces: []string{env.Namespace(t, "stresscached")}}, false)
 	})
+	t.Run("2 processes, Widgets through Targets", func(t *testing.T) { stress(t, 2, d, cu.SharedOptions{}, true) })
 }
 
 // stressWorld is what the stress goroutines share: the namespaces in use,
@@ -107,6 +116,9 @@ func TestStress(t *testing.T) {
 type stressWorld struct {
 	t     *testing.T
 	procs []*stressProcess
+	// chained: the holders are Widgets naming Targets, which name the
+	// Secrets (§9).
+	chained bool
 
 	mu      sync.Mutex
 	nss     []string
@@ -120,14 +132,33 @@ type stressHolder struct {
 	name string
 }
 
-const stressSecrets = 4
+const (
+	stressSecrets = 4
+	stressTargets = 3
+)
 
 func (w *stressWorld) newNamespace() string {
 	ns := env.Namespace(w.t, "stress")
 	for i := range stressSecrets {
 		w.recreateSecret(ns, i)
 	}
+	if w.chained {
+		for i := range stressTargets {
+			w.recreateTarget(ns, i, fmt.Sprintf("s%d", i))
+		}
+	}
 	return ns
+}
+
+func (w *stressWorld) recreateTarget(ns string, i int, secret string) {
+	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"secret": secret}}}
+	u.SetGroupVersionKind(cutest.TargetGVK)
+	u.SetNamespace(ns)
+	u.SetName(fmt.Sprintf("t%d", i))
+	_, err := env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns).Create(context.Background(), u, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) && !apierrors.IsForbidden(err) {
+		w.t.Errorf("recreating a Target in %s: %v", ns, err)
+	}
 }
 
 func (w *stressWorld) recreateSecret(ns string, i int) {
@@ -163,11 +194,24 @@ func (w *stressWorld) step(ctx context.Context, rng *rand.Rand) {
 	}
 	w.ops.Add(1)
 	secret := fmt.Sprintf("s%d", rng.IntN(stressSecrets))
+	field, ref := "secret", secret
+	if w.chained {
+		// The holder names a Target; and a third of the steps act on the
+		// Targets, as someone else would.
+		field, ref = "target", fmt.Sprintf("t%d", rng.IntN(stressTargets))
+		if rng.IntN(3) == 0 {
+			w.targetStep(ctx, ns, rng)
+			return
+		}
+	}
 	switch op := rng.IntN(10); {
 	case op < 3: // create a holder
-		kind := rng.IntN(len(stressKinds))
+		kind := 0
+		if !w.chained {
+			kind = rng.IntN(len(stressKinds))
+		}
 		name := fmt.Sprintf("h%d", w.seq.Add(1))
-		u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"secret": secret}}}
+		u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{field: ref}}}
 		u.SetGroupVersionKind(stressKinds[kind].gvk)
 		u.SetNamespace(ns)
 		u.SetName(name)
@@ -188,7 +232,7 @@ func (w *stressWorld) step(ctx context.Context, rng *rand.Rand) {
 		if err != nil || u.GetDeletionTimestamp() != nil {
 			return
 		}
-		_ = unstructured.SetNestedField(u.Object, secret, "spec", "secret")
+		_ = unstructured.SetNestedField(u.Object, ref, "spec", field)
 		if _, err := r.Update(ctx, u, metav1.UpdateOptions{}); err == nil {
 			w.enqueue(h.kind, ns, h.name)
 		}
@@ -204,6 +248,26 @@ func (w *stressWorld) step(ctx context.Context, rng *rand.Rand) {
 		_ = env.Kube.CoreV1().Secrets(ns).Delete(ctx, secret, metav1.DeleteOptions{})
 	default: // recreate one
 		w.recreateSecret(ns, rng.IntN(stressSecrets))
+	}
+}
+
+// targetStep acts on a Target, as someone other than the tracker: re-points
+// it (which must enqueue its holders, §9.2), deletes it, or recreates it.
+func (w *stressWorld) targetStep(ctx context.Context, ns string, rng *rand.Rand) {
+	i := rng.IntN(stressTargets)
+	r := env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns)
+	switch rng.IntN(3) {
+	case 0:
+		u, err := r.Get(ctx, fmt.Sprintf("t%d", i), metav1.GetOptions{})
+		if err != nil || u.GetDeletionTimestamp() != nil {
+			return
+		}
+		_ = unstructured.SetNestedField(u.Object, fmt.Sprintf("s%d", rng.IntN(stressSecrets)), "spec", "secret")
+		_, _ = r.Update(ctx, u, metav1.UpdateOptions{})
+	case 1:
+		_ = r.Delete(ctx, fmt.Sprintf("t%d", i), metav1.DeleteOptions{})
+	default:
+		w.recreateTarget(ns, i, fmt.Sprintf("s%d", rng.IntN(stressSecrets)))
 	}
 }
 
@@ -223,6 +287,12 @@ func (w *stressWorld) someHolder(ns string, rng *rand.Rand) (stressHolder, bool)
 func (w *stressWorld) teardown(ctx context.Context, ns string) error {
 	if err := env.Kube.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{}); err != nil {
 		return err
+	}
+	if w.chained {
+		// The intermediate objects first, as in TestChainTeardown.
+		for i := range stressTargets {
+			_ = env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns).Delete(ctx, fmt.Sprintf("t%d", i), metav1.DeleteOptions{})
+		}
 	}
 	for i := range stressSecrets {
 		_ = env.Kube.CoreV1().Secrets(ns).Delete(ctx, fmt.Sprintf("s%d", i), metav1.DeleteOptions{})
@@ -285,12 +355,16 @@ func (w *stressWorld) describe(ctx context.Context, ns string) string {
 	return strings.Join(parts, "; ")
 }
 
-func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions) {
+func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, chained bool) {
 	resetPublished(t, cutest.WidgetGVR)
 	resetPublished(t, cutest.TargetGVR)
-	w := &stressWorld{t: t, holders: map[string][]stressHolder{}}
+	t.Cleanup(func() {
+		resetPublished(t, cutest.WidgetGVR)
+		resetPublished(t, cutest.TargetGVR)
+	})
+	w := &stressWorld{t: t, holders: map[string][]stressHolder{}, chained: chained}
 	for range n {
-		w.procs = append(w.procs, startStressProcess(t, so))
+		w.procs = append(w.procs, startStressProcess(t, so, chained))
 	}
 	for range 3 {
 		w.nss = append(w.nss, w.newNamespace())
@@ -350,6 +424,12 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions) {
 		for _, h := range hs {
 			if err := env.Dynamic.Resource(stressKinds[h.kind].gvr).Namespace(ns).Delete(ctx, h.name, metav1.DeleteOptions{}); err == nil || apierrors.IsNotFound(err) {
 				w.enqueue(h.kind, ns, h.name)
+			}
+		}
+		if chained {
+			// With no users left, each Target is released, so it goes.
+			for i := range stressTargets {
+				_ = env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns).Delete(ctx, fmt.Sprintf("t%d", i), metav1.DeleteOptions{})
 			}
 		}
 	}

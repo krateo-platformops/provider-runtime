@@ -11,6 +11,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
@@ -56,15 +57,15 @@ type Acquired struct {
 	// The caller re-reads the holder before its next write (§6.2 A1, L2 of
 	// the review of revision 16).
 	Reread bool
+
+	// resolved are the objects read for each ref with a Next that was
+	// followed: held, or Guaranteed (§9.2). WithResolved hands them on.
+	resolved map[ID]*unstructured.Unstructured
 }
 
 // ErrHolderConflict is a conflict on the holder's own record write (A1). The
 // caller requeues at once (§8 step 5).
 var ErrHolderConflict = errors.New("credential-use: the holder changed while its record was written")
-
-// errChainsNotYet refuses refs that need chains, which come with the next
-// part of the build (plan, PR 4).
-var errChainsNotYet = errors.New("credential-use: refs with Next or Guaranteed aren't supported yet")
 
 // maxGuardedAttempts bounds A2's GET-and-patch on a custom resource (§6.2).
 const maxGuardedAttempts = 3
@@ -89,6 +90,16 @@ type protocol struct {
 	// heldDeleting, if set, is told of every object an A2 held that its
 	// response shows being deleted, with the holder namespace.
 	heldDeleting func(id ID, namespace string)
+
+	// Chains (§9): maxDepth bounds the levels; contentKinds are the
+	// protected kinds with Content, read from contentCache or, live, through
+	// contents, which also reads Guaranteed refs without a lister in
+	// listers. A protocol with no chains needs none of them.
+	maxDepth     int
+	contentKinds map[schema.GroupKind]bool
+	contentCache contentCache
+	contents     contentReader
+	listers      map[schema.GroupKind]Lister
 }
 
 // firstSight remembers when this process first saw each protected object's
@@ -148,12 +159,21 @@ func (f *firstSight) see(uid types.UID, now time.Time) time.Time {
 func isBuiltin(gk schema.GroupKind) bool { return gk.Group == "" }
 
 // acquire runs A1 and A2 for holder obj, which the caller has just read, and
-// refs, which RefsFunc returned for it (§6.2). It runs on every pass,
-// deletion passes included, before anything reads a protected object.
+// refs, which RefsFunc returned for it (§6.2), and follows their chains
+// (§9.1). It runs on every pass, deletion passes included, before anything
+// reads a protected object.
 //
-// It returns ErrHolderConflict when A1 conflicts. Every other failure is in
-// the Acquired: MustNotConnect for a holder that isn't established, Degraded
-// for one that is.
+// The chain is followed level by level, and each hop is held before it is
+// read: A1 for the level, A2 for each of its refs, then a read of each held
+// ref with a Next, whose refs are the next level. An A1 between levels only
+// adds to the record, so a ref of a deeper level that the record names isn't
+// dropped from it, and so released, before the pass reaches it again; the
+// last A1 writes exactly what the whole chain names. A Guaranteed ref is
+// neither recorded nor held, and its Next is followed (§9.3).
+//
+// It returns ErrHolderConflict when an A1 conflicts. Every other failure is
+// in the Acquired: MustNotConnect for a holder that isn't established,
+// Degraded for one that is.
 func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (Acquired, error) {
 	var a Acquired
 	established := IsEstablished(obj, p.ownerFinalizers)
@@ -169,67 +189,187 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		}
 		return a, nil
 	}
-
-	// Which refs are held: those in the holder's own namespace. A ref in
-	// another namespace needs its target's consent, which comes with a later
-	// part of the build (plan, PR 5); until then it is never held, as for a
-	// target that hasn't consented (§11.3).
-	byID := map[ID]Ref{}
-	for _, r := range refs {
-		if r.Next != nil || r.Guaranteed {
-			return fail(errChainsNotYet, "Refs")
-		}
-		if r.GroupKind.Kind == "" || r.Name == "" {
-			return fail(fmt.Errorf("credential-use: ref %s has no kind or no name", r.ID()), "Refs")
-		}
-		if r.Namespace != namespace {
-			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonNotConsented})
-			continue
-		}
-		byID[r.ID()] = r
-	}
-	want := SortedIDs(slices.Collect(maps.Keys(byID)))
-
-	// A1. Announce.
-	added, err := p.announce(ctx, obj, want, &a)
-	if err != nil {
-		if errors.Is(err, ErrHolderConflict) {
-			return a, err
-		}
-		return fail(err, "Announce")
+	maxDepth := p.maxDepth
+	if maxDepth == 0 {
+		maxDepth = DefaultMaxDepth
 	}
 
-	// A2. Write P, for each ref. A skip rests on the exact holder version this
-	// pass works from (§6.3; H1 of #59's review): after an A1, that is A1's
-	// response, which the informer may not have delivered yet.
-	for _, id := range want {
-		r := byID[id]
-		if !deleting && !added[id] {
-			if cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {
-				a.Held = append(a.Held, r)
+	byID := map[ID]Ref{} // every held ref of the chain so far
+	seen := map[ID]bool{}
+	final := false // the last A1 wrote exactly the chain
+	// unfollowed: a hop with a Next wasn't held this pass (Missing or
+	// Deleting), so what lies behind it is unknown. The record then keeps
+	// every ref it names: a ref behind that hop must stay held, as the
+	// record was (§9.1, §8), while the holder may still read through it.
+	// The record stores IDs, not which hop led to which, so a ref the
+	// holder stopped naming for another reason is kept too, until a pass
+	// follows the whole chain again: a longer hold, which §5 bounds.
+	unfollowed := false
+	exact := func() []ID {
+		want := SortedIDs(slices.Collect(maps.Keys(byID)))
+		if unfollowed {
+			if rec := ReadRecord(obj); !rec.Unparseable {
+				want = SortedIDs(append(want, rec.IDs...))
+			}
+		}
+		return want
+	}
+	level := refs
+	for depth := 1; len(level) > 0; depth++ {
+		if depth > maxDepth {
+			return fail(fmt.Errorf("%w (%d)", errChainTooDeep, maxDepth), "Refs")
+		}
+		// Which refs of this level are held: those in the holder's own
+		// namespace. A ref in another namespace needs its target's consent,
+		// which comes with a later part of the build (plan, PR 5); until then
+		// it is never held, as for a target that hasn't consented (§11.3).
+		var toHold []ID
+		var guaranteed []Ref
+		chained := false
+		for _, r := range level {
+			if r.GroupKind.Kind == "" || r.Name == "" {
+				return fail(fmt.Errorf("credential-use: ref %s has no kind or no name", r.ID()), "Refs")
+			}
+			id := r.ID()
+			if seen[id] {
 				continue
 			}
+			seen[id] = true
+			if r.Next != nil {
+				chained = true
+			}
+			switch {
+			case r.Guaranteed:
+				guaranteed = append(guaranteed, r)
+			case r.Namespace != namespace:
+				if r.Next != nil {
+					return fail(errUnheldChainNotYet, "Refs")
+				}
+				a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonNotConsented})
+			default:
+				if r.Next != nil && !p.contentKinds[r.GroupKind] {
+					// Its re-point would be invisible: the metadata caches keep
+					// only credential-use. keys, and a metadata change moves no
+					// generation, so nothing would enqueue its holders (§9.2,
+					// §10.4; the user's decision, 2026-11-21).
+					return fail(fmt.Errorf("%w: %s (set Content on its ProtectedKind)", errNextNeedsContent, id), "Refs")
+				}
+				byID[id] = r
+				toHold = append(toHold, id)
+			}
 		}
-		switch class, err := p.write(ctx, id, namespace); class {
-		case ClassNone:
-			a.Held = append(a.Held, r)
-		case ClassNotFound:
-			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})
-		case ClassDeleting:
-			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonDeleting})
-			if !established {
-				return fail(fmt.Errorf("credential %s %s/%s is being deleted and can't be held; not connecting until it is replaced or the reference changes", id.Kind, id.Namespace, id.Name), "Deleting")
+
+		// A1. Announce: exactly the chain when no hop of this level leads on,
+		// and otherwise the chain so far added to the record as it stands. An
+		// unparseable record names nothing to keep, so a chain behind it is
+		// exposed until the last A1, as for any ref of such a holder; only
+		// someone else's write makes a record unparseable.
+		want := exact()
+		final = !chained
+		if chained {
+			if rec := ReadRecord(obj); !rec.Unparseable {
+				want = SortedIDs(append(want, rec.IDs...))
 			}
-			a.Degraded, a.Err = true, err
-			p.reports.Degraded(p.holder, "Deleting")
-		default:
-			if class == ClassAdmissionDenied {
-				p.reports.AdmissionDenied(p.holder)
+		}
+		added, err := p.announce(ctx, obj, want, &a)
+		if err != nil {
+			if errors.Is(err, ErrHolderConflict) {
+				return a, err
 			}
-			return fail(fmt.Errorf("credential-use: holding %s: %w", id, err), class.String())
+			return fail(err, "Announce")
+		}
+
+		// A2. Write P, for each ref of this level. A skip rests on the exact
+		// holder version this pass works from (§6.3; H1 of #59's review):
+		// after an A1, that is A1's response, which the informer may not have
+		// delivered yet.
+		var next []Ref
+		slices.SortFunc(toHold, compareIDs)
+		for _, id := range toHold {
+			r := byID[id]
+			held := false
+			if !deleting && !added[id] {
+				if cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {
+					a.Held = append(a.Held, r)
+					held = true
+				}
+			}
+			if !held {
+				switch class, err := p.write(ctx, id, namespace); class {
+				case ClassNone:
+					a.Held = append(a.Held, r)
+					held = true
+				case ClassNotFound:
+					a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})
+					unfollowed = unfollowed || r.Next != nil
+				case ClassDeleting:
+					a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonDeleting})
+					unfollowed = unfollowed || r.Next != nil
+					if !established {
+						return fail(fmt.Errorf("credential %s %s/%s is being deleted and can't be held; not connecting until it is replaced or the reference changes", id.Kind, id.Namespace, id.Name), "Deleting")
+					}
+					a.Degraded, a.Err = true, err
+					p.reports.Degraded(p.holder, "Deleting")
+				default:
+					if class == ClassAdmissionDenied {
+						p.reports.AdmissionDenied(p.holder)
+					}
+					return fail(fmt.Errorf("credential-use: holding %s: %w", id, err), class.String())
+				}
+			}
+			// Read it only once it is held, and follow its Next (§9.1).
+			if held && r.Next != nil {
+				o, err := p.readHop(ctx, id)
+				if err != nil {
+					return fail(fmt.Errorf("credential-use: reading %s: %w", id, err), "Refs")
+				}
+				more, err := p.resolve(&a, r, o)
+				if err != nil {
+					return fail(err, "Refs")
+				}
+				next = append(next, more...)
+			}
+		}
+		for _, r := range guaranteed {
+			if r.Next == nil {
+				continue
+			}
+			o, err := p.readGuaranteed(ctx, r)
+			if err != nil {
+				// A Guaranteed ref that can't be read breaks its guarantee; it
+				// is never Missing, which BeforeEstablish would then hold.
+				return fail(fmt.Errorf("credential-use: reading the guaranteed ref %s: %w", r.ID(), err), "Refs")
+			}
+			more, err := p.resolve(&a, r, o)
+			if err != nil {
+				return fail(err, "Refs")
+			}
+			next = append(next, more...)
+		}
+		// Refs already met end there, so a cycle ends, and isn't counted
+		// against MaxDepth.
+		level = slices.DeleteFunc(next, func(r Ref) bool { return seen[r.ID()] })
+	}
+	if !final {
+		// The last level's hops led nowhere new: write exactly the chain.
+		if _, err := p.announce(ctx, obj, exact(), &a); err != nil {
+			if errors.Is(err, ErrHolderConflict) {
+				return a, err
+			}
+			return fail(err, "Announce")
 		}
 	}
 	return a, nil
+}
+
+// resolve keeps o as what was read for r (Resolved) and returns the refs r's
+// Next finds in it.
+func (p *protocol) resolve(a *Acquired, r Ref, o *unstructured.Unstructured) ([]Ref, error) {
+	if a.resolved == nil {
+		a.resolved = map[ID]*unstructured.Unstructured{}
+	}
+	a.resolved[r.ID()] = o
+	return follow(r, o)
 }
 
 // announce is A1: when the holder's record differs from want, it writes want
@@ -373,6 +513,12 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 		}
 		if class, err := p.write(ctx, id, obj.GetNamespace()); class != ClassNone {
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)
+		}
+		if u.Ref.Next != nil {
+			// It is held now, but what it leads to isn't: establishing now
+			// would leave the end of the chain unprotected. The next pass
+			// follows it (§9.1).
+			return fmt.Errorf("credential-use: %s appeared before establishing, and its chain isn't held yet", id)
 		}
 	}
 	return nil

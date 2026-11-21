@@ -344,13 +344,6 @@ func TestAcquireOutcomes(t *testing.T) {
 			t.Error("a Secret in another namespace was pinned")
 		}
 	})
-	t.Run("chains aren't supported yet", func(t *testing.T) {
-		r := newRig(t)
-		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{{GroupKind: targetGK, Namespace: "ns", Name: "t", Guaranteed: true}})
-		if err != nil || !a.MustNotConnect || !errors.Is(a.Err, errChainsNotYet) {
-			t.Fatalf("acquire = %+v, %v", a, err)
-		}
-	})
 	t.Run("an unparseable record is rewritten, and every ref writes", func(t *testing.T) {
 		r := newRig(t)
 		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))

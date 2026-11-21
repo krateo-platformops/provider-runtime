@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/watchlist"
@@ -33,7 +34,7 @@ import (
 //     from the streamed objects only once it has read that bookmark
 //     (client-go tools/cache/reflector.go, watchList).
 type listWatch struct {
-	client   metadata.ResourceInterface
+	client   lwClient
 	selector string // a label selector, or empty
 	clock    clock.PassiveClock
 	// listed, if set, receives each list's completion time.
@@ -45,6 +46,42 @@ type listWatch struct {
 
 var _ cache.ListerWatcherWithContext = (*listWatch)(nil)
 
+// lwClient is what a listWatch lists and watches through: the metadata
+// client, or, for a content kind (§10.4), the dynamic one. list also returns
+// the list's continue token, so the last page is recognised either way.
+type lwClient interface {
+	list(ctx context.Context, opts metav1.ListOptions) (runtime.Object, string, error)
+	watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
+}
+
+type metadataLW struct{ c metadata.ResourceInterface }
+
+func (m metadataLW) list(ctx context.Context, opts metav1.ListOptions) (runtime.Object, string, error) {
+	out, err := m.c.List(ctx, opts)
+	if err != nil {
+		return nil, "", err
+	}
+	return out, out.Continue, nil
+}
+
+func (m metadataLW) watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	return m.c.Watch(ctx, opts)
+}
+
+type dynamicLW struct{ c dynamic.ResourceInterface }
+
+func (d dynamicLW) list(ctx context.Context, opts metav1.ListOptions) (runtime.Object, string, error) {
+	out, err := d.c.List(ctx, opts)
+	if err != nil {
+		return nil, "", err
+	}
+	return out, out.GetContinue(), nil
+}
+
+func (d dynamicLW) watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	return d.c.Watch(ctx, opts)
+}
+
 // newListWatch lists and watches gvr through md, in namespace, or in every
 // namespace when it is "".
 func newListWatch(md metadata.Interface, gvr schema.GroupVersionResource, namespace, selector string, clk clock.PassiveClock, listed func(time.Time)) *listWatch {
@@ -53,8 +90,22 @@ func newListWatch(md metadata.Interface, gvr schema.GroupVersionResource, namesp
 		client = md.Resource(gvr).Namespace(namespace)
 	}
 	return &listWatch{
-		client: client, selector: selector, clock: clk, listed: listed,
+		client: metadataLW{client}, selector: selector, clock: clk, listed: listed,
 		noWatchList: watchlist.DoesClientNotSupportWatchListSemantics(md),
+	}
+}
+
+// newContentListWatch is newListWatch through the dynamic client, for a
+// content kind's protected informer (§10.4): it lists and watches whole
+// objects.
+func newContentListWatch(dyn dynamic.Interface, gvr schema.GroupVersionResource, namespace, selector string, clk clock.PassiveClock) *listWatch {
+	var client dynamic.ResourceInterface = dyn.Resource(gvr)
+	if namespace != "" {
+		client = dyn.Resource(gvr).Namespace(namespace)
+	}
+	return &listWatch{
+		client: dynamicLW{client}, selector: selector, clock: clk,
+		noWatchList: watchlist.DoesClientNotSupportWatchListSemantics(dyn),
 	}
 }
 
@@ -72,11 +123,11 @@ func (l *listWatch) ListWithContext(ctx context.Context, options metav1.ListOpti
 	if l.selector != "" {
 		options.LabelSelector = l.selector
 	}
-	out, err := l.client.List(ctx, options)
+	out, cont, err := l.client.list(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	if out.Continue == "" {
+	if cont == "" {
 		l.completed()
 	}
 	return out, nil
@@ -86,7 +137,7 @@ func (l *listWatch) WatchWithContext(ctx context.Context, options metav1.ListOpt
 	if l.selector != "" {
 		options.LabelSelector = l.selector
 	}
-	w, err := l.client.Watch(ctx, options)
+	w, err := l.client.watch(ctx, options)
 	if err != nil {
 		return nil, err
 	}

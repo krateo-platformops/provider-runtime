@@ -19,7 +19,10 @@ type Ref struct {
 	Name      string
 
 	// Next, when set, names the refs found inside this object. The tracker
-	// calls it after the object is held, with the object it read (§9).
+	// calls it after the object is held, with the object it read (§9),
+	// without managedFields and status. A held ref with a Next must be of a
+	// protected kind with Content (§10.4): the content cache is how a
+	// re-point of it is seen.
 	Next func(obj *unstructured.Unstructured) ([]Ref, error)
 
 	// Guaranteed declares that the object's own controller already keeps it

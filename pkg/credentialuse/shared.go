@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -43,9 +44,12 @@ type Clients struct {
 	Events events.EventRecorder
 }
 
-// SharedOptions configure the process-wide state. Later parts of the build
-// add the listers for Guaranteed refs (§9.3) and the index (§10.6).
+// SharedOptions configure the process-wide state. A later part of the build
+// adds the index (§10.6).
 type SharedOptions struct {
+	// Listers read Guaranteed refs from the caller's cache, by kind (§9.3).
+	// A Guaranteed ref of a kind without one is read live.
+	Listers map[schema.GroupKind]Lister
 	// Namespaces restricts the protected-object caches to these namespaces
 	// (§10.5); the default is every namespace. A ref outside them is read
 	// live on every pass, and its deletion is noticed by the next pass of a
@@ -760,7 +764,7 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	var keys []protKey
 	built := map[protKey]*protectedInformer{}
 	for _, pk := range o.Protected {
-		ps, err := s.newProtectedInformers(pk.GVK)
+		ps, err := s.newProtectedInformers(pk)
 		if err != nil {
 			return nil, setupFailed(err)
 		}
@@ -780,6 +784,14 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 		if p == nil {
 			p = built[k]
 			s.protected[k] = p
+		}
+		if p.content != built[k].content {
+			// One informer caches a kind for every tracker, so they must
+			// agree on whether it keeps content (§10.4).
+			s.releaseLocked(ps)
+			s.mu.Unlock()
+			return nil, setupFailed(fmt.Errorf("credential-use: %s: protected kind %s has Content %v, but another holder kind tracks it with Content %v",
+				gk, k.gk, built[k].content, p.content))
 		}
 		p.claims++
 		ps = append(ps, p)
@@ -1021,8 +1033,6 @@ func (s *Shared) validate(o Options) (Options, error) {
 		switch {
 		case pk.Watch != LabelScoped:
 			return o, fmt.Errorf("credential-use: %s: protected kind %s: only LabelScoped is supported so far", gk, pk.GVK)
-		case pk.Content:
-			return o, fmt.Errorf("credential-use: %s: protected kind %s: Content comes with chains (plan, PR 4)", gk, pk.GVK)
 		}
 		if _, err := s.c.Mapper.RESTMapping(pk.GVK.GroupKind(), pk.GVK.Version); err != nil {
 			return o, fmt.Errorf("credential-use: %s: the protected kind %s can't be mapped: %w", gk, pk.GVK, err)
@@ -1067,7 +1077,8 @@ func sameSet[T comparable](a, b []T) bool {
 // newProtectedInformers builds kind gvk's protected informers: one per
 // namespace of SharedOptions.Namespaces for a namespaced kind, when that is
 // set (§10.5), and otherwise one for every namespace.
-func (s *Shared) newProtectedInformers(gvk schema.GroupVersionKind) ([]*protectedInformer, error) {
+func (s *Shared) newProtectedInformers(pk ProtectedKind) ([]*protectedInformer, error) {
+	gvk := pk.GVK
 	m, err := s.c.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		return nil, err
@@ -1078,13 +1089,20 @@ func (s *Shared) newProtectedInformers(gvk schema.GroupVersionKind) ([]*protecte
 	}
 	var out []*protectedInformer
 	for _, ns := range namespaces {
-		p := &protectedInformer{gk: gvk.GroupKind(), ns: ns, gvr: m.Resource, failed: make(chan struct{})}
-		p.lw = newListWatch(s.c.Metadata, m.Resource, ns, heldSelector(), s.clock, nil)
-		p.inf = cache.NewSharedIndexInformerWithOptions(p.lw, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
+		p := &protectedInformer{gk: gvk.GroupKind(), ns: ns, gvr: m.Resource, content: pk.Content, failed: make(chan struct{})}
+		var example runtime.Object = &metav1.PartialObjectMetadata{}
+		tf := transform(isCredentialUseKey, isCredentialUseKey)
+		if pk.Content {
+			p.lw = newContentListWatch(s.c.Dynamic, m.Resource, ns, heldSelector(), s.clock)
+			example, tf = &unstructured.Unstructured{}, contentTransform
+		} else {
+			p.lw = newListWatch(s.c.Metadata, m.Resource, ns, heldSelector(), s.clock, nil)
+		}
+		p.inf = cache.NewSharedIndexInformerWithOptions(p.lw, example, cache.SharedIndexInformerOptions{
 			Indexers:          cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 			ObjectDescription: "credential-use " + p.what(),
 		})
-		if err := p.inf.SetTransform(transform(isCredentialUseKey, isCredentialUseKey)); err != nil {
+		if err := p.inf.SetTransform(tf); err != nil {
 			return nil, err
 		}
 		_, _ = p.inf.AddEventHandler(janitorHandler{s, p})

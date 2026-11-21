@@ -337,7 +337,6 @@ func TestTrackValidates(t *testing.T) {
 			o.Protected = []ProtectedKind{{GVK: schema.GroupVersionKind{Version: "v1", Kind: "Nope"}}}
 		}, "can't be mapped"},
 		"PerName":      {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}} }, "only LabelScoped"},
-		"Content":      {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Content: true}} }, "Content"},
 		"a kind twice": {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK}, {GVK: secretGVK}} }, "listed twice"},
 	}
 	md := metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme())

@@ -495,6 +495,45 @@ out an object that wasn't held; and the custom-resource guarded merge.
 **Depends on:** PR 3. **Size:** about 800 lines of production code and 1,000
 of tests.
 
+**What the build settled** (2026-11-21), where §9 and §10.4 left room:
+
+- **An A1 between levels only adds to the record.** "A1 again with the
+  union" alone would let a pass over a re-pointed chain first write a record
+  without the Secret it held behind the Target; a concurrent release could
+  then take that Secret's finalizer before the pass reached it again. So
+  each level's A1 writes the chain so far added to the record as it stands,
+  and only the last A1 writes exactly what the whole chain names.
+- **A level of refs already met ends there**, so a cycle ends, and isn't
+  counted against `MaxDepth`.
+- **A held ref with a `Next` must be of a kind with `Content`** (the user's
+  decision, from the review of #122): a re-point of a metadata-only object
+  would go unseen, so it is an Acquire error naming the fix. A `Guaranteed`
+  ref isn't held and may have one on any kind. Every `Next` gets the object
+  without `managedFields` and `status`, however it was read.
+- **A hop with a `Next` that a pass can't hold** (Missing, Deleting) leaves
+  the record's refs in place, since what lies behind it is unknown (the
+  review of #122: without it, a Degraded pass dropped the Secret behind a
+  deleting Target, which a release could then take). The record stores
+  IDs, not which hop led to which, so a ref the holder stopped naming for
+  another reason stays recorded too until a pass follows the whole chain
+  again: a longer hold, never a shorter one, and §5 bounds it.
+- **An unparseable record** names nothing to keep, so a chain behind it is
+  exposed until the pass's last A1, as for any ref of such a holder; only
+  someone else's write makes a record unparseable.
+- **A `Guaranteed` ref that can't be read is an Acquire error**, never
+  Missing: `BeforeEstablish` would then hold it.
+- **`BeforeEstablish` refuses to establish** when a Missing hop with a `Next`
+  appears: it holds the hop, but the end of its chain isn't held yet; the
+  next pass follows it.
+- **A ref in another namespace with a `Next` is an Acquire error until PR 5**,
+  which brings consent and the shared live read of an unheld hop (§9.4).
+- **Every holder kind tracking a protected kind must agree on its
+  `Content`**: one informer caches the kind for all of them.
+- **The self-write filter** sets aside every `credential-use.` label,
+  annotation and finalizer, the `resourceVersion` and the `managedFields`;
+  an emptied finalizer list counts as none, so the tracker's release of the
+  last finalizer isn't taken for someone else's write.
+
 ### PR 5: The cross-namespace consent gate and the `unheld` annotation
 
 **Scope.**
@@ -560,6 +599,13 @@ it reset only on a successful read (M2 of #52's review)?
 
 **Depends on:** PR 4. **Size:** about 900 lines of production code and 1,200
 of tests.
+
+**Carried from PR 4's review** (#122): the self-write filter sets aside
+every `credential-use.` annotation, and `credential-use.krateo.io/allow-holders-from`
+is one that a human writes. So a consent change on a content kind's object
+would be taken for the tracker's own write and enqueue no holder. PR 5 must
+either keep that key in the filter's comparison or enqueue on a consent
+change by its own path.
 
 ### PR 6: Disown and `DisownPrefix`
 

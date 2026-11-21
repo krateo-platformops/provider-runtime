@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
@@ -45,8 +47,87 @@ func metadataOf(obj any) (*metav1.PartialObjectMetadata, bool) {
 	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = t.Obj
 	}
-	m, ok := obj.(*metav1.PartialObjectMetadata)
-	return m, ok
+	switch o := obj.(type) {
+	case *metav1.PartialObjectMetadata:
+		return o, true
+	case *unstructured.Unstructured:
+		// A content kind's object (§10.4): its metadata, trimmed as the
+		// metadata informers' transform leaves theirs.
+		return metadataOfContent(o), true
+	}
+	return nil, false
+}
+
+// metadataOfContent is u's metadata as a metadata informer would cache it.
+func metadataOfContent(u *unstructured.Unstructured) *metav1.PartialObjectMetadata {
+	m := &metav1.PartialObjectMetadata{TypeMeta: metav1.TypeMeta{APIVersion: u.GetAPIVersion(), Kind: u.GetKind()}}
+	m.Name, m.Namespace, m.UID = u.GetName(), u.GetNamespace(), u.GetUID()
+	m.ResourceVersion, m.Generation = u.GetResourceVersion(), u.GetGeneration()
+	m.DeletionTimestamp = u.GetDeletionTimestamp()
+	m.Finalizers = u.GetFinalizers()
+	m.Labels = keepOnly(u.GetLabels(), isCredentialUseKey)
+	m.Annotations = keepOnly(u.GetAnnotations(), isCredentialUseKey)
+	return m
+}
+
+// foreignChange reports whether a content kind's object changed through
+// someone else's write (§9.2, L2): the two versions differ once every
+// credential-use. label, annotation and finalizer, the resourceVersion and
+// the managedFields are set aside, so the tracker's own A2s and releases
+// don't count. Either not being a content object counts as no change.
+func foreignChange(oldObj, newObj any) bool {
+	o, ok1 := contentOf(oldObj)
+	n, ok2 := contentOf(newObj)
+	if !ok1 || !ok2 {
+		return false
+	}
+	return !equality.Semantic.DeepEqual(othersView(o), othersView(n))
+}
+
+func contentOf(obj any) (*unstructured.Unstructured, bool) {
+	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = t.Obj
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	return u, ok
+}
+
+// othersView is u without what the tracker writes and the server stamps.
+func othersView(u *unstructured.Unstructured) map[string]any {
+	c := u.DeepCopy()
+	c.SetLabels(dropKeys(c.GetLabels(), isCredentialUseKey))
+	c.SetAnnotations(dropKeys(c.GetAnnotations(), isCredentialUseKey))
+	fs := slices.DeleteFunc(c.GetFinalizers(), isCredentialUseKey)
+	if len(fs) == 0 {
+		fs = nil // absent and empty are one
+	}
+	c.SetFinalizers(fs)
+	c.SetResourceVersion("")
+	c.SetManagedFields(nil)
+	return c.Object
+}
+
+// dropKeys returns a copy of m without the keys drop accepts, or nil when
+// nothing is left, so that an empty map and an absent one compare equal.
+func dropKeys(m map[string]string, drop func(string) bool) map[string]string {
+	return keepOnly(m, func(k string) bool { return !drop(k) })
+}
+
+// contentTransform is a content kind's transform (§10.4): the whole object,
+// without managedFields and status.
+func contentTransform(obj any) (any, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return obj, nil
+	}
+	out := &unstructured.Unstructured{Object: maps.Clone(u.Object)}
+	delete(out.Object, "status")
+	if md, ok := out.Object["metadata"].(map[string]any); ok {
+		md = maps.Clone(md)
+		delete(md, "managedFields")
+		out.Object["metadata"] = md
+	}
+	return out, nil
 }
 
 // keepOnly returns a copy of m restricted to the keys keep accepts.
@@ -188,8 +269,11 @@ type protectedInformer struct {
 	gk  schema.GroupKind
 	ns  string // the namespace it is restricted to (§10.5), or ""
 	gvr schema.GroupVersionResource
-	lw  *listWatch
-	inf cache.SharedIndexInformer
+	// content: it caches whole objects, without managedFields and status,
+	// through the dynamic client (§10.4); otherwise metadata only.
+	content bool
+	lw      *listWatch
+	inf     cache.SharedIndexInformer
 	// Under Shared.mu: claims counts the Tracks and trackers that use the
 	// informer; runOwned, that RunInformers starts it; starting, that a
 	// Track after Run is starting it, or has; stop ends it then.
@@ -234,8 +318,25 @@ func (p *protectedInformer) get(namespace, name string) (*metav1.PartialObjectMe
 	if err != nil || !ok {
 		return nil, false
 	}
-	m, ok := obj.(*metav1.PartialObjectMetadata)
-	return m, ok
+	return metadataOf(obj)
+}
+
+// getContent returns the cached object namespace/name whole, for a content
+// kind (§10.4); a metadata-only informer has none.
+func (p *protectedInformer) getContent(namespace, name string) (*unstructured.Unstructured, bool) {
+	if !p.content {
+		return nil, false
+	}
+	key := name
+	if namespace != "" {
+		key = namespace + "/" + name
+	}
+	obj, ok, err := p.inf.GetStore().GetByKey(key)
+	if err != nil || !ok {
+		return nil, false
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	return u, ok
 }
 
 // inNamespace returns the cached objects in namespace.
@@ -246,7 +347,7 @@ func (p *protectedInformer) inNamespace(namespace string) []*metav1.PartialObjec
 	}
 	out := make([]*metav1.PartialObjectMetadata, 0, len(objs))
 	for _, o := range objs {
-		if m, ok := o.(*metav1.PartialObjectMetadata); ok {
+		if m, ok := metadataOf(o); ok {
 			out = append(out, m)
 		}
 	}
@@ -363,10 +464,13 @@ func (h *protectedHandler) OnUpdate(oldObj, newObj any) {
 		}
 		lost = lost || (inB && (!inA || replaced))
 	}
-	if lost {
+	if lost || h.p.content && (o.Generation != n.Generation || foreignChange(oldObj, newObj)) {
 		// The holds that were there are gone, as when the object leaves the
 		// cache: its holders' next passes write A2 again (§6.5, G4 of the
-		// review of #109).
+		// review of #109). And a content kind's object, which leads on to
+		// other refs, changed through someone else's write or its spec: what
+		// it names may have changed, so its holders' next passes follow it
+		// again (§9.2, MED-5).
 		t.enqueueHolders(id)
 	}
 	if replaced {
@@ -475,6 +579,15 @@ func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 type trackerViews struct{ t *Tracker }
 
 var _ views = trackerViews{}
+
+// Content returns content kind id's cached object (§10.4).
+func (v trackerViews) Content(id ID) (*unstructured.Unstructured, bool) {
+	p := v.t.s.protectedFor(id)
+	if p == nil || !p.inf.HasSynced() {
+		return nil, false
+	}
+	return p.getContent(id.Namespace, id.Name)
+}
 
 func (v trackerViews) Protected(id ID) (*metav1.PartialObjectMetadata, bool) {
 	p := v.t.s.protectedFor(id)
