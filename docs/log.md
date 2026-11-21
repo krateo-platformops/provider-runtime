@@ -12,7 +12,13 @@ timestamp: 2026-11-21T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
-## 2026-11-21 — unreleased: the management policy is plumbing's, shared with unstructured-runtime
+## 2026-11-21 — v1.21.0: the management policy is plumbing's, shared with unstructured-runtime
+- **A minor release, cut from v1.20.1 on `release/v1.21`** (the user's
+  decision, 2026-11-21). main carries the unreleased credential-use stack, and
+  the plan cuts no tag from main until its last PR, so this ships from a
+  release branch: #108 (the truth table), #115, #116, and #105 (OpenTelemetry
+  1.47.0, which the plumbing bump requires), each cherry-picked from main
+  (#117).
 - **`krateo.io/management-policy` is a set of verbs** (unstructured-runtime#110,
   D9). `meta.ManagementDecision` reads both policy annotations through
   plumbing's `managementpolicy`, the package unstructured-runtime reads, and
@@ -52,9 +58,6 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   event is `ExternalResourceAbsentUnderPolicy`, as in unstructured-runtime.
   On the shared inputs, Synced moves on the same 33 rows as in
   unstructured-runtime#117.
-- **The release route** (the user's decision, 2026-11-21): this work ships
-  as v1.21.0 from `release/v1.21`, cut from v1.20.1, so it doesn't wait for
-  the credential-use stack on main.
 
 ## 2026-11-18 — v1.20.1: the external-create markers are written in UTC
 - **A patch release, cut from v1.20.0 on `release/v1.20`.** main carries the
