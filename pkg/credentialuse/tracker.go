@@ -180,6 +180,16 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		reports:         coreReports{metrics: sinkMetrics{t}, events: s.events},
 		newEpoch:        NewEpoch,
 		heldDeleting:    t.heldDeleting,
+		maxDepth:        o.MaxDepth,
+		contentKinds:    map[schema.GroupKind]bool{},
+		contentCache:    trackerViews{t},
+		contents:        dynamicContent{dyn: s.c.Dynamic, mapper: s.c.Mapper},
+		listers:         s.o.Listers,
+	}
+	for _, pk := range o.Protected {
+		if pk.Content {
+			t.proto.contentKinds[pk.GVK.GroupKind()] = true
+		}
 	}
 	// The holder informer's list or relist completion is a floor under
 	// every observation of the record (§6.5 L2).
