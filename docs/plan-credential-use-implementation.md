@@ -495,6 +495,33 @@ out an object that wasn't held; and the custom-resource guarded merge.
 **Depends on:** PR 3. **Size:** about 800 lines of production code and 1,000
 of tests.
 
+**What the build settled** (2026-11-21), where §9 and §10.4 left room:
+
+- **An A1 between levels only adds to the record.** "A1 again with the
+  union" alone would let a pass over a re-pointed chain first write a record
+  without the Secret it held behind the Target; a concurrent release could
+  then take that Secret's finalizer before the pass reached it again. So
+  each level's A1 writes the chain so far added to the record as it stands,
+  and only the last A1 writes exactly what the whole chain names.
+- **A level of refs already met ends there**, so a cycle ends, and isn't
+  counted against `MaxDepth`.
+- **A `Next` on a kind without `Content` gets a live metadata read**: full
+  labels and annotations, no data. The protected caches keep only
+  `credential-use.` keys, which a `Next` couldn't use.
+- **A `Guaranteed` ref that can't be read is an Acquire error**, never
+  Missing: `BeforeEstablish` would then hold it.
+- **`BeforeEstablish` refuses to establish** when a Missing hop with a `Next`
+  appears: it holds the hop, but the end of its chain isn't held yet; the
+  next pass follows it.
+- **A ref in another namespace with a `Next` is an Acquire error until PR 5**,
+  which brings consent and the shared live read of an unheld hop (§9.4).
+- **Every holder kind tracking a protected kind must agree on its
+  `Content`**: one informer caches the kind for all of them.
+- **The self-write filter** sets aside every `credential-use.` label,
+  annotation and finalizer, the `resourceVersion` and the `managedFields`;
+  an emptied finalizer list counts as none, so the tracker's release of the
+  last finalizer isn't taken for someone else's write.
+
 ### PR 5: The cross-namespace consent gate and the `unheld` annotation
 
 **Scope.**

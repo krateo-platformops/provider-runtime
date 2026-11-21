@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -67,6 +68,49 @@ func metadataOfContent(u *unstructured.Unstructured) *metav1.PartialObjectMetada
 	m.Labels = keepOnly(u.GetLabels(), isCredentialUseKey)
 	m.Annotations = keepOnly(u.GetAnnotations(), isCredentialUseKey)
 	return m
+}
+
+// foreignChange reports whether a content kind's object changed through
+// someone else's write (§9.2, L2): the two versions differ once every
+// credential-use. label, annotation and finalizer, the resourceVersion and
+// the managedFields are set aside, so the tracker's own A2s and releases
+// don't count. Either not being a content object counts as no change.
+func foreignChange(oldObj, newObj any) bool {
+	o, ok1 := contentOf(oldObj)
+	n, ok2 := contentOf(newObj)
+	if !ok1 || !ok2 {
+		return false
+	}
+	return !equality.Semantic.DeepEqual(othersView(o), othersView(n))
+}
+
+func contentOf(obj any) (*unstructured.Unstructured, bool) {
+	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = t.Obj
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	return u, ok
+}
+
+// othersView is u without what the tracker writes and the server stamps.
+func othersView(u *unstructured.Unstructured) map[string]any {
+	c := u.DeepCopy()
+	c.SetLabels(dropKeys(c.GetLabels(), isCredentialUseKey))
+	c.SetAnnotations(dropKeys(c.GetAnnotations(), isCredentialUseKey))
+	fs := slices.DeleteFunc(c.GetFinalizers(), isCredentialUseKey)
+	if len(fs) == 0 {
+		fs = nil // absent and empty are one
+	}
+	c.SetFinalizers(fs)
+	c.SetResourceVersion("")
+	c.SetManagedFields(nil)
+	return c.Object
+}
+
+// dropKeys returns a copy of m without the keys drop accepts, or nil when
+// nothing is left, so that an empty map and an absent one compare equal.
+func dropKeys(m map[string]string, drop func(string) bool) map[string]string {
+	return keepOnly(m, func(k string) bool { return !drop(k) })
 }
 
 // contentTransform is a content kind's transform (§10.4): the whole object,
@@ -420,10 +464,13 @@ func (h *protectedHandler) OnUpdate(oldObj, newObj any) {
 		}
 		lost = lost || (inB && (!inA || replaced))
 	}
-	if lost {
+	if lost || h.p.content && (o.Generation != n.Generation || foreignChange(oldObj, newObj)) {
 		// The holds that were there are gone, as when the object leaves the
 		// cache: its holders' next passes write A2 again (§6.5, G4 of the
-		// review of #109).
+		// review of #109). And a content kind's object, which leads on to
+		// other refs, changed through someone else's write or its spec: what
+		// it names may have changed, so its holders' next passes follow it
+		// again (§9.2, MED-5).
 		t.enqueueHolders(id)
 	}
 	if replaced {

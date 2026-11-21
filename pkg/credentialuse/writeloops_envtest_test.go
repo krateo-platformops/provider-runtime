@@ -88,7 +88,17 @@ func (c *controller) connect(ctx context.Context, holder types.NamespacedName, r
 	if f := c.beforeConnect.Load(); f != nil {
 		(*f)(ctx, holder, ref)
 	}
-	_, err := env.Kube.CoreV1().Secrets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	var err error
+	switch ref.GroupKind {
+	case cutest.TargetGVK.GroupKind():
+		// A chain's intermediate object (§9): read as a provider's Connect
+		// reads a KubernetesTarget.
+		_, err = env.Dynamic.Resource(cutest.TargetGVR).Namespace(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	case schema.GroupKind{Kind: "ConfigMap"}:
+		_, err = env.Kube.CoreV1().ConfigMaps(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	default:
+		_, err = env.Kube.CoreV1().Secrets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	}
 	if err != nil {
 		h, herr := env.Dynamic.Resource(c.d.Holder).Namespace(holder.Namespace).Get(ctx, holder.Name, metav1.GetOptions{})
 		if herr == nil && h.GetDeletionTimestamp() != nil {

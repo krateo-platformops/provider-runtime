@@ -355,3 +355,75 @@ func TestResolvedIsTheHeldReadNotANewerOne(t *testing.T) {
 		t.Error("Resolved without WithResolved found an object")
 	}
 }
+
+// TestContentTransform: a content kind's cache keeps the whole object but
+// managedFields and status (§10.4), and doesn't change the informer's copy.
+func TestContentTransform(t *testing.T) {
+	in := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "credentialuse.test.krateo.io/v1", "kind": "Target",
+		"metadata": map[string]any{"name": "kt", "namespace": "ns", "labels": map[string]any{"app": "x"},
+			"managedFields": []any{map[string]any{"manager": "kubectl"}}},
+		"spec":   map[string]any{"secret": "s"},
+		"status": map[string]any{"ready": true},
+	}}
+	out, err := contentTransform(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := out.(*unstructured.Unstructured)
+	if _, has := u.Object["status"]; has {
+		t.Error("status kept")
+	}
+	if u.GetManagedFields() != nil {
+		t.Error("managedFields kept")
+	}
+	if s, _, _ := unstructured.NestedString(u.Object, "spec", "secret"); s != "s" || u.GetLabels()["app"] != "x" {
+		t.Errorf("content lost: %v", u.Object)
+	}
+	if _, has := in.Object["status"]; !has || in.GetManagedFields() == nil {
+		t.Error("the transform changed its input")
+	}
+}
+
+// TestContentMustAgreeAcrossKinds: one informer caches a protected kind for
+// every holder kind, so two holder kinds that disagree on its Content can't
+// both track it (§10.4).
+func TestContentMustAgreeAcrossKinds(t *testing.T) {
+	r := newFakeRig(t)
+	r.track(t, widgetGK, ProtectedKind{GVK: secretGVK, Content: true})
+	_, err := r.s.Track(context.Background(), r.options(gadgetGK, ProtectedKind{GVK: secretGVK}))
+	if err == nil || !strings.Contains(err.Error(), "Content") {
+		t.Fatalf("Track with the other Content = %v, want it refused", err)
+	}
+	// Control: agreeing is fine.
+	r2 := newFakeRig(t)
+	r2.track(t, widgetGK, ProtectedKind{GVK: secretGVK, Content: true})
+	if _, err := r2.s.Track(context.Background(), r2.options(gadgetGK, ProtectedKind{GVK: secretGVK, Content: true})); err != nil {
+		t.Fatalf("Track with the same Content = %v", err)
+	}
+}
+
+// TestChainEndingInACycleStillWritesTheExactRecord: when the last level's
+// hops lead nowhere new (here, a cycle), the A1s between levels left the old
+// refs in the record, so a last A1 must write exactly the chain; otherwise
+// the Secret the chain no longer names stays recorded and is never released.
+func TestChainEndingInACycleStillWritesTheExactRecord(t *testing.T) {
+	r, fc := chainRig(t)
+	r.target(fc, "t1", "Secret", "s")
+	must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+	h := r.holder(t, "h", false)
+	if _, err := r.p.acquire(context.Background(), h, []Ref{targetRef("t1")}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-point t1 to t2, which points back to t1: no Secret any more.
+	fc.specs[targetID("t1")]["ref"] = map[string]any{"kind": "Target", "name": "t2"}
+	r.target(fc, "t2", "Target", "t1")
+	a, err := r.p.acquire(context.Background(), r.get(t, widgetKey("ns", "h")), []Ref{targetRef("t1")})
+	if err != nil || a.MustNotConnect || len(a.Held) != 2 {
+		t.Fatalf("acquire = %+v, %v", a, err)
+	}
+	want := SortedIDs([]ID{targetID("t1"), targetID("t2")})
+	if got := chainRecord(t, r, "h"); !slices.Equal(got, want) {
+		t.Errorf("record = %v, want %v: the Secret the chain no longer names is still recorded", got, want)
+	}
+}

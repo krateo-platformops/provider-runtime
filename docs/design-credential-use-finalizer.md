@@ -1597,6 +1597,13 @@ That hop is read live, without a hold, and its `Next` is still followed
 3. Call `Next`.
 4. A1 again with the union, then A2 for the Secret.
 
+An A1 between levels only adds to the record: it writes the chain so far
+added to the record as it stands, and only the last A1 of the pass writes
+exactly what the whole chain names. Otherwise a pass over a re-pointed chain
+would first write a record without the Secret it held behind the
+intermediate object, and a concurrent release could take that Secret's
+finalizer before the pass reached it again (found building PR 4).
+
 The record names both, and both carry the finalizer. Every function the
 provider supplies is pure, and the hold-before-read ordering belongs to the
 runtime. `MaxDepth` bounds the chain. A `Next` error, or a chain deeper than
