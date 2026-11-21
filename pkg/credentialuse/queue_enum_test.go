@@ -204,8 +204,21 @@ func (s *enumState) check() {
 	if s.q.Len() > waiting {
 		s.fail("Len is %d with %d keys waiting: a key is queued twice", s.q.Len(), waiting)
 	}
-	// A timer not yet due must not have added: its object is owed only if
-	// another add owes it too, which the coverage check settles at the end.
+	// Nothing is pending that the model hasn't added: a timer not yet due
+	// has added nothing (the review of #114).
+	s.q.mu.Lock()
+	var early []string
+	for k, ids := range s.q.pending {
+		for id := range ids {
+			if !s.owed[k][id] {
+				early = append(early, fmt.Sprintf("%s in %v", id, k))
+			}
+		}
+	}
+	s.q.mu.Unlock()
+	if len(early) > 0 {
+		s.fail("pending before anything added them, as a timer firing early would: %v", early)
+	}
 }
 
 // drain finishes the run: every worker finishes, every timer fires, and

@@ -381,6 +381,10 @@ func stress(t *testing.T, n int, d time.Duration) {
 		}
 	}
 	t.Logf("%d processes, %s: %d operations, %d namespace teardowns, %d passes", n, d, w.ops.Load(), teardowns.Load(), passes)
+	// A stress that did next to nothing proves nothing (the review of #114).
+	if w.ops.Load() < 100 || passes < 100 {
+		t.Errorf("the stress did too little: %d operations and %d passes, want at least 100 each", w.ops.Load(), passes)
+	}
 	if len(violations) != 0 {
 		t.Errorf("%d reads failed for holders being deleted: %v", len(violations), violations)
 	}
