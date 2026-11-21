@@ -229,9 +229,10 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// holder stopped naming for another reason is kept too, until a pass
 	// follows the whole chain again: a longer hold, which §5 bounds.
 	unfollowed := false
-	rec0 := ReadRecord(obj)     // the record as the pass found it
-	listed := map[string]bool{} // the unheld entries as the pass found them
-	for _, e := range ReadUnheld(obj.GetAnnotations()) {
+	rec0 := ReadRecord(obj)                   // the record as the pass found it
+	found := ReadUnheld(obj.GetAnnotations()) // the unheld list as the pass found it
+	listed := map[string]bool{}
+	for _, e := range found {
 		listed[e.Ref] = true
 	}
 	// The cross-namespace refs, by what the gate found (§11.3): liveOK, held
@@ -385,7 +386,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		want := exact()
 		var unheldNow *[]UnheldEntry
 		if last := !chained && len(next) == 0; last {
-			u := p.unheldEntries(obj, notHeld, keepEntry, &passNow)
+			u := p.unheldEntries(found, notHeld, keepEntry, &passNow)
 			unheldNow = &u
 		} else if rec := ReadRecord(obj); !rec.Unparseable {
 			want = SortedIDs(append(want, rec.IDs...))
@@ -510,7 +511,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 
 	// The last A1: exactly the chain, and the unheld list with it, in one
 	// patch (§11.3). It writes nothing when neither changed.
-	unheld := p.unheldEntries(obj, notHeld, keepEntry, &passNow)
+	unheld := p.unheldEntries(found, notHeld, keepEntry, &passNow)
 	if _, err := p.announce(ctx, obj, exact(), &unheld, &a); err != nil {
 		if errors.Is(err, ErrHolderConflict) {
 			return a, err

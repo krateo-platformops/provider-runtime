@@ -703,3 +703,32 @@ func (c tickingClock) Now() time.Time {
 	return c.r.now
 }
 func (c tickingClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }
+
+// TestANewEntryBesideListedOnesIsOneWrite: a pass that adds an unheld entry
+// next to listed ones writes the holder once (the re-check of #123): both of
+// its A1s compute from the list as the pass found it.
+func TestANewEntryBesideListedOnesIsOneWrite(t *testing.T) {
+	ctx := context.Background()
+	r, _ := consentRig(t, "")
+	r.p.clock = tickingClock{r}
+	var refs []Ref
+	for i := range 4 {
+		name := fmt.Sprintf("s%d", i)
+		must(r.m.Create(secretKey("other", name), metav1.ObjectMeta{}))
+		refs = append(refs, SecretRef("other", name))
+	}
+	r.holder(t, "h", false)
+	if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), refs[:3]); err != nil {
+		t.Fatal(err)
+	}
+	r.srv.calls = nil
+	if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), refs); err != nil {
+		t.Fatal(err)
+	}
+	if n := countCalls(r.srv.calls, "patch Widget/h"); n != 1 {
+		t.Errorf("%d holder writes for one new entry, want 1: %v", n, r.srv.calls)
+	}
+	if got := unheldOf(t, r, "h"); len(got) != 4 || got[0].Ref != "other/Secret/s3" {
+		t.Errorf("unheld = %+v; want 4, the newest first", got)
+	}
+}

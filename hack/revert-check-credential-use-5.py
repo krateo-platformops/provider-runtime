@@ -135,12 +135,6 @@ EQUIVALENT = {
     # (§11.3 rule 1): with the cache read at the gate, the live read still
     # comes before any write, at A2 time. The explicit rule stays, for clarity.
     'a deleting holder reads consent from the cache': 'a deleting pass reads consent live at A2 time anyway',
-    # Reading the clock for each new entry, not once per pass: a pass's second
-    # A1 sees the entries its first wrote, so the two never disagree, and a
-    # pass with no new entry still reads no clock (the model's rule). Only
-    # the since of several entries made in one pass may differ by a tick,
-    # each still the time its ref entered the state (§11.3).
-    "a pass's two A1s read the clock twice": 'each new entry still gets the time its state began',
 }
 
 # The tests that must kill each mutant: each runs the tests aimed at its
@@ -177,7 +171,7 @@ KILLERS = {
     'a trimmed ref displaces a listed one': 'TestUnheldPastTheCapIsStable',
     'a trimmed ref is reported again': 'TestUnheldPastTheCapIsStable',
     "a no-consent read doesn't reset the backoff": 'TestTheBackoffResetsOnAnySuccessfulRead',
-    "a pass's two A1s read the clock twice": 'TestUnheldPastTheCapIsStable|TestOneWriteForANewHoldAndANewUnheldEntry|TestStateKeysAreStable',
+    "a pass's two A1s read the clock twice": 'TestUnheldPastTheCapIsStable|TestOneWriteForANewHoldAndANewUnheldEntry|TestANewEntryBesideListedOnesIsOneWrite|TestStateKeysAreStable',
 }
 
 ALL = sorted({t for ts in KILLERS.values() for t in ts.split("|")})

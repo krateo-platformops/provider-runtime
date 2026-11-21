@@ -173,9 +173,12 @@ func (p *protocol) liveConsent(ctx context.Context, obj metav1.Object, id ID) ga
 // now is the pass's time for a new entry, read once, on the first new entry:
 // in the model a clock read is a scheduled input, and a pass with no new
 // entry must not add one; and both of a pass's A1s must compute one list.
-func (p *protocol) unheldEntries(obj metav1.Object, notHeld map[ID]string, keep map[ID]bool, now *time.Time) []UnheldEntry {
+//
+// found is the unheld list as the pass found it, before its first A1: both of
+// a pass's A1s compute from it, so they compute one list.
+func (p *protocol) unheldEntries(found []UnheldEntry, notHeld map[ID]string, keep map[ID]bool, now *time.Time) []UnheldEntry {
 	prev := map[string]UnheldEntry{}
-	for _, e := range ReadUnheld(obj.GetAnnotations()) {
+	for _, e := range found {
 		if e.Reason != unheldMore {
 			e.listed = true
 			prev[e.Ref] = e

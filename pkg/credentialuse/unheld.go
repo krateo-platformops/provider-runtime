@@ -78,26 +78,35 @@ func encodeUnheld(entries []UnheldEntry) (*string, error) {
 		}
 		return 0
 	}
-	// Among NotConsented entries, those already listed come first: a ref
-	// trimmed into More isn't in the annotation, so it comes back as new, and
-	// must not displace a listed one, or the list would rotate, and be
-	// rewritten, on every pass. Withdrawals keep their real since, most
-	// recent first.
-	listedFirst := func(a, b UnheldEntry) int {
-		if rank(a) == 0 || a.listed == b.listed {
-			return 0
-		}
-		if a.listed {
-			return -1
-		}
-		return 1
+	// §11.3's order: withdrawals and ReadDenied ahead of NotConsented, the
+	// most recent first within each.
+	order := func(a, b UnheldEntry) int {
+		return cmp.Or(cmp.Compare(rank(a), rank(b)), b.Since.Compare(a.Since), cmp.Compare(a.Ref, b.Ref))
 	}
-	slices.SortStableFunc(es, func(a, b UnheldEntry) int {
-		return cmp.Or(cmp.Compare(rank(a), rank(b)), listedFirst(a, b), b.Since.Compare(a.Since), cmp.Compare(a.Ref, b.Ref))
-	})
 	if len(es) > maxUnheld {
+		// Which entries a trim keeps: among NotConsented ones, those already
+		// listed before those that aren't. A ref trimmed into More isn't in
+		// the annotation, so it comes back each pass as if new, and must not
+		// displace a listed one, or the list would rotate, and be rewritten,
+		// on every pass. Withdrawals keep their real since.
+		listedFirst := func(a, b UnheldEntry) int {
+			if rank(a) == 0 || a.listed == b.listed {
+				return 0
+			}
+			if a.listed {
+				return -1
+			}
+			return 1
+		}
+		slices.SortStableFunc(es, func(a, b UnheldEntry) int {
+			return cmp.Or(cmp.Compare(rank(a), rank(b)), listedFirst(a, b), order(a, b))
+		})
 		more := len(es) - (maxUnheld - 1)
-		es = append(es[:maxUnheld-1], UnheldEntry{Ref: "…", Reason: unheldMore, Count: more})
+		es = es[:maxUnheld-1]
+		slices.SortStableFunc(es, order)
+		es = append(es, UnheldEntry{Ref: "…", Reason: unheldMore, Count: more})
+	} else {
+		slices.SortStableFunc(es, order)
 	}
 	b, err := json.Marshal(es)
 	if err != nil {
