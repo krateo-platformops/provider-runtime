@@ -59,10 +59,18 @@ type reports interface {
 	// ReleaseRejected reports a release patch that failed against an
 	// unchanged object (§6.2, L1 of the review of revision 16).
 	ReleaseRejected(holder schema.GroupKind, p ID, resourceVersion string)
+	// RefNotHeld reports a cross-namespace ref of holder h that isn't held,
+	// for want of consent, once, when it first goes unheld (§11.3).
+	RefNotHeld(holder schema.GroupKind, h metav1.Object, ref ID)
+	// ConsentWithdrawn reports a hold of h released because its target
+	// withdrew consent (§11.3).
+	ConsentWithdrawn(holder schema.GroupKind, h metav1.Object, ref ID)
 }
 
 type nopReports struct{}
 
-func (nopReports) Degraded(schema.GroupKind, string)            {}
-func (nopReports) AdmissionDenied(schema.GroupKind)             {}
-func (nopReports) ReleaseRejected(schema.GroupKind, ID, string) {}
+func (nopReports) Degraded(schema.GroupKind, string)                    {}
+func (nopReports) AdmissionDenied(schema.GroupKind)                     {}
+func (nopReports) ReleaseRejected(schema.GroupKind, ID, string)         {}
+func (nopReports) RefNotHeld(schema.GroupKind, metav1.Object, ID)       {}
+func (nopReports) ConsentWithdrawn(schema.GroupKind, metav1.Object, ID) {}

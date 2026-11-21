@@ -29,6 +29,12 @@ const (
 	// ReasonNotConsented: the object is in another namespace, and its
 	// target hasn't consented (§11.3).
 	ReasonNotConsented Reason = "NotConsented"
+	// ReasonConsentWithdrawn: it was held, and its target withdrew consent:
+	// this pass released it (§11.3).
+	ReasonConsentWithdrawn Reason = "ConsentWithdrawn"
+	// ReasonConsentUnreadable: it isn't held yet, and its consent couldn't
+	// be read; RetryAfter asks for the next try (§11.3).
+	ReasonConsentUnreadable Reason = "ConsentUnreadable"
 )
 
 // Unheld is a ref that isn't held, and why.
@@ -58,8 +64,15 @@ type Acquired struct {
 	// the review of revision 16).
 	Reread bool
 
+	// RetryAfter, when set, asks the caller to requeue the holder after it:
+	// a live consent read failed, so the pass kept the hold, or held
+	// nothing new, without knowing (§11.3, §8 step 5). It backs off per
+	// (holder, ref).
+	RetryAfter time.Duration
+
 	// resolved are the objects read for each ref with a Next that was
-	// followed: held, or Guaranteed (§9.2). WithResolved hands them on.
+	// followed: held, unheld, or Guaranteed (§9.2). WithResolved hands them
+	// on.
 	resolved map[ID]*unstructured.Unstructured
 }
 
@@ -100,6 +113,18 @@ type protocol struct {
 	contentCache contentCache
 	contents     contentReader
 	listers      map[schema.GroupKind]Lister
+
+	// Consent (§11.3): namespaceViews answers the gate's cached read of a
+	// Namespace's consent; backoff paces the requeues of a failed live read;
+	// unheldReads shares the live read of an unheld hop among holders for
+	// 10s (§9.4); enqueueBatch adds the (K, N) release batch the acquirer
+	// owes after each A2 of a cross-namespace ref (§10.2 L2). A protocol
+	// without cross-namespace refs needs none of them.
+	namespaceViews namespaceViews
+	backoff        *consentBackoff
+	reported       *reportedSet
+	unheldReads    *sharedReads
+	enqueueBatch   func(id ID, holderNamespace string)
 }
 
 // firstSight remembers when this process first saw each protected object's
@@ -196,7 +221,6 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 
 	byID := map[ID]Ref{} // every held ref of the chain so far
 	seen := map[ID]bool{}
-	final := false // the last A1 wrote exactly the chain
 	// unfollowed: a hop with a Next wasn't held this pass (Missing or
 	// Deleting), so what lies behind it is unknown. The record then keeps
 	// every ref it names: a ref behind that hop must stay held, as the
@@ -205,6 +229,27 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// holder stopped naming for another reason is kept too, until a pass
 	// follows the whole chain again: a longer hold, which §5 bounds.
 	unfollowed := false
+	rec0 := ReadRecord(obj)                   // the record as the pass found it
+	found := ReadUnheld(obj.GetAnnotations()) // the unheld list as the pass found it
+	listed := map[string]bool{}
+	for _, e := range found {
+		listed[e.Ref] = true
+	}
+	// The cross-namespace refs, by what the gate found (§11.3): liveOK, held
+	// on a live consent read this pass; notHeld, without consent, by
+	// reason; keepEntry, those whose state this pass couldn't learn, which
+	// keep their unheld entry as it was.
+	liveOK := map[ID]bool{}
+	// readOK: a live consent read of the ref succeeded this pass, whatever it
+	// answered; its backoff goes back to 1s (§11.3).
+	readOK := map[ID]bool{}
+	var passNow time.Time // the pass's time for a new unheld entry
+	cross := map[ID]bool{}
+	notHeld := map[ID]string{}
+	keepEntry := map[ID]bool{}
+	// exact is what the pass's A1 writes: the chain, and with a hop
+	// unfollowed the record's refs too, but never one dropped for consent:
+	// the target's owner withdrew it (§11.3).
 	exact := func() []ID {
 		want := SortedIDs(slices.Collect(maps.Keys(byID)))
 		if unfollowed {
@@ -212,7 +257,46 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				want = SortedIDs(append(want, rec.IDs...))
 			}
 		}
-		return want
+		return slices.DeleteFunc(want, func(id ID) bool { _, dropped := notHeld[id]; return dropped })
+	}
+	retry := func(id ID) {
+		d := p.backoff.fail(consentKey{obj.GetUID(), id})
+		if a.RetryAfter == 0 || d < a.RetryAfter {
+			a.RetryAfter = d
+		}
+	}
+	// drop records r as not held for want of consent, reporting a
+	// withdrawal when it was recorded, and follows its Next through the
+	// shared live read: an unheld hop doesn't stop the chain (§9.4).
+	drop := func(r Ref) ([]Ref, error) {
+		id := r.ID()
+		delete(byID, id)
+		reason := UnheldNotConsented
+		switch {
+		case rec0.Names(id):
+			reason = UnheldConsentWithdrawn
+			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonConsentWithdrawn})
+			p.reports.ConsentWithdrawn(p.holder, obj, id)
+		default:
+			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonNotConsented})
+			if !listed[unheldRef(id)] && p.reported.first(consentKey{obj.GetUID(), id}) {
+				// Reported once, when the ref first goes unheld: neither its
+				// unheld entry, nor this process, has seen it.
+				p.reports.RefNotHeld(p.holder, obj, id)
+			}
+		}
+		notHeld[id] = reason
+		if r.Next == nil {
+			return nil, nil
+		}
+		o, err := p.unheldReads.get(ctx, p.contents, id)
+		if Classify(err) == ClassNotFound {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("credential-use: reading the unheld hop %s: %w", id, err)
+		}
+		return p.resolve(&a, r, o)
 	}
 	level := refs
 	for depth := 1; len(level) > 0; depth++ {
@@ -220,11 +304,10 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			return fail(fmt.Errorf("%w (%d)", errChainTooDeep, maxDepth), "Refs")
 		}
 		// Which refs of this level are held: those in the holder's own
-		// namespace. A ref in another namespace needs its target's consent,
-		// which comes with a later part of the build (plan, PR 5); until then
-		// it is never held, as for a target that hasn't consented (§11.3).
+		// namespace, and those in another whose target consents (§11.3).
 		var toHold []ID
 		var guaranteed []Ref
+		var next []Ref
 		chained := false
 		for _, r := range level {
 			if r.GroupKind.Kind == "" || r.Name == "" {
@@ -238,24 +321,58 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			if r.Next != nil {
 				chained = true
 			}
-			switch {
-			case r.Guaranteed:
+			if r.Guaranteed {
 				guaranteed = append(guaranteed, r)
-			case r.Namespace != namespace:
-				if r.Next != nil {
-					return fail(errUnheldChainNotYet, "Refs")
-				}
-				a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonNotConsented})
-			default:
-				if r.Next != nil && !p.contentKinds[r.GroupKind] {
-					// Its re-point would be invisible: the metadata caches keep
-					// only credential-use. keys, and a metadata change moves no
-					// generation, so nothing would enqueue its holders (§9.2,
-					// §10.4; the user's decision, 2026-11-21).
-					return fail(fmt.Errorf("%w: %s (set Content on its ProtectedKind)", errNextNeedsContent, id), "Refs")
-				}
+				continue
+			}
+			if r.Next != nil && !p.contentKinds[r.GroupKind] {
+				// Its re-point would be invisible: the metadata caches keep
+				// only credential-use. keys, and a metadata change moves no
+				// generation, so nothing would enqueue its holders (§9.2,
+				// §10.4; the user's decision, 2026-11-21).
+				return fail(fmt.Errorf("%w: %s (set Content on its ProtectedKind)", errNextNeedsContent, id), "Refs")
+			}
+			if r.Namespace == namespace {
 				byID[id] = r
 				toHold = append(toHold, id)
+				continue
+			}
+			// The gate, before A1: live in the adding direction, and from
+			// the cache on a pass that may skip A2 (§11.3, M1).
+			cross[id] = true
+			g := p.gate(ctx, obj, id, rec0.Names(id) && !deleting)
+			readOK[id] = g == gateHoldLive || g == gateNotHeld || g == gateMissing
+			switch g {
+			case gateHoldLive, gateHoldCached:
+				p.reported.clear(consentKey{obj.GetUID(), id})
+				liveOK[id] = g == gateHoldLive
+				byID[id] = r
+				toHold = append(toHold, id)
+			case gateNotHeld:
+				more, err := drop(r)
+				if err != nil {
+					return fail(err, "Refs")
+				}
+				next = append(next, more...)
+			case gateMissing:
+				// Nothing to hold; the record keeps it, as for any Missing
+				// ref, and nothing is requeued for it (L1).
+				byID[id] = r
+				keepEntry[id] = true
+				a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})
+				unfollowed = unfollowed || r.Next != nil
+			case gateUnknown:
+				retry(id)
+				keepEntry[id] = true
+				if rec0.Names(id) {
+					// A failed read keeps the hold (A5): it stays recorded,
+					// and is held, without an A2.
+					byID[id] = r
+					a.Held = append(a.Held, r)
+					unfollowed = unfollowed || r.Next != nil
+				} else {
+					a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonConsentUnreadable})
+				}
 			}
 		}
 
@@ -264,14 +381,17 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		// unparseable record names nothing to keep, so a chain behind it is
 		// exposed until the last A1, as for any ref of such a holder; only
 		// someone else's write makes a record unparseable.
+		// A level that leads nowhere further is the last: its A1 writes the
+		// chain and the unheld list in one patch (§11.3). Any other only adds.
 		want := exact()
-		final = !chained
-		if chained {
-			if rec := ReadRecord(obj); !rec.Unparseable {
-				want = SortedIDs(append(want, rec.IDs...))
-			}
+		var unheldNow *[]UnheldEntry
+		if last := !chained && len(next) == 0; last {
+			u := p.unheldEntries(found, notHeld, keepEntry, &passNow)
+			unheldNow = &u
+		} else if rec := ReadRecord(obj); !rec.Unparseable {
+			want = SortedIDs(append(want, rec.IDs...))
 		}
-		added, err := p.announce(ctx, obj, want, &a)
+		added, err := p.announce(ctx, obj, want, unheldNow, &a)
 		if err != nil {
 			if errors.Is(err, ErrHolderConflict) {
 				return a, err
@@ -283,7 +403,6 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		// holder version this pass works from (§6.3; H1 of #59's review):
 		// after an A1, that is A1's response, which the informer may not have
 		// delivered yet.
-		var next []Ref
 		slices.SortFunc(toHold, compareIDs)
 		for _, id := range toHold {
 			r := byID[id]
@@ -294,11 +413,45 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 					held = true
 				}
 			}
+			if !held && cross[id] && !liveOK[id] {
+				// The gate read consent from the cache, and the skip didn't
+				// hold: every A2 of a cross-namespace ref follows a live
+				// consent read in the same pass (§11.3, rule 1).
+				g := p.liveConsent(ctx, obj, id)
+				readOK[id] = readOK[id] || g != gateUnknown
+				switch g {
+				case gateHoldLive:
+					liveOK[id] = true
+				case gateNotHeld:
+					more, err := drop(r)
+					if err != nil {
+						return fail(err, "Refs")
+					}
+					next = append(next, more...)
+					continue
+				case gateMissing:
+					keepEntry[id] = true
+					a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})
+					unfollowed = unfollowed || r.Next != nil
+					continue
+				default:
+					retry(id)
+					keepEntry[id] = true
+					a.Held = append(a.Held, r)
+					unfollowed = unfollowed || r.Next != nil
+					continue
+				}
+			}
 			if !held {
 				switch class, err := p.write(ctx, id, namespace); class {
 				case ClassNone:
 					a.Held = append(a.Held, r)
 					held = true
+					if cross[id] && p.enqueueBatch != nil {
+						// The backstop for an A2 that lands after a release
+						// (§11.3 rule 3, §10.2 L2): this batch runs after it.
+						p.enqueueBatch(id, namespace)
+					}
 				case ClassNotFound:
 					a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})
 					unfollowed = unfollowed || r.Next != nil
@@ -350,14 +503,20 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		// against MaxDepth.
 		level = slices.DeleteFunc(next, func(r Ref) bool { return seen[r.ID()] })
 	}
-	if !final {
-		// The last level's hops led nowhere new: write exactly the chain.
-		if _, err := p.announce(ctx, obj, exact(), &a); err != nil {
-			if errors.Is(err, ErrHolderConflict) {
-				return a, err
-			}
-			return fail(err, "Announce")
+	for id := range readOK {
+		if readOK[id] {
+			p.backoff.succeed(consentKey{obj.GetUID(), id})
 		}
+	}
+
+	// The last A1: exactly the chain, and the unheld list with it, in one
+	// patch (§11.3). It writes nothing when neither changed.
+	unheld := p.unheldEntries(found, notHeld, keepEntry, &passNow)
+	if _, err := p.announce(ctx, obj, exact(), &unheld, &a); err != nil {
+		if errors.Is(err, ErrHolderConflict) {
+			return a, err
+		}
+		return fail(err, "Announce")
 	}
 	return a, nil
 }
@@ -377,22 +536,49 @@ func (p *protocol) resolve(a *Acquired, r Ref, o *unstructured.Unstructured) ([]
 // observed in the same pass, synchronously. It returns the refs it added. An
 // absent record and an empty one are the same; a record that can't be parsed
 // is rewritten.
-func (p *protocol) announce(ctx context.Context, obj metav1.Object, want []ID, a *Acquired) (map[ID]bool, error) {
+//
+// With unheld, it writes the holder's unheld list in the same patch (§11.3),
+// and counts a change to it as a difference; with nil, it leaves the list as
+// it is.
+func (p *protocol) announce(ctx context.Context, obj metav1.Object, want []ID, unheld *[]UnheldEntry, a *Acquired) (map[ID]bool, error) {
 	rec := ReadRecord(obj)
-	if !rec.Unparseable && slices.Equal(rec.IDs, want) || !rec.Present && len(want) == 0 {
-		return nil, nil
-	}
-	var value any // null removes the annotation
-	if len(want) > 0 {
-		v, err := EncodeRecord(want)
+	sameRecord := !rec.Unparseable && slices.Equal(rec.IDs, want) || !rec.Present && len(want) == 0
+	var unheldValue *string
+	sameUnheld := true
+	if unheld != nil {
+		v, err := encodeUnheld(*unheld)
 		if err != nil {
 			return nil, err
 		}
-		value = v
+		unheldValue = v
+		cur, has := obj.GetAnnotations()[AnnotationUnheld]
+		sameUnheld = v == nil && !has || v != nil && has && cur == *v
+	}
+	if sameRecord && sameUnheld {
+		return nil, nil
+	}
+	annotations := map[string]any{}
+	if !sameRecord {
+		var value any // null removes the annotation
+		if len(want) > 0 {
+			v, err := EncodeRecord(want)
+			if err != nil {
+				return nil, err
+			}
+			value = v
+		}
+		annotations[AnnotationRefs] = value
+	}
+	if !sameUnheld {
+		var value any
+		if unheldValue != nil {
+			value = *unheldValue
+		}
+		annotations[AnnotationUnheld] = value
 	}
 	data, err := json.Marshal(map[string]any{"metadata": map[string]any{
 		"resourceVersion": obj.GetResourceVersion(),
-		"annotations":     map[string]any{AnnotationRefs: value},
+		"annotations":     annotations,
 	}})
 	if err != nil {
 		return nil, err
@@ -503,16 +689,30 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 			continue
 		}
 		id := u.Ref.ID()
-		_, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
-		switch Classify(err) {
-		case ClassNotFound:
-			continue
-		case ClassNone:
-		default:
-			return fmt.Errorf("credential-use: checking %s before establishing: %w", id, err)
+		cross := id.Namespace != obj.GetNamespace()
+		if cross {
+			// A ref in another namespace is held only on a live yes, here as
+			// in every pass (§11.3): a Missing one that appeared may still
+			// not consent. Without one it stays unheld, as the next pass
+			// will find it; the holder may establish without it.
+			if p.liveConsent(ctx, obj, id) != gateHoldLive {
+				continue
+			}
+		} else {
+			_, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+			switch Classify(err) {
+			case ClassNotFound:
+				continue
+			case ClassNone:
+			default:
+				return fmt.Errorf("credential-use: checking %s before establishing: %w", id, err)
+			}
 		}
 		if class, err := p.write(ctx, id, obj.GetNamespace()); class != ClassNone {
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)
+		}
+		if cross && p.enqueueBatch != nil {
+			p.enqueueBatch(id, obj.GetNamespace()) // §11.3 rule 3, as after any A2
 		}
 		if u.Ref.Next != nil {
 			// It is held now, but what it leads to isn't: establishing now
@@ -539,6 +739,8 @@ func (p *protocol) forget(obj metav1.Object) bool {
 	delete(an, AnnotationUnheld)
 	obj.SetAnnotations(an)
 	p.ver.forgot(obj.GetUID())
+	p.backoff.forget(obj.GetUID())
+	p.reported.forget(obj.GetUID())
 	return true
 }
 

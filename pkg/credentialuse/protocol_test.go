@@ -71,6 +71,15 @@ type recordingReports struct {
 	degraded         []string
 	rejected         []ID
 	admissionDenials int
+	notHeld          []ID
+	withdrawn        []ID
+}
+
+func (r *recordingReports) RefNotHeld(_ schema.GroupKind, _ metav1.Object, ref ID) {
+	r.notHeld = append(r.notHeld, ref)
+}
+func (r *recordingReports) ConsentWithdrawn(_ schema.GroupKind, _ metav1.Object, ref ID) {
+	r.withdrawn = append(r.withdrawn, ref)
 }
 
 func (r *recordingReports) AdmissionDenied(schema.GroupKind) { r.admissionDenials++ }
@@ -331,17 +340,20 @@ func TestAcquireOutcomes(t *testing.T) {
 			t.Fatalf("acquire with a stale holder: %v, want ErrHolderConflict", err)
 		}
 	})
-	t.Run("a ref in another namespace is never held yet", func(t *testing.T) {
+	t.Run("a ref in another namespace without consent isn't held", func(t *testing.T) {
 		r := newRig(t)
 		must(r.m.Create(nsKey("other"), metav1.ObjectMeta{}))
 		must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{}))
 		h := r.holder(t, "h", true)
 		a, err := r.p.acquire(ctx, h, []Ref{SecretRef("other", "s")})
-		if err != nil || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonNotConsented || len(r.srv.calls) != 0 {
-			t.Fatalf("acquire = %+v, %v, calls %v", a, err, r.srv.calls)
+		if err != nil || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonNotConsented || a.MustNotConnect || a.Degraded {
+			t.Fatalf("acquire = %+v, %v", a, err)
 		}
 		if hasFinalizer(r.get(t, secretKey("other", "s")), fNS) {
 			t.Error("a Secret in another namespace was pinned")
+		}
+		if slices.Contains(r.srv.calls, "patch Secret/s") {
+			t.Errorf("calls = %v: an A2 without consent", r.srv.calls)
 		}
 	})
 	t.Run("an unparseable record is rewritten, and every ref writes", func(t *testing.T) {

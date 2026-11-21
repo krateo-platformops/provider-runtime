@@ -15,6 +15,7 @@ package credentialuse_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -53,11 +54,11 @@ type stressProcess struct {
 	ctrls []*controller
 }
 
-func startStressProcess(t *testing.T, so cu.SharedOptions, chained bool) *stressProcess {
+func startStressProcess(t *testing.T, so cu.SharedOptions, mode stressMode) *stressProcess {
 	t.Helper()
 	p := &stressProcess{s: cu.NewShared(clientsFor(t, env.Config), so)}
 	kinds := stressKinds
-	if chained {
+	if mode != stressPlain {
 		// Widgets only, which reach their Secrets through Targets (§9).
 		kinds = stressKinds[:1]
 	}
@@ -67,8 +68,11 @@ func startStressProcess(t *testing.T, so cu.SharedOptions, chained bool) *stress
 		o.Holder = k.gvk
 		o.DeletionGrace = testGrace
 		o.ProbeInterval = time.Second
-		if chained {
+		switch mode {
+		case stressChained:
 			chainOptions(&o)
+		case stressCross:
+			o.Refs = crossRefs
 		}
 		tr, err := p.s.Track(context.Background(), o)
 		if err != nil {
@@ -103,12 +107,13 @@ func TestStress(t *testing.T) {
 	cutest.Require(t, env)
 	d := stressDuration(t)
 	for _, n := range []int{2, 3} {
-		t.Run(fmt.Sprintf("%d processes, no leader election", n), func(t *testing.T) { stress(t, n, d, cu.SharedOptions{}, false) })
+		t.Run(fmt.Sprintf("%d processes, no leader election", n), func(t *testing.T) { stress(t, n, d, cu.SharedOptions{}, stressPlain) })
 	}
 	t.Run("2 processes, every hold outside the caches", func(t *testing.T) {
-		stress(t, 2, d, cu.SharedOptions{Namespaces: []string{env.Namespace(t, "stresscached")}}, false)
+		stress(t, 2, d, cu.SharedOptions{Namespaces: []string{env.Namespace(t, "stresscached")}}, stressPlain)
 	})
-	t.Run("2 processes, Widgets through Targets", func(t *testing.T) { stress(t, 2, d, cu.SharedOptions{}, true) })
+	t.Run("2 processes, Widgets through Targets", func(t *testing.T) { stress(t, 2, d, cu.SharedOptions{}, stressChained) })
+	t.Run("2 processes, cross-namespace refs whose consent toggles", func(t *testing.T) { stress(t, 2, d, cu.SharedOptions{}, stressCross) })
 }
 
 // stressWorld is what the stress goroutines share: the namespaces in use,
@@ -119,6 +124,9 @@ type stressWorld struct {
 	// chained: the holders are Widgets naming Targets, which name the
 	// Secrets (§9).
 	chained bool
+	// target, in the cross mode: a namespace whose Secrets the holders
+	// also name, whose consent a goroutine toggles (§11.3).
+	target string
 
 	mu      sync.Mutex
 	nss     []string
@@ -135,6 +143,15 @@ type stressHolder struct {
 const (
 	stressSecrets = 4
 	stressTargets = 3
+)
+
+// stressMode is what a stress run's holders name.
+type stressMode int
+
+const (
+	stressPlain   stressMode = iota // Secrets in their own namespace
+	stressChained                   // Targets, which name Secrets (§9)
+	stressCross                     // also Secrets in another namespace (§11.3)
 )
 
 func (w *stressWorld) newNamespace() string {
@@ -195,6 +212,9 @@ func (w *stressWorld) step(ctx context.Context, rng *rand.Rand) {
 	w.ops.Add(1)
 	secret := fmt.Sprintf("s%d", rng.IntN(stressSecrets))
 	field, ref := "secret", secret
+	if w.target != "" && rng.IntN(3) == 0 {
+		ref = fmt.Sprintf("%s/c%d", w.target, rng.IntN(stressTargets))
+	}
 	if w.chained {
 		// The holder names a Target; and a third of the steps act on the
 		// Targets, as someone else would.
@@ -207,7 +227,8 @@ func (w *stressWorld) step(ctx context.Context, rng *rand.Rand) {
 	switch op := rng.IntN(10); {
 	case op < 3: // create a holder
 		kind := 0
-		if !w.chained {
+		if !w.chained && w.target == "" {
+			// Only a plain run tracks both holder kinds.
 			kind = rng.IntN(len(stressKinds))
 		}
 		name := fmt.Sprintf("h%d", w.seq.Add(1))
@@ -355,7 +376,8 @@ func (w *stressWorld) describe(ctx context.Context, ns string) string {
 	return strings.Join(parts, "; ")
 }
 
-func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, chained bool) {
+func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stressMode) {
+	chained := mode == stressChained
 	resetPublished(t, cutest.WidgetGVR)
 	resetPublished(t, cutest.TargetGVR)
 	t.Cleanup(func() {
@@ -364,7 +386,16 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, chained b
 	})
 	w := &stressWorld{t: t, holders: map[string][]stressHolder{}, chained: chained}
 	for range n {
-		w.procs = append(w.procs, startStressProcess(t, so, chained))
+		w.procs = append(w.procs, startStressProcess(t, so, mode))
+	}
+	if mode == stressCross {
+		w.target = env.Namespace(t, "stresstarget")
+		for i := range stressTargets {
+			s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("c%d", i)}}
+			if _, err := env.Kube.CoreV1().Secrets(w.target).Create(context.Background(), s, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	for range 3 {
 		w.nss = append(w.nss, w.newNamespace())
@@ -380,6 +411,35 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, chained b
 			for time.Now().Before(stop) {
 				w.step(ctx, rng)
 				time.Sleep(time.Duration(rng.IntN(20)) * time.Millisecond)
+			}
+		}()
+	}
+	if w.target != "" {
+		// Consent toggles, on a Secret or on its Namespace: granted to every
+		// namespace in use, or to none (§11.3).
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rng := rand.New(rand.NewPCG(99, uint64(n)))
+			for time.Now().Before(stop) {
+				w.mu.Lock()
+				grant := strings.Join(w.nss, ",")
+				w.mu.Unlock()
+				if rng.IntN(2) == 0 {
+					grant = ""
+				}
+				var v any = grant
+				if grant == "" {
+					v = nil
+				}
+				data, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{cu.AnnotationAllowHoldersFrom: v}}})
+				if rng.IntN(2) == 0 {
+					_, _ = env.Kube.CoreV1().Secrets(w.target).Patch(ctx, fmt.Sprintf("c%d", rng.IntN(stressTargets)), types.MergePatchType, data, metav1.PatchOptions{})
+				} else {
+					_, _ = env.Kube.CoreV1().Namespaces().Patch(ctx, w.target, types.MergePatchType, data, metav1.PatchOptions{})
+				}
+				w.ops.Add(1)
+				time.Sleep(time.Duration(50+rng.IntN(150)) * time.Millisecond)
 			}
 		}()
 	}
@@ -452,6 +512,19 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, chained b
 				for _, f := range s.Finalizers {
 					if cu.IsCredentialUseFinalizer(f) {
 						return fmt.Errorf("Secret %s/%s keeps %s with no users: %w", ns, s.Name, f, cutest.ErrNotYet)
+					}
+				}
+			}
+		}
+		if w.target != "" {
+			l, err := env.Kube.CoreV1().Secrets(w.target).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return err
+			}
+			for _, s := range l.Items {
+				for _, f := range s.Finalizers {
+					if cu.IsCredentialUseFinalizer(f) {
+						return fmt.Errorf("the target's Secret %s keeps %s with no users: %w", s.Name, f, cutest.ErrNotYet)
 					}
 				}
 			}

@@ -600,12 +600,56 @@ it reset only on a successful read (M2 of #52's review)?
 **Depends on:** PR 4. **Size:** about 900 lines of production code and 1,200
 of tests.
 
-**Carried from PR 4's review** (#122): the self-write filter sets aside
-every `credential-use.` annotation, and `credential-use.krateo.io/allow-holders-from`
-is one that a human writes. So a consent change on a content kind's object
-would be taken for the tracker's own write and enqueue no holder. PR 5 must
-either keep that key in the filter's comparison or enqueue on a consent
-change by its own path.
+**What the build settled** (2026-11-21), where §11.3 left room:
+
+- **The gate runs before each level's A1.** A ref the record names, on a
+  pass that isn't deleting, may be held on a cached yes (the object's and its
+  Namespace's cached `allow-holders-from`); anything else, a cached no or a
+  cache that can't answer included, is read live. When the cached yes's A2
+  can't be skipped, consent is read live before that A2, so every A2 of a
+  cross-namespace ref follows a live read in the same pass.
+- **A level that leads nowhere further writes the chain and `unheld` in one
+  A1**; any other level only adds to the record, and the pass's last A1, a
+  no-op when nothing changed, writes exactly the chain and `unheld`. So a
+  withdrawal's removal and its entry land in one patch, and so do a new hold
+  and a new entry.
+- **A failed live read of a ref not yet held** holds nothing that pass:
+  `Acquired.Unheld` says `ConsentUnreadable`, `RetryAfter` backs off, and no
+  `unheld` entry is written, since nothing was learnt.
+- **A cross-namespace ref whose object or Namespace is NotFound** is Missing:
+  recorded, as any Missing ref, and given no A2, so a recreated object is
+  never pinned before its consent is read.
+- **A withdrawn ref leaves the record even when a hop is unfollowed** in the
+  same pass: the record's refs are kept for the unfollowed hop, never one
+  whose consent was withdrawn.
+- **`CredentialRefNotHeld` and its metric are reported once per (holder,
+  ref) per process**: when its `unheld` entry first appears, remembered in
+  memory too, so a ref trimmed into `More` isn't reported again. A restart,
+  or another process that reconciles the holder, reports it once more.
+  `CredentialConsentWithdrawn` is reported once per release.
+- **Past 16 entries the list is stable**: among `NotConsented` entries, those
+  already listed come before ones that aren't, so a ref trimmed into `More`,
+  which comes back each pass as if new, never displaces a listed one; a pass
+  computes one list for both of its A1s (from the review of #123).
+- **`BeforeEstablish` holds a ref outside the holder's namespace only on a
+  live yes**, and enqueues the release batch after that A2 (the review of
+  #123).
+- **Any live consent read that succeeds resets the backoff**, whether it
+  found consent, none, or a NotFound.
+- **Any change to a held object's `allow-holders-from` enqueues its holders**,
+  whatever its kind, and the self-write filter counts it as someone else's
+  write (carried from PR 4's review, #122).
+- **`Options.PollInterval`** (default 60s) caps the consent-read backoff; two
+  Tracks of a kind must agree on it.
+- **A `*` on a Namespace** gets the `CredentialConsentWildcardIgnored`
+  Warning event on that Namespace.
+- **`since` reads the clock only for a new entry**, so a pass adds no
+  scheduled input to the model, whose state keys are unchanged.
+- **The late-A2 schedule is an envtest with two processes**
+  (`TestALateA2AfterAWithdrawalIsReleased`), not a model schedule. In the
+  watched modes the A2's own informer event also enqueues the batch, so it
+  proves no finalizer is stranded, not that the self-enqueue alone suffices;
+  that is PerNamePoll's case (PR 9).
 
 ### PR 6: Disown and `DisownPrefix`
 
@@ -864,6 +908,13 @@ a grant past the acquirer's retry budget.
 
 **Depends on:** PR 8. **Size:** about 1,200 lines of production code and
 1,400 of tests.
+
+**Carried from PR 5's review** (#123): PR 5 tested the late A2 of §11.3
+rule 3 with a two-process envtest, where the A2's own informer event also
+enqueues the release batch. In PerNamePoll mode no watch delivers it, so the
+acquirer's self-enqueued batch is the only backstop: this PR adds the model
+schedule the plan lists for PR 5, a concurrent A2 landing after the release
+and caught by the batch its own write enqueued, with no informer event.
 
 ### PR 10: `scaletozero.WithHeld` and `WithHeldIndex`
 
