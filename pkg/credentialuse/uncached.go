@@ -38,9 +38,15 @@ func (s *Shared) namespaceCached(namespace string) bool {
 	return len(s.o.Namespaces) == 0 || namespace == "" || slices.Contains(s.o.Namespaces, namespace)
 }
 
-// uncachedKinds returns t's protected kinds with objects outside the caches:
-// the namespaced ones, when SharedOptions.Namespaces restricts the caches.
-func (s *Shared) uncachedKinds(t *Tracker) []schema.GroupKind {
+// uncachedKinds returns t's protected kinds with objects outside the caches,
+// worked out once, when Track builds t (computeUncachedKinds): the
+// Namespace informer's handler asks, and mustn't wait on the mapper.
+func (s *Shared) uncachedKinds(t *Tracker) []schema.GroupKind { return t.uncached }
+
+// computeUncachedKinds returns t's protected kinds with objects outside the
+// caches: the namespaced ones, when SharedOptions.Namespaces restricts the
+// caches.
+func (s *Shared) computeUncachedKinds(t *Tracker) []schema.GroupKind {
 	if len(s.o.Namespaces) == 0 {
 		return nil
 	}
@@ -254,4 +260,16 @@ func (t *Tracker) keptUncached(ids []ID, kept []Kept) {
 	if changed {
 		t.reportHeldLocked()
 	}
+}
+
+// clearUncached forgets what the release loop counted outside the caches,
+// when the write loops stop.
+func (t *Tracker) clearUncached() {
+	t.heldMu.Lock()
+	defer t.heldMu.Unlock()
+	if t.gone || len(t.waitingUncached) == 0 {
+		return
+	}
+	t.waitingUncached = nil
+	t.reportHeldLocked()
 }

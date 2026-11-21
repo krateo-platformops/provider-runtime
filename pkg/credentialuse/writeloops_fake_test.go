@@ -431,10 +431,20 @@ func TestJanitor(t *testing.T) {
 			}
 			return false, nil, nil
 		})
+		var gets atomic.Int32
+		r.md.PrependReactor("get", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			gets.Add(1)
+			return false, nil, nil
+		})
+		// One clean, with no informer running: nothing else can queue the
+		// object again, so only clean's own retry can clean it.
 		r.track(t, widgetGK)
-		r.run(t)
-		r.runWrites(t)
-		eventually(t, "the labels to go on the retry", func() bool { return cleaned(r) })
+		if err := r.s.clean(context.Background(), secretID("ns", "s")); err != nil {
+			t.Fatal(err)
+		}
+		if !cleaned(r) || gets.Load() != 2 {
+			t.Errorf("cleaned %v after %d reads; want cleaned on the second read", cleaned(r), gets.Load())
+		}
 	})
 	t.Run("a failed read is retried with backoff", func(t *testing.T) {
 		r := newFakeRig(t, namespaceObject("ns"), stripped())
@@ -1022,9 +1032,8 @@ func TestRestrictedCachesNeedAClusterList(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "grant list on secrets in every namespace") {
 		t.Fatalf("RunInformers = %v, want the cluster-wide list refused", err)
 	}
-	// The namespaced checks alone don't trip it.
+	// With the cluster-wide list granted, the same process runs.
 	r2 := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"))
-	r2.denied.Store("list secrets in other", true)
 	r2.track(t, widgetGK)
 	r2.run(t)
 }
@@ -1045,4 +1054,98 @@ func TestTheWaitingGaugeCountsKeptObjectsOutsideTheCaches(t *testing.T) {
 	}
 	releasedStepping(t, r, "the hold to be released once its user goes", func() bool { return !r.heldBy(t, widgetGK, "out", "s") })
 	eventually(t, "the released object to leave the gauge", func() bool { return r.metrics.waitingGauge(kind) == 0 })
+}
+
+// An Add with no objects asks for every held object of the namespace, and
+// that survives the merge of objects added before the batch is taken (the
+// re-review of #114): during a teardown the holders' events fill (K, N) all
+// the time, and a merged batch that ran on their objects alone never listed
+// the namespace, so a hold nobody names stayed.
+func TestAnEmptyBatchMergedWithObjectsStillCoversItsNamespace(t *testing.T) {
+	k := batchKey{widgetGK, "out"}
+	s1 := secretID("out", "s1")
+
+	q := newBatchQueue(newFakeRig(t).clk)
+	q.Add(k)
+	q.Add(k, s1)
+	if _, ids, ok := q.Get(context.Background()); !ok || !slices.Contains(ids, fillAll) || !slices.Contains(ids, s1) {
+		t.Fatalf("Get = %v, %v: the merge lost the namespace's list or the object", ids, ok)
+	}
+
+	// s1 has a user, s2 none: the merged batch releases s2 and keeps s1.
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("out"),
+		heldObject(secretGVK, "out", "s1", "u1", widgetGK, "out"), holderObject("out", "h", s1),
+		heldObject(secretGVK, "out", "s2", "u2", widgetGK, "out"))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.s.releaseBatch(context.Background(), k, []ID{s1, fillAll})
+	if r.heldBy(t, widgetGK, "out", "s2") {
+		t.Error("a batch merged with an object didn't list its namespace: the hold nobody names stayed")
+	}
+	if !r.heldBy(t, widgetGK, "out", "s1") {
+		t.Error("the batch released an object that has a user")
+	}
+}
+
+// The recheck outside the caches retries a list that failed, on the release
+// loop's backoff: a recheck that is skipped can strand a hold for good.
+func TestTheRecheckOutsideTheCachesIsRetried(t *testing.T) {
+	out := deleting(heldObject(secretGVK, "out", "s", "u-out", widgetGK, "out"), time.Now().Add(-time.Hour))
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("out"), out)
+	var failed atomic.Bool
+	r.md.PrependReactor("list", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if a.GetNamespace() == "" && a.(clienttesting.ListAction).GetListRestrictions().Labels.String() == heldSelector() &&
+			failed.CompareAndSwap(false, true) {
+			return true, nil, apierrors.NewInternalError(errors.New("etcd is unhappy"))
+		}
+		return false, nil, nil
+	})
+	r.track(t, widgetGK)
+	r.run(t)
+	r.runWrites(t)
+	eventually(t, "the first recheck to fail", failed.Load)
+	releasedStepping(t, r, "the retried recheck to release the hold", func() bool { return !r.heldBy(t, widgetGK, "out", "s") })
+}
+
+// One process runs one set of write loops: a second RunWriteLoops while the
+// first runs fails at once, and leaves the first's context alone.
+func TestRunWriteLoopsRunsOnce(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.runWrites(t)
+	eventually(t, "the write loops to start", func() bool {
+		r.s.mu.Lock()
+		defer r.s.mu.Unlock()
+		return r.s.writeCtx != nil
+	})
+	if err := r.s.RunWriteLoops(context.Background()); !errors.Is(err, errWriteLoopsRunning) {
+		t.Fatalf("a second RunWriteLoops = %v, want errWriteLoopsRunning", err)
+	}
+	r.s.mu.Lock()
+	running := r.s.writeCtx != nil
+	r.s.mu.Unlock()
+	if !running {
+		t.Error("the refused RunWriteLoops cleared the running one's context")
+	}
+}
+
+// What the release loop counted outside the caches leaves the waiting gauge
+// when the write loops stop: a replica that keeps running without them
+// mustn't report it.
+func TestTheWaitingGaugeOutsideTheCachesClearsWhenTheWriteLoopsStop(t *testing.T) {
+	out := deleting(heldObject(secretGVK, "out", "s", "u-out", widgetGK, "out"), time.Now().Add(-time.Hour))
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("out"), out,
+		holderObject("out", "h", secretID("out", "s")))
+	r.track(t, widgetGK)
+	r.run(t)
+	stop := r.runWrites(t)
+	kind := kindLabel(widgetGK)
+	eventually(t, "the kept object outside the caches to be counted", func() bool { return r.metrics.waitingGauge(kind) == 1 })
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.metrics.waitingGauge(kind); n != 0 {
+		t.Errorf("waiting gauge %d after the write loops stopped, want 0", n)
+	}
 }

@@ -1931,7 +1931,19 @@ grant.
 **The waiting gauge** counts the cached objects from the caches on every
 replica (§12). Outside the caches it counts what this process's release
 loop last found kept for users, so only the process that runs the write
-loops reports those.
+loops reports those, and it forgets them when its write loops stop. It is
+a batch's view: a batch that fails leaves its last count until a retry
+succeeds, and an object whose finalizer a third party strips stays counted
+until a batch covers it again. It is counted per object, not per
+(object, N), which is exact while no hold crosses namespaces (cross-namespace
+refs are unheld until consent, §11.3).
+
+**An empty batch keeps its meaning.** A batch added with no objects asks
+for every held object of its namespace, and a later addition of objects
+to the same (K, N), as a holder's event during a teardown makes, must not
+turn it into a batch of those objects alone. The queue keeps a marker for
+it with the batch's objects, and the release loop lists the namespace
+beside them (the re-review of #114).
 
 ### 10.6 PerName mode: the index ConfigMap (M1)
 

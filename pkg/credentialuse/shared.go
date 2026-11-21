@@ -755,6 +755,7 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	if err != nil {
 		return nil, setupFailed(err)
 	}
+	t.uncached = s.computeUncachedKinds(t)
 	// Build the protected informers that may be missing before taking mu:
 	// the mapper may call the API server.
 	var keys []protKey

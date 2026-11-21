@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,10 @@ const (
 // errInformersEnded is RunWriteLoops' error when RunInformers ends first.
 var errInformersEnded = errors.New("credential-use: the informers have stopped")
 
+// errWriteLoopsRunning is RunWriteLoops' error when another RunWriteLoops of
+// the same Shared is still running: one process runs one set of write loops.
+var errWriteLoopsRunning = errors.New("credential-use: RunWriteLoops is already running")
+
 // RunWriteLoops runs the write loops until ctx is done: the release loop,
 // the missing-ref prober and the label janitor. It needs leader election
 // (§7.5, IP4), and it may start before, with or after RunInformers: it waits
@@ -54,11 +59,14 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
-	s.rescan()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.mu.Lock()
+	if s.writeCtx != nil {
+		s.mu.Unlock()
+		return errWriteLoopsRunning
+	}
 	s.writeCtx = ctx
 	trackers := make([]*Tracker, 0, len(s.trackers))
 	for _, t := range s.trackers {
@@ -71,7 +79,13 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		s.mu.Unlock()
 		cancel()
 		s.writeWG.Wait()
+		// What the release loop counted outside the caches is stale once it
+		// stops: only the process that runs the write loops reports it.
+		for _, t := range s.trackerList() {
+			t.clearUncached()
+		}
 	}()
+	s.rescan()
 	var wg sync.WaitGroup
 	// The recheck outside the caches (§10.5) runs beside the loops: it
 	// lists live, and the batches it finds join the queue as it goes.
@@ -146,7 +160,10 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 // releaseBatch runs one batch (§6.2 R0 to R3), and requeues it as its
 // result says: at the time it asks for, as at a grace's end; with backoff
 // after an error; at once, for the next write loops, when ctx ended under
-// it. A batch for a kind that a Track is adding waits for that Track: it
+// it. A batch that fillAll marks, from an Add with no objects, also covers
+// every object of its namespace that holds K's finalizer for N, which
+// heldIn lists, beside the objects added to it since. A batch for a kind
+// that a Track is adding waits for that Track: it
 // goes back to the queue if the Track succeeds (Shared.endTracking, the
 // review of #114). A batch for a kind nobody tracks or is tracking is
 // dropped: a Track after start that failed and rolled back may have left
@@ -157,16 +174,19 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	if t == nil {
 		return
 	}
-	if len(ids) == 0 {
-		var err error
-		ids, err = s.heldIn(ctx, t, k.Namespace)
+	fill := len(ids) == 0 || slices.Contains(ids, fillAll)
+	if fill {
+		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return id == fillAll })
+		held, err := s.heldIn(ctx, t, k.Namespace)
 		if err != nil {
-			s.retryBatch(ctx, t, k, nil, err)
+			s.retryBatch(ctx, t, k, append(ids, fillAll), err)
 			return
 		}
-		if len(ids) == 0 {
-			return
-		}
+		ids = SortedIDs(append(ids, held...))
+		ids = slices.Compact(ids)
+	}
+	if len(ids) == 0 {
+		return
 	}
 	res, err := t.proto.release(ctx, k.Namespace, ids)
 	s.reportKept(t, k, res.Kept)

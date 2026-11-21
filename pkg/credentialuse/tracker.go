@@ -47,7 +47,10 @@ type Tracker struct {
 	// waitingUncached are the objects outside the caches that the release
 	// loop last found kept for t's users (§10.5, keptUncached).
 	waitingUncached map[ID]bool
-	gone            bool // a failed Track dropped t
+	// uncached are t's protected kinds with objects outside the caches
+	// (§10.5), set when Track builds t.
+	uncached []schema.GroupKind
+	gone     bool // a failed Track dropped t
 
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).

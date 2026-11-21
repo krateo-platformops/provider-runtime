@@ -53,9 +53,9 @@ type stressProcess struct {
 	ctrls []*controller
 }
 
-func startStressProcess(t *testing.T) *stressProcess {
+func startStressProcess(t *testing.T, so cu.SharedOptions) *stressProcess {
 	t.Helper()
-	p := &stressProcess{s: cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})}
+	p := &stressProcess{s: cu.NewShared(clientsFor(t, env.Config), so)}
 	for _, k := range stressKinds {
 		c := newController(t)
 		o := widgetOptions(c.enqueue)
@@ -87,13 +87,19 @@ func stressDuration(t *testing.T) time.Duration {
 	return 8 * time.Second
 }
 
-// The stress test, with two processes and with three.
+// The stress test, with two processes and with three, and with two whose
+// caches SharedOptions.Namespaces restricts to a namespace the stress
+// doesn't use, so that every hold is outside the caches (§10.5): read live,
+// enqueued by the passes and the namespace teardowns, and rechecked live.
 func TestStress(t *testing.T) {
 	cutest.Require(t, env)
 	d := stressDuration(t)
 	for _, n := range []int{2, 3} {
-		t.Run(fmt.Sprintf("%d processes, no leader election", n), func(t *testing.T) { stress(t, n, d) })
+		t.Run(fmt.Sprintf("%d processes, no leader election", n), func(t *testing.T) { stress(t, n, d, cu.SharedOptions{}) })
 	}
+	t.Run("2 processes, every hold outside the caches", func(t *testing.T) {
+		stress(t, 2, d, cu.SharedOptions{Namespaces: []string{env.Namespace(t, "stresscached")}})
+	})
 }
 
 // stressWorld is what the stress goroutines share: the namespaces in use,
@@ -279,12 +285,12 @@ func (w *stressWorld) describe(ctx context.Context, ns string) string {
 	return strings.Join(parts, "; ")
 }
 
-func stress(t *testing.T, n int, d time.Duration) {
+func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions) {
 	resetPublished(t, cutest.WidgetGVR)
 	resetPublished(t, cutest.TargetGVR)
 	w := &stressWorld{t: t, holders: map[string][]stressHolder{}}
 	for range n {
-		w.procs = append(w.procs, startStressProcess(t))
+		w.procs = append(w.procs, startStressProcess(t, so))
 	}
 	for range 3 {
 		w.nss = append(w.nss, w.newNamespace())
@@ -382,8 +388,9 @@ func stress(t *testing.T, n int, d time.Duration) {
 	}
 	t.Logf("%d processes, %s: %d operations, %d namespace teardowns, %d passes", n, d, w.ops.Load(), teardowns.Load(), passes)
 	// A stress that did next to nothing proves nothing (the review of #114).
-	if w.ops.Load() < 100 || passes < 100 {
-		t.Errorf("the stress did too little: %d operations and %d passes, want at least 100 each", w.ops.Load(), passes)
+	if w.ops.Load() < 100 || passes < 100 || teardowns.Load() < 1 {
+		t.Errorf("the stress did too little: %d operations, %d passes and %d namespace teardowns; want at least 100, 100 and 1",
+			w.ops.Load(), passes, teardowns.Load())
 	}
 	if len(violations) != 0 {
 		t.Errorf("%d reads failed for holders being deleted: %v", len(violations), violations)
