@@ -1759,6 +1759,12 @@ annotations and the labels. 10,000 held Secrets cost about 5 MB.
   whose informer sees a labelled object with no matching finalizer removes
   the label. That is a JSON patch testing that the whole finalizer array
   still has no `credential-use.` entry, so it can't race a new A2.
+- an object a third party left with K's marker but **not the held label**
+  is outside every cache, which selects by the held label, yet
+  `scaletozero` selects on the marker (§11.6). The write loops' start, and
+  a Track while they run, list each protected kind live, in every
+  namespace, by K's marker without the held label, and the janitor removes
+  the marker (the review of #114).
 
 **A fast-path miss falls back to a live GET.** That covers:
 
@@ -1879,6 +1885,65 @@ namespaces. Such a ref is read live, every pass. If even the live read is
 denied there (class (d) of §6.2, RBAC), Acquire returns an error: fail
 closed for a new holder, fail open for an established one (§8). The doc text says so, and that such
 refs need §13's cluster-scoped RBAC.
+
+**What is restricted.** Only the protected-object informers, one per
+listed namespace. The holder informers and the Namespace informer stay
+cluster-wide, as §13's ClusterRole verbs on the holder kind and on
+namespaces already allow: the release batches start from holder events
+(§10.2), and §5's namespace rows read every namespace.
+
+**A deletion outside the cached namespaces** reaches no informer, so
+nothing enqueues the object's batch or starts its grace timer. The rule:
+when a pass's A2 holds an object outside the cached namespaces and A2's
+response shows it being deleted, the acquirer enqueues the object's
+(K, N) batch, and R1 measures the grace from that first sight (§5, L4).
+The cost is liveness only: such an object is released on the next pass of
+a holder that reads it, not at once, and never earlier than the table of
+§5 allows (PR 3b, 2026-11-19).
+
+**Held objects nobody reads any more** (the user's decision of
+2026-11-19: hold them, plus live rechecks). A restricted process still
+holds the objects its holders name outside the cached namespaces. But a
+holder deleted while the process was down, or a leader that died between a
+holder's Forget and R3 (§7.5, M1), leaves an object outside the caches
+that no holder pass reads and no informer delivers; the startup rescan
+(§10.2) covers only the caches. If its namespace is then deleted, the
+object's finalizer keeps the namespace Terminating, the failure this
+design exists to prevent. Two more triggers release such objects:
+
+- **a namespace outside the caches starting to delete**: the Namespace
+  handler enqueues each tracker's (K, N) batch for it with no objects, and
+  the release loop fills it with a live list of the objects there that
+  carry the held label and K's finalizer for N;
+- **the write loops' start, and a Track while they run**: one live list per
+  protected kind, in every namespace, selected by the held label, finds the
+  held objects outside the caches, and enqueues the batch of each of their
+  (K, N) finalizers. A failed list is retried with the release loop's
+  backoff until it succeeds: a recheck that is skipped can strand a hold.
+
+The lists only find what to recheck; R1 to R3 then read and write each
+object as for any batch, so nothing is released earlier than §5 allows.
+They need list on each protected kind **in every namespace**, which such
+refs already need (§13's cluster-scoped RBAC): a restricted process
+checks it before it starts and refuses to run without it, naming the
+grant.
+
+**The waiting gauge** counts the cached objects from the caches on every
+replica (§12). Outside the caches it counts what this process's release
+loop last found kept for users, so only the process that runs the write
+loops reports those, and it forgets them when its write loops stop. It is
+a batch's view: a batch that fails leaves its last count until a retry
+succeeds, and an object whose finalizer a third party strips stays counted
+until a batch covers it again. It is counted per object, not per
+(object, N), which is exact while no hold crosses namespaces (cross-namespace
+refs are unheld until consent, §11.3).
+
+**An empty batch keeps its meaning.** A batch added with no objects asks
+for every held object of its namespace, and a later addition of objects
+to the same (K, N), as a holder's event during a teardown makes, must not
+turn it into a batch of those objects alone. The queue keeps a marker for
+it with the batch's objects, and the release loop lists the namespace
+beside them (the re-review of #114).
 
 ### 10.6 PerName mode: the index ConfigMap (M1)
 

@@ -61,10 +61,21 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 	return q
 }
 
+// fillAll is never an object: it stands in a batch for "every object of
+// the namespace that holds K's finalizer for N", which an Add with no ids
+// asks for. It is kept with the batch's objects, so it survives the merge
+// of later additions, and the release loop replaces it with the held
+// objects it lists (the review of #114: an empty batch merged with an
+// object's lost the namespace's list).
+var fillAll = ID{Kind: "\x00all"}
+
 // Add queues k's batch, covering ids as well as whatever it covered already.
-// With no ids it still queues the batch, which then lists the namespace's
-// held objects itself. After ShutDown it does nothing.
+// With no ids it covers every held object of the namespace too (fillAll),
+// which the release loop lists itself. After ShutDown it does nothing.
 func (q *batchQueue) Add(k batchKey, ids ...ID) {
+	if len(ids) == 0 {
+		ids = []ID{fillAll}
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.stopped {
@@ -101,6 +112,9 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 		return
 	}
 	ids = slices.Clone(ids)
+	if len(ids) == 0 {
+		ids = []ID{fillAll}
+	}
 	e := &queueTimer{}
 	q.mu.Lock()
 	if q.stopped {

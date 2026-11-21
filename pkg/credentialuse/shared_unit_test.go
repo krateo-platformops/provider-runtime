@@ -198,6 +198,7 @@ type countingMetrics struct {
 	counts  map[string]int
 	reasons []string
 	held    map[string]int
+	waiting map[string]int
 }
 
 func (m *countingMetrics) inc(name string) {
@@ -218,6 +219,23 @@ func (m *countingMetrics) Degraded(kind, reason string) {
 func (m *countingMetrics) AdmissionDenied(kind string) { m.inc("admission_denied " + kind) }
 func (m *countingMetrics) ReleaseRejected(kind string) { m.inc("release_rejected " + kind) }
 func (m *countingMetrics) CRDWriteStarved(kind string) { m.inc("crd_write_starved " + kind) }
+
+// WaitingObjects keeps the waiting gauge's last value, by kind.
+func (m *countingMetrics) WaitingObjects(kind string, n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.waiting == nil {
+		m.waiting = map[string]int{}
+	}
+	m.waiting[kind] = n
+}
+
+// waitingGauge is the waiting gauge's last value for kind.
+func (m *countingMetrics) waitingGauge(kind string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.waiting[kind]
+}
 
 // HeldObjects keeps the gauge's last value, by kind.
 func (m *countingMetrics) HeldObjects(kind string, n int) {

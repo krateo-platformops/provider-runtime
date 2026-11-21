@@ -86,6 +86,9 @@ type protocol struct {
 	// restoredEpochRequeue, if set, replaces the constant of that name
 	// (epochRequeue).
 	restoredEpochRequeue time.Duration
+	// heldDeleting, if set, is told of every object an A2 held that its
+	// response shows being deleted, with the holder namespace.
+	heldDeleting func(id ID, namespace string)
 }
 
 // firstSight remembers when this process first saw each protected object's
@@ -314,6 +317,7 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, e
 			return Classify(err), err
 		}
 		p.ver.wrote(out.UID, namespace, issued)
+		p.wroteDeleting(id, namespace, out)
 		return ClassNone, nil
 	}
 	var last error
@@ -330,6 +334,7 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, e
 		out, err := p.srv.Patch(ctx, gk, id.Namespace, id.Name, pt.Type, pt.Data)
 		if err == nil {
 			p.ver.wrote(out.UID, namespace, issued)
+			p.wroteDeleting(id, namespace, out)
 			return ClassNone, nil
 		}
 		if c := Classify(err); c != ClassConflict {
@@ -338,6 +343,14 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, e
 		last = err
 	}
 	return ClassOther, fmt.Errorf("credential-use: %d conflicting writes in a row: %w", maxGuardedAttempts, last)
+}
+
+// wroteDeleting tells heldDeleting of an A2 response that shows its object
+// being deleted.
+func (p *protocol) wroteDeleting(id ID, namespace string, out *metav1.PartialObjectMetadata) {
+	if p.heldDeleting != nil && out != nil && out.DeletionTimestamp != nil {
+		p.heldDeleting(id, namespace)
+	}
 }
 
 // beforeEstablish runs just before the caller adds its owner finalizer, and

@@ -412,8 +412,12 @@ unreleased and nothing imports it, so neither is visible to anyone.
   #109): the held gauge, `credentialuse_held_objects`, is PR 3a's, counted
   from the protected informers' finalizers; the waiting gauge,
   `credentialuse_waiting_objects`, and the `CredentialDeleting` and
-  `WaitingForCredentialUsers` events are PR 3b's, since only the release
-  loop knows which deletions wait for users.
+  `WaitingForCredentialUsers` events are PR 3b's. The events come from the
+  release loop, since only it knows why a deleting object is kept. The
+  waiting gauge, in the end, is counted like the held one, from the
+  caches: the deleting objects that still carry one of the kind's
+  finalizers, which the releaser removes as soon as §5 lets it. So every
+  replica reports it, not only the one whose write loops run (PR 3b).
 - Tests: the relist (watch-list and List), its order forced; `Track` after
   start and twice, concurrent `Track`s, a failed `Track`'s rollback, and a
   `Track` after start that rechecks a shared cache; the published settings

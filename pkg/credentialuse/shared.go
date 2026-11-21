@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/clock"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -43,9 +44,16 @@ type Clients struct {
 }
 
 // SharedOptions configure the process-wide state. Later parts of the build
-// add the namespace restriction (§10.5), the listers for Guaranteed refs
-// (§9.3) and the index (§10.6).
-type SharedOptions struct{}
+// add the listers for Guaranteed refs (§9.3) and the index (§10.6).
+type SharedOptions struct {
+	// Namespaces restricts the protected-object caches to these namespaces
+	// (§10.5); the default is every namespace. A ref outside them is read
+	// live on every pass, and its deletion is noticed by the next pass of a
+	// holder that reads it (see Tracker.Acquire). The holder informers and
+	// the Namespace informer stay cluster-wide: the release batches start
+	// from holder events, and §5's namespace rows read every namespace.
+	Namespaces []string
+}
 
 // A WatchMode is how a protected kind's holds are found (§10).
 type WatchMode int
@@ -145,6 +153,12 @@ type Shared struct {
 	queue  *batchQueue
 	seen   *firstSight
 	events *eventSink
+	// janitor queues protected objects whose labels the janitor may clean
+	// (§10.1); janitorState and backoff are the janitor's and the release
+	// loop's memory across attempts.
+	janitor      workqueue.TypedRateLimitingInterface[ID]
+	janitorState janitorState
+	backoff      batchBackoff
 
 	namespaces cache.SharedIndexInformer
 	nsLW       *listWatch
@@ -158,11 +172,16 @@ type Shared struct {
 	// is adding (D2 of the review of #109, and its re-review).
 	trackers  map[schema.GroupKind]*Tracker
 	tracking  map[schema.GroupKind]*inflight
-	protected map[schema.GroupKind]*protectedInformer
+	protected map[protKey]*protectedInformer
 	setupErr  error
 	// informerCtx is RunInformers' context once it runs, for Track after
 	// start; nil before.
 	informerCtx context.Context
+	// writeCtx is RunWriteLoops' context while the write loops run, for the
+	// recheck outside the caches after a Track (§10.5); nil otherwise.
+	// writeWG counts those rechecks, so the write loops wait for them.
+	writeCtx context.Context
+	writeWG  sync.WaitGroup
 	// runDone is closed when a RunInformers that started returns, so that
 	// a Track after start stops waiting for informers it will never sync.
 	runDone chan struct{}
@@ -171,8 +190,10 @@ type Shared struct {
 	// each of a Track's two budgets (see Track). Atomic, so that tests can
 	// change it between Tracks.
 	syncTimeout atomic.Int64
-	// synced: RunInformers' informers have all synced.
-	synced atomic.Bool
+	// synced: RunInformers' informers have all synced; syncedCh is closed
+	// then.
+	synced   atomic.Bool
+	syncedCh chan struct{}
 
 	hooks hooks
 }
@@ -191,6 +212,8 @@ type hooks struct {
 	// beforeListRecorded runs when a holder informer's list or relist has
 	// completed, just before the completion is recorded.
 	beforeListRecorded func(t *Tracker)
+	// wrapServer wraps the server every tracker and the janitor use.
+	wrapServer func(server) server
 }
 
 // NewShared builds the process-wide state. It creates the batch queue before
@@ -214,16 +237,18 @@ func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 		o:         o,
 		clock:     clk,
 		queue:     newBatchQueue(clk),
+		janitor:   newJanitorQueue(clk),
+		syncedCh:  make(chan struct{}),
 		seen:      newFirstSight(),
 		events:    newEventSink(c.Events, c.Mapper, clk),
 		trackers:  map[schema.GroupKind]*Tracker{},
 		tracking:  map[schema.GroupKind]*inflight{},
 		runDone:   make(chan struct{}),
-		protected: map[schema.GroupKind]*protectedInformer{},
+		protected: map[protKey]*protectedInformer{},
 	}
 	s.syncTimeout.Store(int64(2 * time.Minute))
 	if c.Metadata != nil {
-		s.nsLW = newListWatch(c.Metadata, namespaceGVR, "", clk, nil)
+		s.nsLW = newListWatch(c.Metadata, namespaceGVR, "", "", clk, nil)
 		s.namespaces = cache.NewSharedIndexInformerWithOptions(s.nsLW, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
 			ObjectDescription: "credential-use namespaces",
 		})
@@ -233,10 +258,50 @@ func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 	return s
 }
 
-func (s *Shared) protectedInformer(gk schema.GroupKind) *protectedInformer {
+// A protKey names one protected informer: a protected kind, and the
+// namespace it is restricted to, or "" for every namespace.
+type protKey struct {
+	gk schema.GroupKind
+	ns string
+}
+
+// protectedFor returns the protected informer whose cache covers id, or nil
+// when none does: id's namespace isn't among SharedOptions.Namespaces
+// (§10.5), or no tracker protects id's kind.
+func (s *Shared) protectedFor(id ID) *protectedInformer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.protected[gk]
+	if p := s.protected[protKey{id.GroupKind(), id.Namespace}]; p != nil {
+		return p
+	}
+	return s.protected[protKey{id.GroupKind(), ""}]
+}
+
+// cached reports whether id's namespace is covered by a protected cache,
+// whether or not any tracker protects its kind yet.
+func (s *Shared) cached(id ID) bool {
+	return s.namespaceCached(id.Namespace)
+}
+
+// newServer is the server the protocol and the janitor call the API
+// server through.
+func (s *Shared) newServer() server {
+	var srv server = clientServer{md: s.c.Metadata, mapper: s.c.Mapper}
+	if f := s.hooks.wrapServer; f != nil {
+		srv = f(srv)
+	}
+	return srv
+}
+
+// trackerList returns every tracker.
+func (s *Shared) trackerList() []*Tracker {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*Tracker, 0, len(s.trackers))
+	for _, t := range s.trackers {
+		out = append(out, t)
+	}
+	return out
 }
 
 func (s *Shared) protectedInformers() []*protectedInformer {
@@ -250,13 +315,35 @@ func (s *Shared) protectedInformers() []*protectedInformer {
 }
 
 // Run runs the informers and, once they have synced, the write loops, until
-// ctx is done. It fails at once on a setup error of a Track before it, and
-// when the Namespace informer can't sync (§7.3, §7.5): the process then
-// refuses to start.
-//
-// The write loops come with the next part of the build (plan, PR 3b); until
-// then Run runs the informers.
-func (s *Shared) Run(ctx context.Context) error { return s.RunInformers(ctx) }
+// ctx is done: RunInformers and RunWriteLoops together, for a process that
+// needs no leader election (§6.8) or holds it already. It fails at once on a
+// setup error of a Track before it, and when the Namespace informer can't
+// sync (§7.3, §7.5): the process then refuses to start. When either part
+// fails, it stops the other, and returns the informers' error first.
+func (s *Shared) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	informers, writes := make(chan error, 1), make(chan error, 1)
+	go func() { informers <- s.RunInformers(ctx) }()
+	go func() { writes <- s.RunWriteLoops(ctx) }()
+	select {
+	case err := <-informers:
+		cancel()
+		// The write loops end because the informers did: errInformersEnded,
+		// or nil when ctx ended first, adds nothing. Anything else follows
+		// the informers' error.
+		if werr := <-writes; werr != nil && !errors.Is(werr, errInformersEnded) {
+			return errors.Join(err, werr)
+		}
+		return err
+	case err := <-writes:
+		cancel()
+		if ierr := <-informers; ierr != nil {
+			return ierr
+		}
+		return err
+	}
+}
 
 // RunInformers starts the Namespace informer and waits for it to sync, then
 // starts every holder and protected informer and waits for them, and runs
@@ -292,8 +379,9 @@ func (s *Shared) RunInformers(ctx context.Context) error {
 	s.mu.Unlock()
 	defer close(s.runDone)
 	defer s.queue.ShutDown()
+	defer s.janitor.ShutDown()
 
-	if err := s.canAccess(ctx, namespaceGVR, "get", "list", "watch"); err != nil {
+	if err := s.canAccess(ctx, namespaceGVR, "", "get", "list", "watch"); err != nil {
 		return fmt.Errorf("%w (%w)", errNamespaceSync, err)
 	}
 	for _, inf := range infs {
@@ -313,6 +401,7 @@ func (s *Shared) RunInformers(ctx context.Context) error {
 		}
 	}
 	s.synced.Store(true)
+	close(s.syncedCh)
 	<-ctx.Done()
 	return nil
 }
@@ -326,14 +415,26 @@ func (s *Shared) HasSynced() bool { return s.synced.Load() }
 type informer struct {
 	inf  cache.SharedIndexInformer
 	gvr  schema.GroupVersionResource
+	ns   string // the namespace it is restricted to, or ""
 	what string
+	// clusterList is set for a protected informer restricted to a
+	// namespace (SharedOptions.Namespaces): the objects of its kind
+	// outside the caches are rechecked with a cluster-wide list (§10.5).
+	clusterList bool
 }
 
 // preflight checks that this process may list and watch the informer's
-// resource in every namespace (§7.3: missing RBAC is a setup error).
+// resource, in its namespace or in every namespace (§7.3: missing RBAC is a
+// setup error). A protected informer restricted to a namespace also needs
+// list in every namespace, for §10.5's rechecks outside the caches.
 func (i informer) preflight(ctx context.Context, s *Shared) error {
-	if err := s.canAccess(ctx, i.gvr, "list", "watch"); err != nil {
+	if err := s.canAccess(ctx, i.gvr, i.ns, "list", "watch"); err != nil {
 		return fmt.Errorf("credential-use: cannot run %s: grant list and watch on %s: %w", i.what, i.gvr.GroupResource(), err)
+	}
+	if i.clusterList {
+		if err := s.canAccess(ctx, i.gvr, "", "list"); err != nil {
+			return fmt.Errorf("credential-use: cannot run %s: SharedOptions.Namespaces restricts its cache, and the held objects outside it are rechecked with a list in every namespace (§10.5): grant list on %s in every namespace: %w", i.what, i.gvr.GroupResource(), err)
+		}
 	}
 	return nil
 }
@@ -347,7 +448,7 @@ var ssarGVR = schema.GroupVersionResource{Group: "authorization.k8s.io", Version
 // that falls back to a List does, so a missing verb fails start either way,
 // rather than on the day the fallback runs. Without Clients.Dynamic it
 // can't check, and fails (N2 of the review of #109).
-func (s *Shared) canAccess(ctx context.Context, gvr schema.GroupVersionResource, verbs ...string) error {
+func (s *Shared) canAccess(ctx context.Context, gvr schema.GroupVersionResource, namespace string, verbs ...string) error {
 	if s.c.Dynamic == nil {
 		return errors.New("credential-use: Clients.Dynamic is required")
 	}
@@ -356,7 +457,7 @@ func (s *Shared) canAccess(ctx context.Context, gvr schema.GroupVersionResource,
 			"apiVersion": "authorization.k8s.io/v1",
 			"kind":       "SelfSubjectAccessReview",
 			"spec": map[string]any{"resourceAttributes": map[string]any{
-				"verb": verb, "group": gvr.Group, "resource": gvr.Resource,
+				"verb": verb, "group": gvr.Group, "resource": gvr.Resource, "namespace": namespace,
 			}},
 		}}
 		out, err := s.c.Dynamic.Resource(ssarGVR).Create(ctx, review, metav1.CreateOptions{})
@@ -523,12 +624,7 @@ func (s *Shared) Track(ctx context.Context, o Options) (*Tracker, error) {
 			}
 		}
 	}
-	defer func() {
-		s.mu.Lock()
-		delete(s.tracking, gk)
-		s.mu.Unlock()
-		close(mine.done)
-	}()
+	defer s.endTracking(gk, mine)
 	work, cancel := s.trackCtx(ctx)
 	defer cancel()
 	t, err := s.track(ctx, work, o, mine)
@@ -562,10 +658,71 @@ func (s *Shared) trackCtx(parent context.Context) (context.Context, context.Canc
 }
 
 // An inflight is a Track adding its kind: done is closed when it ends, and
-// t is its tracker once built, for tests.
+// t is its tracker once built, for tests. parked holds the release batches
+// of its kind that a release worker took while it ran (the review of #114):
+// a Track after start replays the shared caches to its handlers, and those
+// batches, the recheck of every hold already cached, reach the queue before
+// the kind is in s.trackers.
 type inflight struct {
-	done chan struct{}
-	t    *Tracker
+	done   chan struct{}
+	t      *Tracker
+	parked []parkedBatch
+}
+
+// A parkedBatch is a release batch held while its kind's Track runs.
+type parkedBatch struct {
+	key batchKey
+	ids []ID
+}
+
+// endTracking ends the Track of gk that mine records: the release batches
+// parked while it ran go back to the queue if it tracked the kind, and are
+// dropped if it failed, which leaves nothing behind (§7.3); a later Track
+// replays the caches again. Only then can another Track of gk start.
+func (s *Shared) endTracking(gk schema.GroupKind, mine *inflight) {
+	s.mu.Lock()
+	delete(s.tracking, gk)
+	parked := mine.parked
+	mine.parked = nil
+	t := s.trackers[gk]
+	// While the write loops run, a kind tracked now needs the recheck
+	// outside the caches that their start gave the kinds tracked before
+	// (§10.5); the replay of the caches covers the cached objects.
+	wctx := s.writeCtx
+	if wctx != nil && wctx.Err() != nil {
+		wctx = nil // the write loops are stopping
+	}
+	if t != nil && wctx != nil {
+		s.writeWG.Add(1)
+	}
+	s.mu.Unlock()
+	if t != nil {
+		for _, b := range parked {
+			s.queue.Add(b.key, b.ids...)
+		}
+		if wctx != nil {
+			go func() {
+				defer s.writeWG.Done()
+				s.recheckUncached(wctx, []*Tracker{t})
+			}()
+		}
+	}
+	close(mine.done)
+}
+
+// trackerOrPark returns the tracker of k's holder kind. While a Track of
+// that kind runs, it parks the batch (k, ids) with that Track instead and
+// returns nil, as it does for a kind nobody tracks or is tracking.
+func (s *Shared) trackerOrPark(k batchKey, ids []ID) *Tracker {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t := s.trackers[k.Holder]; t != nil {
+		return t
+	}
+	if in := s.tracking[k.Holder]; in != nil {
+		in.parked = append(in.parked, parkedBatch{key: k, ids: append([]ID(nil), ids...)})
+	}
+	return nil
 }
 
 // trackFailed wraps err, the failure of a Track of gk, naming the end of
@@ -597,15 +754,20 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	if err != nil {
 		return nil, setupFailed(err)
 	}
+	t.uncached = s.computeUncachedKinds(t)
 	// Build the protected informers that may be missing before taking mu:
 	// the mapper may call the API server.
-	built := map[schema.GroupKind]*protectedInformer{}
+	var keys []protKey
+	built := map[protKey]*protectedInformer{}
 	for _, pk := range o.Protected {
-		p, err := s.newProtectedInformer(pk.GVK)
+		ps, err := s.newProtectedInformers(pk.GVK)
 		if err != nil {
 			return nil, setupFailed(err)
 		}
-		built[pk.GVK.GroupKind()] = p
+		for _, p := range ps {
+			keys = append(keys, p.key())
+			built[p.key()] = p
+		}
 	}
 
 	// Claim each protected informer, installing the missing ones. A claimed
@@ -613,12 +775,11 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	s.mu.Lock()
 	mine.t = t
 	var ps []*protectedInformer
-	for _, pk := range o.Protected {
-		pgk := pk.GVK.GroupKind()
-		p := s.protected[pgk]
+	for _, k := range keys {
+		p := s.protected[k]
 		if p == nil {
-			p = built[pgk]
-			s.protected[pgk] = p
+			p = built[k]
+			s.protected[k] = p
 		}
 		p.claims++
 		ps = append(ps, p)
@@ -673,8 +834,8 @@ func (s *Shared) releaseLocked(ps []*protectedInformer) []context.CancelFunc {
 		if p.claims > 0 || p.runOwned {
 			continue
 		}
-		if s.protected[p.gk] == p {
-			delete(s.protected, p.gk)
+		if s.protected[p.key()] == p {
+			delete(s.protected, p.key())
 		}
 		if p.stop != nil {
 			stops = append(stops, p.stop)
@@ -709,7 +870,7 @@ func (s *Shared) startTracker(ctx, ictx context.Context, t *Tracker, ps []*prote
 		}
 	}
 	for _, p := range ps {
-		if err := s.waitSynced(ctx, t.regs[p].HasSynced, "the handler of "+t.gk.String()+" on "+p.gk.String(), nil); err != nil {
+		if err := s.waitSynced(ctx, t.regs[p].HasSynced, "the handler of "+t.gk.String()+" on "+p.what(), nil); err != nil {
 			return err
 		}
 	}
@@ -757,7 +918,7 @@ func (s *Shared) startShared(ictx context.Context, p *protectedInformer) {
 	s.setStop(p, pstop)
 	_ = p.inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
 		if apierrors.IsForbidden(err) && !p.inf.HasSynced() {
-			p.fail(fmt.Errorf("%w: the protected informer of %s: %w", errForbidden, p.gk, err))
+			p.fail(fmt.Errorf("%w: %s: %w", errForbidden, p.what(), err))
 		}
 	})
 	go func() {
@@ -795,7 +956,7 @@ func (s *Shared) waitShared(ctx context.Context, p *protectedInformer) error {
 			return p.startErr
 		default:
 		}
-		return fmt.Errorf("credential-use: the protected informer of %s didn't sync within this Track's budget: %w", p.gk, ctx.Err())
+		return fmt.Errorf("credential-use: %s didn't sync within this Track's budget: %w", p.what(), ctx.Err())
 	case <-p.failed:
 		return p.startErr
 	}
@@ -903,23 +1064,45 @@ func sameSet[T comparable](a, b []T) bool {
 	return maps.Equal(as, bs)
 }
 
-func (s *Shared) newProtectedInformer(gvk schema.GroupVersionKind) (*protectedInformer, error) {
+// newProtectedInformers builds kind gvk's protected informers: one per
+// namespace of SharedOptions.Namespaces for a namespaced kind, when that is
+// set (§10.5), and otherwise one for every namespace.
+func (s *Shared) newProtectedInformers(gvk schema.GroupVersionKind) ([]*protectedInformer, error) {
 	m, err := s.c.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		return nil, err
 	}
-	p := &protectedInformer{gk: gvk.GroupKind(), gvr: m.Resource, failed: make(chan struct{})}
-	p.lw = newListWatch(s.c.Metadata, m.Resource, heldSelector(), s.clock, nil)
-	p.inf = cache.NewSharedIndexInformerWithOptions(p.lw, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
-		Indexers:          cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		ObjectDescription: "credential-use protected " + gvk.GroupKind().String(),
-	})
-	if err := p.inf.SetTransform(transform(isCredentialUseKey, isCredentialUseKey)); err != nil {
-		return nil, err
+	namespaces := []string{""}
+	if len(s.o.Namespaces) > 0 && m.Scope.Name() == meta.RESTScopeNameNamespace {
+		namespaces = s.o.Namespaces
 	}
-	return p, nil
+	var out []*protectedInformer
+	for _, ns := range namespaces {
+		p := &protectedInformer{gk: gvk.GroupKind(), ns: ns, gvr: m.Resource, failed: make(chan struct{})}
+		p.lw = newListWatch(s.c.Metadata, m.Resource, ns, heldSelector(), s.clock, nil)
+		p.inf = cache.NewSharedIndexInformerWithOptions(p.lw, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
+			Indexers:          cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+			ObjectDescription: "credential-use " + p.what(),
+		})
+		if err := p.inf.SetTransform(transform(isCredentialUseKey, isCredentialUseKey)); err != nil {
+			return nil, err
+		}
+		_, _ = p.inf.AddEventHandler(janitorHandler{s, p})
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (p *protectedInformer) key() protKey { return protKey{p.gk, p.ns} }
+
+// what names p in messages.
+func (p *protectedInformer) what() string {
+	if p.ns == "" {
+		return "the protected informer of " + p.gk.String()
+	}
+	return "the protected informer of " + p.gk.String() + " in namespace " + p.ns
 }
 
 func (p *protectedInformer) informer() informer {
-	return informer{inf: p.inf, gvr: p.gvr, what: "the protected informer of " + p.gk.String()}
+	return informer{inf: p.inf, gvr: p.gvr, ns: p.ns, what: p.what(), clusterList: p.ns != ""}
 }
