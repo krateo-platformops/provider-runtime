@@ -156,6 +156,12 @@ func statusRows() map[string]statusRow {
 			widget:   fresh,
 			provider: absent,
 		},
+		"15bCreatesSkippedByPolicy": {
+			widget: func() *Widget {
+				return newWidget("w", ann(meta.AnnotationKeyManagementPolicy, meta.ManagementPolicyObserveDelete))
+			},
+			provider: absent,
+		},
 		"16LateInitFailed": {
 			widget: func() *Widget { return initialized(newWidget("w", nil)) },
 			provider: func(s *traceServer) *widgetProvider {
