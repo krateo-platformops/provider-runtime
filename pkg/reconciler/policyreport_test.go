@@ -191,15 +191,19 @@ func TestPolicyReportsKeepTheirTransitionTime(t *testing.T) {
 		ready, synced  prv1.ConditionReason
 		changePolicyTo string // non-empty: pass 2 runs under this policy, so Ready must move
 		wantReadyMoved bool
+		unhealthy      bool // Observe reports the existing resource Unavailable, "degraded"
 	}{
-		{"control: default, up to date", "", "", upToDate, prv1.ReasonAvailable, prv1.ReasonReconcileSuccess, "", false},
-		{"observe-only, absent", "observe", "", absent, prv1.ReasonCreateWithheldByPolicy, prv1.ReasonReconcileError, "", false},
-		{"update without create, absent", "observe,update", "", absent, prv1.ReasonCreateWithheldByPolicy, prv1.ReasonReconcileSuccess, "", false},
-		{"update withheld, drifted", "observe-delete", "", drifted, prv1.ReasonUpdateWithheldByPolicy, prv1.ReasonReconcileSuccess, "", false},
-		{"invalid policy, up to date", "observe-create", "", upToDate, prv1.ReasonAvailable, prv1.ReasonManagementPolicyInvalid, "", false},
-		{"invalid policy, absent", "observe-create", "", absent, prv1.ReasonCreateWithheldByPolicy, prv1.ReasonManagementPolicyInvalid, "", false},
-		{"invalid deletion policy, up to date", "", "orphaned", upToDate, prv1.ReasonAvailable, prv1.ReasonDeletionPolicyInvalid, "", false},
-		{"control: the policy changes, so Ready moves", "observe", "", absent, prv1.ReasonCreating, prv1.ReasonReconcileSuccess, meta.ManagementPolicyDefault, true},
+		{"control: default, up to date", "", "", upToDate, prv1.ReasonAvailable, prv1.ReasonReconcileSuccess, "", false, false},
+		{"observe-only, absent", "observe", "", absent, prv1.ReasonCreateWithheldByPolicy, prv1.ReasonReconcileError, "", false, false},
+		{"update without create, absent", "observe,update", "", absent, prv1.ReasonCreateWithheldByPolicy, prv1.ReasonReconcileSuccess, "", false, false},
+		{"update withheld, drifted", "observe-delete", "", drifted, prv1.ReasonUpdateWithheldByPolicy, prv1.ReasonReconcileSuccess, "", false, false},
+		{"invalid policy, up to date", "observe-create", "", upToDate, prv1.ReasonAvailable, prv1.ReasonManagementPolicyInvalid, "", false, false},
+		{"invalid policy, absent", "observe-create", "", absent, prv1.ReasonCreateWithheldByPolicy, prv1.ReasonManagementPolicyInvalid, "", false, false},
+		{"invalid deletion policy, up to date", "", "orphaned", upToDate, prv1.ReasonAvailable, prv1.ReasonDeletionPolicyInvalid, "", false, false},
+		{"control: the policy changes, so Ready moves", "observe", "", absent, prv1.ReasonCreating, prv1.ReasonReconcileSuccess, meta.ManagementPolicyDefault, true, false},
+		// The unhealthy Ready keeps the provider's reason, with the note added;
+		// that condition too must keep its stored time.
+		{"update withheld, drifted and unhealthy", "observe-delete", "", drifted, prv1.ReasonUnavailable, prv1.ReasonReconcileSuccess, "", false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -216,7 +220,16 @@ func TestPolicyReportsKeepTheirTransitionTime(t *testing.T) {
 			var calls mgmtTableCalls
 			r := NewReconciler(&fake.Manager{Client: s.c, Scheme: s.scheme}, resource.ManagedKind(widgetGVK),
 				WithExternalConnecter(ExternalConnectorFn(func(context.Context, resource.Managed) (ExternalClient, error) {
-					return mgmtTableClient(tc.st, &calls), nil
+					c := mgmtTableClient(tc.st, &calls).(*ExternalClientFns)
+					if tc.unhealthy {
+						observe := c.ObserveFn
+						c.ObserveFn = func(ctx context.Context, mg resource.Managed) (ExternalObservation, error) {
+							o, err := observe(ctx, mg)
+							mg.SetConditions(prv1.Unavailable().WithMessage("degraded"))
+							return o, err
+						}
+					}
+					return c, nil
 				})),
 				WithRecorder(&eventCapture{}),
 			)
@@ -255,6 +268,9 @@ func TestPolicyReportsKeepTheirTransitionTime(t *testing.T) {
 			ready, synced := stored.GetCondition(prv1.TypeReady), stored.GetCondition(prv1.TypeSynced)
 			if ready.Reason != tc.ready || synced.Reason != tc.synced {
 				t.Fatalf("after pass 2: Ready %s, Synced %s; want %s, %s", ready.Reason, synced.Reason, tc.ready, tc.synced)
+			}
+			if want := "degraded; " + messageUpdateWithheld; tc.unhealthy && ready.Message != want {
+				t.Fatalf("after pass 2: Ready message %q, want %q", ready.Message, want)
 			}
 			if moved := !ready.LastTransitionTime.Equal(&old); moved != tc.wantReadyMoved {
 				t.Errorf("Ready's LastTransitionTime %v (old %v): moved=%v, want %v", ready.LastTransitionTime, old, moved, tc.wantReadyMoved)
