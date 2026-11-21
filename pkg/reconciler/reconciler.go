@@ -1003,7 +1003,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 				pass.conflict(tracing.StepFinalizer)
 				return rateLimitedRequeue(), nil
 			}
-			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
+			managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileError(err))
 			passErr := errors.Wrap(err, errUpdateManagedStatus)
 			if err := writeStatus(passErr); err != nil {
 				return reconcile.Result{}, err
@@ -1197,7 +1197,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 			log.Debug("Unresolved create handshake: external resource not observed yet, waiting out the recovery grace period",
 				"pendingAge", time.Since(meta.GetExternalCreatePending(managed)).String(),
 				"gracePeriod", r.createRecoveryGracePeriod.String())
-			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(errors.New(errCreateIncomplete)))
+			managed.SetConditions(start.keep(prv1.Creating()), prv1.ReconcileError(errors.New(errCreateIncomplete)))
 			// The pass returns nil here, but errCreateIncomplete is the error it reports, so a
 			// conflict keeps it.
 			if err := writeStatus(errors.New(errCreateIncomplete)); err != nil {
@@ -1305,7 +1305,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 				log.Error(err, "Cannot delete external resource")
 				throttledRecorder.Event(managed, event.Warning(reasonCannotDelete, actionDeleteExternalResource, err))
 				passErr := errors.Wrap(err, errReconcileDelete)
-				managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(passErr))
+				managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileError(passErr))
 				if err := writeStatus(passErr); err != nil {
 					return reconcile.Result{}, err
 				}
@@ -1321,7 +1321,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 			// block and try again.
 			log.Info("Successfully requested deletion of external resource")
 			record.Event(managed, event.Normal(reasonDeleted, actionDeleteEvent, "Successfully requested deletion of external resource"))
-			managed.SetConditions(prv1.Deleting(), prv1.ReconcileSuccess())
+			managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileSuccess())
 			if err := writeStatus(nil); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -1341,7 +1341,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 				pass.conflict(tracing.StepFinalizer)
 				return rateLimitedRequeue(), nil
 			}
-			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
+			managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileError(err))
 			passErr := errors.Wrap(err, errUpdateManagedStatus)
 			if err := writeStatus(passErr); err != nil {
 				return reconcile.Result{}, err
@@ -1410,7 +1410,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 			}
 			throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, errors.Wrap(err, errUpdateManaged)))
 			passErr := errors.Wrap(err, errUpdateManaged)
-			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(passErr))
+			managed.SetConditions(start.keep(prv1.Creating()), prv1.ReconcileError(passErr))
 			if err := writeStatus(passErr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -1464,7 +1464,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 			throttledRecorder.Event(managed, event.Warning(reasonCannotCreate, actionCreateExternalResource, err))
 
 			passErr := errors.Wrap(err, errReconcileCreate)
-			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(passErr))
+			managed.SetConditions(start.keep(prv1.Creating()), prv1.ReconcileError(passErr))
 			if err := writeStatus(passErr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -1492,7 +1492,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 			log.Error(err, errUpdateManagedAnnotations)
 			throttledRecorder.Event(managed, event.Warning(reasonCannotUpdateManaged, actionUpdateExternalResource, errors.Wrap(err, errUpdateManagedAnnotations)))
 			passErr := errors.Wrap(err, errUpdateManagedAnnotations)
-			managed.SetConditions(prv1.Creating(), prv1.ReconcileError(passErr))
+			managed.SetConditions(start.keep(prv1.Creating()), prv1.ReconcileError(passErr))
 			if err := writeStatus(passErr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -1505,7 +1505,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		// ready for use.
 		log.Info("Successfully requested creation of external resource")
 		record.Event(managed, event.Normal(reasonCreated, actionCreateEvent, "Successfully requested creation of external resource"))
-		managed.SetConditions(prv1.Creating(), prv1.ReconcileSuccess())
+		managed.SetConditions(start.keep(prv1.Creating()), prv1.ReconcileSuccess())
 		if err := writeStatus(nil); err != nil {
 			return reconcile.Result{}, err
 		}
