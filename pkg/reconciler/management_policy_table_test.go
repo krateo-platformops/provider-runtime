@@ -34,9 +34,11 @@ package reconciler
 // the two files diff line by line. Columns, tab-separated, in order:
 //
 //	management-policy  unset (no annotation), default, observe-create-update,
-//	                   observe-delete, observe, observe-create (a value the
-//	                   runtime does not know)
-//	deletion-policy    unset (no annotation), delete, orphan
+//	                   observe-delete, observe, observe-create (a value that
+//	                   does not parse: D2), observe,create and create (verb
+//	                   sets: D1, with observe implied: D3)
+//	deletion-policy    unset (no annotation), delete, orphan, orphaned (a
+//	                   value that is neither, which keeps the resource)
 //	state              absent, up-to-date, drifted, deleting-present,
 //	                   deleting-absent
 //	observe, create,   how many times each ExternalClient method was called
@@ -53,7 +55,8 @@ package reconciler
 //	                   Requeue; after=<d> for RequeueAfter; otherwise none
 //
 // An empty cell is -. Rows are management-policy outer, then deletion-policy,
-// then state inner: 90 rows and the header. The API server writes of each row
+// then state inner: 8 × 4 × 5 = 160 rows and the header. The two lists, and
+// their order, are unstructured-runtime's (#116). The API server writes of each row
 // go to t.Log only.
 //
 // Regenerate the golden file with MGMT_TABLE_WRITE=1.
@@ -107,8 +110,9 @@ var mgmtTableStates = []mgmtTableState{
 	{name: "deleting-absent", deleting: true},
 }
 
-// The policy values; "" is the annotation unset. observe-create is not a
-// value the runtime knows.
+// The policy values; "" is the annotation unset. observe-create does not
+// parse (D2); observe,create and create are verb sets (D1, D3); orphaned is a
+// deletion policy that is neither delete nor orphan (Diego, 2026-11-19).
 var (
 	mgmtTableManagementPolicies = []string{
 		"",
@@ -117,11 +121,14 @@ var (
 		meta.ManagementPolicyObserveDelete,
 		meta.ManagementPolicyObserve,
 		"observe-create",
+		"observe,create",
+		"create",
 	}
 	mgmtTableDeletionPolicies = []string{
 		"",
 		meta.DeletionPolicyDelete,
 		meta.DeletionPolicyOrphan,
+		"orphaned",
 	}
 )
 
@@ -167,14 +174,16 @@ func TestManagementPolicyTruthTable(t *testing.T) {
 			}
 		}
 	}
-	if len(rows) != 91 {
-		t.Fatalf("the table has %d lines, header included; want 91 (90 cases and the header)", len(rows))
+	if want := 1 + len(mgmtTableManagementPolicies)*len(mgmtTableDeletionPolicies)*len(mgmtTableStates); len(rows) != want || want != 161 {
+		t.Fatalf("the table has %d lines, header included; want 161 (8 × 4 × 5 cases and the header)", len(rows))
 	}
 	for i, r := range rows {
 		if len(r) != len(mgmtTableColumns) {
 			t.Fatalf("line %d has %d cells, want %d: %q", i, len(r), len(mgmtTableColumns), r)
 		}
 	}
+
+	checkMgmtTableContracts(t, rows[1:])
 
 	var b strings.Builder
 	for _, r := range rows {
@@ -309,4 +318,54 @@ func mgmtJoin(ss []string, sep string) string {
 
 func mgmtTSVSafe(s string) string {
 	return strings.NewReplacer("\t", " ", "\r", " ", "\n", " ").Replace(s)
+}
+
+// checkMgmtTableContracts asserts what unstructured-runtime#110 decided, on
+// the rows themselves, so a golden file regenerated without reading its diff
+// can't change it unseen:
+//
+//   - delete-on-absent (Diego, 2026-11-21): when Observe reports the external
+//     resource absent during a deletion, this runtime removes the finalizer
+//     without calling Delete. unstructured-runtime calls Delete there; each
+//     runtime keeps and documents its own contract.
+//   - D5: a deletion policy that keeps the resource (orphan, or a value that
+//     is neither delete nor orphan) is never overridden by the management
+//     policy: no Delete call, whatever the policy.
+//   - D2: a value that does not parse acts on nothing: no Create, Update or
+//     Delete call.
+//   - D3: "create" is "observe,create": the two rows agree on every cell.
+func checkMgmtTableContracts(t *testing.T, rows [][]string) {
+	t.Helper()
+	col := map[string]int{}
+	for i, c := range mgmtTableColumns {
+		col[c] = i
+	}
+	byKey := map[[3]string][]string{}
+	for _, r := range rows {
+		byKey[[3]string{r[0], r[1], r[2]}] = r
+		key := fmt.Sprintf("%s/%s/%s", r[0], r[1], r[2])
+		if r[2] == "deleting-absent" && (r[col["delete"]] != "0" || r[col["finalizer-removed"]] != "true") {
+			t.Errorf("%s: delete=%s finalizer-removed=%s; this runtime removes the finalizer without a Delete when the resource is absent", key, r[col["delete"]], r[col["finalizer-removed"]])
+		}
+		if (r[1] == meta.DeletionPolicyOrphan || r[1] == "orphaned") && r[col["delete"]] != "0" {
+			t.Errorf("%s: delete=%s; a deletion policy that keeps the resource always wins (D5)", key, r[col["delete"]])
+		}
+		if r[0] == "observe-create" && (r[col["create"]] != "0" || r[col["update"]] != "0" || r[col["delete"]] != "0") {
+			t.Errorf("%s: create=%s update=%s delete=%s; a policy that does not parse acts on nothing (D2)", key, r[col["create"]], r[col["update"]], r[col["delete"]])
+		}
+	}
+	n := 0
+	for k, r := range byKey {
+		if k[0] != "create" {
+			continue
+		}
+		n++
+		o := byKey[[3]string{"observe,create", k[1], k[2]}]
+		if !cmp.Equal(r[3:], o[3:]) {
+			t.Errorf("create/%s/%s differs from observe,create (D3: observe is implied):\n%q\n%q", k[1], k[2], r[3:], o[3:])
+		}
+	}
+	if n != len(mgmtTableDeletionPolicies)*len(mgmtTableStates) {
+		t.Errorf("compared %d create rows, want %d", n, len(mgmtTableDeletionPolicies)*len(mgmtTableStates))
+	}
 }

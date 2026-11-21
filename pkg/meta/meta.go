@@ -4,6 +4,7 @@ package meta
 import (
 	"time"
 
+	"github.com/krateo-platformops/plumbing/managementpolicy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -75,12 +76,19 @@ const (
 	//                 can not create and update it.
 	// observe: The provider can only observe the resource.
 	//          This maps to the read-only scenario where the resource is fully controlled by third party application.
-	AnnotationKeyManagementPolicy = "krateo.io/management-policy"
+	// Since unstructured-runtime#110 (D1) the value may also be a
+	// comma-separated SET of verbs, e.g. "observe,create"; observe is always
+	// implied (D3), and a value that does not parse acts on nothing (D2). The
+	// four names above are aliases for their sets. The definition is
+	// plumbing's managementpolicy, which unstructured-runtime reads too.
+	AnnotationKeyManagementPolicy = managementpolicy.AnnotationKey
 
 	// AnnotationKeyDeletionPolicy is the key in the annotations map
 	// of a resource that determines what should happen to the underlying external
-	// resource when a managed resource is deleted
-	AnnotationKeyDeletionPolicy = "krateo.io/deletion-policy"
+	// resource when a managed resource is deleted: "delete" (or unset) deletes
+	// it when the management policy allows delete, "orphan" keeps it whatever
+	// the management policy says (D5), and any other value keeps it too.
+	AnnotationKeyDeletionPolicy = managementpolicy.DeletionAnnotationKey
 
 	// AnnotationKeyTraceparentContinued is the key in the annotations map of a
 	// managed resource under which provider-runtime records the krateo.io/traceparent
@@ -104,11 +112,11 @@ const (
 
 	// DeletionPolicyOrphan means the external resource will orphaned when its managed
 	// resource is deleted.
-	DeletionPolicyOrphan = "orphan"
+	DeletionPolicyOrphan = managementpolicy.DeletionOrphan
 
 	// DeletionPolicyDelete means both the  external resource will be deleted when its
 	// managed resource is deleted.
-	DeletionPolicyDelete = "delete"
+	DeletionPolicyDelete = managementpolicy.DeletionDelete
 
 	// ActionCreate means to create an Object
 	ActionCreate = "create"
@@ -336,79 +344,65 @@ func IsVerbose(o metav1.Object) bool {
 	return o.GetAnnotations()[AnnotationKeyConnectorVerbose] == "true"
 }
 
+// ManagementDecision is what the reconciler may do to o's external resource,
+// read from its krateo.io/management-policy and krateo.io/deletion-policy
+// annotations by plumbing's managementpolicy package, the one definition
+// provider-runtime and unstructured-runtime share (unstructured-runtime#110,
+// D9). The reconciler consults it; nothing in this runtime parses either
+// annotation itself.
+//
+// It reads no declared verbs (D8): nil means "no verb information", so the
+// policy alone decides, as before.
+func ManagementDecision(o metav1.Object) managementpolicy.Decision {
+	return managementpolicy.For(o.GetAnnotations(), nil)
+}
+
 // IsActionAllowed determines if action is allowed to be performed on Object.
 //
 // Deprecated: the reconciler doesn't use it, and its answer for delete
 // differs from what the reconciler does: it ignores
 // krateo.io/deletion-policy, so under the default policy it allows a delete
-// that orphan forbids. Use ShouldCreate, ShouldUpdate and ShouldDelete, the
-// predicates the reconciler's gates call.
+// that orphan forbids. Use ManagementDecision, which is what the reconciler
+// consults. It reads the policy through managementpolicy, so a verb set such
+// as "observe,create" is understood; for the four presets, an unset
+// annotation and a value that does not parse, its answers are the ones it
+// always gave, and for delete it still ignores the deletion policy.
 func IsActionAllowed(o metav1.Object, action string) bool {
-	p := o.GetAnnotations()[AnnotationKeyManagementPolicy]
-	if len(p) == 0 {
-		p = ManagementPolicyDefault
-	}
-
-	if action == ActionCreate || action == ActionUpdate {
-		return p == ManagementPolicyDefault || p == ManagementPolicyObserveCreateUpdate
-	}
-
-	// ObjectActionDelete
-	return p == ManagementPolicyDefault || p == ManagementPolicyObserveDelete
+	return ManagementDecision(o).Policy.Allows(managementpolicy.Verb(action))
 }
 
-// ShouldDelete determines if the external resource will orphaned
+// ShouldDelete reports whether the external resource is deleted with o: the
+// policy allows delete, and the deletion policy keeps nothing.
+// krateo.io/deletion-policy: orphan always wins (D5), and a deletion policy
+// that is neither delete nor orphan keeps the resource too.
+//
+// Deprecated: use ManagementDecision(o).May(managementpolicy.Delete).
 func ShouldDelete(o metav1.Object) bool {
-	mp := o.GetAnnotations()[AnnotationKeyManagementPolicy]
-	if len(mp) == 0 {
-		mp = ManagementPolicyDefault
-	}
-
-	dp := o.GetAnnotations()[AnnotationKeyDeletionPolicy]
-	if len(dp) == 0 {
-		dp = DeletionPolicyDelete
-	}
-
-	if dp == DeletionPolicyDelete && mp == ManagementPolicyDefault {
-		return true
-	}
-
-	if mp == ManagementPolicyObserveDelete {
-		return true
-	}
-
-	return false
+	return ManagementDecision(o).May(managementpolicy.Delete)
 }
 
-// ShouldOnlyObserve returns true if the Observe action is allowed and all
-// other actions are not allowed.
+// ShouldOnlyObserve returns true if the policy allows observe and nothing
+// else: the "observe" preset, the set "observe", or a value that does not
+// parse (D2: an invalid policy acts on nothing).
+//
+// Deprecated: read ManagementDecision(o).Policy.
 func ShouldOnlyObserve(o metav1.Object) bool {
-	mp := o.GetAnnotations()[AnnotationKeyManagementPolicy]
-	if len(mp) == 0 {
-		mp = ManagementPolicyDefault
-	}
-
-	return mp == ManagementPolicyObserve
+	p := ManagementDecision(o).Policy
+	return !p.Allows(managementpolicy.Create) && !p.Allows(managementpolicy.Update) && !p.Allows(managementpolicy.Delete)
 }
 
 // ShouldCreate returns true if the Create action is allowed.
+//
+// Deprecated: use ManagementDecision(o).May(managementpolicy.Create).
 func ShouldCreate(o metav1.Object) bool {
-	mp := o.GetAnnotations()[AnnotationKeyManagementPolicy]
-	if len(mp) == 0 {
-		mp = ManagementPolicyDefault
-	}
-
-	return mp == ManagementPolicyDefault || mp == ManagementPolicyObserveCreateUpdate
+	return ManagementDecision(o).May(managementpolicy.Create)
 }
 
 // ShouldUpdate returns true if the Update action is allowed.
+//
+// Deprecated: use ManagementDecision(o).May(managementpolicy.Update).
 func ShouldUpdate(o metav1.Object) bool {
-	mp := o.GetAnnotations()[AnnotationKeyManagementPolicy]
-	if len(mp) == 0 {
-		mp = ManagementPolicyDefault
-	}
-
-	return mp == ManagementPolicyDefault || mp == ManagementPolicyObserveCreateUpdate
+	return ManagementDecision(o).May(managementpolicy.Update)
 }
 
 // The W3C trace context of the reconcile that created or last changed an
