@@ -26,8 +26,9 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     is a `ReconcileError` with the observe-only event, where it was a silent
     success.
   - **Whitespace around a value is ignored** (2026-11-21, from the review of
-    #115). A padded value used to match nothing: it acted on nothing and kept
-    the external resource. **A deletion policy of `"delete\n"` (a Helm block
+    #115). A padded value used to match no preset: a padded management policy
+    acted on nothing, and a padded deletion policy kept the external resource
+    (except under `observe-delete`, which deleted regardless). **A deletion policy of `"delete\n"` (a Helm block
     scalar) or `" delete"` now deletes it**, as `delete` does, and
     `" default"` now manages fully. unstructured-runtime does the same since
     v1.30.0.
@@ -41,8 +42,19 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 - `ShouldCreate`, `ShouldUpdate`, `ShouldDelete` and `ShouldOnlyObserve` are
   deprecated wrappers over it. `IsActionAllowed` keeps every answer it gave
   for the presets, an unset annotation and a value that doesn't parse.
-- Not yet: the `CreateWithheldByPolicy`, `UpdateWithheldByPolicy`,
-  `ManagementPolicyInvalid` and `DeletionPolicyInvalid` reasons (D2, D4, D7).
+- **The policy is reported** (D2, D4; the user's decisions of 2026-11-21).
+  The reconciler, not each provider, writes a withheld verb on Ready:
+  `False/CreateWithheldByPolicy` for an absent resource it won't create, and
+  `True/UpdateWithheldByPolicy` in place of a healthy Ready on drift it won't
+  correct (an unhealthy Ready keeps its reason, with a note). An annotation
+  that doesn't parse wins over the pass's outcome on Synced:
+  `ManagementPolicyInvalid`, else `DeletionPolicyInvalid`. The observe-only
+  event is `ExternalResourceAbsentUnderPolicy`, as in unstructured-runtime.
+  On the shared inputs, Synced moves on the same 33 rows as in
+  unstructured-runtime#117.
+- **The release route** (the user's decision, 2026-11-21): this work ships
+  as v1.21.0 from `release/v1.21`, cut from v1.20.1, so it doesn't wait for
+  the credential-use stack on main.
 
 ## 2026-11-18 — v1.20.1: the external-create markers are written in UTC
 - **A patch release, cut from v1.20.0 on `release/v1.20`.** main carries the
