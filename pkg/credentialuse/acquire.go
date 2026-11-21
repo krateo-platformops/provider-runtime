@@ -201,6 +201,9 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// Deleting), so what lies behind it is unknown. The record then keeps
 	// every ref it names: a ref behind that hop must stay held, as the
 	// record was (§9.1, §8), while the holder may still read through it.
+	// The record stores IDs, not which hop led to which, so a ref the
+	// holder stopped naming for another reason is kept too, until a pass
+	// follows the whole chain again: a longer hold, which §5 bounds.
 	unfollowed := false
 	exact := func() []ID {
 		want := SortedIDs(slices.Collect(maps.Keys(byID)))

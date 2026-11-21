@@ -513,7 +513,10 @@ of tests.
 - **A hop with a `Next` that a pass can't hold** (Missing, Deleting) leaves
   the record's refs in place, since what lies behind it is unknown (the
   review of #122: without it, a Degraded pass dropped the Secret behind a
-  deleting Target, which a release could then take).
+  deleting Target, which a release could then take). The record stores
+  IDs, not which hop led to which, so a ref the holder stopped naming for
+  another reason stays recorded too until a pass follows the whole chain
+  again: a longer hold, never a shorter one, and §5 bounds it.
 - **An unparseable record** names nothing to keep, so a chain behind it is
   exposed until the pass's last A1, as for any ref of such a holder; only
   someone else's write makes a record unparseable.
