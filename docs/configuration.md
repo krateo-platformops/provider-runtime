@@ -163,10 +163,10 @@ so the two runtimes give every value the same meaning
   `observe-delete` and `observe` are what they name. Unset or empty is
   `default`.
 - **A value that doesn't parse acts on nothing.** An unknown verb or an empty
-  entry (`observe-create`, `observe,,create`) is observe-only: an absent
-  resource is a `ReconcileError` with a `CannotObserveExternalResource` event,
-  and nothing is created, updated or deleted. A typo meant to restrict never
-  widens into full management.
+  entry (`observe-create`, `observe,,create`) is observe-only: nothing is
+  created, updated or deleted, and Synced reads
+  `False/ManagementPolicyInvalid`, naming the bad token. A typo meant to
+  restrict never widens into full management.
 - **`orphan` always wins.** The external resource is deleted only when the
   set allows `delete` and `krateo.io/deletion-policy` is unset or `delete`.
   `orphan` keeps it under every policy, `observe-delete` included, and any
@@ -174,18 +174,33 @@ so the two runtimes give every value the same meaning
 - **Whitespace is ignored** around either annotation and around a set's
   entries: `" observe , create "` is `observe,create`, and a deletion policy
   of `"delete\n"` (a Helm block scalar's trailing newline) is `delete`.
-  Before, a padded value matched nothing, so it acted on nothing and kept the
-  external resource; it now does what its trimmed value says, which for
-  `"delete\n"` means the external resource is deleted with the object (the
+  Before, a padded value matched no preset: a padded management policy acted
+  on nothing, and a padded deletion policy kept the external resource (except
+  under `observe-delete`, which deleted whatever the deletion policy said). It
+  now does what its trimmed value says, which for `"delete\n"` means the
+  external resource is deleted with the object (the
   user's decision, 2026-11-21; unstructured-runtime has done the same since
   v1.30.0).
-- **A withheld verb is not reported yet.** An absent resource under a policy
-  that withholds `create` but allows another write verb (`observe-delete`) is
-  a plain success (`Synced=True`), and so is a drifted resource under any
-  policy that withholds `update`. Only an observe-only policy reports an
-  absent resource, as an error. The reasons `CreateWithheldByPolicy`,
-  `UpdateWithheldByPolicy`, `ManagementPolicyInvalid` and
-  `DeletionPolicyInvalid` come next, in both runtimes.
+- **A withheld verb is reported on Ready** (D4). The reconciler writes it,
+  for every provider, after `Observe`:
+  - An absent resource whose create is withheld reads
+    `Ready=False/CreateWithheldByPolicy`: only a human changes it. Synced is
+    `True`, except under an observe-only policy, where the pass is a
+    `ReconcileError` with an `ExternalResourceAbsentUnderPolicy` Warning event.
+  - A drifted resource whose update is withheld reads
+    `Ready=True/UpdateWithheldByPolicy` when `Observe` reported it healthy.
+    An unhealthy `Ready` keeps the provider's status and reason, with
+    "updates are withheld by policy" added to its message. Synced is `True`.
+- **An annotation that doesn't parse is reported on Synced** (D2), over the
+  pass's own outcome: `Synced=False/ManagementPolicyInvalid` first, and else
+  `Synced=False/DeletionPolicyInvalid`, on every pass while the deletion
+  policy is unrecognised, not only on deletion. When both are invalid,
+  ManagementPolicyInvalid's message names the deletion policy too. The pass's
+  error and events are unchanged, and a paused or deferred pass keeps its own
+  reason. Every status write goes through one place, so no path skips it.
+- **The reasons are both runtimes'.** The literals are plumbing's, the ones
+  unstructured-runtime reports. On the truth table's shared inputs, Synced's
+  reason equals unstructured-runtime's on every row outside a deletion.
 - **When an edit takes effect** is the controller's choice: provider-runtime
   adds no event filter, so a controller set up with a plain `For(&T{})`
   (git-provider, for one) reconciles a policy edit at once, while one whose

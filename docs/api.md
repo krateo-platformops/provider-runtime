@@ -36,8 +36,8 @@ types, by package:
 
 ## `apis/common/v1`
 
-- `Condition` (`Type`, `Status`, `LastTransitionTime`, `Reason`, `Message`), `ConditionType` (`TypeReady`, `TypeSynced`), `ConditionReason` (`Available`, `Unavailable`, `Creating`, `Deleting`, `NotObserved`, `ReconcileSuccess`, `ReconcileError`, `ReconcilePaused`, `ReconcileDeferred`).
-- `ConditionedStatus` with `GetCondition`/`SetConditions`/`Equal`; constructors `Creating()`, `Deleting()`, `Available()`, `Unavailable()`, `NotObserved()` (`Ready` `Unknown`, set by the runtime when it can't observe; since v1.8.0), `ReconcileSuccess()`, `ReconcileError(err)`, `ReconcilePaused()`, `ReconcileDeferred(msg)` (`Synced=False`; unreleased).
+- `Condition` (`Type`, `Status`, `LastTransitionTime`, `Reason`, `Message`), `ConditionType` (`TypeReady`, `TypeSynced`), `ConditionReason` (`Available`, `Unavailable`, `Creating`, `Deleting`, `NotObserved`, `ReconcileSuccess`, `ReconcileError`, `ReconcilePaused`, `ReconcileDeferred`, and, unreleased, `CreateWithheldByPolicy`, `UpdateWithheldByPolicy` (Ready), `ManagementPolicyInvalid`, `DeletionPolicyInvalid` (Synced), whose literals are plumbing `managementpolicy`'s).
+- `ConditionedStatus` with `GetCondition`/`SetConditions`/`Equal`; constructors `Creating()`, `Deleting()`, `Available()`, `Unavailable()`, `NotObserved()` (`Ready` `Unknown`, set by the runtime when it can't observe; since v1.8.0), `ReconcileSuccess()`, `ReconcileError(err)`, `ReconcilePaused()`, `ReconcileDeferred(msg)` (`Synced=False`; unreleased), and, unreleased, `CreateWithheldByPolicy(msg)` (`Ready=False`), `UpdateWithheldByPolicy(msg)` (`Ready=True`), `ManagementPolicyInvalid(msg)` and `DeletionPolicyInvalid(msg)` (`Synced=False`), which the reconciler sets for the management policy (see [configuration](./configuration.md#management-policy)).
 - `ReasonReconcileDeferred` (`"ReconcileDeferred"`) is a consumer contract shared with unstructured-runtime's `condition.ReasonReconcileDeferred`; a test pins the literal.
 - Selector types CRDs embed: `Reference`, `EnvSelector`, `SecretKeySelector`, `ConfigMapKeySelector`, `CredentialSelectors`.
 

@@ -3,6 +3,7 @@ package v1
 import (
 	"sort"
 
+	"github.com/krateo-platformops/plumbing/managementpolicy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -34,6 +35,18 @@ const (
 	// the provider last reported. The error is on the Synced condition.
 	// Readers match this value by equality; do not change it.
 	ReasonNotObserved ConditionReason = "NotObserved"
+
+	// ReasonCreateWithheldByPolicy (Ready=False) means the external resource
+	// is absent and krateo.io/management-policy withholds create, so only a
+	// human changes it (unstructured-runtime#110, D4). The reconciler sets it.
+	ReasonCreateWithheldByPolicy ConditionReason = managementpolicy.ReasonCreateWithheld
+
+	// ReasonUpdateWithheldByPolicy (Ready=True) means the external resource
+	// exists and is healthy, but differs from the desired state, and
+	// krateo.io/management-policy withholds update, so the drift is not
+	// corrected (D4). The reconciler sets it in place of a healthy Ready
+	// only; an unhealthy Ready keeps its reason.
+	ReasonUpdateWithheldByPolicy ConditionReason = managementpolicy.ReasonUpdateWithheld
 )
 
 // Reasons a resource is or is not synced.
@@ -53,6 +66,17 @@ const (
 	// runtimes deferring against one endpoint must report it in the same word.
 	// Do not change it. See TestReasonReconcileDeferredIsAConsumerContract.
 	ReasonReconcileDeferred ConditionReason = "ReconcileDeferred"
+
+	// ReasonManagementPolicyInvalid (Synced=False) means
+	// krateo.io/management-policy does not parse, so the reconciler acts on
+	// nothing (D2). It replaces the pass's ReconcileSuccess or ReconcileError:
+	// fixing the annotation is what changes the outcome.
+	ReasonManagementPolicyInvalid ConditionReason = managementpolicy.ReasonInvalid
+
+	// ReasonDeletionPolicyInvalid (Synced=False) means krateo.io/deletion-policy
+	// is neither delete nor orphan, so the external resource will be kept. It
+	// is reported on every pass while the value is set, not only on deletion.
+	ReasonDeletionPolicyInvalid ConditionReason = managementpolicy.ReasonDeletionPolicyInvalid
 )
 
 // A Condition that may apply to a resource.
@@ -284,6 +308,56 @@ func ReconcileDeferred(msg string) Condition {
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: metav1.Now(),
 		Reason:             ReasonReconcileDeferred,
+		Message:            msg,
+	}
+}
+
+// CreateWithheldByPolicy returns a Ready=False condition for an absent
+// external resource that the management policy doesn't let the reconciler
+// create; msg names the policy.
+func CreateWithheldByPolicy(msg string) Condition {
+	return Condition{
+		Type:               TypeReady,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonCreateWithheldByPolicy,
+		Message:            msg,
+	}
+}
+
+// UpdateWithheldByPolicy returns a Ready=True condition for a healthy
+// external resource whose drift the management policy doesn't let the
+// reconciler correct; msg names the policy.
+func UpdateWithheldByPolicy(msg string) Condition {
+	return Condition{
+		Type:               TypeReady,
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonUpdateWithheldByPolicy,
+		Message:            msg,
+	}
+}
+
+// ManagementPolicyInvalid returns a Synced=False condition for an object
+// whose krateo.io/management-policy doesn't parse; msg says why.
+func ManagementPolicyInvalid(msg string) Condition {
+	return Condition{
+		Type:               TypeSynced,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonManagementPolicyInvalid,
+		Message:            msg,
+	}
+}
+
+// DeletionPolicyInvalid returns a Synced=False condition for an object whose
+// krateo.io/deletion-policy is neither delete nor orphan; msg says why.
+func DeletionPolicyInvalid(msg string) Condition {
+	return Condition{
+		Type:               TypeSynced,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             ReasonDeletionPolicyInvalid,
 		Message:            msg,
 	}
 }

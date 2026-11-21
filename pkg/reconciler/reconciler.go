@@ -69,11 +69,15 @@ const (
 const ReasonReadyNotSetAfterObserve event.Reason = "ReadyNotSetAfterObserve"
 
 const (
-	reasonCannotConnect       event.Reason = "CannotConnectToProvider"
-	reasonCannotDisconnect    event.Reason = "CannotDisconnectFromProvider"
-	reasonCannotInitialize    event.Reason = "CannotInitializeManagedResource"
-	reasonCannotResolveRefs   event.Reason = "CannotResolveResourceReferences"
-	reasonCannotObserve       event.Reason = "CannotObserveExternalResource"
+	reasonCannotConnect     event.Reason = "CannotConnectToProvider"
+	reasonCannotDisconnect  event.Reason = "CannotDisconnectFromProvider"
+	reasonCannotInitialize  event.Reason = "CannotInitializeManagedResource"
+	reasonCannotResolveRefs event.Reason = "CannotResolveResourceReferences"
+	reasonCannotObserve     event.Reason = "CannotObserveExternalResource"
+	// reasonAbsentUnderPolicy is the Warning for an absent resource under an
+	// observe-only policy: not a failure to observe, so not reasonCannotObserve.
+	// The literal is plumbing's, the one unstructured-runtime records.
+	reasonAbsentUnderPolicy   event.Reason = managementpolicy.EventAbsentUnderPolicy
 	reasonCannotCreate        event.Reason = "CannotCreateExternalResource"
 	reasonCannotDelete        event.Reason = "CannotDeleteExternalResource"
 	reasonCannotPublish       event.Reason = "CannotPublishConnectionDetails"
@@ -936,11 +940,18 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	if r.apiReader != nil {
 		read, _ = managed.DeepCopyObject().(resource.Managed)
 	}
+	// start is Ready and Synced as the pass read them. A policy report the
+	// pass writes again unchanged keeps its stored transition time (keep), so
+	// a steady withheld or invalid state writes back an unchanged status.
+	start := passConditions{ready: managed.GetCondition(prv1.TypeReady), synced: managed.GetCondition(prv1.TypeSynced)}
 	// writeStatus is every status write of the pass. Each is the last write of
-	// its path. passErr is the error the path goes on to return, or nil. A
+	// its path. It reports an annotation that doesn't parse on Synced first
+	// (policySynced), so no path can forget it
+	// (TestNoStatusWriteBypassesWriteStatus). passErr is the error the path goes on to return, or nil. A
 	// conflict isn't retried: it stays an error, which names the likely cause
 	// and keeps passErr (see ExternalClient, and statusConflict).
 	writeStatus := func(passErr error) error {
+		policySynced(managed, start)
 		started := time.Now()
 		err := r.client.Status().Update(ctx, managed)
 		r.recordStatusUpdate(ctx, started, err)
@@ -1250,9 +1261,9 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	// not parse (D2: an invalid policy acts on nothing).
 	if p := meta.ManagementDecision(managed).Policy; !observation.ResourceExists &&
 		!p.Allows(managementpolicy.Create) && !p.Allows(managementpolicy.Update) && !p.Allows(managementpolicy.Delete) {
-		throttledRecorder.Event(managed, event.Warning(reasonCannotObserve, actionObserveExternalResource, errors.New(errExternalResourceNotExist)))
+		throttledRecorder.Event(managed, event.Warning(reasonAbsentUnderPolicy, actionObserveExternalResource, errors.New(errExternalResourceNotExist)))
 		passErr := errors.Wrap(errors.New(errExternalResourceNotExist), errReconcileObserve)
-		managed.SetConditions(prv1.ReconcileError(passErr))
+		managed.SetConditions(start.keep(prv1.CreateWithheldByPolicy(createWithheldMessage(managed))), prv1.ReconcileError(passErr))
 		if err := writeStatus(passErr); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -1515,7 +1526,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	if !observation.ResourceExists {
 		reconcileAfter := r.pollIntervalHook(managed, r.pollInterval)
 		log.Debug("Skipping create due to managementPolicies. Reconciliation succeeded", "requeue-after", time.Now().Add(reconcileAfter))
-		managed.SetConditions(prv1.ReconcileSuccess())
+		managed.SetConditions(start.keep(prv1.CreateWithheldByPolicy(createWithheldMessage(managed))), prv1.ReconcileSuccess())
 		if err := writeStatus(nil); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -1573,7 +1584,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	if !meta.ManagementDecision(managed).May(managementpolicy.Update) {
 		reconcileAfter := r.pollIntervalHook(managed, r.pollInterval)
 		log.Debug("Skipping update due to managementPolicies. Reconciliation succeeded", "requeue-after", time.Now().Add(reconcileAfter))
-		managed.SetConditions(prv1.ReconcileSuccess())
+		managed.SetConditions(start.keep(updateWithheldReady(managed.GetCondition(prv1.TypeReady), managed)), prv1.ReconcileSuccess())
 		if err := writeStatus(nil); err != nil {
 			return reconcile.Result{}, err
 		}
