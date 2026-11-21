@@ -165,7 +165,7 @@ func TestNoStatusWriteBypassesWriteStatus(t *testing.T) {
 	i := strings.Index(string(src), "writeStatus := func(passErr error) error {")
 	j := strings.Index(string(src), "r.client.Status().Update(ctx, managed)")
 	k := strings.Index(string(src), "policySynced(managed)")
-	if i < 0 || j < 0 || k < 0 || !(i < k && k < j) {
+	if i < 0 || j < 0 || k < 0 || i >= k || k >= j {
 		t.Fatalf("writeStatus must call policySynced before its Status().Update (offsets %d, %d, %d)", i, k, j)
 	}
 }
