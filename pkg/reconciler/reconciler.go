@@ -1009,7 +1009,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 				pass.conflict(tracing.StepFinalizer)
 				return rateLimitedRequeue(), nil
 			}
-			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
+			managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileError(err))
 			passErr := errors.Wrap(err, errUpdateManagedStatus)
 			if err := writeStatus(passErr); err != nil {
 				return reconcile.Result{}, err
@@ -1311,7 +1311,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 				log.Error(err, "Cannot delete external resource")
 				throttledRecorder.Event(managed, event.Warning(reasonCannotDelete, actionDeleteExternalResource, err))
 				passErr := errors.Wrap(err, errReconcileDelete)
-				managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(passErr))
+				managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileError(passErr))
 				if err := writeStatus(passErr); err != nil {
 					return reconcile.Result{}, err
 				}
@@ -1327,7 +1327,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 			// block and try again.
 			log.Info("Successfully requested deletion of external resource")
 			record.Event(managed, event.Normal(reasonDeleted, actionDeleteEvent, "Successfully requested deletion of external resource"))
-			managed.SetConditions(prv1.Deleting(), prv1.ReconcileSuccess())
+			managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileSuccess())
 			if err := writeStatus(nil); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -1347,7 +1347,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 				pass.conflict(tracing.StepFinalizer)
 				return rateLimitedRequeue(), nil
 			}
-			managed.SetConditions(prv1.Deleting(), prv1.ReconcileError(err))
+			managed.SetConditions(start.keep(prv1.Deleting()), prv1.ReconcileError(err))
 			passErr := errors.Wrap(err, errUpdateManagedStatus)
 			if err := writeStatus(passErr); err != nil {
 				return reconcile.Result{}, err

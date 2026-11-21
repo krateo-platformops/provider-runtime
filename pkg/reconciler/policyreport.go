@@ -54,6 +54,8 @@ func policySynced(managed resource.Managed, start passConditions) {
 }
 
 // passConditions is Ready and Synced as a pass read them, before it set any.
+// The reconciler's own Ready=Deleting goes through keep too: during a deletion
+// that takes several passes, Observe sets Ready before Deleting is set again.
 type passConditions struct{ ready, synced prv1.Condition }
 
 // keep returns the condition the pass read when c equals it in type, status,
