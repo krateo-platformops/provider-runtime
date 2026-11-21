@@ -505,9 +505,18 @@ of tests.
   and only the last A1 writes exactly what the whole chain names.
 - **A level of refs already met ends there**, so a cycle ends, and isn't
   counted against `MaxDepth`.
-- **A `Next` on a kind without `Content` gets a live metadata read**: full
-  labels and annotations, no data. The protected caches keep only
-  `credential-use.` keys, which a `Next` couldn't use.
+- **A held ref with a `Next` must be of a kind with `Content`** (the user's
+  decision, from the review of #122): a re-point of a metadata-only object
+  would go unseen, so it is an Acquire error naming the fix. A `Guaranteed`
+  ref isn't held and may have one on any kind. Every `Next` gets the object
+  without `managedFields` and `status`, however it was read.
+- **A hop with a `Next` that a pass can't hold** (Missing, Deleting) leaves
+  the record's refs in place, since what lies behind it is unknown (the
+  review of #122: without it, a Degraded pass dropped the Secret behind a
+  deleting Target, which a release could then take).
+- **An unparseable record** names nothing to keep, so a chain behind it is
+  exposed until the pass's last A1, as for any ref of such a holder; only
+  someone else's write makes a record unparseable.
 - **A `Guaranteed` ref that can't be read is an Acquire error**, never
   Missing: `BeforeEstablish` would then hold it.
 - **`BeforeEstablish` refuses to establish** when a Missing hop with a `Next`
@@ -587,6 +596,13 @@ it reset only on a successful read (M2 of #52's review)?
 
 **Depends on:** PR 4. **Size:** about 900 lines of production code and 1,200
 of tests.
+
+**Carried from PR 4's review** (#122): the self-write filter sets aside
+every `credential-use.` annotation, and `credential-use.krateo.io/allow-holders-from`
+is one that a human writes. So a consent change on a content kind's object
+would be taken for the tracker's own write and enqueue no holder. PR 5 must
+either keep that key in the filter's comparison or enqueue on a consent
+change by its own path.
 
 ### PR 6: Disown and `DisownPrefix`
 

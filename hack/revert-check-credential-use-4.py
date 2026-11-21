@@ -65,12 +65,6 @@ MUTANTS = [
     ('Resolved shares its object with the caller', 'chain.go',
      [('\treturn u.DeepCopy(), true\n}',
        '\treturn u, true\n}')]),
-    ('a content kind is read as metadata', 'chain.go',
-     [('\tif p.contentKinds[gk] {\n\t\tif p.contentCache != nil {',
-       '\tif false {\n\t\tif p.contentCache != nil {')]),
-    ('a kind without Content is read as content', 'chain.go',
-     [('\tif p.contentKinds[gk] {\n\t\tif p.contentCache != nil {',
-       '\tif true {\n\t\tif p.contentCache != nil {')]),
     ("the caller's lister isn't used", 'chain.go',
      [('\tif l := p.listers[r.GroupKind]; l != nil {',
        '\tif l := p.listers[r.GroupKind]; false {\n\t\t_ = l')]),
@@ -110,6 +104,18 @@ MUTANTS = [
     ('holder kinds may disagree on Content', 'shared.go',
      [('\t\tif p.content != built[k].content {',
        '\t\tif false {')]),
+    ("a held ref with a Next needn't be Content", 'acquire.go',
+     [('\t\t\t\tif r.Next != nil && !p.contentKinds[r.GroupKind] {',
+       '\t\t\t\tif false {')]),
+    ('an unfollowed hop drops what it leads to', 'acquire.go',
+     [('\t\tif unfollowed {\n',
+       '\t\tif unfollowed && false {\n')]),
+    ('a live hop read keeps status', 'chain.go',
+     [('\treturn asCached(u), nil\n}\n\n// asCached',
+       '\treturn u, nil\n}\n\n// asCached')]),
+    ("a lister's object keeps status", 'chain.go',
+     [('\t\treturn asCached(u), nil\n\t}\n\tu, err := p.contents',
+       '\t\treturn u.DeepCopy(), nil\n\t}\n\tu, err := p.contents')]),
 ]
 
 EQUIVALENT = {}
@@ -128,8 +134,6 @@ KILLERS = {
     'BeforeEstablish establishes with a chain unheld': 'TestChainFailures',
     'a Next error is ignored': 'TestChainFailures',
     'Resolved shares its object with the caller': 'TestResolvedIsTheHeldReadNotANewerOne',
-    'a content kind is read as metadata': 'TestChainHoldsEachHopBeforeReadingIt',
-    'a kind without Content is read as content': 'TestChainNextOnAKindWithoutContentGetsMetadata',
     "the caller's lister isn't used": 'TestChainGuaranteedRefs',
     "a foreign change to a content kind doesn't enqueue its holders": 'TestARepointedTargetEnqueuesItsHolders|TestARepointedConfigMapEnqueuesItsHolders',
     "our annotations count as someone else's": 'TestForeignChange',
@@ -143,6 +147,10 @@ KILLERS = {
     "a content object isn't seen as metadata": 'TestChainTeardown|TestARepointedTargetEnqueuesItsHolders',
     "a content kind's informer caches metadata only": 'TestARepointedTargetEnqueuesItsHolders|TestARepointedConfigMapEnqueuesItsHolders',
     'holder kinds may disagree on Content': 'TestContentMustAgreeAcrossKinds',
+    "a held ref with a Next needn't be Content": 'TestChainNextNeedsContent',
+    'an unfollowed hop drops what it leads to': 'TestChainKeepsWhatAnUnfollowedHopLeadsTo',
+    'a live hop read keeps status': 'TestChainHoldsEachHopBeforeReadingIt',
+    "a lister's object keeps status": 'TestChainGuaranteedRefs',
 }
 
 ALL = sorted({t for ts in KILLERS.values() for t in ts.split("|")})

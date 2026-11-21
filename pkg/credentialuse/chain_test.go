@@ -38,7 +38,8 @@ func (f *fakeContents) Content(_ context.Context, gk schema.GroupKind, namespace
 	if err != nil {
 		return nil, err
 	}
-	u := &unstructured.Unstructured{Object: map[string]any{"metadata": md}}
+	// A status, as the server would return, which no Next may see.
+	u := &unstructured.Unstructured{Object: map[string]any{"metadata": md, "status": map[string]any{"ready": true}}}
 	u.SetKind(gk.Kind)
 	if spec, ok := f.specs[ID{Group: gk.Group, Kind: gk.Kind, Namespace: namespace, Name: name}]; ok {
 		u.Object["spec"] = runtime.DeepCopyJSONValue(spec)
@@ -127,6 +128,9 @@ func TestChainHoldsEachHopBeforeReadingIt(t *testing.T) {
 	}
 	if name, _, _ := unstructured.NestedString(got.Object, "spec", "ref", "name"); name != "kubeconfig" {
 		t.Errorf("Resolved's spec.ref.name = %q", name)
+	}
+	if _, has := got.Object["status"]; has {
+		t.Error("a live read of a hop kept its status")
 	}
 }
 
@@ -295,8 +299,12 @@ func TestChainGuaranteedRefs(t *testing.T) {
 			return fc.Content(ctx, targetGK, ns, name)
 		}}
 		r.srv.calls = nil
-		if a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{guaranteed()}); err != nil || len(a.Held) != 1 || listed != 1 {
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{guaranteed()})
+		if err != nil || len(a.Held) != 1 || listed != 1 {
 			t.Fatalf("acquire = %+v, %v, listed %d", a, err, listed)
+		}
+		if got, ok := Resolved(WithResolved(ctx, a), guaranteed()); !ok || got.Object["status"] != nil {
+			t.Errorf("Resolved = %v, %v; want the lister's object without its status", got, ok)
 		}
 	})
 	t.Run("one that can't be read fails, and isn't Missing", func(t *testing.T) {
@@ -311,25 +319,93 @@ func TestChainGuaranteedRefs(t *testing.T) {
 	})
 }
 
-func TestChainNextOnAKindWithoutContentGetsMetadata(t *testing.T) {
-	r, _ := chainRig(t)
-	must(r.m.Create(secretKey("ns", "outer"), metav1.ObjectMeta{Annotations: map[string]string{"example.com/next": "inner"}}))
-	must(r.m.Create(secretKey("ns", "inner"), metav1.ObjectMeta{}))
-	var seen *unstructured.Unstructured
-	outer := SecretRef("ns", "outer")
-	outer.Next = func(obj *unstructured.Unstructured) ([]Ref, error) {
-		seen = obj
-		return []Ref{SecretRef("ns", obj.GetAnnotations()["example.com/next"])}, nil
+// TestChainNextNeedsContent: a held ref with a Next must be of a Content
+// kind (§10.4; the user's decision, 2026-11-21), since only the content cache
+// sees a re-point of it. A Guaranteed ref isn't held, so it needn't be.
+func TestChainNextNeedsContent(t *testing.T) {
+	ctx := context.Background()
+	outer := func() Ref {
+		r := SecretRef("ns", "outer")
+		r.Next = func(*unstructured.Unstructured) ([]Ref, error) { return []Ref{SecretRef("ns", "inner")}, nil }
+		return r
 	}
-	a, err := r.p.acquire(context.Background(), r.holder(t, "h", false), []Ref{outer})
-	if err != nil || len(a.Held) != 2 {
-		t.Fatalf("acquire = %+v, %v", a, err)
-	}
-	if _, has := seen.Object["data"]; has || seen.GetName() != "outer" {
-		t.Errorf("Next got %v; want metadata only", seen.Object)
-	}
-	if slices.ContainsFunc(r.srv.calls, func(c string) bool { return strings.HasPrefix(c, "content") }) {
-		t.Errorf("calls = %v; a kind without Content was read as content", r.srv.calls)
+	t.Run("fails closed for a new holder", func(t *testing.T) {
+		r, _ := chainRig(t)
+		must(r.m.Create(secretKey("ns", "outer"), metav1.ObjectMeta{}))
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{outer()})
+		if err != nil || !a.MustNotConnect || !errors.Is(a.Err, errNextNeedsContent) || !strings.Contains(a.Err.Error(), "set Content") {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+		if hasFinalizer(r.get(t, secretKey("ns", "outer")), fNS) {
+			t.Error("the refused ref was held")
+		}
+	})
+	t.Run("fails open for an established holder", func(t *testing.T) {
+		r, _ := chainRig(t)
+		must(r.m.Create(secretKey("ns", "outer"), metav1.ObjectMeta{}))
+		if a, err := r.p.acquire(ctx, r.holder(t, "h", true), []Ref{outer()}); err != nil || a.MustNotConnect || !a.Degraded || !errors.Is(a.Err, errNextNeedsContent) {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+	})
+	t.Run("a Guaranteed ref of any kind may have a Next", func(t *testing.T) {
+		r, fc := chainRig(t)
+		r.p.contentKinds = nil
+		r.target(fc, "cd", "Secret", "s")
+		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+		g := targetRef("cd")
+		g.Guaranteed = true
+		if a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{g}); err != nil || a.MustNotConnect || len(a.Held) != 1 {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+	})
+}
+
+// TestChainKeepsWhatAnUnfollowedHopLeadsTo: a hop with a Next that this pass
+// can't hold, Deleting or Missing, isn't read, so what lies behind it is
+// unknown; the record keeps the refs it named, which stay held (§9.1, §8),
+// while an established holder fails open and may still read through the hop.
+func TestChainKeepsWhatAnUnfollowedHopLeadsTo(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		break_ func(r *rig)
+		want   Reason
+	}{
+		{"the hop is being deleted", func(r *rig) {
+			// Someone strips our finalizer, and the hop is deleted: it stays,
+			// deleting, for its other finalizer.
+			data := []byte(`{"metadata":{"finalizers":["example.com/keep"]}}`)
+			if _, err := r.m.Patch(targetKey("kt"), types.MergePatchType, data); err != nil {
+				panic(err)
+			}
+			must(r.m.Delete(targetKey("kt")))
+		}, ReasonDeleting},
+		{"the hop is missing", func(r *rig) {
+			data := []byte(`{"metadata":{"finalizers":null}}`)
+			if _, err := r.m.Patch(targetKey("kt"), types.MergePatchType, data); err != nil {
+				panic(err)
+			}
+			must(r.m.Delete(targetKey("kt")))
+		}, ReasonMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, fc := chainRig(t)
+			must(r.m.Create(targetKey("kt"), metav1.ObjectMeta{Finalizers: []string{"example.com/keep"}}))
+			fc.specs[targetID("kt")] = map[string]any{"ref": map[string]any{"kind": "Secret", "name": "kubeconfig"}}
+			must(r.m.Create(secretKey("ns", "kubeconfig"), metav1.ObjectMeta{}))
+			h := r.holder(t, "h", true)
+			if a, err := r.p.acquire(ctx, h, []Ref{targetRef("kt")}); err != nil || len(a.Held) != 2 {
+				t.Fatalf("pass 1: acquire = %+v, %v", a, err)
+			}
+			tc.break_(r)
+			a, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), []Ref{targetRef("kt")})
+			if err != nil || len(a.Unheld) != 1 || a.Unheld[0].Reason != tc.want {
+				t.Fatalf("pass 2: acquire = %+v, %v", a, err)
+			}
+			if got := chainRecord(t, r, "h"); !slices.Contains(got, SecretRef("ns", "kubeconfig").ID()) {
+				t.Errorf("record = %v: the Secret behind the unfollowed hop was dropped, so a release can take it", got)
+			}
+		})
 	}
 }
 

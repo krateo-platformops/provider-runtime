@@ -1608,7 +1608,11 @@ The record names both, and both carry the finalizer. Every function the
 provider supplies is pure, and the hold-before-read ordering belongs to the
 runtime. `MaxDepth` bounds the chain. A `Next` error, or a chain deeper than
 `MaxDepth`, is an Acquire error: a new holder fails closed, and an
-established one fails open with its record as it was (§8).
+established one fails open with its record as it was (§8). **A hop with a
+`Next` that a pass can't hold**, Missing or Deleting, isn't read, so what
+lies behind it is unknown: that pass's record keeps every ref the record
+already named, which stay held while the holder may still read through the
+hop (found in the review of PR 4).
 
 **A Secret that names a Secret** is in scope the same way: the first
 Secret's `Ref` has a `Next`. It needs that Secret's data, which is §10.4's
@@ -1642,8 +1646,8 @@ object with a `Next`:
   counts as the tracker's own only if the two versions are equal once every
   `credential-use.` label, annotation and finalizer, `resourceVersion` and
   `managedFields` are set aside (L2). For a metadata-only kind, a change to
-  data can't be told apart, but it doesn't need to be: such a kind has no
-  `Next`;
+  data can't be told apart, but it doesn't need to be: a held ref with a
+  `Next` must be of a kind with `Content` (§10.4);
 - loses the finalizer or a label;
 - gets a `deletionTimestamp`, or is deleted.
 
@@ -1879,10 +1883,19 @@ per namespace.
 
 **On Secrets, `Content` is opt-in and holds Secret data in memory**, for
 held Secrets only. That is needed only for a Secret that names a Secret.
-Without it, a `Next` on a Secret is given a metadata-only object, so it
-can't read data. A provider that sets `Content` on Secrets takes on the
-memory and the exposure. Providers whose cached client already reads all
-Secrets hold that data anyway.
+A provider that sets `Content` on Secrets takes on the memory and the
+exposure. Providers whose cached client already reads all Secrets hold that
+data anyway.
+
+**A held ref with a `Next` must be of a kind with `Content`** (the user's
+decision, 2026-11-21, from the review of PR 4). An earlier revision gave a
+`Next` on a kind without it a metadata-only object, but a re-point of such
+an object would go unseen: the metadata caches keep only `credential-use.`
+keys, and a metadata change moves no generation, so nothing would enqueue
+its holders (§9.2). Such a ref is an Acquire error that names the fix. A
+`Guaranteed` ref isn't held, so it may have a `Next` on any kind. Every
+`Next` is given the object without `managedFields` and `status`, however it
+was read.
 
 ### 10.5 Namespace-restricted caches (R10)
 

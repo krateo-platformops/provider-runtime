@@ -197,6 +197,20 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	byID := map[ID]Ref{} // every held ref of the chain so far
 	seen := map[ID]bool{}
 	final := false // the last A1 wrote exactly the chain
+	// unfollowed: a hop with a Next wasn't held this pass (Missing or
+	// Deleting), so what lies behind it is unknown. The record then keeps
+	// every ref it names: a ref behind that hop must stay held, as the
+	// record was (§9.1, §8), while the holder may still read through it.
+	unfollowed := false
+	exact := func() []ID {
+		want := SortedIDs(slices.Collect(maps.Keys(byID)))
+		if unfollowed {
+			if rec := ReadRecord(obj); !rec.Unparseable {
+				want = SortedIDs(append(want, rec.IDs...))
+			}
+		}
+		return want
+	}
 	level := refs
 	for depth := 1; len(level) > 0; depth++ {
 		if depth > maxDepth {
@@ -230,14 +244,24 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				}
 				a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonNotConsented})
 			default:
+				if r.Next != nil && !p.contentKinds[r.GroupKind] {
+					// Its re-point would be invisible: the metadata caches keep
+					// only credential-use. keys, and a metadata change moves no
+					// generation, so nothing would enqueue its holders (§9.2,
+					// §10.4; the user's decision, 2026-11-21).
+					return fail(fmt.Errorf("%w: %s (set Content on its ProtectedKind)", errNextNeedsContent, id), "Refs")
+				}
 				byID[id] = r
 				toHold = append(toHold, id)
 			}
 		}
 
 		// A1. Announce: exactly the chain when no hop of this level leads on,
-		// and otherwise the chain so far added to the record as it stands.
-		want := SortedIDs(slices.Collect(maps.Keys(byID)))
+		// and otherwise the chain so far added to the record as it stands. An
+		// unparseable record names nothing to keep, so a chain behind it is
+		// exposed until the last A1, as for any ref of such a holder; only
+		// someone else's write makes a record unparseable.
+		want := exact()
 		final = !chained
 		if chained {
 			if rec := ReadRecord(obj); !rec.Unparseable {
@@ -274,8 +298,10 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 					held = true
 				case ClassNotFound:
 					a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})
+					unfollowed = unfollowed || r.Next != nil
 				case ClassDeleting:
 					a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonDeleting})
+					unfollowed = unfollowed || r.Next != nil
 					if !established {
 						return fail(fmt.Errorf("credential %s %s/%s is being deleted and can't be held; not connecting until it is replaced or the reference changes", id.Kind, id.Namespace, id.Name), "Deleting")
 					}
@@ -323,7 +349,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	}
 	if !final {
 		// The last level's hops led nowhere new: write exactly the chain.
-		if _, err := p.announce(ctx, obj, SortedIDs(slices.Collect(maps.Keys(byID))), &a); err != nil {
+		if _, err := p.announce(ctx, obj, exact(), &a); err != nil {
 			if errors.Is(err, ErrHolderConflict) {
 				return a, err
 			}

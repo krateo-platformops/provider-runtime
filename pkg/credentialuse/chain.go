@@ -8,7 +8,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 )
@@ -58,6 +57,9 @@ var (
 	// an unheld hop needs the shared live read, which comes with consent
 	// (§9.4; plan, PR 5).
 	errUnheldChainNotYet = errors.New("credential-use: a ref in another namespace with a Next isn't supported yet")
+	// errNextNeedsContent: a held ref has a Next, but its kind isn't
+	// Content, so a re-point of it would go unseen (§10.4).
+	errNextNeedsContent = errors.New("credential-use: a ref with a Next must be of a protected kind with Content")
 )
 
 // resolvedKey keys the objects an Acquire read in a context (WithResolved).
@@ -82,42 +84,27 @@ func Resolved(ctx context.Context, ref Ref) (*unstructured.Unstructured, bool) {
 	return u.DeepCopy(), true
 }
 
-// metadataObject is m as an unstructured object with only its metadata: what
-// a Next on a kind without Content is given (§10.4).
-func metadataObject(gk schema.GroupKind, m *metav1.PartialObjectMetadata) (*unstructured.Unstructured, error) {
-	md, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&m.ObjectMeta)
+// readHop reads held hop id, of a content kind, after its A2, for its Next
+// (§9.1 step 2): from its content cache, or live if the cache doesn't have it
+// yet.
+func (p *protocol) readHop(ctx context.Context, id ID) (*unstructured.Unstructured, error) {
+	if p.contentCache != nil {
+		if u, ok := p.contentCache.Content(id); ok {
+			return u.DeepCopy(), nil
+		}
+	}
+	u, err := p.contents.Content(ctx, id.GroupKind(), id.Namespace, id.Name)
 	if err != nil {
 		return nil, err
 	}
-	u := &unstructured.Unstructured{Object: map[string]any{"metadata": md}}
-	u.SetAPIVersion(m.APIVersion)
-	u.SetKind(gk.Kind)
-	return u, nil
+	return asCached(u), nil
 }
 
-// readHop reads held hop id, after its A2, for its Next (§9.1 step 2): a
-// content kind from its content cache, or live if the cache doesn't have it
-// yet; any other kind as metadata, live.
-func (p *protocol) readHop(ctx context.Context, id ID) (*unstructured.Unstructured, error) {
-	gk := id.GroupKind()
-	if p.contentKinds[gk] {
-		if p.contentCache != nil {
-			if u, ok := p.contentCache.Content(id); ok {
-				return u.DeepCopy(), nil
-			}
-		}
-		u, err := p.contents.Content(ctx, gk, id.Namespace, id.Name)
-		if err != nil {
-			return nil, err
-		}
-		out, _ := contentTransform(u)
-		return out.(*unstructured.Unstructured), nil
-	}
-	m, err := p.srv.Get(ctx, gk, id.Namespace, id.Name)
-	if err != nil {
-		return nil, err
-	}
-	return metadataObject(gk, m)
+// asCached is u as a content cache keeps it, without managedFields and
+// status, so a Next sees the same shape however the hop was read.
+func asCached(u *unstructured.Unstructured) *unstructured.Unstructured {
+	out, _ := contentTransform(u)
+	return out.(*unstructured.Unstructured)
 }
 
 // readGuaranteed reads Guaranteed ref r (§9.3): through the caller's lister
@@ -128,9 +115,13 @@ func (p *protocol) readGuaranteed(ctx context.Context, r Ref) (*unstructured.Uns
 		if err != nil {
 			return nil, err
 		}
-		return u.DeepCopy(), nil
+		return asCached(u), nil
 	}
-	return p.contents.Content(ctx, r.GroupKind, r.Namespace, r.Name)
+	u, err := p.contents.Content(ctx, r.GroupKind, r.Namespace, r.Name)
+	if err != nil {
+		return nil, err
+	}
+	return asCached(u), nil
 }
 
 // follow calls r's Next on obj, the object read for it.
