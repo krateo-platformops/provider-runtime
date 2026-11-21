@@ -371,13 +371,17 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		// unparseable record names nothing to keep, so a chain behind it is
 		// exposed until the last A1, as for any ref of such a holder; only
 		// someone else's write makes a record unparseable.
+		// A level that leads nowhere further is the last: its A1 writes the
+		// chain and the unheld list in one patch (§11.3). Any other only adds.
 		want := exact()
-		if chained {
-			if rec := ReadRecord(obj); !rec.Unparseable {
-				want = SortedIDs(append(want, rec.IDs...))
-			}
+		var unheldNow *[]UnheldEntry
+		if last := !chained && len(next) == 0; last {
+			u := p.unheldEntries(obj, notHeld, keepEntry)
+			unheldNow = &u
+		} else if rec := ReadRecord(obj); !rec.Unparseable {
+			want = SortedIDs(append(want, rec.IDs...))
 		}
-		added, err := p.announce(ctx, obj, want, nil, &a)
+		added, err := p.announce(ctx, obj, want, unheldNow, &a)
 		if err != nil {
 			if errors.Is(err, ErrHolderConflict) {
 				return a, err
