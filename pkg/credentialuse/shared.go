@@ -329,9 +329,12 @@ func (s *Shared) Run(ctx context.Context) error {
 	select {
 	case err := <-informers:
 		cancel()
-		// The write loops end because the informers did, so their error
-		// adds nothing to the informers'.
-		<-writes
+		// The write loops end because the informers did: errInformersEnded,
+		// or nil when ctx ended first, adds nothing. Anything else follows
+		// the informers' error.
+		if werr := <-writes; werr != nil && !errors.Is(werr, errInformersEnded) {
+			return errors.Join(err, werr)
+		}
 		return err
 	case err := <-writes:
 		cancel()
