@@ -27,21 +27,21 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG = "pkg/credentialuse/"
-FILES = ["writeloops.go", "janitor.go", "prober.go", "tracker.go", "informers.go", "shared.go", "listwatch.go", "release.go", "acquire.go", "uncached.go"]
+FILES = ["writeloops.go", "janitor.go", "prober.go", "tracker.go", "informers.go", "shared.go", "listwatch.go", "release.go", "acquire.go", "uncached.go", "queue.go"]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
     # writeloops.go: RunWriteLoops and the release loop (§7.5, §6.2).
     ("the write loops don't wait for the informers' sync", "writeloops.go",
-     [("\tselect {\n\tcase <-s.syncedCh:\n\tcase <-s.runDone:\n\t\treturn errInformersEnded\n\tcase <-ctx.Done():\n\t\treturn nil\n\t}\n\ts.rescan()",
-       "\ts.rescan()")]),
+     [("\tselect {\n\tcase <-s.syncedCh:\n\tcase <-s.runDone:\n\t\treturn errInformersEnded\n\tcase <-ctx.Done():\n\t\treturn nil\n\t}\n\n\tctx, cancel := context.WithCancel(ctx)",
+       "\tctx, cancel := context.WithCancel(ctx)")]),
     ("the write loops don't rescan", "writeloops.go",
-     [("\ts.rescan()\n\n\tctx, cancel", "\n\tctx, cancel")]),
+     [("\ts.rescan()\n\tvar wg sync.WaitGroup", "\tvar wg sync.WaitGroup")]),
     ("a batch of an untracked kind is worked with another tracker", "writeloops.go",
      [("\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\treturn\n\t}",
        "\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\tif all := s.trackerList(); len(all) > 0 {\n\t\t\tt = all[0]\n\t\t} else {\n\t\t\treturn\n\t\t}\n\t}")]),
     ("an empty batch isn't filled", "writeloops.go",
-     [("\tif len(ids) == 0 {\n\t\tvar err error\n\t\tids, err = s.heldIn(ctx, t, k.Namespace)", "\tif false {\n\t\tvar err error\n\t\tids, err = s.heldIn(ctx, t, k.Namespace)")]),
+     [("\tif fill {\n\t\tids = slices.DeleteFunc(", "\tif fill && false {\n\t\tids = slices.DeleteFunc(")]),
     ("RequeueAt isn't honoured", "writeloops.go",
      [("\tif !res.RequeueAt.IsZero() {\n\t\ts.queue.AddAfter(", "\tif false {\n\t\ts.queue.AddAfter(")]),
     ("a failed batch isn't retried", "writeloops.go",
@@ -140,6 +140,17 @@ MUTANTS = [
      [("\t\t\tq.AddRateLimited(id)\n", "")]),
     ("objects that kept only a marker aren't swept", "uncached.go",
      [("\tif err := s.sweepMarkers(ctx, ts); err != nil {\n\t\treturn err\n\t}\n", "")]),
+    # The re-review of #114: an empty batch's namespace list survives merges.
+    ("an empty batch is just an empty set", "queue.go",
+     [("\tif len(ids) == 0 {\n\t\tids = []ID{fillAll}\n\t}\n\tq.mu.Lock()\n\tdefer q.mu.Unlock()", "\tq.mu.Lock()\n\tdefer q.mu.Unlock()")]),
+    ("a merged batch runs only its objects", "writeloops.go",
+     [("\tfill := len(ids) == 0 || slices.Contains(ids, fillAll)\n", "\tfill := len(ids) == 0 || (len(ids) == 1 && ids[0] == fillAll)\n")]),
+    ("the recheck outside the caches isn't retried", "uncached.go",
+     [("\t\tif err == nil || ctx.Err() != nil {\n\t\t\treturn\n\t\t}", "\t\tif true || err == nil || ctx.Err() != nil {\n\t\t\treturn\n\t\t}")]),
+    ("two RunWriteLoops run at once", "writeloops.go",
+     [("\tif s.writeCtx != nil {\n\t\ts.mu.Unlock()\n\t\treturn errWriteLoopsRunning\n\t}\n", "")]),
+    ("the gauge outside the caches outlives the write loops", "writeloops.go",
+     [("\t\tfor _, t := range s.trackerList() {\n\t\t\tt.clearUncached()\n\t\t}\n", "")]),
 ]
 
 EQUIVALENT = {}
@@ -196,6 +207,11 @@ KILLERS = {
     'the janitor gives up on a changed object': 'TestJanitor',
     "the janitor doesn't retry a failure": 'TestJanitor',
     "objects that kept only a marker aren't swept": 'TestJanitor',
+    'an empty batch is just an empty set': 'TestAnEmptyBatchMergedWithObjectsStillCoversItsNamespace|TestAnUncachedNamespaceDeletionReleasesItsHolds',
+    'a merged batch runs only its objects': 'TestAnEmptyBatchMergedWithObjectsStillCoversItsNamespace',
+    "the recheck outside the caches isn't retried": 'TestTheRecheckOutsideTheCachesIsRetried',
+    'two RunWriteLoops run at once': 'TestRunWriteLoopsRunsOnce',
+    'the gauge outside the caches outlives the write loops': 'TestTheWaitingGaugeOutsideTheCachesClearsWhenTheWriteLoopsStop',
 }
 
 ALL = sorted({t for ts in KILLERS.values() for t in ts.split("|")})

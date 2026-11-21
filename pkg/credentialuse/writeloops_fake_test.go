@@ -1119,7 +1119,11 @@ func TestRunWriteLoopsRunsOnce(t *testing.T) {
 		defer r.s.mu.Unlock()
 		return r.s.writeCtx != nil
 	})
-	if err := r.s.RunWriteLoops(context.Background()); !errors.Is(err, errWriteLoopsRunning) {
+	// A second RunWriteLoops that ran would block until its ctx ends; the
+	// refusal returns at once.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.s.RunWriteLoops(ctx); !errors.Is(err, errWriteLoopsRunning) {
 		t.Fatalf("a second RunWriteLoops = %v, want errWriteLoopsRunning", err)
 	}
 	r.s.mu.Lock()
