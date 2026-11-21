@@ -1507,6 +1507,21 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		return rateLimitedRequeue(), nil
 	}
 
+	// The resource is absent and the policy withholds create (the
+	// observe-only case returned above). Nothing else applies to a resource
+	// that doesn't exist: no late-initialization, and no Update, which a set
+	// such as "observe,update" allows. The pass succeeds and polls, as a
+	// withheld update does.
+	if !observation.ResourceExists {
+		reconcileAfter := r.pollIntervalHook(managed, r.pollInterval)
+		log.Debug("Skipping create due to managementPolicies. Reconciliation succeeded", "requeue-after", time.Now().Add(reconcileAfter))
+		managed.SetConditions(prv1.ReconcileSuccess())
+		if err := writeStatus(nil); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{RequeueAfter: reconcileAfter}, nil
+	}
+
 	if observation.ResourceLateInitialized {
 		// Note that this update may reset any pending updates to the status of
 		// the managed resource from when it was observed above. This is because

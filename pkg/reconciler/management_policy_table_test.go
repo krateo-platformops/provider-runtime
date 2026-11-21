@@ -369,3 +369,58 @@ func checkMgmtTableContracts(t *testing.T, rows [][]string) {
 		t.Errorf("compared %d create rows, want %d", n, len(mgmtTableDeletionPolicies)*len(mgmtTableStates))
 	}
 }
+
+// TestEveryVerbSetCallsOnlyWhatItAllows runs every subset of {create, update,
+// delete}, written as a set (observe is implied), against every deletion
+// policy and state, with the truth table's harness. The table pins only the
+// inputs it shares with unstructured-runtime; this test covers the sets it
+// doesn't, such as "observe,update", which no preset could express. A verb
+// must be called exactly when the policy allows it and the state calls for
+// it: create when absent, update when drifted, delete when deleting a present
+// resource whose deletion policy keeps nothing. In particular an absent
+// resource is never updated.
+func TestEveryVerbSetCallsOnlyWhatItAllows(t *testing.T) {
+	optional := []string{"create", "update", "delete"}
+	for mask := 0; mask < 1<<len(optional); mask++ {
+		set := []string{"observe"}
+		for i, v := range optional {
+			if mask&(1<<i) != 0 {
+				set = append(set, v)
+			}
+		}
+		mp := strings.Join(set, ",")
+		allows := func(v string) bool {
+			for _, s := range set {
+				if s == v {
+					return true
+				}
+			}
+			return false
+		}
+		for _, dp := range mgmtTableDeletionPolicies {
+			keeps := dp == meta.DeletionPolicyOrphan || dp == "orphaned"
+			for _, st := range mgmtTableStates {
+				row, _ := mgmtTableRow(t, mp, dp, st)
+				want := map[string]string{"create": "0", "update": "0", "delete": "0"}
+				switch {
+				case st.deleting:
+					if st.exists && allows("delete") && !keeps {
+						want["delete"] = "1"
+					}
+				case !st.exists:
+					if allows("create") {
+						want["create"] = "1"
+					}
+				case !st.upToDate:
+					if allows("update") {
+						want["update"] = "1"
+					}
+				}
+				got := map[string]string{"create": row[4], "update": row[5], "delete": row[6]}
+				if !cmp.Equal(want, got) {
+					t.Errorf("%q / deletion %q / %s: calls %v, want %v", mp, dp, st.name, got, want)
+				}
+			}
+		}
+	}
+}
