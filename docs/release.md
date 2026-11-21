@@ -78,7 +78,11 @@ fix ships from a release branch:
 3. After merge, tag `vX.Y.(Z+1)` on `release/vX.Y` and push it, then do steps
    4 and 5 above. Add the same log entry on main.
 
-v1.20.1 shipped this way (#112).
+v1.20.1 shipped this way (#112). A minor release can too: v1.21.0, the
+shared management policy, shipped from `release/v1.21`, cut from v1.20.1, with
+its features cherry-picked from main (#117). A dependency bump that the
+backported work forces comes along (#105, OpenTelemetry 1.47.0, for plumbing
+v1.102.0); the rest of main stays out.
 
 ## After a release
 
