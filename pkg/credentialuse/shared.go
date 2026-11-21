@@ -293,13 +293,6 @@ func (s *Shared) newServer() server {
 	return srv
 }
 
-// tracker returns the tracker of holder kind gk, or nil.
-func (s *Shared) tracker(gk schema.GroupKind) *Tracker {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.trackers[gk]
-}
-
 // trackerList returns every tracker.
 func (s *Shared) trackerList() []*Tracker {
 	s.mu.Lock()
@@ -338,7 +331,7 @@ func (s *Shared) Run(ctx context.Context) error {
 		cancel()
 		// The write loops end because the informers did, so their error
 		// adds nothing to the informers'.
-		_ = <-writes
+		<-writes
 		return err
 	case err := <-writes:
 		cancel()

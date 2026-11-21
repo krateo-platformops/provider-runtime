@@ -1,0 +1,10 @@
+# Accepted gitleaks findings, one fingerprint each (commit:file:rule:line).
+#
+# 09f43f2 is a commit of PR #114's branch, whose revert-check output named a
+# test "TestNamespaceTeardown/with_credential-use", which generic-api-key took
+# for a key assignment. It is no secret. 8caec1f renamed the tests and
+# regenerated the output, so no current file has it, but the scan reads every
+# commit of a PR. A historical commit's fingerprint never moves, so this
+# entry matches that one line and nothing else (the user's decision,
+# 2026-11-21).
+09f43f29657fdf072d180cfe2120ccb3830cbb02:hack/revert-check-credential-use-3b.txt:generic-api-key:120

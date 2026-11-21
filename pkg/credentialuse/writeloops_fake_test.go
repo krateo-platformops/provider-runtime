@@ -1119,12 +1119,20 @@ func TestRunWriteLoopsRunsOnce(t *testing.T) {
 		defer r.s.mu.Unlock()
 		return r.s.writeCtx != nil
 	})
-	// A second RunWriteLoops that ran would block until its ctx ends; the
-	// refusal returns at once.
+	// A second RunWriteLoops that ran would block until its ctx ends, or
+	// for good, since two sets of loops can deadlock on the shared queues;
+	// the refusal returns at once.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := r.s.RunWriteLoops(ctx); !errors.Is(err, errWriteLoopsRunning) {
-		t.Fatalf("a second RunWriteLoops = %v, want errWriteLoopsRunning", err)
+	done := make(chan error, 1)
+	go func() { done <- r.s.RunWriteLoops(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errWriteLoopsRunning) {
+			t.Fatalf("a second RunWriteLoops = %v, want errWriteLoopsRunning", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a second RunWriteLoops neither was refused nor returned: two sets of write loops ran")
 	}
 	r.s.mu.Lock()
 	running := r.s.writeCtx != nil
