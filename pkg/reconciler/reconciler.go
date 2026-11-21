@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/krateo-platformops/plumbing/kubeutil/event"
+	"github.com/krateo-platformops/plumbing/managementpolicy"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,11 +69,15 @@ const (
 const ReasonReadyNotSetAfterObserve event.Reason = "ReadyNotSetAfterObserve"
 
 const (
-	reasonCannotConnect       event.Reason = "CannotConnectToProvider"
-	reasonCannotDisconnect    event.Reason = "CannotDisconnectFromProvider"
-	reasonCannotInitialize    event.Reason = "CannotInitializeManagedResource"
-	reasonCannotResolveRefs   event.Reason = "CannotResolveResourceReferences"
-	reasonCannotObserve       event.Reason = "CannotObserveExternalResource"
+	reasonCannotConnect     event.Reason = "CannotConnectToProvider"
+	reasonCannotDisconnect  event.Reason = "CannotDisconnectFromProvider"
+	reasonCannotInitialize  event.Reason = "CannotInitializeManagedResource"
+	reasonCannotResolveRefs event.Reason = "CannotResolveResourceReferences"
+	reasonCannotObserve     event.Reason = "CannotObserveExternalResource"
+	// reasonAbsentUnderPolicy is the Warning for an absent resource under an
+	// observe-only policy: not a failure to observe, so not reasonCannotObserve.
+	// The literal is plumbing's, the one unstructured-runtime records.
+	reasonAbsentUnderPolicy   event.Reason = managementpolicy.EventAbsentUnderPolicy
 	reasonCannotCreate        event.Reason = "CannotCreateExternalResource"
 	reasonCannotDelete        event.Reason = "CannotDeleteExternalResource"
 	reasonCannotPublish       event.Reason = "CannotPublishConnectionDetails"
@@ -929,11 +934,18 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	if r.apiReader != nil {
 		read, _ = managed.DeepCopyObject().(resource.Managed)
 	}
+	// start is Ready and Synced as the pass read them. A policy report the
+	// pass writes again unchanged keeps its stored transition time (keep), so
+	// a steady withheld or invalid state writes back an unchanged status.
+	start := passConditions{ready: managed.GetCondition(prv1.TypeReady), synced: managed.GetCondition(prv1.TypeSynced)}
 	// writeStatus is every status write of the pass. Each is the last write of
-	// its path. passErr is the error the path goes on to return, or nil. A
+	// its path. It reports an annotation that doesn't parse on Synced first
+	// (policySynced), so no path can forget it
+	// (TestNoStatusWriteBypassesWriteStatus). passErr is the error the path goes on to return, or nil. A
 	// conflict isn't retried: it stays an error, which names the likely cause
 	// and keeps passErr (see ExternalClient, and statusConflict).
 	writeStatus := func(passErr error) error {
+		policySynced(managed, start)
 		started := time.Now()
 		err := r.client.Status().Update(ctx, managed)
 		r.recordStatusUpdate(ctx, started, err)
@@ -975,7 +987,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	// If managed resource has a deletion timestamp and and a deletion policy of
 	// Orphan, we do not need to observe the external resource before attempting
 	// to remove finalizer.
-	if meta.WasDeleted(managed) && !meta.ShouldDelete(managed) {
+	if meta.WasDeleted(managed) && !meta.ManagementDecision(managed).May(managementpolicy.Delete) {
 		log = log.WithValues("deletion-timestamp", managed.GetDeletionTimestamp())
 
 		started = time.Now()
@@ -1237,11 +1249,15 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	}
 
 	// In the observe-only mode, !observation.ResourceExists will be an error
-	// case, and we will explicitly return this information to the user.
-	if !observation.ResourceExists && meta.ShouldOnlyObserve(managed) {
-		throttledRecorder.Event(managed, event.Warning(reasonCannotObserve, actionObserveExternalResource, errors.New(errExternalResourceNotExist)))
+	// case, and we will explicitly return this information to the user. A
+	// policy that allows observe and nothing else is observe-only, whatever
+	// the deletion policy: the "observe" preset or set, and a value that does
+	// not parse (D2: an invalid policy acts on nothing).
+	if p := meta.ManagementDecision(managed).Policy; !observation.ResourceExists &&
+		!p.Allows(managementpolicy.Create) && !p.Allows(managementpolicy.Update) && !p.Allows(managementpolicy.Delete) {
+		throttledRecorder.Event(managed, event.Warning(reasonAbsentUnderPolicy, actionObserveExternalResource, errors.New(errExternalResourceNotExist)))
 		passErr := errors.Wrap(errors.New(errExternalResourceNotExist), errReconcileObserve)
-		managed.SetConditions(prv1.ReconcileError(passErr))
+		managed.SetConditions(start.keep(prv1.CreateWithheldByPolicy(createWithheldMessage(managed))), prv1.ReconcileError(passErr))
 		if err := writeStatus(passErr); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -1264,7 +1280,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 
 		// We'll only reach this point if deletion policy is not orphan, so we
 		// are safe to call external deletion if external resource exists.
-		if observation.ResourceExists && meta.ShouldDelete(managed) {
+		if observation.ResourceExists && meta.ManagementDecision(managed).May(managementpolicy.Delete) {
 			release, deferral = r.gate(ctx, log, clientKeyer, managed)
 			if deferral != nil {
 				return deferred(deferral)
@@ -1362,7 +1378,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		return reconcile.Result{}, passErr
 	}
 
-	if !observation.ResourceExists && meta.ShouldCreate(managed) {
+	if !observation.ResourceExists && meta.ManagementDecision(managed).May(managementpolicy.Create) {
 		// Ask the gate before the create-pending annotation is written: a
 		// deferral after it would leave an unresolved create handshake behind
 		// for a create that was never attempted.
@@ -1496,6 +1512,21 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		return rateLimitedRequeue(), nil
 	}
 
+	// The resource is absent and the policy withholds create (the
+	// observe-only case returned above). Nothing else applies to a resource
+	// that doesn't exist: no late-initialization, and no Update, which a set
+	// such as "observe,update" allows. The pass succeeds and polls, as a
+	// withheld update does.
+	if !observation.ResourceExists {
+		reconcileAfter := r.pollIntervalHook(managed, r.pollInterval)
+		log.Debug("Skipping create due to managementPolicies. Reconciliation succeeded", "requeue-after", time.Now().Add(reconcileAfter))
+		managed.SetConditions(start.keep(prv1.CreateWithheldByPolicy(createWithheldMessage(managed))), prv1.ReconcileSuccess())
+		if err := writeStatus(nil); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{RequeueAfter: reconcileAfter}, nil
+	}
+
 	if observation.ResourceLateInitialized {
 		// Note that this update may reset any pending updates to the status of
 		// the managed resource from when it was observed above. This is because
@@ -1544,10 +1575,10 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	}
 
 	// skip the update if the management policy is set to ignore updates
-	if !meta.ShouldUpdate(managed) {
+	if !meta.ManagementDecision(managed).May(managementpolicy.Update) {
 		reconcileAfter := r.pollIntervalHook(managed, r.pollInterval)
 		log.Debug("Skipping update due to managementPolicies. Reconciliation succeeded", "requeue-after", time.Now().Add(reconcileAfter))
-		managed.SetConditions(prv1.ReconcileSuccess())
+		managed.SetConditions(start.keep(updateWithheldReady(managed.GetCondition(prv1.TypeReady), managed)), prv1.ReconcileSuccess())
 		if err := writeStatus(nil); err != nil {
 			return reconcile.Result{}, err
 		}
