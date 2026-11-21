@@ -149,6 +149,59 @@ implement `reconciler.RateLimitKeyer` on its connecter or client (or
 signals with `ratelimit.Report` or the `pkg/ratelimit/httpsignal` transport.
 See [usage](./usage.md#the-pieces-you-opt-into).
 
+### Management policy
+
+`krateo.io/management-policy` and `krateo.io/deletion-policy` are read by
+plumbing's `managementpolicy` package, which unstructured-runtime reads too,
+so the two runtimes give every value the same meaning
+(unstructured-runtime#110). The reconciler consults `meta.ManagementDecision`.
+
+- **A set of verbs.** `observe,create` creates the external resource when it
+  is absent and never updates or deletes it. Order doesn't matter, and
+  `observe` is always implied: `create` is `observe,create`. The four presets
+  are aliases: `default` is all four verbs, `observe-create-update`,
+  `observe-delete` and `observe` are what they name. Unset or empty is
+  `default`.
+- **A value that doesn't parse acts on nothing.** An unknown verb or an empty
+  entry (`observe-create`, `observe,,create`) is observe-only: an absent
+  resource is a `ReconcileError` with a `CannotObserveExternalResource` event,
+  and nothing is created, updated or deleted. A typo meant to restrict never
+  widens into full management.
+- **`orphan` always wins.** The external resource is deleted only when the
+  set allows `delete` and `krateo.io/deletion-policy` is unset or `delete`.
+  `orphan` keeps it under every policy, `observe-delete` included, and any
+  other value (`orphaned`, `Orphan`, `keep`) keeps it too.
+- **Whitespace is ignored** around either annotation and around a set's
+  entries: `" observe , create "` is `observe,create`, and a deletion policy
+  of `"delete\n"` (a Helm block scalar's trailing newline) is `delete`.
+  Before, a padded value matched nothing, so it acted on nothing and kept the
+  external resource; it now does what its trimmed value says, which for
+  `"delete\n"` means the external resource is deleted with the object (the
+  user's decision, 2026-11-21; unstructured-runtime has done the same since
+  v1.30.0).
+- **A withheld verb is not reported yet.** An absent resource under a policy
+  that withholds `create` but allows another write verb (`observe-delete`) is
+  a plain success (`Synced=True`), and so is a drifted resource under any
+  policy that withholds `update`. Only an observe-only policy reports an
+  absent resource, as an error. The reasons `CreateWithheldByPolicy`,
+  `UpdateWithheldByPolicy`, `ManagementPolicyInvalid` and
+  `DeletionPolicyInvalid` come next, in both runtimes.
+- **When an edit takes effect** is the controller's choice: provider-runtime
+  adds no event filter, so a controller set up with a plain `For(&T{})`
+  (git-provider, for one) reconciles a policy edit at once, while one whose
+  predicates drop annotation-only updates sees it at its next resync.
+
+**Delete on an absent resource: this runtime's contract.** When an object is
+being deleted and `Observe` reports `ResourceExists: false`, the reconciler
+removes the finalizer **without** calling `Delete`. So `Observe` must report
+`false` during a deletion only when the resource is really gone (or, as
+core-provider's CompositionDefinition controller does once its Kind is
+handed over, when nothing is left for this object to delete). An `Observe`
+that cannot tell should return an error, which keeps the finalizer and
+retries. unstructured-runtime's contract differs: it calls `Delete` there
+too. The truth table (`pkg/reconciler/testdata/management-policy-table.tsv`,
+160 cases) pins it, and its test asserts it on every `deleting-absent` row.
+
 A refused key is held for as long as the server asks, up to `MaxHold` (1h by
 default). A hold longer than `MaxHold` is retried at `MaxHold` intervals, so a
 server asking for 6h receives 6 requests instead of 1. Set it to 0 to honour
@@ -559,8 +612,8 @@ Set by users/operators on each managed CR, honored by the reconcile loop
 | Annotation | Values | Effect |
 |---|---|---|
 | `krateo.io/paused` | `"true"` | Skips reconciliation and sets the `ReconcilePaused` condition. |
-| `krateo.io/management-policy` | `default` \| `observe-create-update` \| `observe-delete` \| `observe` | Restricts which external actions the provider may take. |
-| `krateo.io/deletion-policy` | `delete` (default) \| `orphan` | Whether external-resource deletion follows CR deletion. |
+| `krateo.io/management-policy` | a comma-separated set of `observe`, `create`, `update`, `delete` (e.g. `observe,create`), or one of the presets `default` \| `observe-create-update` \| `observe-delete` \| `observe` | Restricts which external actions the provider may take. See [management policy](#management-policy). |
+| `krateo.io/deletion-policy` | `delete` (default) \| `orphan` | Whether external-resource deletion follows CR deletion. `orphan` always keeps the resource; any other value keeps it too. Whitespace around the value is ignored: `"delete\n"` is `delete`. |
 | `krateo.io/connector-verbose` | `"true"` | Signals the external client to enable verbose behavior (`meta.IsVerbose`). |
 | `krateo.io/external-name` | string | The resource's identity in the external system; set by `Create` implementations, readable via `meta.GetExternalName`. |
 | `krateo.io/external-create-pending` / `-succeeded` / `-failed` | RFC3339Nano, in UTC | Managed by the reconciler's create-tracking guard — not for hand-editing. Compare them as parsed times, never as strings: trailing zeros of the fraction are dropped, so string order isn't time order. Other writers of the same annotation names may use second precision or a zone offset, so a reader should parse with a layout that accepts both. Markers aren't rewritten on upgrade, so one object can carry a marker written with an offset by an earlier release and its clearer written in UTC by a later one. |
