@@ -449,6 +449,11 @@ func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 	if f := h.s.hooks.namespaceAct; f != nil {
 		f(n)
 	}
+	if newlyDeleting {
+		// Outside the caches no informer delivers the deletion of the
+		// namespace's objects (§10.5).
+		h.s.uncachedDeleting(n.Name)
+	}
 	for _, p := range h.s.protectedInformers() {
 		for _, m := range p.inNamespace(n.Name) {
 			id := ID{Group: p.gk.Group, Kind: p.gk.Kind, Namespace: m.Namespace, Name: m.Name}

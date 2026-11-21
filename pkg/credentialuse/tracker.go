@@ -44,7 +44,10 @@ type Tracker struct {
 	heldMu    sync.Mutex
 	heldBy    map[protKey]int
 	waitingBy map[protKey]int
-	gone      bool // a failed Track dropped t
+	// waitingUncached are the objects outside the caches that the release
+	// loop last found kept for t's users (§10.5, keptUncached).
+	waitingUncached map[ID]bool
+	gone            bool // a failed Track dropped t
 
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).
@@ -276,6 +279,7 @@ func (t *Tracker) reportHeldLocked() {
 	for _, c := range t.waitingBy {
 		waiting += c
 	}
+	waiting += len(t.waitingUncached)
 	sinkMetrics{t}.HeldObjects(kindLabel(t.gk), held)
 	sinkMetrics{t}.WaitingObjects(kindLabel(t.gk), waiting)
 }

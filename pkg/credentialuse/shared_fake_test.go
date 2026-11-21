@@ -189,7 +189,16 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 		obj := a.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured).DeepCopy()
 		verb, _, _ := unstructured.NestedString(obj.Object, "spec", "resourceAttributes", "verb")
 		res, _, _ := unstructured.NestedString(obj.Object, "spec", "resourceAttributes", "resource")
+		ns, _, _ := unstructured.NestedString(obj.Object, "spec", "resourceAttributes", "namespace")
+		if ns == "" {
+			ns = "*"
+		}
+		// "verb resource" refuses in every namespace; "verb resource in ns"
+		// only in ns, where "*" is the cluster-wide check.
 		_, denied := r.denied.Load(verb + " " + res)
+		if _, inNS := r.denied.Load(verb + " " + res + " in " + ns); inNS {
+			denied = true
+		}
 		_ = unstructured.SetNestedField(obj.Object, !denied, "status", "allowed")
 		return true, obj, nil
 	})

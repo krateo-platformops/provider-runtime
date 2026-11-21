@@ -40,6 +40,9 @@ var errInformersEnded = errors.New("credential-use: the informers have stopped")
 //
 // The rescan enqueues the batch of every (K, N) finalizer on every cached
 // protected object, and every object whose labels the janitor would clean.
+// Beside it, when SharedOptions.Namespaces restricts the caches, one live
+// list per protected kind finds the held objects outside them and enqueues
+// their batches too (§10.5).
 // The informers may have started long before this process was elected, so
 // this covers what they saw before then, and a leader that died between a
 // holder's Forget and R3 (§7.5, M1 of the review of revision 16).
@@ -55,7 +58,28 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	s.mu.Lock()
+	s.writeCtx = ctx
+	trackers := make([]*Tracker, 0, len(s.trackers))
+	for _, t := range s.trackers {
+		trackers = append(trackers, t)
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.writeCtx = nil
+		s.mu.Unlock()
+		cancel()
+		s.writeWG.Wait()
+	}()
 	var wg sync.WaitGroup
+	// The recheck outside the caches (§10.5) runs beside the loops: it
+	// lists live, and the batches it finds join the queue as it goes.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.recheckUncached(ctx, trackers)
+	}()
 	for range releaseWorkers {
 		wg.Add(1)
 		go func() {
@@ -134,7 +158,12 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		return
 	}
 	if len(ids) == 0 {
-		ids = s.heldIn(t, k.Namespace)
+		var err error
+		ids, err = s.heldIn(ctx, t, k.Namespace)
+		if err != nil {
+			s.retryBatch(ctx, t, k, nil, err)
+			return
+		}
 		if len(ids) == 0 {
 			return
 		}
@@ -142,26 +171,41 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	res, err := t.proto.release(ctx, k.Namespace, ids)
 	s.reportKept(t, k, res.Kept)
 	if err != nil {
-		if ctx.Err() != nil {
-			s.queue.Add(k, ids...)
-			return
-		}
-		d := s.backoff.fail(k)
-		t.warn("credential-use: a release batch failed; it is retried with backoff",
-			"kind", t.gk.String(), "namespace", k.Namespace, "retryIn", d.String(), "error", err.Error())
-		s.queue.AddAfter(k, d, ids...)
+		s.retryBatch(ctx, t, k, ids, err)
 		return
 	}
+	t.keptUncached(ids, res.Kept)
 	s.backoff.reset(k)
 	if !res.RequeueAt.IsZero() {
 		s.queue.AddAfter(k, res.RequeueAt.Sub(s.clock.Now()), ids...)
 	}
 }
 
-// heldIn returns the cached protected objects that carry t's finalizer for
-// holder namespace n: what a batch added with no objects covers.
-func (s *Shared) heldIn(t *Tracker, n string) []ID {
+// retryBatch requeues batch (k, ids) after err: at once, for the next write
+// loops, when ctx ended under it; otherwise with backoff.
+func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []ID, err error) {
+	if ctx.Err() != nil {
+		s.queue.Add(k, ids...)
+		return
+	}
+	d := s.backoff.fail(k)
+	t.warn("credential-use: a release batch failed; it is retried with backoff",
+		"kind", t.gk.String(), "namespace", k.Namespace, "retryIn", d.String(), "error", err.Error())
+	s.queue.AddAfter(k, d, ids...)
+}
+
+// heldIn returns the protected objects that carry t's finalizer for holder
+// namespace n: what a batch added with no objects covers. They are read
+// from the caches, and live in a namespace the caches don't cover (§10.5).
+func (s *Shared) heldIn(ctx context.Context, t *Tracker, n string) ([]ID, error) {
 	var out []ID
+	if !s.namespaceCached(n) {
+		live, err := s.liveHeldIn(ctx, t, n)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, live...)
+	}
 	for _, p := range s.protectedInformers() {
 		for _, obj := range p.inf.GetStore().List() {
 			m, ok := metadataOf(obj)
@@ -173,7 +217,7 @@ func (s *Shared) heldIn(t *Tracker, n string) []ID {
 			}
 		}
 	}
-	return SortedIDs(out)
+	return SortedIDs(out), nil
 }
 
 // batchBackoff is the release loop's per-(K, N) failure backoff.

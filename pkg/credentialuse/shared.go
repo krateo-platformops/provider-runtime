@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,6 +177,11 @@ type Shared struct {
 	// informerCtx is RunInformers' context once it runs, for Track after
 	// start; nil before.
 	informerCtx context.Context
+	// writeCtx is RunWriteLoops' context while the write loops run, for the
+	// recheck outside the caches after a Track (§10.5); nil otherwise.
+	// writeWG counts those rechecks, so the write loops wait for them.
+	writeCtx context.Context
+	writeWG  sync.WaitGroup
 	// runDone is closed when a RunInformers that started returns, so that
 	// a Track after start stops waiting for informers it will never sync.
 	runDone chan struct{}
@@ -276,7 +280,7 @@ func (s *Shared) protectedFor(id ID) *protectedInformer {
 // cached reports whether id's namespace is covered by a protected cache,
 // whether or not any tracker protects its kind yet.
 func (s *Shared) cached(id ID) bool {
-	return len(s.o.Namespaces) == 0 || id.Namespace == "" || slices.Contains(s.o.Namespaces, id.Namespace)
+	return s.namespaceCached(id.Namespace)
 }
 
 // newServer is the server the protocol and the janitor call the API
@@ -417,14 +421,24 @@ type informer struct {
 	gvr  schema.GroupVersionResource
 	ns   string // the namespace it is restricted to, or ""
 	what string
+	// clusterList is set for a protected informer restricted to a
+	// namespace (SharedOptions.Namespaces): the objects of its kind
+	// outside the caches are rechecked with a cluster-wide list (§10.5).
+	clusterList bool
 }
 
 // preflight checks that this process may list and watch the informer's
 // resource, in its namespace or in every namespace (§7.3: missing RBAC is a
-// setup error).
+// setup error). A protected informer restricted to a namespace also needs
+// list in every namespace, for §10.5's rechecks outside the caches.
 func (i informer) preflight(ctx context.Context, s *Shared) error {
 	if err := s.canAccess(ctx, i.gvr, i.ns, "list", "watch"); err != nil {
 		return fmt.Errorf("credential-use: cannot run %s: grant list and watch on %s: %w", i.what, i.gvr.GroupResource(), err)
+	}
+	if i.clusterList {
+		if err := s.canAccess(ctx, i.gvr, "", "list"); err != nil {
+			return fmt.Errorf("credential-use: cannot run %s: SharedOptions.Namespaces restricts its cache, and the held objects outside it are rechecked with a list in every namespace (§10.5): grant list on %s in every namespace: %w", i.what, i.gvr.GroupResource(), err)
+		}
 	}
 	return nil
 }
@@ -674,11 +688,24 @@ func (s *Shared) endTracking(gk schema.GroupKind, mine *inflight) {
 	delete(s.tracking, gk)
 	parked := mine.parked
 	mine.parked = nil
-	tracked := s.trackers[gk] != nil
+	t := s.trackers[gk]
+	// While the write loops run, a kind tracked now needs the recheck
+	// outside the caches that their start gave the kinds tracked before
+	// (§10.5); the replay of the caches covers the cached objects.
+	wctx := s.writeCtx
+	if t != nil && wctx != nil {
+		s.writeWG.Add(1)
+	}
 	s.mu.Unlock()
-	if tracked {
+	if t != nil {
 		for _, b := range parked {
 			s.queue.Add(b.key, b.ids...)
+		}
+		if wctx != nil {
+			go func() {
+				defer s.writeWG.Done()
+				s.recheckUncached(wctx, []*Tracker{t})
+			}()
 		}
 	}
 	close(mine.done)
@@ -1077,5 +1104,5 @@ func (p *protectedInformer) what() string {
 }
 
 func (p *protectedInformer) informer() informer {
-	return informer{inf: p.inf, gvr: p.gvr, ns: p.ns, what: p.what()}
+	return informer{inf: p.inf, gvr: p.gvr, ns: p.ns, what: p.what(), clusterList: p.ns != ""}
 }

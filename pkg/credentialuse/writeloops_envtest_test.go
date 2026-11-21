@@ -864,6 +864,11 @@ func TestNamespaceRestrictedLiveRead(t *testing.T) {
 			{APIGroups: []string{cutest.WidgetGVR.Group}, Resources: []string{cutest.WidgetGVR.Resource}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
 			{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, Verbs: []string{"get", "patch"}},
 			{APIGroups: []string{"authorization.k8s.io"}, Resources: []string{"selfsubjectaccessreviews"}, Verbs: []string{"create"}},
+			// A restricted process rechecks the held Secrets outside its
+			// caches with a list in every namespace (§10.5), so it needs
+			// list cluster-wide; it still can't read or write them in
+			// denied.
+			{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"list"}},
 		},
 	}
 	if _, err := env.Kube.RbacV1().ClusterRoles().Create(ctx, cluster, metav1.CreateOptions{}); err != nil {
@@ -877,12 +882,12 @@ func TestNamespaceRestrictedLiveRead(t *testing.T) {
 	}, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	// Secrets: list and watch where they are cached, and the protocol's
-	// verbs in in and out, none in denied.
+	// Secrets: watch where they are cached, and the protocol's verbs in in
+	// and out, none in denied.
 	for _, ns := range []string{in, out} {
 		verbs := []string{"get", "patch"}
 		if ns == in {
-			verbs = append(verbs, "list", "watch")
+			verbs = append(verbs, "watch")
 		}
 		role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: sa, Namespace: ns},
 			Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: verbs}}}

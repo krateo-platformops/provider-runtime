@@ -410,6 +410,60 @@ func TestJanitor(t *testing.T) {
 		r.runWrites(t)
 		eventually(t, "the labels to go", func() bool { return cleaned(r) })
 	})
+	t.Run("a patch whose object changed is retried on a new read", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"), stripped())
+		var once sync.Once
+		r.md.PrependReactor("patch", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			var changed bool
+			once.Do(func() {
+				// Another writer changes the object under the patch, so its
+				// resourceVersion test fails against a newer object.
+				obj := r.secretMeta(t, "ns", "s")
+				obj.Annotations["example.com/touched"] = "yes"
+				obj.ResourceVersion = "2"
+				if err := r.md.Tracker().Update(secretsGVR, obj, "ns"); err != nil {
+					t.Error(err)
+				}
+				changed = true
+			})
+			if changed {
+				return true, nil, apierrors.NewGenericServerResponse(422, "", schema.GroupResource{}, "", "", 0, false)
+			}
+			return false, nil, nil
+		})
+		r.track(t, widgetGK)
+		r.run(t)
+		r.runWrites(t)
+		eventually(t, "the labels to go on the retry", func() bool { return cleaned(r) })
+	})
+	t.Run("a failed read is retried with backoff", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"), stripped())
+		var failed atomic.Bool
+		r.md.PrependReactor("get", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			if failed.CompareAndSwap(false, true) {
+				return true, nil, apierrors.NewInternalError(errors.New("etcd is unhappy"))
+			}
+			return false, nil, nil
+		})
+		r.track(t, widgetGK)
+		r.run(t)
+		r.runWrites(t)
+		eventually(t, "the labels to go after the backoff", func() bool {
+			r.clk.Step(janitorBackoffBase)
+			return failed.Load() && cleaned(r)
+		})
+	})
+	t.Run("an object that kept only a marker is swept at the write loops' start", func(t *testing.T) {
+		// The held label is gone, so no cache holds it; the marker is left,
+		// and scaletozero selects on it (§11.6).
+		m := stripped()
+		delete(m.Labels, LabelHeld)
+		r := newFakeRig(t, namespaceObject("ns"), m)
+		r.track(t, widgetGK)
+		r.run(t)
+		r.runWrites(t)
+		eventually(t, "the marker to go", func() bool { return r.secretMeta(t, "ns", "s").Labels[MarkerLabel(widgetGK)] == "" })
+	})
 	t.Run("a rejected patch is reported", func(t *testing.T) {
 		r := newFakeRig(t, namespaceObject("ns"), stripped())
 		r.md.PrependReactor("patch", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
@@ -538,6 +592,55 @@ func TestProber(t *testing.T) {
 		r.t.probe(ctx)
 		if r.gets.Load() != 4 {
 			t.Errorf("%d GETs after a refused LIST, want 4", r.gets.Load())
+		}
+	})
+	t.Run("a holder's deletion drops its refs", func(t *testing.T) {
+		r := setup(t, "new")
+		r.run(t)
+		if err := r.md.Tracker().Delete(widgetsGVR, "ns", "h"); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "the deleted holder's refs to be dropped", func() bool {
+			return len(r.t.missing.due(r.clk.Now().Add(time.Hour))) == 0
+		})
+		r.clk.Step(interval)
+		r.t.probe(ctx)
+		if r.gets.Load() != 0 {
+			t.Errorf("%d GETs for the refs of a deleted holder", r.gets.Load())
+		}
+	})
+	t.Run("Forget drops its refs", func(t *testing.T) {
+		r := setup(t, "new")
+		r.t.Forget(r.currentHolder(t))
+		r.clk.Step(interval)
+		r.t.probe(ctx)
+		if r.gets.Load() != 0 {
+			t.Errorf("%d GETs for the refs of a forgotten holder", r.gets.Load())
+		}
+	})
+	t.Run("a LIST that fails otherwise is retried at the same backoff", func(t *testing.T) {
+		r := setup(t, "a", "b", "c", "d")
+		var fail atomic.Bool
+		fail.Store(true)
+		r.md.PrependReactor("list", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			if fail.Load() && a.(clienttesting.ListAction).GetListRestrictions().Labels.Empty() {
+				// This reactor answers first, so it counts the LIST itself.
+				r.plainLists.Add(1)
+				return true, nil, apierrors.NewInternalError(errors.New("etcd is unhappy"))
+			}
+			return false, nil, nil
+		})
+		r.clk.Step(interval)
+		r.t.probe(ctx)
+		r.t.probe(ctx)
+		if r.plainLists.Load() != 1 {
+			t.Fatalf("%d LISTs: a failed LIST was retried before its backoff", r.plainLists.Load())
+		}
+		fail.Store(false)
+		r.clk.Step(interval) // the backoff didn't double: due again after one interval
+		r.t.probe(ctx)
+		if r.plainLists.Load() != 2 {
+			t.Errorf("%d LISTs one interval after the failure, want 2: the backoff is unchanged", r.plainLists.Load())
 		}
 	})
 	t.Run("the write loops run it on their clock", func(t *testing.T) {
@@ -815,4 +918,131 @@ func TestReleaseLoopParksBatchesOfAKindBeingTracked(t *testing.T) {
 		}
 		eventually(t, "the later Track's batch to release the hold", func() bool { return !held(r) })
 	})
+}
+
+// --- §10.5: held objects outside the protected caches (the user's
+// decision of 2026-11-19) ---
+
+var namespacesGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+
+// releasedStepping steps the clock a grace at a time until released holds,
+// so a release that waits for a grace measured from its first sight gets
+// there; it fails after 20s of wall time.
+func releasedStepping(t *testing.T, r *fakeRig, what string, released func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for !released() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		r.clk.Step(DefaultDeletionGrace)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// clusterHeldListed reports whether a live, label-selected list of secrets
+// in every namespace has been made: §10.5's recheck outside the caches.
+func (r *fakeRig) clusterHeldListed() bool {
+	for _, a := range r.md.Actions() {
+		l, ok := a.(clienttesting.ListAction)
+		if ok && a.GetResource().Resource == "secrets" && a.GetNamespace() == "" &&
+			l.GetListRestrictions().Labels.String() == heldSelector() {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *fakeRig) heldBy(t *testing.T, gk schema.GroupKind, ns, name string) bool {
+	return hasFinalizer(r.secretMeta(t, ns, name), mustFinalizer(gk, ns))
+}
+
+// A deleting Secret outside the cached namespaces keeps Widget's finalizer,
+// and no Widget holder names it any more: its holder was deleted while the
+// process was down, or the leader died between Forget and R3. No informer
+// and no holder pass reaches it; the write loops' start rechecks it with a
+// live list, and releases it.
+func TestUncachedHoldsAreRecheckedWhenTheWriteLoopsStart(t *testing.T) {
+	out := deleting(heldObject(secretGVK, "out", "s", "u-out", widgetGK, "out"), time.Now().Add(-time.Hour))
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("out"), out)
+	r.track(t, widgetGK)
+	r.run(t)
+	r.runWrites(t)
+	releasedStepping(t, r, "the start's recheck to release the stranded hold", func() bool { return !r.heldBy(t, widgetGK, "out", "s") })
+}
+
+// A kind tracked after the write loops started gets the same recheck
+// outside the caches: the replay of the caches covers only what they hold.
+func TestATrackAfterTheWriteLoopsStartRechecksOutsideTheCaches(t *testing.T) {
+	out := deleting(heldObject(secretGVK, "out", "s", "u-out", gadgetGK, "out"), time.Now().Add(-time.Hour))
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("out"), out)
+	r.track(t, widgetGK)
+	r.run(t)
+	r.runWrites(t)
+	if _, err := r.s.Track(context.Background(), r.options(gadgetGK)); err != nil {
+		t.Fatal(err)
+	}
+	releasedStepping(t, r, "the late Track's recheck to release the stranded hold", func() bool { return !r.heldBy(t, gadgetGK, "out", "s") })
+}
+
+// A held Secret outside the caches that appears after the start's recheck
+// is deleted with its namespace. No informer delivers its deletion and no
+// holder names it: the namespace's deletion enqueues each tracker's batch
+// for it, which a live list fills, and the hold is released. Without that,
+// the Secret's finalizer keeps the namespace Terminating, the krateo-057
+// wedge (the review of #114, defect 2).
+func TestAnUncachedNamespaceDeletionReleasesItsHolds(t *testing.T) {
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("out"))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.runWrites(t)
+	eventually(t, "the start's recheck outside the caches", r.clusterHeldListed)
+
+	when := time.Now().Add(-time.Hour)
+	if err := r.md.Tracker().Create(secretsGVR, deleting(heldObject(secretGVK, "out", "s", "u-out", widgetGK, "out"), when), "out"); err != nil {
+		t.Fatal(err)
+	}
+	ns := deleting(namespaceObject("out"), when)
+	if err := r.md.Tracker().Update(namespacesGVR, ns, ""); err != nil {
+		t.Fatal(err)
+	}
+	releasedStepping(t, r, "the namespace's deletion to release the hold outside the caches", func() bool { return !r.heldBy(t, widgetGK, "out", "s") })
+}
+
+// A restricted process needs list on each protected kind in every
+// namespace, for the rechecks outside the caches: without it, Run fails at
+// once and says which grant is missing.
+func TestRestrictedCachesNeedAClusterList(t *testing.T) {
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"))
+	r.denied.Store("list secrets in *", true)
+	r.track(t, widgetGK)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err := r.s.RunInformers(ctx)
+	if err == nil || !strings.Contains(err.Error(), "grant list on secrets in every namespace") {
+		t.Fatalf("RunInformers = %v, want the cluster-wide list refused", err)
+	}
+	// The namespaced checks alone don't trip it.
+	r2 := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"))
+	r2.denied.Store("list secrets in other", true)
+	r2.track(t, widgetGK)
+	r2.run(t)
+}
+
+// The waiting gauge counts a deleting object outside the caches that the
+// release loop keeps for its users, and stops counting it once released.
+func TestTheWaitingGaugeCountsKeptObjectsOutsideTheCaches(t *testing.T) {
+	out := deleting(heldObject(secretGVK, "out", "s", "u-out", widgetGK, "out"), time.Now().Add(-time.Hour))
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("out"), out,
+		holderObject("out", "h", secretID("out", "s")))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.runWrites(t)
+	kind := kindLabel(widgetGK)
+	eventually(t, "the kept object outside the caches to be counted", func() bool { return r.metrics.waitingGauge(kind) == 1 })
+	if err := r.md.Tracker().Delete(widgetsGVR, "out", "h"); err != nil {
+		t.Fatal(err)
+	}
+	releasedStepping(t, r, "the hold to be released once its user goes", func() bool { return !r.heldBy(t, widgetGK, "out", "s") })
+	eventually(t, "the released object to leave the gauge", func() bool { return r.metrics.waitingGauge(kind) == 0 })
 }
