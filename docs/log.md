@@ -18,13 +18,19 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   plumbing's `managementpolicy`, the package unstructured-runtime reads, and
   the reconciler's gates consult it. `observe,create` and `create` (observe is
   implied) now work; the four presets are aliases.
-- **Two behaviour changes, each decided by the user:**
+- **Three behaviour changes, each decided by the user:**
   - `krateo.io/deletion-policy: orphan` always wins: `observe-delete` with
     `orphan` no longer deletes (D5). A deletion policy that is neither
     `delete` nor `orphan` keeps the resource.
   - A value that doesn't parse is observe-only (D2): on an absent resource it
     is a `ReconcileError` with the observe-only event, where it was a silent
     success.
+  - **Whitespace around a value is ignored** (2026-11-21, from the review of
+    #115). A padded value used to match nothing: it acted on nothing and kept
+    the external resource. **A deletion policy of `"delete\n"` (a Helm block
+    scalar) or `" delete"` now deletes it**, as `delete` does, and
+    `" default"` now manages fully. unstructured-runtime does the same since
+    v1.30.0.
 - **The truth table grows to 160 cases**, with unstructured-runtime's inputs in
   its order. 5 of the 90 earlier rows change, the same 5 as there. On every
   non-deleting row, the two runtimes now agree on the verbs called, the

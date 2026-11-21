@@ -162,3 +162,55 @@ func TestIsActionAllowedKeepsItsAnswers(t *testing.T) {
 		t.Error("IsActionAllowed(default, orphan, delete) = false: it ignores the deletion policy, as it always has")
 	}
 }
+
+// TestPaddedValuesMeanTheirTrimmedValue pins the third behaviour change of
+// adopting managementpolicy, which the user decided to keep on 2026-11-21:
+// whitespace around either annotation, or around a set's entries, is ignored.
+// A padded value decides exactly as its trimmed value does. Before, a padded
+// value matched no preset, so it acted on nothing and kept the external
+// resource: deletion-policy "delete\n" (a Helm block scalar's trailing
+// newline) kept it, and now deletes it, as "delete" does.
+func TestPaddedValuesMeanTheirTrimmedValue(t *testing.T) {
+	cases := []struct{ mp, dp, trimmedMP, trimmedDP string }{
+		{"", "delete\n", "", DeletionPolicyDelete},
+		{"", " delete", "", DeletionPolicyDelete},
+		{" default", "", ManagementPolicyDefault, ""},
+		{"default\n", "delete\n", ManagementPolicyDefault, DeletionPolicyDelete},
+		{" observe-create-update", "", ManagementPolicyObserveCreateUpdate, ""},
+		{"observe-delete", " orphan", ManagementPolicyObserveDelete, DeletionPolicyOrphan},
+		{" observe , create ", "", "observe,create", ""},
+		{"\tobserve\n", "", ManagementPolicyObserve, ""},
+	}
+	differsFromBefore := 0
+	for _, tc := range cases {
+		o, trimmed := policyObject(tc.mp, tc.dp), policyObject(tc.trimmedMP, tc.trimmedDP)
+		for _, c := range []struct {
+			name            string
+			got, want, old bool
+		}{
+			{"ShouldCreate", ShouldCreate(o), ShouldCreate(trimmed), oldShouldCreate(tc.mp)},
+			{"ShouldUpdate", ShouldUpdate(o), ShouldUpdate(trimmed), oldShouldCreate(tc.mp)},
+			{"ShouldDelete", ShouldDelete(o), ShouldDelete(trimmed), oldShouldDelete(tc.mp, tc.dp)},
+			{"ShouldOnlyObserve", ShouldOnlyObserve(o), ShouldOnlyObserve(trimmed), oldShouldOnlyObserve(tc.mp)},
+		} {
+			if c.got != c.want {
+				t.Errorf("%s(policy %q, deletion %q) = %v, but its trimmed value gives %v", c.name, tc.mp, tc.dp, c.got, c.want)
+			}
+			if c.got != c.old {
+				differsFromBefore++
+			}
+		}
+		if p := ManagementDecision(o).Policy; p.Invalid != "" {
+			t.Errorf("policy %q is invalid (%s); padding must not make a value invalid", tc.mp, p.Invalid)
+		}
+	}
+	// The delete direction, named: these kept the resource before.
+	for _, dp := range []string{"delete\n", " delete"} {
+		if oldShouldDelete("", dp) || !ShouldDelete(policyObject("", dp)) {
+			t.Errorf("deletion-policy %q: before %v, now %v; want kept before and deleted now", dp, oldShouldDelete("", dp), ShouldDelete(policyObject("", dp)))
+		}
+	}
+	if differsFromBefore == 0 {
+		t.Error("no padded input answers differently from before: the comparison can't fail")
+	}
+}

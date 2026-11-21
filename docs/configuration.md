@@ -171,6 +171,14 @@ so the two runtimes give every value the same meaning
   set allows `delete` and `krateo.io/deletion-policy` is unset or `delete`.
   `orphan` keeps it under every policy, `observe-delete` included, and any
   other value (`orphaned`, `Orphan`, `keep`) keeps it too.
+- **Whitespace is ignored** around either annotation and around a set's
+  entries: `" observe , create "` is `observe,create`, and a deletion policy
+  of `"delete\n"` (a Helm block scalar's trailing newline) is `delete`.
+  Before, a padded value matched nothing, so it acted on nothing and kept the
+  external resource; it now does what its trimmed value says, which for
+  `"delete\n"` means the external resource is deleted with the object (the
+  user's decision, 2026-11-21; unstructured-runtime has done the same since
+  v1.30.0).
 - **A withheld verb is not reported yet.** An absent resource under a policy
   that withholds `create` but allows another write verb (`observe-delete`) is
   a plain success (`Synced=True`), and so is a drifted resource under any
@@ -605,7 +613,7 @@ Set by users/operators on each managed CR, honored by the reconcile loop
 |---|---|---|
 | `krateo.io/paused` | `"true"` | Skips reconciliation and sets the `ReconcilePaused` condition. |
 | `krateo.io/management-policy` | a comma-separated set of `observe`, `create`, `update`, `delete` (e.g. `observe,create`), or one of the presets `default` \| `observe-create-update` \| `observe-delete` \| `observe` | Restricts which external actions the provider may take. See [management policy](#management-policy). |
-| `krateo.io/deletion-policy` | `delete` (default) \| `orphan` | Whether external-resource deletion follows CR deletion. `orphan` always keeps the resource; any other value keeps it too. |
+| `krateo.io/deletion-policy` | `delete` (default) \| `orphan` | Whether external-resource deletion follows CR deletion. `orphan` always keeps the resource; any other value keeps it too. Whitespace around the value is ignored: `"delete\n"` is `delete`. |
 | `krateo.io/connector-verbose` | `"true"` | Signals the external client to enable verbose behavior (`meta.IsVerbose`). |
 | `krateo.io/external-name` | string | The resource's identity in the external system; set by `Create` implementations, readable via `meta.GetExternalName`. |
 | `krateo.io/external-create-pending` / `-succeeded` / `-failed` | RFC3339Nano, in UTC | Managed by the reconciler's create-tracking guard — not for hand-editing. Compare them as parsed times, never as strings: trailing zeros of the fraction are dropped, so string order isn't time order. Other writers of the same annotation names may use second precision or a zone offset, so a reader should parse with a layout that accepts both. Markers aren't rewritten on upgrade, so one object can carry a marker written with an offset by an earlier release and its clearer written in UTC by a later one. |

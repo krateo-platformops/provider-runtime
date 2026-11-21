@@ -424,3 +424,52 @@ func TestEveryVerbSetCallsOnlyWhatItAllows(t *testing.T) {
 		}
 	}
 }
+
+// TestTheDeleteGateRereadsThePolicyAfterConnect pins the second delete gate,
+// the one just before Delete. The first gate, before Connect, removes the
+// finalizer of an object whose policy withholds delete, so the second decides
+// only when the policy changed in between: a connecter whose Connect writes
+// the object's annotations. It must read the policy as it is then.
+func TestTheDeleteGateRereadsThePolicyAfterConnect(t *testing.T) {
+	cases := []struct {
+		name       string
+		set        map[string]string // what Connect writes onto the object
+		wantDelete int
+	}{
+		{"control: nothing changes", nil, 1},
+		{"Connect sets deletion-policy orphan", map[string]string{meta.AnnotationKeyDeletionPolicy: meta.DeletionPolicyOrphan}, 0},
+		{"Connect sets an unrecognised deletion-policy", map[string]string{meta.AnnotationKeyDeletionPolicy: "orphaned"}, 0},
+		{"Connect sets management-policy observe-create-update", map[string]string{meta.AnnotationKeyManagementPolicy: meta.ManagementPolicyObserveCreateUpdate}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWidget("w", map[string]string{})
+			w.SetFinalizers([]string{FinalizerName})
+			ts := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+			w.SetDeletionTimestamp(&ts)
+			s := newTraceServer(t, w)
+			var calls mgmtTableCalls
+			st := mgmtTableState{name: "deleting-present", exists: true, upToDate: true, deleting: true}
+			r := NewReconciler(&fake.Manager{Client: s.c, Scheme: s.scheme}, resource.ManagedKind(widgetGVK),
+				WithExternalConnecter(ExternalConnectorFn(func(_ context.Context, mg resource.Managed) (ExternalClient, error) {
+					if tc.set != nil {
+						meta.AddAnnotations(mg, tc.set)
+					}
+					return mgmtTableClient(st, &calls), nil
+				})),
+				WithRecorder(&eventCapture{}),
+			)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := r.Reconcile(ctx, reqFor("w")); err != nil {
+				t.Logf("Reconcile: %v", err)
+			}
+			if calls.observe != 1 {
+				t.Fatalf("observe called %d times, want 1: the pass didn't reach the second gate", calls.observe)
+			}
+			if calls.delete != tc.wantDelete {
+				t.Errorf("Delete called %d times, want %d", calls.delete, tc.wantDelete)
+			}
+		})
+	}
+}
