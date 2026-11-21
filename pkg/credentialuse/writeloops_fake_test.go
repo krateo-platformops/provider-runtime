@@ -738,3 +738,81 @@ func TestReleaseLoopRequeuesAtTheGracesEnd(t *testing.T) {
 	r.clk.Step(DefaultDeletionGrace)
 	eventually(t, "the release at the grace's end", func() bool { return !hasFinalizer(r.secretMeta(t, "out", "s"), f) })
 }
+
+// A release batch for a kind that a Track is still adding waits for that
+// Track (the review of #114): a release worker that takes it parks it, and
+// it goes back to the queue when the Track succeeds, or is dropped when the
+// Track fails. A Track after start replays the shared caches to its
+// handlers, and those batches, the recheck of every hold already cached,
+// reach the queue before the kind is tracked; dropping them stranded the
+// hold of a holder deleted while the process was down. The Secret carries
+// Gadget's finalizer and no Gadget holder exists, so once Gadget is tracked
+// its batch releases it.
+func TestReleaseLoopParksBatchesOfAKindBeingTracked(t *testing.T) {
+	k := batchKey{gadgetGK, "ns"}
+	held := func(r *fakeRig) bool {
+		return hasFinalizer(r.secretMeta(t, "ns", "s"), mustFinalizer(gadgetGK, "ns"))
+	}
+	// start tracks Gadget after the write loops run, with its holder list
+	// held, so the Track is in flight; queues Gadget's batch; and waits for
+	// a worker to take it.
+	start := func(t *testing.T) (r *fakeRig, release chan struct{}, done chan error) {
+		r = newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", gadgetGK, "ns"))
+		r.track(t, widgetGK)
+		r.run(t)
+		r.runWrites(t)
+		entered, release := r.gateList("gadgets")
+		done = make(chan error, 1)
+		go func() {
+			_, err := r.s.Track(context.Background(), r.options(gadgetGK))
+			done <- err
+		}()
+		<-entered
+		r.s.queue.Add(k, secretID("ns", "s"))
+		eventually(t, "a worker to take the batch", func() bool { return r.s.queue.Len() == 0 && !r.working(k) })
+		r.s.mu.Lock()
+		parked := len(r.s.tracking[gadgetGK].parked)
+		r.s.mu.Unlock()
+		if parked != 1 {
+			t.Fatalf("the batch of a kind being tracked wasn't parked: %d parked", parked)
+		}
+		if !held(r) {
+			t.Fatal("the hold was released before its kind was tracked")
+		}
+		return r, release, done
+	}
+
+	t.Run("the Track succeeds", func(t *testing.T) {
+		r, release, done := start(t)
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "the parked batch to release the hold", func() bool { return !held(r) })
+	})
+
+	t.Run("the Track fails", func(t *testing.T) {
+		r, release, done := start(t)
+		r.forbidList.Store("gadgets", true)
+		close(release)
+		if err := <-done; err == nil {
+			t.Fatal("the Track didn't fail")
+		}
+		r.s.mu.Lock()
+		_, inFlight := r.s.tracking[gadgetGK]
+		r.s.mu.Unlock()
+		if inFlight || r.s.queue.Len() != 0 || len(r.queued(gadgetGK, "ns")) != 0 {
+			t.Fatalf("a failed Track left its parked batch behind: in flight %v, queued %v", inFlight, r.queued(gadgetGK, "ns"))
+		}
+		if !held(r) {
+			t.Fatal("a failed Track's parked batch was worked")
+		}
+		// A later Track replays the caches again, and its batch releases the
+		// hold.
+		r.forbidList.Delete("gadgets")
+		if _, err := r.s.Track(context.Background(), r.options(gadgetGK)); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "the later Track's batch to release the hold", func() bool { return !held(r) })
+	})
+}

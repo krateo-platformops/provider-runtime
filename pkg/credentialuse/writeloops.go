@@ -122,11 +122,14 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 // releaseBatch runs one batch (§6.2 R0 to R3), and requeues it as its
 // result says: at the time it asks for, as at a grace's end; with backoff
 // after an error; at once, for the next write loops, when ctx ended under
-// it. A batch for a kind with no tracker is dropped: a Track after start
-// that failed and rolled back may have left batches and timers for its
-// kind, from replaying a shared cache (the re-review of #109).
+// it. A batch for a kind that a Track is adding waits for that Track: it
+// goes back to the queue if the Track succeeds (Shared.endTracking, the
+// review of #114). A batch for a kind nobody tracks or is tracking is
+// dropped: a Track after start that failed and rolled back may have left
+// batches and timers for its kind, from replaying a shared cache (the
+// re-review of #109).
 func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
-	t := s.tracker(k.Holder)
+	t := s.trackerOrPark(k, ids)
 	if t == nil {
 		return
 	}

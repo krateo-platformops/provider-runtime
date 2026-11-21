@@ -614,12 +614,7 @@ func (s *Shared) Track(ctx context.Context, o Options) (*Tracker, error) {
 			}
 		}
 	}
-	defer func() {
-		s.mu.Lock()
-		delete(s.tracking, gk)
-		s.mu.Unlock()
-		close(mine.done)
-	}()
+	defer s.endTracking(gk, mine)
 	work, cancel := s.trackCtx(ctx)
 	defer cancel()
 	t, err := s.track(ctx, work, o, mine)
@@ -653,10 +648,55 @@ func (s *Shared) trackCtx(parent context.Context) (context.Context, context.Canc
 }
 
 // An inflight is a Track adding its kind: done is closed when it ends, and
-// t is its tracker once built, for tests.
+// t is its tracker once built, for tests. parked holds the release batches
+// of its kind that a release worker took while it ran (the review of #114):
+// a Track after start replays the shared caches to its handlers, and those
+// batches, the recheck of every hold already cached, reach the queue before
+// the kind is in s.trackers.
 type inflight struct {
-	done chan struct{}
-	t    *Tracker
+	done   chan struct{}
+	t      *Tracker
+	parked []parkedBatch
+}
+
+// A parkedBatch is a release batch held while its kind's Track runs.
+type parkedBatch struct {
+	key batchKey
+	ids []ID
+}
+
+// endTracking ends the Track of gk that mine records: the release batches
+// parked while it ran go back to the queue if it tracked the kind, and are
+// dropped if it failed, which leaves nothing behind (§7.3); a later Track
+// replays the caches again. Only then can another Track of gk start.
+func (s *Shared) endTracking(gk schema.GroupKind, mine *inflight) {
+	s.mu.Lock()
+	delete(s.tracking, gk)
+	parked := mine.parked
+	mine.parked = nil
+	tracked := s.trackers[gk] != nil
+	s.mu.Unlock()
+	if tracked {
+		for _, b := range parked {
+			s.queue.Add(b.key, b.ids...)
+		}
+	}
+	close(mine.done)
+}
+
+// trackerOrPark returns the tracker of k's holder kind. While a Track of
+// that kind runs, it parks the batch (k, ids) with that Track instead and
+// returns nil, as it does for a kind nobody tracks or is tracking.
+func (s *Shared) trackerOrPark(k batchKey, ids []ID) *Tracker {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t := s.trackers[k.Holder]; t != nil {
+		return t
+	}
+	if in := s.tracking[k.Holder]; in != nil {
+		in.parked = append(in.parked, parkedBatch{key: k, ids: append([]ID(nil), ids...)})
+	}
+	return nil
 }
 
 // trackFailed wraps err, the failure of a Track of gk, naming the end of
