@@ -15,8 +15,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	metadatafake "k8s.io/client-go/metadata/fake"
+	"k8s.io/client-go/tools/cache"
 	testingclock "k8s.io/utils/clock/testing"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
@@ -585,5 +587,90 @@ func TestIndexPrunable(t *testing.T) {
 	ix.recorded = func(id ID) bool { return id == named }
 	if got := ix.prunable([]ID{named, free, other}); !slices.Equal(got, []ID{free}) {
 		t.Errorf("prunable = %v, want %v", got, []ID{free})
+	}
+}
+
+// listOnly is a ListWatch the reflector lists with a List, not a watch-list
+// stream.
+type listOnly struct{ *cache.ListWatch }
+
+func (listOnly) IsWatchListSemanticsUnSupported() bool { return true }
+
+// syncedInformer is a started informer over an empty list, which syncs at
+// once; with block, its list waits until block is closed.
+func syncedInformer(t *testing.T, block chan struct{}) cache.SharedIndexInformer {
+	t.Helper()
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, _ metav1.ListOptions) (runtime.Object, error) {
+			if block != nil {
+				select {
+				case <-block:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			return &metav1.PartialObjectMetadataList{}, nil
+		},
+		WatchFuncWithContext: func(context.Context, metav1.ListOptions) (watch.Interface, error) {
+			return watch.NewFake(), nil
+		},
+	}
+	inf := cache.NewSharedIndexInformer(listOnly{lw}, &metav1.PartialObjectMetadata{}, 0, cache.Indexers{})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go inf.RunWithContext(ctx)
+	return inf
+}
+
+// HasSynced waits on the index informer too, in PerName mode: the
+// controller's workers start only once the index has been seen (§7.5).
+func TestHasSyncedWaitsOnTheIndex(t *testing.T) {
+	block := make(chan struct{})
+	tr := &Tracker{holders: syncedInformer(t, nil), crd: syncedInformer(t, nil),
+		idx: &index{inf: syncedInformer(t, block)}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !cache.WaitForCacheSync(ctx.Done(), tr.holders.HasSynced, tr.crd.HasSynced) {
+		t.Fatal("the holder and CRD informers didn't sync")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if tr.HasSynced() {
+		t.Fatal("HasSynced before the index informer synced")
+	}
+	close(block)
+	deadline := time.Now().Add(10 * time.Second)
+	for !tr.HasSynced() {
+		if time.Now().After(deadline) {
+			t.Fatal("HasSynced stays false once the index informer synced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A per-name watch that stops takes its counts off the held gauge, and a
+// count its handler makes after the stop doesn't reach it (§12).
+func TestAStoppedPerNameWatchLeavesTheGauge(t *testing.T) {
+	m := &countingMetrics{}
+	tr := &Tracker{gk: widgetGK, heldBy: map[countKey]int{}, waitingBy: map[countKey]int{}, sink: sinks{metrics: m}}
+	tr.names = newPerNames(tr)
+	label := &protectedInformer{gk: secretGroupKind}
+	tr.setCounts(label.countKey(), 1, 0, nil)
+	w := &nameWatch{p: &protectedInformer{gk: secretGroupKind, ns: "ns", name: "s"}, stop: func() {}}
+	tr.setCounts(w.p.countKey(), 2, 1, w)
+	if n, _ := m.heldGauge(kindLabel(widgetGK)); n != 3 {
+		t.Fatalf("held gauge %d, want 3", n)
+	}
+	tr.names.parent = context.Background()
+	tr.names.by[ID{Kind: "Secret", Namespace: "ns", Name: "s"}] = w
+	tr.names.follow(nil)
+	if n, _ := m.heldGauge(kindLabel(widgetGK)); n != 1 {
+		t.Errorf("held gauge %d after the watch stopped, want 1", n)
+	}
+	if got := m.waitingGauge(kindLabel(widgetGK)); got != 0 {
+		t.Errorf("waiting gauge %d after the watch stopped, want 0", got)
+	}
+	tr.setCounts(w.p.countKey(), 5, 0, w)
+	if n, _ := m.heldGauge(kindLabel(widgetGK)); n != 1 {
+		t.Errorf("held gauge %d after a late count from the stopped watch, want 1", n)
 	}
 }
