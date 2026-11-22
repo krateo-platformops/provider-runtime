@@ -699,9 +699,18 @@ func TestDisownPassCounts(t *testing.T) {
 		}
 		return crd.GetAnnotations()[AnnotationHeldCount]
 	}
+	// The pass's count is written only under the switch it counted for.
+	switchOn := func(t *testing.T, r *fakeRig) {
+		t.Helper()
+		if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Run("a record alone", func(t *testing.T) {
 		r := newFakeRig(t, holderObject("ns", "h", SecretRef("ns", "s").ID()))
 		tr := r.track(t, widgetGK)
+		switchOn(t, r)
 		r.s.disownPass(ctx, tr, parseDisown("all"))
 		if got := crdCount(t, r); got != "1" {
 			t.Errorf("held-count %q, want 1: the record is a hold to strip", got)
@@ -714,6 +723,7 @@ func TestDisownPassCounts(t *testing.T) {
 	t.Run("a list that fails", func(t *testing.T) {
 		r := newFakeRig(t)
 		tr := r.track(t, widgetGK)
+		switchOn(t, r)
 		r.forbidList.Store("secrets", true)
 		r.s.disownPass(ctx, tr, parseDisown("all"))
 		if got := crdCount(t, r); got != "unknown" {

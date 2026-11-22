@@ -276,6 +276,8 @@ func TestAStripCountsWhatItFound(t *testing.T) {
 	}
 	put(fa)
 	var fired atomic.Bool
+	var mu sync.Mutex
+	var calls []string // every call on the Secret, with its result, for a failure's report
 	newWriteRig(t, env.Config, cu.SharedOptions{Namespaces: []string{cached}}, func(o *cu.Options) {
 		// One pass's count stays on the CRD for 3s, for the poll to read.
 		o.DisownInterval, o.DisownPasses, o.TimeoutBound = 3*time.Second, 2, time.Second
@@ -285,7 +287,13 @@ func TestAStripCountsWhatItFound(t *testing.T) {
 				put(fa, fb) // the late A2, after the list
 			}
 			return nil
-		}, nil)
+		}, func(c cu.Call, err error) {
+			if c.GK.Kind == "Secret" && c.Namespace == ns {
+				mu.Lock()
+				calls = append(calls, fmt.Sprintf("%s %s at %s: %v", c.Op, c.PatchType, time.Now().UTC().Format("15:04:05.000"), err))
+				mu.Unlock()
+			}
+		})
 	})
 	set("all")
 	var first string
@@ -296,7 +304,9 @@ func TestAStripCountsWhatItFound(t *testing.T) {
 		return nil
 	})
 	if first != "2" {
-		t.Errorf("the first pass counted %q, want 2: the one its list showed, and the one its strip found", first)
+		mu.Lock()
+		t.Errorf("the first pass counted %q, want 2: the one its list showed, and the one its strip found; the calls on the Secret: %q", first, calls)
+		mu.Unlock()
 	}
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
 	stripped(t, ns, "s")
