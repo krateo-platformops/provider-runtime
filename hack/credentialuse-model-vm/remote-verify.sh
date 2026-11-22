@@ -9,7 +9,8 @@
 # revert.time, a header with the machine and the times. However it ends, the
 # script writes ~/out/DONE with the exit status, packs ~/out into
 # ~/out.tar.gz, waits GRACE seconds (180 by default) for the copy-back, and
-# powers the VM off.
+# powers the VM off. REVERT_ONLY passes through to the revert script; SKIP_CI=1
+# skips the suite.
 #
 # Usage: remote-verify.sh <go sha256> <bundle> <commit> <revert script> [envtest version]
 # e.g.   remote-verify.sh ccfe7ae8...c5 cred-6.bundle 04e5760 hack/revert-check-credential-use-6.py 1.37.0
@@ -59,10 +60,14 @@ export KUBEBUILDER_ASSETS
   echo "ci start $(date -u '+%Y-%m-%d %H:%M:%S UTC'); $(uptime)"
 } > "$HOME/out/header"
 set +e
-/usr/bin/time -v go test -race -count=1 -skip '^TestModel' ./... > "$HOME/out/ci.log" 2> "$HOME/out/ci.time"
-rc=$?
-echo "ci end $(date -u '+%Y-%m-%d %H:%M:%S UTC'); go test exit $rc; $(uptime)" >> "$HOME/out/header"
-[ $rc -ne 0 ] && exit $rc
+# SKIP_CI=1 runs only the revert check: for a rerun over a delta when the
+# code under test hasn't changed since a passing run.
+if [ "${SKIP_CI:-}" != 1 ]; then
+  /usr/bin/time -v go test -race -count=1 -skip '^TestModel' ./... > "$HOME/out/ci.log" 2> "$HOME/out/ci.time"
+  rc=$?
+  echo "ci end $(date -u '+%Y-%m-%d %H:%M:%S UTC'); go test exit $rc; $(uptime)" >> "$HOME/out/header"
+  [ $rc -ne 0 ] && exit $rc
+fi
 echo "revert start $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$HOME/out/header"
 /usr/bin/time -v python3 "$revert" > "$HOME/out/revert.txt" 2> "$HOME/out/revert.time"
 rc=$?
