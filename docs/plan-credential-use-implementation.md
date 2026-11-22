@@ -1057,6 +1057,12 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   (L5). A restored dropped line is counted in
   `credentialuse_index_tampered_total`, with a `CredentialUseIndexTampered`
   Warning event on the index.
+- **§10.6.6 follows IP4** (the review of the PR 8 build, 2026-11-22): the
+  dropped-line checks, their restores and the rebuild run in the write
+  loops, on the leader, or on every process without leader election
+  (§6.8). The index informer only buffers dropped lines and deletions in
+  the index's queue, so a standby loses nothing before its election. The
+  cost is N GETs per dropped line only without leader election.
 - **Creating the index rebuilds it.** `Track` creates the index when it is
   absent and then rebuilds it from the records. The write loops recreate a
   deleted index the same way, and so does an acquirer's add that finds it

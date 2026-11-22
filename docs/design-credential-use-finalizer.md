@@ -2355,13 +2355,20 @@ missing (§10.6.6).
 #### 10.6.6 Tampering, deletion, and the rebuild (M2, L5)
 
 The tracker watches the ConfigMap by name (or polls it in PerNamePoll mode,
-§10.7). The write loops make the checks below, so under leader election
-only the leader does. **A change that drops lines this process didn't
-remove** is checked line by line, except for **lines removed alongside a successful R3 the
+§10.7). **A change that drops lines this process didn't remove** is checked
+line by line, except for **lines removed alongside a successful R3 the
 tracker can see**. In PerName mode, the per-object watch has already
-delivered that P lost K's last finalizer. Those need no check (L5). Every
-other dropped line costs a GET, in every process: with N processes, N GETs
-per dropped line. That cost is accepted. A dropped line whose object no longer carries K's prefix
+delivered that P lost K's last finalizer. Those need no check (L5).
+
+**Where the checks run** (IP4: the informers only read, and every write is
+in the write loops). The dropped-line checks, their restores and the
+rebuild below run in the write loops: on the leader, or on every process
+when there is no leader election (§6.8). The index informer, which runs on
+standbys too, only buffers what it sees, the dropped lines and the
+deletions, in a queue the write loops drain, so a standby loses nothing
+before its election. Every other dropped line therefore costs one GET per
+process that runs the write loops: N GETs per dropped line only with N
+processes and no leader election. That cost is accepted. A dropped line whose object no longer carries K's prefix
 needs nothing: another process pruned it. A dropped line whose object
 still carries the prefix is **tampering**, or a lost race. The tracker adds
 those lines back, records a Warning event and counts
