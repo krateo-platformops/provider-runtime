@@ -34,9 +34,9 @@ func parseDisown(v string) disownSet {
 	d := disownSet{kinds: map[schema.GroupKind]bool{}}
 	for _, s := range strings.Split(v, ",") {
 		s = strings.TrimSpace(s)
-		switch {
-		case s == "":
-		case s == "all":
+		switch s {
+		case "":
+		case "all":
 			d.all = true
 		default:
 			kind, group, _ := strings.Cut(s, ".")
