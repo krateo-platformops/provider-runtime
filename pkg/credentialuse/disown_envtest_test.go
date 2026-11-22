@@ -233,6 +233,73 @@ func TestDisownSettlesAfterConsecutiveZeroPasses(t *testing.T) {
 	})
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
 	stripped(t, ns, "s")
+
+	// A change of what the switch covers starts the run over: the flag goes
+	// at once, and comes back only after a whole run under the new switch
+	// (the review of PR 6).
+	changed := time.Now()
+	set("Secret")
+	cutest.Eventually(t, time.Minute, func() error {
+		if widgetCRDAnnotations(t)[cu.AnnotationDisownSettled] != "" {
+			return fmt.Errorf("still settled after the switch changed: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if got, min := time.Since(changed), time.Duration(disownPasses-1)*disownInterval-150*time.Millisecond; got < min {
+		t.Errorf("settled %s after the switch changed, want at least %s", got, min)
+	}
+}
+
+// A strip that finds more of the kind's finalizers than its pass's list
+// showed, as when an A2 lands between them, adds them to the count (the
+// review of PR 6). The Secret is outside the caches, so only Disown acts on
+// it; the hook puts back a second finalizer just before the first strip.
+func TestAStripCountsWhatItFound(t *testing.T) {
+	cutest.Require(t, env)
+	set := disowning(t)
+	cached, ns := env.Namespace(t, "disown-found-cached"), env.Namespace(t, "disown-found")
+	createSecret(t, ns, "s")
+	fa, _ := cu.FinalizerName(widgetGK, ns)
+	fb, _ := cu.FinalizerName(widgetGK, "elsewhere")
+	put := func(finalizers ...string) {
+		t.Helper()
+		ann := map[string]string{}
+		for _, f := range finalizers {
+			ann[f] = "epoch"
+		}
+		data, _ := json.Marshal(map[string]any{"metadata": map[string]any{"finalizers": finalizers, "annotations": ann,
+			"labels": map[string]string{cu.MarkerLabel(widgetGK): "true", cu.LabelHeld: "true"}}})
+		if _, err := env.Kube.CoreV1().Secrets(ns).Patch(context.Background(), "s", types.MergePatchType, data, metav1.PatchOptions{}); err != nil {
+			t.Error(err)
+		}
+	}
+	put(fa)
+	var fired atomic.Bool
+	newWriteRig(t, env.Config, cu.SharedOptions{Namespaces: []string{cached}}, func(o *cu.Options) {
+		// One pass's count stays on the CRD for 3s, for the poll to read.
+		o.DisownInterval, o.DisownPasses, o.TimeoutBound = 3*time.Second, 2, time.Second
+	}, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			if c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.JSONPatchType && fired.CompareAndSwap(false, true) {
+				put(fa, fb) // the late A2, after the list
+			}
+			return nil
+		}, nil)
+	})
+	set("all")
+	var first string
+	cutest.Eventually(t, time.Minute, func() error {
+		if first = widgetCRDAnnotations(t)[cu.AnnotationHeldCount]; first == "" {
+			return cutest.ErrNotYet
+		}
+		return nil
+	})
+	if first != "2" {
+		t.Errorf("the first pass counted %q, want 2: the one its list showed, and the one its strip found", first)
+	}
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	stripped(t, ns, "s")
 }
 
 // Three processes with no leader election all run Disown: they agree on the

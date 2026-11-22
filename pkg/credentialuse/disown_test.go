@@ -429,6 +429,44 @@ func TestAcquireWhileDisowned(t *testing.T) {
 			t.Fatalf("acquire = %+v, %v; want MustNotConnect for a new holder, and no A2", a, err)
 		}
 	})
+	t.Run("set between two A2s: the cached check stops the second", func(t *testing.T) {
+		r, set := disownRig(t)
+		for _, n := range []string{"a", "b"} {
+			must(r.m.Create(secretKey("ns", n), metav1.ObjectMeta{}))
+		}
+		r.srv.before = func(op, kind, name string) error {
+			if op == "patch" && kind == "Secret" && name == "a" {
+				*set = parseDisown("all") // after the pass's live read, before b's A2
+			}
+			return nil
+		}
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{SecretRef("ns", "a"), SecretRef("ns", "b")})
+		if err != nil || len(a.Held) != 1 || a.Held[0].Name != "a" || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonDisowned {
+			t.Fatalf("acquire = %+v, %v; want a held and b disowned", a, err)
+		}
+		if countCalls(r.srv.calls, "patch Secret/b") != 0 {
+			t.Errorf("b's A2 after the switch: %v", r.srv.calls)
+		}
+
+		// BeforeEstablish likewise, between its own A2s.
+		*set = disownSet{}
+		for _, n := range []string{"c", "d"} {
+			must(r.m.Create(secretKey("ns", n), metav1.ObjectMeta{}))
+		}
+		r.srv.before = func(op, kind, name string) error {
+			if op == "patch" && kind == "Secret" && name == "c" {
+				*set = parseDisown("all")
+			}
+			return nil
+		}
+		missing := Acquired{Unheld: []Unheld{{Ref: SecretRef("ns", "c"), Reason: ReasonMissing}, {Ref: SecretRef("ns", "d"), Reason: ReasonMissing}}}
+		if err := r.p.beforeEstablish(ctx, r.get(t, widgetKey("ns", "h")), missing); err != nil {
+			t.Fatal(err)
+		}
+		if hasFinalizer(r.get(t, secretKey("ns", "d")), fNS) {
+			t.Error("BeforeEstablish held d after the switch")
+		}
+	})
 	t.Run("the switch off again: held as before", func(t *testing.T) {
 		r, set := disownRig(t)
 		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
@@ -646,4 +684,40 @@ func lastPatch(acts []clienttesting.Action) clienttesting.PatchAction {
 		}
 	}
 	return nil
+}
+
+// TestDisownPassCounts: a pass counts a holder whose record names a covered
+// ref, with no finalizer anywhere, and a list that fails makes the count
+// unknown, never zero (§7.4).
+func TestDisownPassCounts(t *testing.T) {
+	ctx := context.Background()
+	crdCount := func(t *testing.T, r *fakeRig) string {
+		t.Helper()
+		crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return crd.GetAnnotations()[AnnotationHeldCount]
+	}
+	t.Run("a record alone", func(t *testing.T) {
+		r := newFakeRig(t, holderObject("ns", "h", SecretRef("ns", "s").ID()))
+		tr := r.track(t, widgetGK)
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if got := crdCount(t, r); got != "1" {
+			t.Errorf("held-count %q, want 1: the record is a hold to strip", got)
+		}
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if got := crdCount(t, r); got != "0" {
+			t.Errorf("held-count %q after the strip, want 0", got)
+		}
+	})
+	t.Run("a list that fails", func(t *testing.T) {
+		r := newFakeRig(t)
+		tr := r.track(t, widgetGK)
+		r.forbidList.Store("secrets", true)
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if got := crdCount(t, r); got != "unknown" {
+			t.Errorf("held-count %q, want unknown", got)
+		}
+	})
 }
