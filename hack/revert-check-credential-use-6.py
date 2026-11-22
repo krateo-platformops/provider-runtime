@@ -191,7 +191,7 @@ KILLERS = {
     'the strip keeps the marker': 'TestDisownPatch|TestDisownPrefix',
     "the held label goes despite another kind's finalizer": 'TestDisownPatch',
     "the strip isn't guarded by the version read": 'TestDisownPatch',
-    "a changed object isn't read again": 'TestDisownPrefix|' + E2,
+    "a changed object isn't read again": 'TestAStripCountsWhatItFound',
     'DisownPrefix runs while the CRD exists': 'TestDisownPrefix',
     'a dry run strips': 'TestDisownPrefix',
     'the setup bound counts passes, not their span': 'TestTrackValidates',
