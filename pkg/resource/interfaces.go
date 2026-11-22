@@ -42,3 +42,20 @@ type Finalizer interface {
 	AddFinalizer(ctx context.Context, obj Object) error
 	RemoveFinalizer(ctx context.Context, obj Object) error
 }
+
+// A NamedFinalizer is a Finalizer that names the finalizer it adds and
+// removes. The reconciler's credential-use wiring needs it: an object that
+// carries the finalizer is established, and its credentials are held from
+// then on (docs/design-credential-use-finalizer.md §7.5).
+//
+// Its contract: RemoveFinalizer writes the object's annotations together
+// with the finalizer change, in one write, as APIFinalizer's Update does, so
+// that the credential-use record the reconciler removes from the object in
+// memory just before goes in the same write (§8). A RemoveFinalizer that
+// writes only the finalizer list leaves the record behind; the record of an
+// object without its finalizer is then ignored, so that is harmless (§6.1).
+type NamedFinalizer interface {
+	Finalizer
+	// FinalizerName is the finalizer AddFinalizer adds.
+	FinalizerName() string
+}

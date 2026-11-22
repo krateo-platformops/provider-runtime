@@ -33,6 +33,41 @@ const (
 	EventConflict = tracecontext.EventConflict
 	// EventMarkerFailed: the marker write failed with anything but a conflict.
 	EventMarkerFailed = tracecontext.EventMarkerFailed
+	// EventCredentialUseAcquire: one per credential-use Acquire in the pass
+	// (docs/design-credential-use-finalizer.md §8 step 5), with what it held
+	// and its outcome; never a ref's name or a Secret's data.
+	EventCredentialUseAcquire = "credentialuse.acquire" // #nosec G101 -- a span event name, not a credential
+	// EventCredentialUseRelease is reserved: release runs in the
+	// credential-use write loops, outside any reconcile span.
+	EventCredentialUseRelease = "credentialuse.release" // #nosec G101 -- a span event name, not a credential
+)
+
+// The credentialuse.acquire event's attributes: the refs, chains followed,
+// counted as those held plus those not held, so a Guaranteed ref, which is
+// neither, isn't counted; how many it held; how many it didn't by reason, as
+// AttrCredentialUseUnheldPrefix plus the reason (only the reasons present),
+// and the outcome.
+const (
+	AttrCredentialUseRefs    = attribute.Key("provider_runtime.credentialuse.refs")
+	AttrCredentialUseHeld    = attribute.Key("provider_runtime.credentialuse.held")
+	AttrCredentialUseOutcome = attribute.Key("provider_runtime.credentialuse.outcome")
+	// AttrCredentialUseUnheldPrefix prefixes a count per reason, as
+	// provider_runtime.credentialuse.unheld.Missing.
+	AttrCredentialUseUnheldPrefix = "provider_runtime.credentialuse.unheld."
+)
+
+// The credentialuse.acquire event's outcomes.
+const (
+	// CredentialUseOK: the pass proceeds with its refs acquired.
+	CredentialUseOK = "ok"
+	// CredentialUseDegraded: the acquire failed for an established object,
+	// which proceeds (fail open).
+	CredentialUseDegraded = "degraded"
+	// CredentialUseMustNotConnect: the object is new and its acquire failed,
+	// or a ref is being deleted: the pass stops before Connect.
+	CredentialUseMustNotConnect = "must_not_connect"
+	// CredentialUseConflict: the record write conflicted; the pass requeues.
+	CredentialUseConflict = "conflict"
 )
 
 // Event attribute keys.
@@ -68,9 +103,13 @@ const (
 	StepLateInit      Step = "late_init"
 	StepMarker        Step = "marker"
 	StepStatus        Step = "status"
+	// StepCredentialUse is the credential-use record write (A1), a merge
+	// patch guarded by the object's resourceVersion
+	// (docs/design-credential-use-finalizer.md §6.2, §8 step 5).
+	StepCredentialUse Step = "credential_use" // #nosec G101 -- a tracing step name, not a credential
 )
 
 // Steps returns every Step, in the order above, as a new slice each call.
 func Steps() []Step {
-	return []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker, StepStatus}
+	return []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker, StepStatus, StepCredentialUse}
 }

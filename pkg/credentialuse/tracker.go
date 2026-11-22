@@ -55,6 +55,13 @@ type Tracker struct {
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).
 	missing *missingRefs
+	// unrecorded are the (holder, object) pairs CheckRead has logged
+	// (§11.9).
+	unrecorded *reportedSet
+	// degradedLogged are the holders whose degraded pass was logged, keyed
+	// with an empty ref: §8 logs it once per object, until a pass that
+	// isn't degraded, or Forget, clears it.
+	degradedLogged *reportedSet
 
 	// sinkMu guards sink. Every call to a sink holds it for reading, so
 	// that rebind, which holds it for writing, returns only once no call to
@@ -169,11 +176,14 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	}
 	t := &Tracker{
 		s: s, o: o, gk: gk, gvr: m.Resource, prefix: prefix, ver: newVerified(gk),
-		regs:      map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
-		heldBy:    map[protKey]int{},
-		waitingBy: map[protKey]int{},
-		missing:   newMissingRefs(),
-		sink:      sinksOf(o),
+		regs:       map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
+		heldBy:     map[protKey]int{},
+		waitingBy:  map[protKey]int{},
+		missing:    newMissingRefs(),
+		unrecorded: newReportedSet(),
+
+		degradedLogged: newReportedSet(),
+		sink:           sinksOf(o),
 	}
 	t.proto = &protocol{
 		holder:          gk,
@@ -195,6 +205,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		namespaceViews:  trackerViews{t},
 		backoff:         newConsentBackoff(o.PollInterval),
 		reported:        newReportedSet(),
+		written:         newRecordWrites(),
 		unheldReads:     s.unheldReads,
 		enqueueBatch: func(id ID, ns string) {
 			s.queue.Add(batchKey{gk, ns}, id)
@@ -392,13 +403,24 @@ func (t *Tracker) heldDeleting(id ID, namespace string) {
 	}
 }
 
-// reportOutcome records §12's event for a degraded pass, on the holder.
+// reportOutcome records §12's event for a degraded pass, on the holder,
+// throttled by the event sink, and logs it once per holder while it stays
+// degraded (§8): a pass that isn't degraded, or Forget, clears that, so the
+// next degraded pass logs again.
 func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
-	if !a.Degraded || a.Err == nil {
+	key := consentKey{holder: obj.GetUID()}
+	if !a.Degraded {
+		t.degradedLogged.clear(key)
+		return
+	}
+	if a.Err == nil {
 		return
 	}
 	if ro, ok := obj.(runtime.Object); ok {
 		t.s.events.record(ro, "Warning", EventDegraded, a.Err.Error())
+	}
+	if !t.degradedLogged.first(key) {
+		return
 	}
 	t.warn("credential-use: the acquire failed for an established holder, which proceeds",
 		"holder", obj.GetNamespace()+"/"+obj.GetName(), "kind", t.gk.String(), "error", a.Err.Error())
@@ -416,6 +438,7 @@ func (t *Tracker) BeforeEstablish(ctx context.Context, obj metav1.Object, a Acqu
 // write that removes its owner finalizer, so that both go in one write
 // (§7.2 item 4). It is mandatory. It reports whether anything changed.
 func (t *Tracker) Forget(obj metav1.Object) bool {
+	t.degradedLogged.forget(obj.GetUID())
 	t.missing.set(types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, nil, t.s.clock.Now(), t.o.ProbeInterval)
 	return t.proto.forget(obj)
 }

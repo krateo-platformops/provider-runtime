@@ -300,7 +300,10 @@ say which half each item lands in.
   except the PerName items. It publishes `credential-use.krateo.io/config` on
   the holder CRD once (A4), with bounded retries (L4 of #52's review), and a
   disagreeing process refuses to start. It validates
-  `DisownPasses × DisownInterval ≥ 2 × TimeoutBound` (A6). `NewShared`
+  `(DisownPasses − 1) × DisownInterval ≥ 2 × TimeoutBound` (A6), and
+  derives an unset `DisownInterval` so that it holds. PR 3 validated
+  `DisownPasses × DisownInterval`; PR 6 changed the bound to `(DisownPasses
+  − 1)`, and PR 7 added the derivation. `NewShared`
   creates the (K, N) batch queue before any informer starts, so it buffers
   and deduplicates from the first event, grace timers included (M1 of #52's
   review);
@@ -839,6 +842,103 @@ where a standby's informers saw the holder go before its write loops ran
 **Depends on:** PR 6. **Size:** about 900 lines of production code and 1,600
 of tests.
 
+**What the build settled** (2026-11-22), where §7.5 and §8 left room:
+
+- **A conflict on the record write (A1) is traced** as `k8s.conflict` with a
+  new step, `credential_use`, so that every conflict requeue of the pass
+  keeps its event (the user's decision, 2026-11-22). It changes the tracing
+  contract (design-tracing §4.5's step list), and goes to observability as a
+  delta. The standalone `Forget` Update shares the finalizer removal's error
+  handling, so its conflict is step `finalizer`.
+- **Each Acquire records a `credentialuse.acquire` event** on the reconcile
+  span (the user's decision, 2026-11-22), with
+  `provider_runtime.credentialuse.refs` (the refs named, chains followed),
+  `.held`, `.unheld.<Reason>` (a count per reason present) and `.outcome`
+  (`ok`, `degraded`, `must_not_connect` or `conflict`): counts only, never
+  a ref's name or a Secret's data. `credentialuse.release` stays reserved:
+  release runs in the write loops, outside any reconcile span.
+- **An unset `DisownInterval` is derived from `TimeoutBound`** (the user's
+  decision, 2026-11-22, from the review of PR 7): `max(60s, ⌈2 ×
+  TimeoutBound / (DisownPasses − 1)⌉)`, after `DisownPasses`' default, in
+  the core's validation, so outside runtimes get it too. With the defaults
+  a reconcile timeout above about 90s, git-provider's 4m among them, made
+  setup refuse to start. It is rounded up to a whole second, so the
+  published duration reads back unchanged and still spans the bound. It is
+  derived in validate, before equalOptions and publishConfig, so a second
+  Track or another process compares derived with derived; the derived value
+  is what is published on the CRD. `DisownPasses` of 1 with the interval
+  unset is refused with the "below twice TimeoutBound" error, never a
+  division by zero; an interval set explicitly is still refused when too
+  short.
+- **A holder being deleted that carries none of its owner finalizers skips
+  Acquire** (the user's decision, 2026-11-22): it has been finalized, isn't
+  a user (§6.1), and a record it wrote would be ignored; the rest of its
+  pass runs as before. Without it, each pass of a holder kept by another
+  finalizer (`foregroundDeletion`) wrote its record back and re-held its
+  Secret, which release then dropped again.
+- **Acquire runs right after the Orphan check, before the trace marker's
+  write**; `pristine` is taken after both, and the marker's locked patch
+  carries A1's resourceVersion.
+- **The re-read after a webhook-changed A1** (`Acquired.Reread`) is live
+  through `WithAPIReader` when set, and through the cached client otherwise:
+  a stale copy only makes the pass's next write conflict, never write over
+  the webhook's change. It is tested on fakes; envtest has no webhook server.
+- **The informers run under the informer runnable's context.** A source
+  whose `Start` comes first starts them, without owning them, so a
+  controller's shutdown doesn't stop another's informers.
+- **The M4 timer counts from election, or from the `NewReconciler` that
+  registered the source when that comes later**; every Reconciler on a
+  Shared is checked.
+- **Every setup error fails both runnables and every pass before the Get**:
+  a `WithFinalizer` without `NamedFinalizer`, a failed `Track` (whatever
+  its error), or the registry's. The tracker's owner finalizers are the
+  `NamedFinalizer`'s name alone: provider-runtime#46 hasn't renamed it yet.
+- **An injected Shared** (`WithCredentialUseShared`) gets the two runnables
+  once per Shared when the manager has a config; with a test manager's nil
+  config the test runs it. A connecter without `CredentialRefsProvider`
+  creates nothing, injected Shared or not.
+- **The source's `Enqueue`** drops a holder before `Start`, and forwards
+  after it, to the queue `Start` received (A22).
+- **`Acquired.RetryAfter`** applies to a pass that ends without an error, a
+  rate-limited requeue or a deferral: it requeues at the smaller of the two.
+  A deferral keeps the governor's time.
+- **A new holder that must not connect** gets the core's error as Synced's
+  message, unwrapped, so that §12's text for a Deleting ref is exact; no
+  event is added. `CredentialUseDegraded` and `CredentialDeleting` are the
+  core's, recorded through `Clients.Events`, which is the manager's
+  `GetEventRecorder("credential-use")`: events.k8s.io/v1 Events (P12), so
+  the provider's RBAC needs `create` and `patch` on `events` in
+  `events.k8s.io`.
+- **The Synced pointer** cuts the reason at 16 characters and caps `<n>` at
+  9999, so a hand-edited annotation can't push it past 160.
+- **`CheckRead`** counts a read as named when the holder's record, its
+  unheld list, or the first level of its refs (Guaranteed ones included)
+  names it, and never for a kind the Disown switch covers; it counts every
+  unnamed read and logs once per (holder, object).
+  `CredentialUseCheckingReader(reader, scheme)` finds the holder on the
+  context Connect and the ExternalClient's methods get, and checks Gets and
+  each item of a List.
+- **`IsOwnRecordWrite`** compares the two versions whole, as unstructured
+  maps, with the record and unheld annotations, `resourceVersion` and
+  `managedFields` set aside; a pair that isn't a `runtime.Object` passes.
+  What A1 wrote is remembered per holder until `Forget` or the holder's
+  deletion.
+- **The metrics** are named `credentialuse.<name>`, which the Prometheus
+  exporter turns into the design's names (`_total` added to counters), and
+  are taken from `WithMetrics` when the recorder implements
+  `credentialuse.MetricsRecorder`, as `telemetry.Metrics` does.
+- **`KindOptions` lives in the core**; the adapter adds the holder, the
+  owner finalizers, `Refs`, the sinks, `PollInterval` (the poll interval)
+  and `TimeoutBound` (the timeout plus 30s).
+- **`AssertCredentialRefsCover(t, ctx, connecter, mg, recordingReader,
+  protected...)`** follows the refs' Next through the fixture, and hands
+  Connect the objects it followed through the new
+  `credentialuse.WithResolvedObjects`.
+- **A degraded pass is logged once per holder** (§8), keyed by UID, while
+  it stays degraded: a pass that isn't degraded, `Forget`, or the holder's
+  deletion clears it, so the next degraded pass logs again. The
+  `CredentialUseDegraded` event keeps the event sink's throttle.
+
 ### PR 8: PerName mode, the index ConfigMap
 
 **Scope.** `index.go`:
@@ -1150,7 +1250,9 @@ requeues") both need one. *Choice:* add `Acquired.RetryAfter`.
 `DisownPasses × DisownInterval` against "the kind's largest reconcile or
 request timeout" and publishes `timeoutBound`, but `Options` has no such
 field. *Choice:* `Options.TimeoutBound`, which `Track` requires. The adapter
-passes `timeout + reconcileGracePeriod` (90s by default).
+passes `timeout + reconcileGracePeriod` (90s by default). The rule now in
+force is `(DisownPasses − 1) × DisownInterval ≥ 2 × TimeoutBound` (PR 6),
+with an unset interval derived from `TimeoutBound` (PR 7).
 
 **A7. §7.1 vs. §12, §10.6.4 and §11.3: events and metrics.** The core must
 record events on holders, protected objects and the index, but `Clients` has

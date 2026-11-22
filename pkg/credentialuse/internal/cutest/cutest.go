@@ -64,6 +64,11 @@ type Env struct {
 // and no error when KUBEBUILDER_ASSETS is unset, so that a test binary runs
 // its other tests; Require then fails or skips the tests that need it.
 func Start() (*Env, error) {
+	return StartWith(CRD("Widget", "widgets"), CRD("Target", "targets"))
+}
+
+// StartWith is Start with crds instead of the Widget and Target CRDs.
+func StartWith(crds ...*apiextensionsv1.CustomResourceDefinition) (*Env, error) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		return nil, nil
 	}
@@ -75,10 +80,7 @@ func Start() (*Env, error) {
 		return nil, err
 	}
 	te := &envtest.Environment{
-		CRDs: []*apiextensionsv1.CustomResourceDefinition{
-			CRD("Widget", "widgets"),
-			CRD("Target", "targets"),
-		},
+		CRDs:                  crds,
 		ErrorIfCRDPathMissing: true,
 	}
 	cfg, err := te.Start()
@@ -151,6 +153,14 @@ func CRD(kind, plural string) *apiextensionsv1.CustomResourceDefinition {
 			}},
 		},
 	}
+}
+
+// CRDWithStatus is CRD with the status subresource, as a managed
+// resource's CRD has: provider-runtime's reconciler writes status through it.
+func CRDWithStatus(kind, plural string) *apiextensionsv1.CustomResourceDefinition {
+	crd := CRD(kind, plural)
+	crd.Spec.Versions[0].Subresources = &apiextensionsv1.CustomResourceSubresources{Status: &apiextensionsv1.CustomResourceSubresourceStatus{}}
+	return crd
 }
 
 var nsSeq atomic.Int64

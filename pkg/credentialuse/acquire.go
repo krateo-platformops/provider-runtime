@@ -130,6 +130,10 @@ type protocol struct {
 	unheldReads    *sharedReads
 	enqueueBatch   func(id ID, holderNamespace string)
 
+	// written remembers what each holder's last A1 left, for the holder
+	// event filter (IsOwnRecordWrite, §7.5); nil remembers nothing.
+	written *recordWrites
+
 	// disowned reports whether the holder kind's Disown switch covers a
 	// protected kind now (§7.4); nil is never. Acquire asks it for every
 	// ref, and again just before each A2 (§10.6.8, interleaving 3).
@@ -696,6 +700,7 @@ func (p *protocol) announce(ctx context.Context, obj metav1.Object, want []ID, u
 	}
 	at := p.clock.Now()
 	copyMeta(obj, &out.ObjectMeta)
+	p.written.set(obj.GetUID(), out.Annotations)
 	if out.Generation != generation || !maps.Equal(out.Labels, labels) {
 		a.Reread = true
 	}
@@ -854,6 +859,7 @@ func (p *protocol) forget(obj metav1.Object) bool {
 	p.ver.forgot(obj.GetUID())
 	p.backoff.forget(obj.GetUID())
 	p.reported.forget(obj.GetUID())
+	p.written.forget(obj.GetUID())
 	return true
 }
 

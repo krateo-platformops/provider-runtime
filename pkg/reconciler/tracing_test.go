@@ -619,6 +619,23 @@ func TestTracingStatusMapping(t *testing.T) {
 			s.faults.patch = func(client.Object) error { return conflictErr() }
 			return s, &widgetProvider{ops: s.ops}, nil
 		},
+		// The credential-use record write (A1), a merge patch guarded by the
+		// object's resourceVersion.
+		tracing.StepCredentialUse: func(t *testing.T) (*traceServer, *widgetProvider, []ReconcilerOption) {
+			w := newCUWorld(t, newWidget("w", nil))
+			w.mdPatch = func(gvr schema.GroupVersionResource, _, name string) error {
+				if gvr == cuWidgetGVR {
+					return kerrors.NewConflict(gvr.GroupResource(), name, errors.New("test"))
+				}
+				return nil
+			}
+			p := &widgetProvider{ops: w.srv.ops}
+			return w.srv, p, []ReconcilerOption{
+				WithExternalConnecter(refsConnecter{widgetProvider: p, refs: secretRef("creds")}),
+				WithFinalizer(resource.NewAPIFinalizer(w.srv.c, FinalizerName)),
+				WithCredentialUseShared(w.s),
+			}
+		},
 		// The one step that doesn't requeue: a status conflict is the pass's error.
 		tracing.StepStatus: func(t *testing.T) (*traceServer, *widgetProvider, []ReconcilerOption) {
 			s := newTraceServer(t, initialized(newWidget("w", nil)))
@@ -633,7 +650,11 @@ func TestTracingStatusMapping(t *testing.T) {
 		t.Run("Conflict/"+string(step), func(t *testing.T) {
 			s, p, o := build(t)
 			tp, rec := tracer(t)
-			res, err := newTraceReconciler(s, p, append([]ReconcilerOption{WithTracerProvider(tp)}, o...)...).Reconcile(context.Background(), reqFor("w"))
+			r := newTraceReconciler(s, p, append([]ReconcilerOption{WithTracerProvider(tp)}, o...)...)
+			if r.cu.enabled {
+				startSource(t, r)
+			}
+			res, err := r.Reconcile(context.Background(), reqFor("w"))
 			root := lastRoot(t, rec)
 			if step == tracing.StepStatus {
 				if err == nil || !kerrors.IsConflict(err) {

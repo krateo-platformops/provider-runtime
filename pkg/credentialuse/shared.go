@@ -108,7 +108,13 @@ type Options struct {
 	// is 15s.
 	ProbeInterval time.Duration
 	// DisownInterval and DisownPasses are Disown's pass interval and its
-	// consecutive zero passes (§7.4); the defaults are 60s and 5.
+	// consecutive zero passes (§7.4); DisownPasses defaults to 5. An unset
+	// DisownInterval is derived from the kind's TimeoutBound, after
+	// DisownPasses' default: max(60s, ⌈2 × TimeoutBound / (DisownPasses −
+	// 1)⌉), so a long reconcile timeout needs no setting (the user's decision,
+	// 2026-11-22). That derived value is what Track publishes on the CRD, so
+	// every process of the kind agrees on it. An interval that is set is
+	// used as given, and Track refuses one too short for TimeoutBound.
 	DisownInterval time.Duration
 	DisownPasses   int
 	// TimeoutBound is the kind's largest reconcile or request timeout.
@@ -1032,11 +1038,11 @@ func (s *Shared) validate(o Options) (Options, error) {
 	if o.ProbeInterval == 0 {
 		o.ProbeInterval = DefaultProbeInterval
 	}
-	if o.DisownInterval == 0 {
-		o.DisownInterval = DefaultDisownInterval
-	}
 	if o.DisownPasses == 0 {
 		o.DisownPasses = DefaultDisownPasses
+	}
+	if o.DisownInterval == 0 {
+		o.DisownInterval = defaultDisownInterval(o.DisownPasses, o.TimeoutBound)
 	}
 	if o.MaxDepth == 0 {
 		o.MaxDepth = DefaultMaxDepth
@@ -1077,6 +1083,30 @@ func (s *Shared) validate(o Options) (Options, error) {
 		o.Metrics = NopMetrics{}
 	}
 	return o, nil
+}
+
+// defaultDisownInterval is an unset DisownInterval: DefaultDisownInterval,
+// or longer when the kind's TimeoutBound needs it, so that passes zero passes
+// span twice TimeoutBound (§7.4): max(DefaultDisownInterval, ⌈2 ×
+// TimeoutBound / (passes − 1)⌉), rounded up to a whole second, so that the
+// duration published on the CRD reads back as the same value and the bound
+// still holds after parsing. A long reconcile timeout then needs no setting
+// (the user's decision, 2026-11-22). With passes below 2 no interval
+// suffices: it returns DefaultDisownInterval, never dividing by zero, and
+// validate refuses with its "below twice TimeoutBound" error.
+func defaultDisownInterval(passes int, timeoutBound time.Duration) time.Duration {
+	if passes < 2 || timeoutBound <= 0 {
+		return DefaultDisownInterval
+	}
+	span, n := 2*timeoutBound, time.Duration(passes-1)
+	d := span / n
+	if d*n < span {
+		d++
+	}
+	if r := d % time.Second; r != 0 {
+		d += time.Second - r
+	}
+	return max(DefaultDisownInterval, d)
 }
 
 // equalOptions reports whether a and b, both validated, configure the same

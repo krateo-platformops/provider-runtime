@@ -36,6 +36,11 @@ func NewAPIFinalizer(c client.Client, finalizer string) *APIFinalizer {
 	return &APIFinalizer{client: c, finalizer: finalizer}
 }
 
+var _ NamedFinalizer = (*APIFinalizer)(nil)
+
+// FinalizerName is the finalizer the APIFinalizer adds and removes.
+func (a *APIFinalizer) FinalizerName() string { return a.finalizer }
+
 // AddFinalizer to the supplied Managed resource.
 func (a *APIFinalizer) AddFinalizer(ctx context.Context, obj Object) error {
 	if meta.FinalizerExists(obj, a.finalizer) {

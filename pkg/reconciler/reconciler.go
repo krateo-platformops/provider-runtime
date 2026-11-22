@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
+	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
 	"github.com/krateo-platformops/provider-runtime/pkg/errors"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
@@ -497,6 +498,10 @@ type Reconciler struct {
 	traceWindow time.Duration
 	// traces is the in-memory record of traceparent values seen and marked.
 	traces traceMemo
+
+	// cu is the credential-use wiring (credentialuse.go), on only for a
+	// connecter that implements CredentialRefsProvider (§11.10).
+	cu credentialUse
 }
 
 type mrManaged struct {
@@ -716,6 +721,7 @@ func WithExternalConnecter(c ExternalConnecter) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.external.ExternalConnectDisconnecter = NewNopDisconnecter(c)
 		r.external.keyer = keyerOf(c)
+		r.cu.refs = credentialRefsOf(c)
 	}
 }
 
@@ -725,6 +731,7 @@ func WithExternalConnectDisconnecter(c ExternalConnectDisconnecter) ReconcilerOp
 	return func(r *Reconciler) {
 		r.external.ExternalConnectDisconnecter = c
 		r.external.keyer = keyerOf(c)
+		r.cu.refs = credentialRefsOf(c)
 	}
 }
 
@@ -842,6 +849,10 @@ func NewReconciler(m manager.Manager, of resource.ManagedKind, o ...ReconcilerOp
 		r.throttledRecorder = r.record
 	}
 
+	// Credential-use, once every option is in: it needs the connecter, the
+	// finalizer, the metrics, the timeout and the poll interval (§7.5).
+	r.setupCredentialUse(m, schema.GroupVersionKind(of))
+
 	return r
 }
 
@@ -875,6 +886,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 				r.metrics.IncReconcileRequeueImmediate(inCtx)
 			}
 		}()
+	}
+
+	// Credential-use's step 1, before the Get: a kind whose source was never
+	// started, or whose setup failed, does nothing and fails the manager
+	// (design-credential-use-finalizer §8; credentialuse.go).
+	if err = r.cu.ready(r.kind); err != nil {
+		return reconcile.Result{}, err
 	}
 
 	deadline := started.Add(r.timeout + reconcileGracePeriod)
@@ -923,15 +941,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (resu
 		externalCtx = ratelimit.WithSink(externalCtx, r.governor)
 	}
 
-	result, err = r.reconcile(ctx, externalCtx, log, managed, pass)
+	var cup credentialUsePass
+	result, err = r.reconcile(ctx, externalCtx, log, managed, pass, &cup)
 	panicked = false
-	return result, err
+	return cup.requeue(result, err), err
 }
 
 // reconcile is one pass over managed, which Reconcile has read. ctx holds the
 // reconcile span; externalCtx is the provider calls' context, with the external
 // timeout. The pass's own spans, events and the marker go through pass.
-func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Logger, managed resource.Managed, pass *tracePass) (reconcile.Result, error) { //nolint:gocyclo // See note below.
+func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Logger, managed resource.Managed, pass *tracePass, cup *credentialUsePass) (reconcile.Result, error) { //nolint:gocyclo // See note below.
 	// read is the object as the pass read it, taken only with a live reader. A
 	// status conflict's message compares the live object's status with it, and
 	// the governor's deferral reuses it as pristine (below), so a pass with both
@@ -996,8 +1015,10 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	if meta.WasDeleted(managed) && !meta.ManagementDecision(managed).May(managementpolicy.Delete) {
 		log = log.WithValues("deletion-timestamp", managed.GetDeletionTimestamp())
 
+		// No Connect, so nothing to acquire: the record goes in the
+		// finalizer's write (design-credential-use-finalizer §8 step 4).
 		started = time.Now()
-		err = r.managed.RemoveFinalizer(ctx, managed)
+		err = r.removeFinalizer(ctx, managed)
 		r.recordFinalizerRemove(ctx, started, err)
 		if err != nil {
 			// If this is the first time we encounter this issue we'll be
@@ -1036,6 +1057,21 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	// Instead, carry the unresolved handshake forward and let Observe answer it below. The window
 	// between SetExternalCreatePending and the terminal annotation is pure bookkeeping, measured at
 	// well under a second on live resources (#88), so the overwhelmingly common interruption is one where the external work actually completed.
+	// Credential-use's step 5 (design-credential-use-finalizer §8): hold what Connect will read,
+	// on every pass past the Orphan check, deletion passes included, before the governor's gate,
+	// so a deferred pass has already acquired. pristine is taken below, after it.
+	// A holder being deleted that carries none of its owner finalizers has been finalized
+	// already: it isn't a user (§6.1), so there is nothing to protect, and a record it wrote
+	// would be ignored. Its pass skips Acquire (§8 step 5; the user's decision, 2026-11-22).
+	if r.cu.active() && (!meta.WasDeleted(managed) || credentialuse.IsEstablished(managed, r.cu.owners)) {
+		var res reconcile.Result
+		var stop bool
+		managed, externalCtx, res, stop, err = r.acquireCredentials(ctx, externalCtx, log, managed, pass, cup, writeStatus)
+		if stop {
+			return res, err
+		}
+	}
+
 	// The marker the decision says to write now (its window closed, or the window is 0): past the
 	// pause and Orphan checks, before anything acts and before pristine is taken (§6.2).
 	if res, stop := r.writeMarkerIf(ctx, log, managed, pass, tracing.Now); stop {
@@ -1060,6 +1096,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	}
 	// deferred ends a pass whose next external call the governor deferred.
 	deferred := func(d *ratelimit.Deferral) (reconcile.Result, error) {
+		cup.deferred = true
 		pass.deferred(d)
 		return r.deferReconcile(log, managed, pristine, d, func() error {
 			return writeStatus(nil)
@@ -1091,7 +1128,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		throttledRecorder.Event(managed, event.Warning(reasonCannotConnect, actionProcessEvent, err))
 		// Without a client nothing was observed, so the last Ready can no longer be vouched for.
 		markNotObserved(managed, err)
-		passErr := errors.Wrap(err, errReconcileConnect)
+		passErr := r.withUnheldSuffix(errors.Wrap(err, errReconcileConnect), managed)
 		managed.SetConditions(prv1.ReconcileError(passErr))
 		if err := writeStatus(passErr); err != nil {
 			return reconcile.Result{}, err
@@ -1144,6 +1181,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 			// without creating blind (oasgen-provider#266, core-provider#236).
 			werr = errors.Wrapf(werr, errFmtCreateWaitsOnObserve, meta.GetExternalCreatePending(managed).Format(time.RFC3339))
 		}
+		werr = r.withUnheldSuffix(werr, managed)
 		// Observe could not answer, so the Ready it last reported is no longer known to hold.
 		// Leaving it would show a stale True next to the error.
 		markNotObserved(managed, err)
@@ -1335,7 +1373,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		}
 
 		started = time.Now()
-		err = r.managed.RemoveFinalizer(ctx, managed)
+		err = r.removeFinalizer(ctx, managed)
 		r.recordFinalizerRemove(ctx, started, err)
 		if err != nil {
 			// If this is the first time we encounter this issue we'll be
@@ -1362,6 +1400,19 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 		// thus there is no point trying to update its status.
 		log.Info("Successfully deleted managed resource")
 		return reconcile.Result{}, nil
+	}
+
+	// Credential-use's step 8: just before the finalizer makes the object established, every
+	// ref that was Missing is read live, and held if it now exists (§6.7).
+	if r.cu.active() && !credentialuse.IsEstablished(managed, r.cu.owners) {
+		if err := r.cu.tracker.BeforeEstablish(ctx, managed, cup.acquired); err != nil {
+			log.Debug("Cannot hold the credentials before adding the finalizer", "error", err)
+			managed.SetConditions(prv1.ReconcileError(err))
+			if werr := writeStatus(err); werr != nil {
+				return reconcile.Result{}, werr
+			}
+			return reconcile.Result{}, err
+		}
 	}
 
 	started = time.Now()
