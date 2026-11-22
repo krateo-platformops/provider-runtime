@@ -1713,8 +1713,100 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	if after := unreadableEvents(); after != before {
 		t.Errorf("the event was recorded %d more times over four passes for the same set: it isn't throttled", after-before)
 	}
-	setIndexLines(t, idx, func(l []string) []string {
-		return slices.DeleteFunc(l, func(x string) bool { return x == secretLine(ns, "nogrant") })
+
+	// A hand removal alone isn't a remedy: the line of an object this
+	// process can't read may name a hold, so it comes back (§10.6.3).
+	line := secretLine(ns, "nogrant")
+	setIndexLines(t, idx, func(l []string) []string { return slices.DeleteFunc(l, func(x string) bool { return x == line }) })
+	lined(t, idx, line, true)
+	if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" {
+		t.Fatalf("held-count %q after the hand removal alone", a[cu.AnnotationHeldCount])
+	}
+
+	// The remedy: the operator vouches for it, here removing its line in the
+	// same edit. The line stays removed, and Disown settles.
+	editIndex(t, idx, func(cm *corev1.ConfigMap) {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		cm.Annotations[cu.AnnotationVouched] = ns + "/Secret/nogrant"
+		cm.Data["entries"] = strings.ReplaceAll(cm.Data["entries"], line+"\n", "")
 	})
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if lines, _ := indexLines(t, idx); slices.Contains(lines, line) {
+		t.Errorf("the vouched line came back: %v", lines)
+	}
+	if v := indexAnnotations(t, idx)[cu.AnnotationVouched]; v != ns+"/Secret/nogrant" {
+		t.Errorf("the vouched annotation after Disown's writes: %q", v)
+	}
+}
+
+// editIndex edits the index in idx by hand, as an operator would, retrying
+// on conflict.
+func editIndex(t *testing.T, idx string, edit func(cm *corev1.ConfigMap)) {
+	t.Helper()
+	cutest.Eventually(t, 30*time.Second, func() error {
+		cms := env.Kube.CoreV1().ConfigMaps(idx)
+		cm, err := cms.Get(context.Background(), widgetIndex, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		edit(cm)
+		_, err = cms.Update(context.Background(), cm, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// indexAnnotations reads the annotations of the index in idx.
+func indexAnnotations(t *testing.T, idx string) map[string]string {
+	t.Helper()
+	cm, err := env.Kube.CoreV1().ConfigMaps(idx).Get(context.Background(), widgetIndex, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cm.Annotations
+}
+
+// A vouched object that can be read and carries a finalizer of the kind is
+// counted and stripped as any other: the vouch applies only while it can't
+// be read, and the wrong vouch is logged (§7.4).
+func TestDisownCountsAVouchedObjectThatCarries(t *testing.T) {
+	cutest.Require(t, env)
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-vouch-wrong")
+	createSecret(t, ns, "x")
+	acquireAs(t, ns, "x")
+	logs := &warnLog{}
+	perNameRig(t, idx, func(o *cu.Options) {
+		disownOptions(o)
+		o.Logger = logs
+	}, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			// The release loop can't take x: its batch's list fails.
+			if c.Op == "list" && c.GK == widgetGK && c.Namespace == ns {
+				return errors.New("the release loop can't list the holders")
+			}
+			return nil
+		}, nil)
+	})
+	editIndex(t, idx, func(cm *corev1.ConfigMap) {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		cm.Annotations[cu.AnnotationVouched] = ns + "/Secret/x"
+		cm.Data["entries"] += secretLine(ns, "x") + "\n"
+	})
+	counts := watchHeldCount(t)
+	set("all")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if seen := counts(); !slices.ContainsFunc(seen, func(v string) bool { return v != "0" && v != "" && v != "unknown" }) {
+		t.Errorf("held-count before settling: %v; want the vouched, held Secret counted", seen)
+	}
+	stripped(t, ns, "x")
+	if len(logs.matching("the vouch is wrong")) == 0 {
+		t.Error("the wrong vouch wasn't logged")
+	}
 }

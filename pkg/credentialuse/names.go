@@ -58,6 +58,13 @@ const (
 	// an index without it, so that a process that died between creating the
 	// index and rebuilding it leaves no hold without its line.
 	AnnotationRebuilt = Domain + "/rebuilt"
+	// AnnotationVouched lists the objects an operator has checked by hand
+	// to carry no finalizer of the kind, comma-separated, each written as
+	// the unheld annotation names a ref: <namespace>/<Kind[.group]>/<name>
+	// (§7.4, §10.6.6). While such an object can't be read, Disown and the
+	// startup recheck skip it, and its line may go. The process never
+	// writes it.
+	AnnotationVouched = Domain + "/vouched"
 )
 
 // ClusterScopedName is the name part of a cluster-scoped holder kind's

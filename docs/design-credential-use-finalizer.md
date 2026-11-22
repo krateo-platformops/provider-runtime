@@ -1316,8 +1316,12 @@ default) consecutive passes count zero.
   each such object and why (`team-a/Secret/nogrant: forbidden`), throttled
   while the set stays the same; a log line; and the gauge
   `credentialuse_disown_unreadable`. **The remedy:** grant `get` on the
-  object, or confirm by hand that it carries no finalizer of K and remove
-  its line from the index. Disown then settles.
+  object, or confirm by hand that it carries no finalizer of K and add it
+  to the index's `credential-use.krateo.io/vouched` annotation, and then,
+  optionally, remove its line. Disown then settles. Removing the line
+  alone isn't enough: the tamper check restores the line of an object it
+  can't read (§10.6.6). The vouch, the user's decision of 2026-11-22, is
+  described in §10.6.6.
 
 A non-zero count clears the flag. **Downgrading the runtime, removing the interface from the connecter,
 or uninstalling is safe once `held-count` is `0` and `disown-settled` is
@@ -2372,7 +2376,8 @@ line. The marker label still finds it (§10.6.6).
   kept, logged and counted
   (`credentialuse_index_read_denied_total`) once per object, and never
   retried: no retry can read it before RBAC changes. Any other failed read
-  makes the recheck retry with backoff.
+  makes the recheck retry with backoff. A line an operator vouched for
+  (§10.6.6) isn't read.
 - **Disown** reads it to find what to strip and what to count (§7.4).
 - **`WithHeld`** reads it, and stops at the first line whose object still
   carries K's prefix (§11.6).
@@ -2414,6 +2419,19 @@ by merging, an index without it. So a process that dies between creating
 the index and rebuilding it, or an acquirer that recreated a deleted index
 while no write loops ran, leaves no hold without its line past the next
 start.
+
+**An operator's vouch** (the user's decision, 2026-11-22). The index's
+`credential-use.krateo.io/vouched` annotation lists, comma-separated and
+written as the unheld annotation names refs (`team-a/Secret/nogrant`), the
+objects an operator has checked by hand to carry no finalizer of K. Malformed
+entries are ignored, with a warning once per value. While a vouched object
+can't be read, Disown's count and its strip skip it, the startup recheck
+doesn't read it, the tamper check doesn't restore its dropped line, a prune
+may remove its line, and a rebuild doesn't add it. Every other unreadable
+line keeps the superset's rule: restored, and counted unknown. A vouched
+object that can be read and carries K's prefix is treated as any other,
+counted and kept, and the wrong vouch is logged. The process never writes
+the annotation, and its own writes keep it.
 
 **If the ConfigMap is deleted**, the tracker recreates it and rebuilds it
 from the records. It lists the holders of K, takes the union of their

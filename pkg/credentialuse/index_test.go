@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,6 +41,7 @@ type memStore struct {
 	failGet      error
 	updates      int
 	rebuilt      bool
+	vouched      string
 }
 
 func (s *memStore) get(context.Context) (indexVersion, error) {
@@ -49,7 +51,7 @@ func (s *memStore) get(context.Context) (indexVersion, error) {
 	if !s.exists {
 		return indexVersion{}, apierrors.NewNotFound(configMapsGR, "cu-index")
 	}
-	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt}, nil
+	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched}, nil
 }
 
 func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
@@ -65,7 +67,7 @@ func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, r
 	s.lines, s.rv = slices.Clone(lines), s.rv+1
 	s.rebuilt = s.rebuilt || rebuilt
 	s.updates++
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt}, nil
+	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched}, nil
 }
 
 func (s *memStore) create(_ context.Context, lines []string, rebuilt bool) (indexVersion, error) {
@@ -917,5 +919,124 @@ func TestARefusalAfterAReadIsReportedAgain(t *testing.T) {
 	}
 	if reports != 2 {
 		t.Errorf("%d reports from live checks for refused, readable, refused; want 2", reports)
+	}
+}
+
+// The vouched annotation is read tolerantly: blanks trimmed, a malformed
+// entry ignored and reported once per value (§10.6.6).
+func TestParseVouched(t *testing.T) {
+	ix := testIndex(&memStore{}, nil)
+	var reports [][]string
+	ix.onVouchMalformed = func(e []string) { reports = append(reports, e) }
+	v := " team-a/Secret/nogrant, ,/Cluster.x.io/c,nonsense, team-b/KubernetesTarget.core.krateo.io/prod ,a/b/c/d"
+	for range 2 {
+		got := ix.parseVouched(v)
+		want := map[ID]bool{
+			SecretRef("team-a", "nogrant").ID():                                                    true,
+			{Group: "x.io", Kind: "Cluster", Name: "c"}:                                            true,
+			{Group: "core.krateo.io", Kind: "KubernetesTarget", Namespace: "team-b", Name: "prod"}: true,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("parsed %v, want %v", got, want)
+		}
+		for id := range want {
+			if !got[id] {
+				t.Errorf("%v missing from %v", id, got)
+			}
+		}
+	}
+	if len(reports) != 1 || !slices.Equal(reports[0], []string{"nonsense", "a/b/c/d"}) {
+		t.Errorf("reports %q, want the two malformed entries once", reports)
+	}
+	if got, ok := parseUnheldRef(unheldRef(SecretRef("ns", "s").ID())); !ok || got != SecretRef("ns", "s").ID() {
+		t.Errorf("parseUnheldRef(unheldRef) = %v, %v", got, ok)
+	}
+}
+
+// A vouched object, while it can't be read, is skipped: the startup recheck
+// doesn't read it, its dropped line isn't restored, a prune may remove it,
+// and a rebuild doesn't add it. Every other unreadable line keeps the
+// superset's rule. A vouched object found carrying the prefix is treated as
+// any other, and the wrong vouch reported (§7.4, §10.6.6).
+func TestAVouchedLine(t *testing.T) {
+	vouched, unvouched, carrying := SecretRef("ns", "vouched").ID(), SecretRef("ns", "unvouched").ID(), SecretRef("ns", "carrying").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{carrying: heldObj("carrying")}, forbid: map[ID]bool{vouched: true, unvouched: true}}
+	annotation := unheldRef(vouched) + "," + unheldRef(carrying)
+	st := &memStore{exists: true, rebuilt: true, vouched: annotation, lines: linesOf([]ID{vouched})}
+	ix := testIndex(st, srv)
+	var wrong []ID
+	ix.onVouchWrong = func(id ID) { wrong = append(wrong, id) }
+
+	// The startup recheck doesn't read it.
+	srv.gets = nil
+	if err := ix.recheck(context.Background(), func(ID, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(srv.gets, vouched) {
+		t.Errorf("the recheck read the vouched object: %v", srv.gets)
+	}
+
+	// A dropped line: the vouched one stays dropped, the unvouched
+	// unreadable one and the vouched one that carries come back.
+	st.lines = nil
+	ix.queue([]ID{vouched, unvouched, carrying}, true)
+	if err := ix.recheckTick(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if want := linesOf([]ID{unvouched, carrying}); !slices.Equal(st.lines, want) {
+		t.Errorf("after the live checks: %q, want %q", st.lines, want)
+	}
+	if !slices.Equal(wrong, []ID{carrying}) || len(ix.pending) != 0 {
+		t.Errorf("wrong vouches %v, pending %v", wrong, ix.pending)
+	}
+
+	// A prune removes the vouched line for good; the unvouched one comes
+	// back.
+	st.lines = linesOf([]ID{vouched, unvouched})
+	if err := ix.prune(context.Background(), []ID{vouched, unvouched}); err != nil {
+		t.Fatal(err)
+	}
+	if want := linesOf([]ID{unvouched}); !slices.Equal(st.lines, want) {
+		t.Errorf("after the prune: %q, want %q", st.lines, want)
+	}
+
+	// A rebuild doesn't add the vouched object a record names.
+	rec, _ := EncodeRecord([]ID{vouched, unvouched})
+	h := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "h", Annotations: map[string]string{AnnotationRefs: rec}}}
+	st2 := &memStore{exists: true, vouched: annotation}
+	if err := testIndex(st2, holdersServer{srv, []metav1.PartialObjectMetadata{h}}).rebuild(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := linesOf([]ID{unvouched}); !slices.Equal(st2.lines, want) {
+		t.Errorf("after the rebuild: %q, want %q", st2.lines, want)
+	}
+}
+
+// The index's own writes keep the annotations an operator set, the vouched
+// list among them (§10.6.6).
+func TestIndexWritesPreserveTheVouch(t *testing.T) {
+	cm := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": "cu-index-x", "namespace": "idx", "annotations": map[string]any{AnnotationVouched: "ns/Secret/s"}},
+		"data":     map[string]any{indexDataKey: ""},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cm)
+	st := newConfigMapStore(dyn, "idx", "cu-index-x")
+	ix := testIndex(st, nil)
+	if err := ix.add(context.Background(), []ID{SecretRef("ns", "a").ID()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.merge(context.Background(), nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.remove(context.Background(), []string{SecretRef("ns", "a").ID().String()}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := st.get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.vouched != "ns/Secret/s" || !v.rebuilt {
+		t.Errorf("after the writes: vouched %q, rebuilt %v", v.vouched, v.rebuilt)
 	}
 }

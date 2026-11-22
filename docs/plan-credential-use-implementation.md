@@ -1053,7 +1053,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   and the sink throttles it while the set is the same. Disown also logs, and
   sets the gauge `credentialuse_disown_unreadable`. The remedy, for PR 11's
   runbook: grant `get`, or confirm by hand that the object carries no
-  finalizer of the kind and remove its line. A 403 in the startup recheck,
+  finalizer of the kind and add it to the index's vouched annotation, then
+  optionally remove its line. A 403 in the startup recheck,
   or in the write loops' live checks, is logged and counted once per object
   (`credentialuse_index_read_denied_total`) and isn't returned as an error,
   since no retry helps before RBAC changes. That holds only for the
@@ -1061,6 +1062,24 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   admission or a policy 403 is an ordinary failure, and retried. The line is kept, and a live
   check puts it back, so nothing is stranded. Other errors still retry with
   backoff.
+- **An operator vouches for an unreadable object** (the user's decision,
+  2026-11-22, in place of honouring a hand removal). The index's
+  `credential-use.krateo.io/vouched` annotation lists objects, written
+  `ns/Kind[.group]/name`, that an operator checked by hand to carry no
+  finalizer of the kind. Its entries are trimmed, and a malformed one is
+  ignored with a warning once per value. While a vouched object can't be
+  read:
+  - Disown's count and strip skip it;
+  - the startup recheck doesn't read it;
+  - the tamper check doesn't restore its dropped line;
+  - a prune may remove its line;
+  - a rebuild doesn't add it.
+
+  Once readable and carrying the prefix, it is treated normally, and the
+  wrong vouch is logged. Every other unreadable line keeps the superset's
+  rule. The process never writes the annotation, and its writes keep it,
+  as they keep the rebuilt marker. Disown's event names the vouch as the
+  remedy.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
   after R3, in one write per batch. A prune that fails retries the batch.
@@ -1271,7 +1290,9 @@ tests.
   - the runbook entry for Disown that stays `unknown` with
     `CredentialUseDisownUnreadable` (PR 8): grant `get` on each object the
     event names, or confirm by hand that it carries no finalizer of the kind
-    and remove its line from the index;
+    and add it to the index's `credential-use.krateo.io/vouched`
+    annotation, then optionally remove its line (removing the line alone is
+    undone by the tamper check);
   - the outside-runtime guide (§7.2);
 - the admission policy sketch, as a reference installer copies;
 - `docs/overview.md`: the new reconcile steps;

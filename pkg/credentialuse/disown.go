@@ -239,6 +239,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		if err != nil {
 			known = false
 		}
+		vouched := t.idx.parseVouched(cur.vouched)
 		for _, id := range t.idx.ids(cur.lines) {
 			if perName[id.GroupKind()] {
 				named[id] = true
@@ -253,6 +254,12 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			case ClassNotFound:
 				continue
 			default:
+				if vouched[id] {
+					// An operator checked by hand that it carries no
+					// finalizer of the kind (§7.4): skipped while it can't
+					// be read.
+					continue
+				}
 				// It may carry the kind's finalizer: the count is unknown,
 				// never zero, until it can be read (§7.4).
 				known = false
@@ -260,6 +267,9 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				continue
 			}
 			n := countPrefix(m.Finalizers, t.prefix)
+			if n > 0 && vouched[id] {
+				t.idx.vouchWrong(id) // readable, and held: counted as any other
+			}
 			count += n
 			objs = append(objs, object{id.GroupKind(), m, n})
 		}
@@ -316,7 +326,8 @@ func (t *Tracker) reportDisownUnreadable(unreadable []string) {
 		return
 	}
 	note := "Disown can't read " + strings.Join(unreadable, ", ") + ", so held-count stays unknown: grant get on each, " +
-		"or confirm by hand that it carries no finalizer of " + kindLabel(t.gk) + " and remove its line from the index " + t.idx.ref() + " (§7.4)"
+		"or confirm by hand that it carries no finalizer of " + kindLabel(t.gk) + " and add it to the " + AnnotationVouched +
+		" annotation of the index " + t.idx.ref() + " (§7.4)"
 	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(crd, "Warning", EventDisownUnreadable, note)

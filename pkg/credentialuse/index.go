@@ -162,6 +162,8 @@ type indexVersion struct {
 	rv    string
 	// rebuilt: the index carries AnnotationRebuilt (§10.6.6).
 	rebuilt bool
+	// vouched is AnnotationVouched's value, as the operator wrote it.
+	vouched string
 	// obj is the ConfigMap itself, for the next guarded Update; nil from the
 	// model's store.
 	obj *unstructured.Unstructured
@@ -197,7 +199,8 @@ func newConfigMapStore(dyn dynamic.Interface, namespace, name string) configMapS
 // versionOf reads an index ConfigMap.
 func versionOf(u *unstructured.Unstructured) indexVersion {
 	data, _, _ := unstructured.NestedString(u.Object, "data", indexDataKey)
-	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u, rebuilt: u.GetAnnotations()[AnnotationRebuilt] == "true"}
+	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u,
+		rebuilt: u.GetAnnotations()[AnnotationRebuilt] == "true", vouched: u.GetAnnotations()[AnnotationVouched]}
 }
 
 func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
@@ -251,7 +254,8 @@ func (s configMapStore) create(ctx context.Context, lines []string, rebuilt bool
 // indexSnapshot is the index as this process last saw it: the informer's
 // latest version, or this process's latest write.
 type indexSnapshot struct {
-	lines map[string]bool
+	lines   map[string]bool
+	vouched map[ID]bool
 }
 
 // index is one holder kind's index (§10.6), for its PerName kinds. Its
@@ -301,6 +305,10 @@ type index struct {
 	// process can't read: not tampering, since whether it carries the
 	// kind's prefix is unknown.
 	onRestoredUnread func(id ID)
+	// onVouchMalformed reports the malformed entries of the vouched
+	// annotation; onVouchWrong, a vouched object that carries the prefix.
+	onVouchMalformed func(entries []string)
+	onVouchWrong     func(id ID)
 
 	snap atomic.Pointer[indexSnapshot]
 
@@ -325,6 +333,11 @@ type index struct {
 	lostFails int
 	// deniedSeen are the objects whose refused read was reported.
 	deniedSeen map[ID]bool
+	// vouchWarned are the vouched annotation's values whose malformed
+	// entries were reported; vouchWrongSeen, the vouched objects found
+	// carrying the prefix.
+	vouchWarned    map[string]bool
+	vouchWrongSeen map[ID]bool
 }
 
 // A recheck is one pending live check of an object whose line may be
@@ -352,7 +365,7 @@ func (ix *index) covers(gk schema.GroupKind) bool { return ix != nil && ix.kinds
 
 // saw keeps v as this process's view, and reports its lines.
 func (ix *index) saw(v indexVersion) {
-	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines))}
+	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines)), vouched: ix.parseVouched(v.vouched)}
 	for _, l := range v.lines {
 		s.lines[l] = true
 	}
@@ -547,13 +560,14 @@ func (ix *index) prune(ctx context.Context, ids []ID) error {
 	if err != nil {
 		return err
 	}
+	vouched := ix.vouchedNow()
 	var back []ID
 	for _, l := range removed {
 		id, ok := parseIndexLine(l)
 		if !ok {
 			continue
 		}
-		if ix.carries(ctx, id) != carriesNot {
+		if ix.keepsLine(ctx, id, vouched) {
 			back = append(back, id)
 		}
 	}
@@ -565,6 +579,24 @@ func (ix *index) prune(ctx context.Context, ids []ID) error {
 		return err
 	}
 	return nil
+}
+
+// keepsLine reads id live, after its line was removed, and reports whether
+// the line must come back: the object carries the kind's prefix, or can't be
+// read and may, unless an operator vouched for it (§10.6.6). A vouched
+// object that turns out to carry the prefix keeps its line, and the wrong
+// vouch is logged.
+func (ix *index) keepsLine(ctx context.Context, id ID, vouched map[ID]bool) bool {
+	switch ix.carries(ctx, id) {
+	case carriesNot:
+		return false
+	case carriesYes:
+		if vouched[id] {
+			ix.vouchWrong(id)
+		}
+		return true
+	}
+	return !vouched[id]
 }
 
 // What a live read found of an object's holds.
@@ -602,6 +634,80 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 		return carriesRBACDenied
 	}
 	return carriesUnknown
+}
+
+// parseVouched reads AnnotationVouched: comma-separated refs written
+// <namespace>/<Kind[.group]>/<name>, blanks trimmed; a malformed entry is
+// ignored, and reported once per value of the annotation.
+func (ix *index) parseVouched(v string) map[ID]bool {
+	out := map[ID]bool{}
+	var bad []string
+	for _, e := range strings.Split(v, ",") {
+		if e = strings.TrimSpace(e); e == "" {
+			continue
+		}
+		id, ok := parseUnheldRef(e)
+		if !ok {
+			bad = append(bad, e)
+			continue
+		}
+		out[id] = true
+	}
+	if len(bad) > 0 {
+		ix.mu.Lock()
+		first := !ix.vouchWarned[v]
+		if first {
+			if ix.vouchWarned == nil {
+				ix.vouchWarned = map[string]bool{}
+			}
+			ix.vouchWarned[v] = true
+		}
+		ix.mu.Unlock()
+		if first && ix.onVouchMalformed != nil {
+			ix.onVouchMalformed(bad)
+		}
+	}
+	return out
+}
+
+// parseUnheldRef reads a ref as the unheld annotation writes it,
+// <namespace>/<Kind[.group]>/<name> (unheldRef).
+func parseUnheldRef(s string) (ID, bool) {
+	parts := strings.SplitN(s, "/", 3)
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" || strings.Contains(parts[2], "/") {
+		return ID{}, false
+	}
+	kind, group, _ := strings.Cut(parts[1], ".")
+	if kind == "" {
+		return ID{}, false
+	}
+	return ID{Group: group, Kind: kind, Namespace: parts[0], Name: parts[2]}, true
+}
+
+// vouchedNow is the vouched objects of the index as this process last saw
+// it.
+func (ix *index) vouchedNow() map[ID]bool {
+	if s := ix.snap.Load(); s != nil {
+		return s.vouched
+	}
+	return nil
+}
+
+// vouchWrong reports, once per object, a vouched object found carrying the
+// kind's prefix: the vouch is ignored for it.
+func (ix *index) vouchWrong(id ID) {
+	ix.mu.Lock()
+	first := !ix.vouchWrongSeen[id]
+	if first {
+		if ix.vouchWrongSeen == nil {
+			ix.vouchWrongSeen = map[ID]bool{}
+		}
+		ix.vouchWrongSeen[id] = true
+	}
+	ix.mu.Unlock()
+	if first && ix.onVouchWrong != nil {
+		ix.onVouchWrong(id)
+	}
 }
 
 // readable forgets that a read of id was refused, once one has been
@@ -793,12 +899,22 @@ func (ix *index) rebuild(ctx context.Context) error {
 			}
 		}
 	}
+	var vouched map[ID]bool
+	if cur, err := ix.store.get(ctx); err == nil {
+		vouched = ix.parseVouched(cur.vouched)
+	}
 	var keep, unread []ID
 	for _, id := range SortedIDs(keysOf(named)) {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
+			if vouched[id] {
+				ix.vouchWrong(id)
+			}
 			keep = append(keep, id)
 		case carriesUnknown, carriesRBACDenied:
+			if vouched[id] {
+				continue // vouched by an operator while it can't be read
+			}
 			keep = append(keep, id)
 			unread = append(unread, id)
 		}
@@ -865,10 +981,22 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	due = SortedIDs(due)
+	vouched := ix.vouchedNow()
 	var back, failed, done, unread []ID
 	for _, id := range due {
-		switch ix.carries(ctx, id) {
+		c := ix.carries(ctx, id)
+		if vouched[id] && c != carriesYes && c != carriesNot {
+			// An operator vouched that it carries no finalizer of the
+			// kind: its dropped line stays dropped while it can't be read
+			// (§10.6.6).
+			done = append(done, id)
+			continue
+		}
+		switch c {
 		case carriesYes:
+			if vouched[id] {
+				ix.vouchWrong(id)
+			}
 			back = append(back, id)
 		case carriesRBACDenied:
 			// It may carry the prefix, and no retry can tell before RBAC
@@ -1192,6 +1320,14 @@ func (t *Tracker) newTrackerIndex() error {
 		t.warn("credential-use: restored the line of an object this process can't read: someone else dropped it, and it may carry the kind's finalizer (§10.6.3)",
 			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
 	}
+	ix.onVouchMalformed = func(entries []string) {
+		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name> (§10.6.6)",
+			"kind", t.gk.String(), "index", ix.ref(), "entries", strings.Join(entries, ", "))
+	}
+	ix.onVouchWrong = func(id ID) {
+		t.warn("credential-use: an object vouched for in the index carries a finalizer of the kind: the vouch is wrong, and is ignored for it (§10.6.6)",
+			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
+	}
 	unreadLogged := newReportedSet()
 	ix.onUnreadable = func(ids []ID) {
 		for _, id := range ids {
@@ -1284,8 +1420,12 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 		return errors.Join(errs...)
 	}
 	ix.saw(cur)
+	vouched := ix.parseVouched(cur.vouched)
 	var bare []ID
 	for _, id := range ix.ids(cur.lines) {
+		if vouched[id] {
+			continue // an operator checked it by hand: not read (§10.6.6)
+		}
 		m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 		switch Classify(err) {
 		case ClassNone:
