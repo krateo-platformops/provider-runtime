@@ -868,3 +868,54 @@ func TestADeniedLineIsReportedOnceAndNotRetried(t *testing.T) {
 		t.Errorf("after a denied live check: lines %q, pending %v", st.lines, ix.pending)
 	}
 }
+
+// A dropped line whose object this process can't read (an RBAC 403) is
+// restored, and reported as such: not as tampering, since whether it carries
+// the kind's prefix is unknown (§10.6.3, §10.6.6).
+func TestARestoredUnreadableLineIsNotTampering(t *testing.T) {
+	denied, held := SecretRef("ns", "denied").ID(), SecretRef("ns", "held").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}, forbid: map[ID]bool{denied: true}}
+	st := &memStore{exists: true}
+	ix := testIndex(st, srv)
+	var tampered, restored []ID
+	ix.onTampered = func(id ID) { tampered = append(tampered, id) }
+	ix.onRestoredUnread = func(id ID) { restored = append(restored, id) }
+	ix.queue([]ID{denied, held}, true)
+	if err := ix.recheckTick(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if want := linesOf([]ID{denied, held}); !slices.Equal(st.lines, want) {
+		t.Errorf("lines %q, want both restored", st.lines)
+	}
+	if !slices.Equal(tampered, []ID{held}) || !slices.Equal(restored, []ID{denied}) {
+		t.Errorf("tampered %v, restored unreadable %v; want %v and %v", tampered, restored, []ID{held}, []ID{denied})
+	}
+}
+
+// A refusal is reported again after the object was readable in between: a
+// grant restored and then revoked again is counted twice.
+func TestARefusalAfterAReadIsReportedAgain(t *testing.T) {
+	id := SecretRef("ns", "s").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{id: heldObj("s")}, forbid: map[ID]bool{id: true}}
+	ix := testIndex(&memStore{exists: true, rebuilt: true, lines: linesOf([]ID{id})}, srv)
+	reports := 0
+	ix.onDenied = func(ID, error) { reports++ }
+	for _, forbid := range []bool{true, true, false, true} {
+		srv.forbid[id] = forbid
+		if err := ix.recheck(context.Background(), func(ID, string) {}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reports != 2 {
+		t.Errorf("%d reports for refused, refused, readable, refused; want 2", reports)
+	}
+	reports = 0
+	ix.deniedSeen = nil
+	for _, forbid := range []bool{true, false, true} {
+		srv.forbid[id] = forbid
+		_ = ix.carries(context.Background(), id)
+	}
+	if reports != 2 {
+		t.Errorf("%d reports from live checks for refused, readable, refused; want 2", reports)
+	}
+}

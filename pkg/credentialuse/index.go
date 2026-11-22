@@ -297,6 +297,10 @@ type index struct {
 	onUnreadable func(ids []ID)
 	// onDenied reports, once per object, a read the API server refused.
 	onDenied func(id ID, err error)
+	// onRestoredUnread reports a dropped line restored for an object this
+	// process can't read: not tampering, since whether it carries the
+	// kind's prefix is unknown.
+	onRestoredUnread func(id ID)
 
 	snap atomic.Pointer[indexSnapshot]
 
@@ -584,11 +588,13 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 	m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 	switch Classify(err) {
 	case ClassNone:
+		ix.readable(id)
 		if countPrefix(m.Finalizers, ix.prefix) > 0 {
 			return carriesYes
 		}
 		return carriesNot
 	case ClassNotFound:
+		ix.readable(id)
 		return carriesNot
 	}
 	if Classify(err) == ClassRBAC {
@@ -596,6 +602,14 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 		return carriesRBACDenied
 	}
 	return carriesUnknown
+}
+
+// readable forgets that a read of id was refused, once one has been
+// answered: a grant revoked again is then reported again.
+func (ix *index) readable(id ID) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	delete(ix.deniedSeen, id)
 }
 
 // denied reports, once per object, a read of id the API server refused: its
@@ -851,7 +865,7 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	due = SortedIDs(due)
-	var back, failed, done []ID
+	var back, failed, done, unread []ID
 	for _, id := range due {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
@@ -859,8 +873,10 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		case carriesRBACDenied:
 			// It may carry the prefix, and no retry can tell before RBAC
 			// changes: its line goes back, as for an object that does
-			// (§10.6.3), and the refusal is reported once.
+			// (§10.6.3), and the refusal is reported once. Whether it
+			// carries the prefix is unknown, so it isn't tampering.
 			back = append(back, id)
+			unread = append(unread, id)
 		case carriesNot:
 			done = append(done, id)
 		default:
@@ -875,10 +891,13 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		}
 	}
 	ix.mu.Lock()
-	var tampered []ID
+	var tampered, restoredUnread []ID
 	for _, id := range append(done, back...) {
 		if r := ix.pending[id]; r != nil {
-			if r.tampered && slices.Contains(back, id) {
+			switch {
+			case r.tampered && slices.Contains(unread, id) && slices.Contains(back, id):
+				restoredUnread = append(restoredUnread, id)
+			case r.tampered && slices.Contains(back, id):
 				tampered = append(tampered, id)
 			}
 			delete(ix.pending, id)
@@ -894,6 +913,11 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	if ix.onTampered != nil {
 		for _, id := range tampered {
 			ix.onTampered(id)
+		}
+	}
+	if ix.onRestoredUnread != nil {
+		for _, id := range restoredUnread {
+			ix.onRestoredUnread(id)
 		}
 	}
 	if err == nil && len(failed) > 0 {
@@ -1164,6 +1188,10 @@ func (t *Tracker) newTrackerIndex() error {
 		t.warn("credential-use: an object the index names can't be read (403); its line is kept, and the read isn't retried until RBAC changes: grant get on it (§10.6.5)",
 			"kind", t.gk.String(), "index", ix.ref(), "object", id.String(), "error", err.Error())
 	}
+	ix.onRestoredUnread = func(id ID) {
+		t.warn("credential-use: restored the line of an object this process can't read: someone else dropped it, and it may carry the kind's finalizer (§10.6.3)",
+			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
+	}
 	unreadLogged := newReportedSet()
 	ix.onUnreadable = func(ids []ID) {
 		for _, id := range ids {
@@ -1261,7 +1289,9 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 		m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 		switch Classify(err) {
 		case ClassNone:
+			ix.readable(id)
 		case ClassNotFound:
+			ix.readable(id)
 			bare = append(bare, id)
 			continue
 		default:
