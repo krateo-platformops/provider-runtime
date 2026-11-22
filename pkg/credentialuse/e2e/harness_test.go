@@ -582,3 +582,15 @@ func (v *versionWatch) firstWithout(f string) *unstructured.Unstructured {
 	}
 	return nil
 }
+
+// after returns the versions delivered after u.
+func (v *versionWatch) after(u *unstructured.Unstructured) []*unstructured.Unstructured {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i, x := range v.versions {
+		if x == u {
+			return slices.Clone(v.versions[i+1:])
+		}
+	}
+	return nil
+}

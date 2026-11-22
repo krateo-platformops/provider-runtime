@@ -39,7 +39,10 @@ FILES = [RC, RR, CA, "pkg/tracing/names.go", C + "tracker.go", C + "acquire.go",
 ACQUIRE_BLOCK = """	// Credential-use's step 5 (design-credential-use-finalizer §8): hold what Connect will read,
 	// on every pass past the Orphan check, deletion passes included, before the governor's gate,
 	// so a deferred pass has already acquired. pristine is taken below, after it.
-	if r.cu.active() {
+	// A holder being deleted that carries none of its owner finalizers has been finalized
+	// already: it isn't a user (§6.1), so there is nothing to protect, and a record it wrote
+	// would be ignored. Its pass skips Acquire (§8 step 5; the user's decision, 2026-11-22).
+	if r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {
 		var res reconcile.Result
 		var stop bool
 		managed, externalCtx, res, stop, err = r.acquireCredentials(ctx, externalCtx, log, managed, pass, cup, writeStatus)
@@ -93,7 +96,9 @@ MUTANTS = [
        "\tif !r.cu.active() || !r.cu.tracker.Forget(mg) || true {")]),
     # §8 step 5: Acquire.
     ("no Acquire", RR,
-     [("\tif r.cu.active() {\n\t\tvar res reconcile.Result", "\tif false {\n\t\tvar res reconcile.Result")]),
+     [("\tif r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {", "\tif false && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {")]),
+    ("a finalized deleting holder acquires", RR,
+     [("\tif r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {", "\tif r.cu.active() {")]),
     ("pristine taken before Acquire", RR,
      [(ACQUIRE_BLOCK, ""), (GATE, ACQUIRE_BLOCK + GATE)]),
     ("a record conflict isn't requeued", RC,
@@ -187,6 +192,7 @@ KILLERS = {
     "no Forget on the delete path": {E: "TestStandaloneForget|TestForegroundDeletionOfAnOwnerCompletes"},
     "no standalone Forget": {R: "TestCredentialUseStandaloneForgetOnTheOrphanPath", E: "TestStandaloneForget"},
     "no Acquire": {R: "TestIgnoreCredentialUseRecord", E: "TestNamespaceTeardown"},
+    "a finalized deleting holder acquires": {R: "TestCredentialUseSkipsAcquireOnAFinalizedDeletingHolder", E: "TestForegroundDeletionOfAnOwnerCompletes"},
     "pristine taken before Acquire": {R: "TestCredentialUseDeferralRightAfterTheRecordWrite"},
     "a record conflict isn't requeued": {R: "TestCredentialUseRecordConflictRequeues|TestTracingStatusMapping"},
     "a new holder that must not connect connects": {R: "TestStatusConflictOnEveryPath", E: "TestNewHolderOnADeletingSecretDeletesFreely"},

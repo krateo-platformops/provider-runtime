@@ -854,6 +854,12 @@ of tests.
   (`ok`, `degraded`, `must_not_connect` or `conflict`): counts only, never
   a ref's name or a Secret's data. `credentialuse.release` stays reserved:
   release runs in the write loops, outside any reconcile span.
+- **A holder being deleted that carries none of its owner finalizers skips
+  Acquire** (the user's decision, 2026-11-22): it has been finalized, isn't
+  a user (§6.1), and a record it wrote would be ignored; the rest of its
+  pass runs as before. Without it, each pass of a holder kept by another
+  finalizer (`foregroundDeletion`) wrote its record back and re-held its
+  Secret, which release then dropped again.
 - **Acquire runs right after the Orphan check, before the trace marker's
   write**; `pristine` is taken after both, and the marker's locked patch
   carries A1's resourceVersion.

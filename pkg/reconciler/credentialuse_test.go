@@ -1130,3 +1130,49 @@ func TestTracingCredentialUseAcquireEvent(t *testing.T) {
 		})
 	}
 }
+
+// §8 step 5 (the user's decision of 2026-11-22): a holder being deleted that
+// carries none of its owner finalizers has been finalized: its pass skips
+// Acquire, writes no record and holds nothing, and runs on as before. An
+// established deleting holder still acquires.
+func TestCredentialUseSkipsAcquireOnAFinalizedDeletingHolder(t *testing.T) {
+	deleting := func(finalizers ...string) *Widget {
+		w := newWidget("w", nil)
+		w.Finalizers = finalizers
+		now := metav1.Now()
+		w.DeletionTimestamp = &now
+		return w
+	}
+	secret := func() client.Object {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "demo"}}
+	}
+	t.Run("finalized", func(t *testing.T) {
+		w := newCUWorld(t, deleting("other"), secret())
+		tp, rec := tracer(t)
+		r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops, exists: func(*Widget) bool { return false }}, secretRef("creds"), WithTracerProvider(tp))
+		startSource(t, r)
+		mustReconcile(t, r, "w")
+		ops := w.srv.ops.list()
+		if slices.ContainsFunc(ops, func(op string) bool { return strings.HasPrefix(op, "md-patch") }) {
+			t.Errorf("calls = %v; want no record write and no hold", ops)
+		}
+		if !slices.Contains(ops, "connect") {
+			t.Errorf("calls = %v; want the pass to run on as before", ops)
+		}
+		if a := w.srv.widget("w").Annotations; a[credentialuse.AnnotationRefs] != "" {
+			t.Errorf("a record was written: %v", a)
+		}
+		if _, ok := eventAttr(lastRoot(t, rec), tracing.EventCredentialUseAcquire, string(tracing.AttrCredentialUseOutcome)); ok {
+			t.Error("a credentialuse.acquire event on a pass that skips Acquire")
+		}
+	})
+	t.Run("established", func(t *testing.T) {
+		w := newCUWorld(t, deleting("other", FinalizerName), secret())
+		r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops, exists: func(*Widget) bool { return false }}, secretRef("creds"))
+		startSource(t, r)
+		mustReconcile(t, r, "w")
+		if !slices.Contains(w.srv.ops.list(), "md-patch widgets") {
+			t.Errorf("calls = %v; want an established deleting holder to acquire", w.srv.ops.list())
+		}
+	})
+}

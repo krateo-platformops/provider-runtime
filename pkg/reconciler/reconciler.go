@@ -1060,7 +1060,10 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	// Credential-use's step 5 (design-credential-use-finalizer §8): hold what Connect will read,
 	// on every pass past the Orphan check, deletion passes included, before the governor's gate,
 	// so a deferred pass has already acquired. pristine is taken below, after it.
-	if r.cu.active() {
+	// A holder being deleted that carries none of its owner finalizers has been finalized
+	// already: it isn't a user (§6.1), so there is nothing to protect, and a record it wrote
+	// would be ignored. Its pass skips Acquire (§8 step 5; the user's decision, 2026-11-22).
+	if r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {
 		var res reconcile.Result
 		var stop bool
 		managed, externalCtx, res, stop, err = r.acquireCredentials(ctx, externalCtx, log, managed, pass, cup, writeStatus)

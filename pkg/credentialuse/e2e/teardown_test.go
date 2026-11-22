@@ -284,6 +284,18 @@ func TestForegroundDeletionOfAnOwnerCompletes(t *testing.T) {
 	if first.GetAnnotations()[cu.AnnotationRefs] != "" {
 		t.Errorf("the write that removed the owner finalizer left the record: %v", first.GetAnnotations())
 	}
+	// And it keeps none: its later passes, while it waits for the collector,
+	// skip Acquire (§8 step 5; the user's decision, 2026-11-22). Status
+	// writes keep enqueueing it meanwhile.
+	time.Sleep(2 * time.Second)
+	for _, u := range versions.after(first) {
+		if u.GetAnnotations()[cu.AnnotationRefs] != "" {
+			t.Errorf("a later version, resourceVersion %s, has the record back: %v", u.GetResourceVersion(), u.GetAnnotations())
+		}
+	}
+	if wd := getWidget(t, w, ns, "w"); wd.Annotations[cu.AnnotationRefs] != "" {
+		t.Errorf("the Widget has the record back: %v", wd.Annotations)
+	}
 	if !slices.Contains(w.recorded(), "delete "+ns+"/w") {
 		t.Errorf("no external Delete: %v", w.recorded())
 	}
