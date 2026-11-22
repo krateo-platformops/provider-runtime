@@ -912,9 +912,10 @@ of tests.
   protected...)`** follows the refs' Next through the fixture, and hands
   Connect the objects it followed through the new
   `credentialuse.WithResolvedObjects`.
-- **The degraded log line** is the core's, on every degraded pass, as PR 3
-  built it; §8's "log once per object" isn't enforced there, and the event
-  is throttled.
+- **A degraded pass is logged once per holder** (§8), keyed by UID, while
+  it stays degraded: a pass that isn't degraded, `Forget`, or the holder's
+  deletion clears it, so the next degraded pass logs again. The
+  `CredentialUseDegraded` event keeps the event sink's throttle.
 
 ### PR 8: PerName mode, the index ConfigMap
 

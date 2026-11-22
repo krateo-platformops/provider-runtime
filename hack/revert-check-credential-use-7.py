@@ -34,7 +34,7 @@ CA = C + "adapter.go"
 E = "pkg/credentialuse/e2e/"
 RT = "pkg/reconciler/reconcilertest/"
 T = "pkg/telemetry/"
-FILES = [RC, RR, CA, "pkg/tracing/names.go", C + "acquire.go", C + "informers.go", RT + "credentialuse.go", T + "credentialuse.go", "pkg/resource/api.go"]
+FILES = [RC, RR, CA, "pkg/tracing/names.go", C + "tracker.go", C + "acquire.go", C + "informers.go", RT + "credentialuse.go", T + "credentialuse.go", "pkg/resource/api.go"]
 
 ACQUIRE_BLOCK = """	// Credential-use's step 5 (design-credential-use-finalizer §8): hold what Connect will read,
 	// on every pass past the Orphan check, deletion passes included, before the governor's gate,
@@ -158,6 +158,13 @@ MUTANTS = [
      [("\t\tbyReason[u.Reason]++\n", "\t\t_ = u\n")]),
     ("the event's outcome ignores must-not-connect", RC,
      [("\tcase a.MustNotConnect:\n\t\toutcome = tracing.CredentialUseMustNotConnect\n", "")]),
+    # §8: a degraded pass is logged once per object.
+    ("a degraded pass logs every time", C + "tracker.go",
+     [("\tif !t.degradedLogged.first(key) {\n\t\treturn\n\t}\n", "")]),
+    ("a pass that isn't degraded doesn't clear the log", C + "tracker.go",
+     [("\t\tt.degradedLogged.clear(key)\n", "")]),
+    ("Forget doesn't clear the log", C + "tracker.go",
+     [("\tt.degradedLogged.forget(obj.GetUID())\n", "")]),
     # §12: the metrics.
     ("the metrics lose holder_kind", T + "credentialuse.go",
      [("\treturn metric.WithAttributes(AttrHolderKind.String(k))", "\treturn metric.WithAttributes()")]),
@@ -207,6 +214,9 @@ KILLERS = {
     "an unnamed read passes the cover check": {RT: "TestAssertCredentialRefsCover"},
     "a ref that resolves to nothing passes the cover check": {RT: "TestAssertCredentialRefsCover"},
     "the metrics lose holder_kind": {T: "TestCredentialUseMetrics"},
+    "a degraded pass logs every time": {C: "TestDegradedIsLoggedOncePerHolder"},
+    "a pass that isn't degraded doesn't clear the log": {C: "TestDegradedIsLoggedOncePerHolder"},
+    "Forget doesn't clear the log": {C: "TestDegradedIsLoggedOncePerHolder"},
     "no credentialuse.acquire event": {R: "TestTracingCredentialUseAcquireEvent"},
     "the event drops the counts by reason": {R: "TestTracingCredentialUseAcquireEvent"},
     "the event's outcome ignores must-not-connect": {R: "TestTracingCredentialUseAcquireEvent"},

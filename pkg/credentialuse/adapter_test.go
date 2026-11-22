@@ -2,12 +2,16 @@ package credentialuse
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 // The adapter API (plan, PR 7): IsOwnRecordWrite, CheckRead, SummarizeUnheld
@@ -177,4 +181,57 @@ func TestRecordWritesGoWithTheHolder(t *testing.T) {
 		_, ok := tr.proto.written.get(h.UID)
 		return !ok
 	})
+}
+
+// warnCount counts a logger's Warn calls.
+type warnCount struct {
+	logging.Logger
+	n atomic.Int64
+}
+
+func (w *warnCount) Warn(string, ...any) { w.n.Add(1) }
+
+// §8: a degraded pass is logged once per holder while it stays degraded; a
+// pass that isn't degraded, or Forget, clears that, so the next degraded pass
+// logs again.
+func TestDegradedIsLoggedOncePerHolder(t *testing.T) {
+	h := holderObject("ns", "w") // established
+	r := newFakeRig(t, h, namespaceObject("ns"))
+	var failing atomic.Bool
+	log := &warnCount{Logger: logging.NewNopLogger()}
+	o := r.options(widgetGK)
+	o.Logger = log
+	o.Refs = func(metav1.Object) ([]Ref, error) {
+		if failing.Load() {
+			return nil, errors.New("boom")
+		}
+		return nil, nil
+	}
+	tr, err := r.s.Track(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pass := func(fail bool) {
+		t.Helper()
+		failing.Store(fail)
+		a, err := tr.Acquire(context.Background(), h.DeepCopy())
+		if err != nil || a.Degraded != fail {
+			t.Fatalf("Acquire = %+v, %v; want Degraded %v", a, err, fail)
+		}
+	}
+	steps := []struct {
+		fail bool
+		want int64
+	}{{true, 1}, {true, 1}, {true, 1}, {false, 1}, {true, 2}, {true, 2}}
+	for i, s := range steps {
+		pass(s.fail)
+		if got := log.n.Load(); got != s.want {
+			t.Fatalf("after pass %d: %d degraded log lines, want %d", i+1, got, s.want)
+		}
+	}
+	tr.Forget(h.DeepCopy())
+	pass(true)
+	if got := log.n.Load(); got != 3 {
+		t.Errorf("after Forget, a degraded pass logged %d lines in all, want 3", got)
+	}
 }
