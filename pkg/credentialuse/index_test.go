@@ -674,3 +674,37 @@ func TestAStoppedPerNameWatchLeavesTheGauge(t *testing.T) {
 		t.Errorf("held gauge %d after a late count from the stopped watch, want 1", n)
 	}
 }
+
+// A post-check that finds the line gone and can't add it, the index being
+// full, queues the object: once there is room, the write loops' live check
+// restores the line, since P carries the kind's prefix (§10.6.2).
+func TestAFullPostCheckIsRetriedByTheWriteLoops(t *testing.T) {
+	p := SecretRef("ns", "held").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{p: heldObj("held")}}
+	var others []ID
+	for i := range 5 {
+		others = append(others, SecretRef("ns", "o"+strconv.Itoa(i)).ID())
+	}
+	st := &memStore{exists: true, lines: linesOf(others)}
+	ix := testIndex(st, srv)
+	if err := ix.postCheck(context.Background(), p); !errors.Is(err, errIndexFull) {
+		t.Fatalf("the post-check on a full index = %v, want errIndexFull", err)
+	}
+	if ix.pending[p] == nil {
+		t.Fatalf("the failed post-check queued nothing: %v", ix.pending)
+	}
+	now := time.Now()
+	if err := ix.recheckTick(context.Background(), now); err == nil {
+		t.Error("a re-add into a full index is no error")
+	}
+	if slices.Contains(st.lines, p.String()) {
+		t.Fatal("the line went into a full index")
+	}
+	st.lines = st.lines[1:]
+	if err := ix.recheckTick(context.Background(), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(st.lines, p.String()) || len(ix.pending) != 0 {
+		t.Errorf("after room was freed: lines %q, pending %v", st.lines, ix.pending)
+	}
+}

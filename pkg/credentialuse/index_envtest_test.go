@@ -1236,3 +1236,33 @@ func heldForKind(ns, name, f string) error {
 	}
 	return nil
 }
+
+// A rebuild that fails right after the start created the index is left to
+// the write loops, which retry it: the holds made before the index get their
+// lines without any holder's pass (§10.6.2, §10.6.6). A later start would
+// find the index present, and never rebuild it.
+func TestIndexSetupRebuildFailureIsRetried(t *testing.T) {
+	cutest.Require(t, env)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-setup-rebuild")
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	labelScoped := newWriteRig(t, env.Config, cu.SharedOptions{}, nil, nil)
+	labelScoped.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "s", "w")
+	labelScoped.stop()
+
+	var failed atomic.Bool
+	perNameRig(t, idx, nil, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			// The rebuild's list of every holder, once.
+			if c.Op == "list" && c.GK == widgetGK && c.Namespace == "" && failed.CompareAndSwap(false, true) {
+				return errors.New("the API server is busy")
+			}
+			return nil
+		}, nil)
+	})
+	if !failed.Load() {
+		t.Fatal("the start's rebuild never listed the holders")
+	}
+	lined(t, idx, secretLine(ns, "s"), true)
+}

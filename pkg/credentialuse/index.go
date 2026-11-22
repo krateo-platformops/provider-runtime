@@ -569,6 +569,10 @@ func (ix *index) ensure(ctx context.Context, id ID) error {
 
 // postCheck is the acquirer's step after a successful A2 (§10.6.2): it reads
 // the index live, and adds id's line again if a concurrent prune removed it.
+// When it can't tell, or the add fails, as on a full index, P may carry the
+// finalizer without its line: id is queued for the write loops, which add
+// the line once a live read shows P carrying the kind's prefix and the add
+// lands, retrying with backoff (§10.6.2).
 func (ix *index) postCheck(ctx context.Context, id ID) error {
 	cur, err := ix.store.get(ctx)
 	switch Classify(err) {
@@ -579,9 +583,14 @@ func (ix *index) postCheck(ctx context.Context, id ID) error {
 		}
 	case ClassNotFound:
 	default:
+		ix.queue([]ID{id}, false)
 		return fmt.Errorf("credential-use: reading the index %s after holding %s: %w", ix.ref(), id, err)
 	}
-	return ix.add(ctx, []ID{id})
+	if err := ix.add(ctx, []ID{id}); err != nil {
+		ix.queue([]ID{id}, false)
+		return err
+	}
+	return nil
 }
 
 // prunable returns those of ids whose lines may go: of a PerName kind, and
@@ -922,9 +931,14 @@ func (t *Tracker) setupIndex(ctx context.Context) error {
 		return nil // another process created it, and rebuilds it
 	}
 	// A created index may lack the holds made before it: a kind moved from
-	// LabelScoped, or an index deleted while no process ran.
+	// LabelScoped, or an index deleted while no process ran. A rebuild that
+	// fails here is left to the write loops, which retry it with backoff
+	// (§10.6.2, §10.6.6): a later start finds the index present and
+	// wouldn't rebuild it.
 	if err := ix.rebuild(ctx); err != nil {
-		return fmt.Errorf("credential-use: %s: rebuilding the new index %s from the records: %w", t.gk, ix.ref(), err)
+		ix.markLost()
+		t.warn("credential-use: rebuilding the new index failed; the write loops retry it",
+			"kind", t.gk.String(), "index", ix.ref(), "error", err.Error())
 	}
 	return nil
 }

@@ -1024,6 +1024,14 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   it removed and adds back any that carries the kind's prefix, or can't be
   read. A re-add that fails is queued for the write loops, which retry it
   with backoff until it lands.
+- **What fails is retried by the write loops** (the review of the PR 8
+  build): a re-add after a prune, an acquirer's post-check that can't read
+  the index or can't add the line, as on a full index, and a rebuild that
+  fails right after `Track` created the index. Each is queued, and the
+  write loops retry it with backoff until it lands: a later start would
+  find the index present and never rebuild it. A process that dies between
+  creating the index and rebuilding it leaves its earlier holds without
+  lines until each holder's next pass.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
   after R3, in one write per batch. A prune that fails retries the batch.
