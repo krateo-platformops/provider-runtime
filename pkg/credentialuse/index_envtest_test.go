@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -1475,5 +1476,105 @@ func TestDisownCountsAndEmptiesTheIndex(t *testing.T) {
 	lined(t, idx, secretLine(ns, "x"), false)
 	if lines, _ := indexLines(t, idx); len(lines) != 0 {
 		t.Errorf("the index after Disown: %v; want it empty", lines)
+	}
+}
+
+// An object a record names that the process can't read, as a Secret outside
+// its resourceNames grant, stops neither the startup recheck nor the rest of
+// the write loops' recheck (the reviewer's probe of the marker): the index's
+// rebuild keeps its line and sets the marker; the recheck goes on past it,
+// releasing a readable stale hold and pruning a bare line; and §10.5's list
+// outside the caches still runs, for another holder kind, and releases a
+// hold stranded there.
+func TestIndexRecheckWithAnUnreadableRecordedObject(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	idx, ns, cached := indexNamespace(t), env.Namespace(t, "idx-unreadable"), env.Namespace(t, "idx-unreadable-cached")
+	resetPublished(t, cutest.WidgetGVR)
+	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
+	resetPublished(t, cutest.TargetGVR)
+	t.Cleanup(func() { resetPublished(t, cutest.TargetGVR) })
+
+	// The Widget kind, PerName: a record names a-nogrant, which can't be
+	// read; z-held is a stale hold; z-stale's line names a bare Secret. The
+	// index has no marker.
+	for _, n := range []string{"a-nogrant", "z-held", "z-stale"} {
+		createSecret(t, ns, n)
+	}
+	acquireAs(t, ns, "z-held")
+	createWidget(t, ns, "w", "a-nogrant")
+	rec, err := cu.EncodeRecord([]cu.ID{cu.SecretRef(ns, "a-nogrant").ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, cu.AnnotationRefs, rec))
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Patch(ctx, "w", types.MergePatchType, data, metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx},
+		Data: map[string]string{"entries": strings.Join([]string{secretLine(ns, "a-nogrant"), secretLine(ns, "z-held"), secretLine(ns, "z-stale")}, "\n") + "\n"}}
+	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The Target kind, LabelScoped on ConfigMaps, its caches restricted to
+	// another namespace: a hold stranded in ns, with no holder, is found
+	// only by §10.5's list outside the caches.
+	targetGK := cutest.TargetGVK.GroupKind()
+	if _, err := env.Kube.CoreV1().ConfigMaps(ns).Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "stranded"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	epoch, _ := cu.NewEpoch()
+	p, err := cu.AcquireStrategicPatch(targetGK, ns, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configMaps := env.Metadata.Resource(corev1.SchemeGroupVersion.WithResource("configmaps")).Namespace(ns)
+	if _, err := send(ctx, configMaps, "stranded", p); err != nil {
+		t.Fatal(err)
+	}
+	fTarget, _ := cu.FinalizerName(targetGK, ns)
+
+	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx, Namespaces: []string{cached}})
+	s.HookCalls(func(_ context.Context, c cu.Call) error {
+		if c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == ns && c.Name == "a-nogrant" {
+			return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, c.Name, errors.New("outside the service account's grant"))
+		}
+		return nil
+	}, nil)
+	ow := widgetOptions(func(types.NamespacedName) {})
+	perName(&ow)
+	if _, err := s.Track(ctx, ow); err != nil {
+		t.Fatalf("Track with an unreadable recorded object: %v", err)
+	}
+	ot := cu.Options{
+		Holder: cutest.TargetGVK, OwnerFinalizers: []string{ownerFinalizer}, TimeoutBound: 90 * time.Second,
+		Refs:      func(metav1.Object) ([]cu.Ref, error) { return nil, nil },
+		Enqueue:   func(types.NamespacedName) {},
+		Protected: []cu.ProtectedKind{{GVK: corev1.SchemeGroupVersion.WithKind("ConfigMap")}},
+	}
+	if _, err := s.Track(ctx, ot); err != nil {
+		t.Fatal(err)
+	}
+	if !indexRebuilt(t, idx) {
+		t.Error("the rebuild at Track didn't complete and set the marker")
+	}
+	running(t, s)
+
+	cutest.Eventually(t, time.Minute, notHeldFor(ns, "z-held", ns))
+	lined(t, idx, secretLine(ns, "z-stale"), false)
+	lined(t, idx, secretLine(ns, "a-nogrant"), true)
+	cutest.Eventually(t, time.Minute, func() error {
+		m, err := configMaps.Get(ctx, "stranded", metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if hasString(m.Finalizers, fTarget) {
+			return fmt.Errorf("the stranded hold outside the caches stays: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	if !indexRebuilt(t, idx) {
+		t.Error("the marker went")
 	}
 }

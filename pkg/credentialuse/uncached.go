@@ -2,6 +2,7 @@ package credentialuse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -199,14 +200,19 @@ func (s *Shared) recheckUncached(ctx context.Context, ts []*Tracker) {
 	}
 }
 
+// recheckUncachedOnce is one try of recheckUncached. Every part runs,
+// whatever fails before it, and their errors are joined: an
+// object one tracker can't read must not stop another's recheck, nor §10.5's
+// lists.
 func (s *Shared) recheckUncachedOnce(ctx context.Context, ts []*Tracker) error {
+	var errs []error
 	if err := s.sweepMarkers(ctx, ts); err != nil {
-		return err
+		errs = append(errs, err)
 	}
 	for _, t := range ts {
 		if t.idx != nil {
 			if err := s.recheckIndex(ctx, t); err != nil {
-				return err
+				errs = append(errs, err)
 			}
 		}
 	}
@@ -223,7 +229,8 @@ func (s *Shared) recheckUncachedOnce(ctx context.Context, ts []*Tracker) error {
 	for _, gk := range kinds {
 		items, err := s.liveHeld(ctx, gk, "")
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			continue
 		}
 		for i := range items {
 			m := &items[i]
@@ -238,7 +245,7 @@ func (s *Shared) recheckUncachedOnce(ctx context.Context, ts []*Tracker) error {
 			}
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // uncachedDeleting enqueues, for a namespace outside the caches that starts

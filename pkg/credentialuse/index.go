@@ -292,6 +292,9 @@ type index struct {
 	// onPolicyConfig reports a write the namespace's admission policy
 	// couldn't be configured for (§10.6.1, class (c)).
 	onPolicyConfig func(err error)
+	// onUnreadable reports the recorded objects a rebuild couldn't read, and
+	// kept the lines of.
+	onUnreadable func(ids []ID)
 
 	snap atomic.Pointer[indexSnapshot]
 
@@ -722,6 +725,11 @@ func (ix *index) ids(lines []string) []ID {
 // whose last record was gone before its R3 landed is in no record, so the
 // rebuild can't find it: its marker label still does (§10.6.6, the
 // residual).
+//
+// An object it can't read, as one outside a resourceNames grant, or whose
+// grant was revoked after its hold, may carry the prefix: it keeps its line,
+// since the index is a superset (§10.6.3), and the rebuild still completes
+// and sets the marker. Each is logged once.
 func (ix *index) rebuild(ctx context.Context) error {
 	holders, err := ix.srv.List(ctx, ix.holder, "")
 	if err != nil {
@@ -739,14 +747,18 @@ func (ix *index) rebuild(ctx context.Context) error {
 			}
 		}
 	}
-	var keep []ID
+	var keep, unread []ID
 	for _, id := range SortedIDs(keysOf(named)) {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
 			keep = append(keep, id)
 		case carriesUnknown:
-			return fmt.Errorf("credential-use: reading %s to rebuild the index %s", id, ix.ref())
+			keep = append(keep, id)
+			unread = append(unread, id)
 		}
+	}
+	if len(unread) > 0 && ix.onUnreadable != nil {
+		ix.onUnreadable(unread)
 	}
 	// The last merge, which sets the marker in the same write.
 	return ix.merge(ctx, keep, true)
@@ -1110,6 +1122,15 @@ func (t *Tracker) newTrackerIndex() error {
 		t.warn("credential-use: a line dropped from the index named an object that still carries the kind's finalizer; it was added back",
 			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
 	}
+	unreadLogged := newReportedSet()
+	ix.onUnreadable = func(ids []ID) {
+		for _, id := range ids {
+			if unreadLogged.first(consentKey{ref: id}) {
+				t.warn("credential-use: the rebuild couldn't read an object a record names; its line is kept, since it may carry the kind's finalizer (§10.6.3)",
+					"kind", t.gk.String(), "index", ix.ref(), "object", id.String(), "unreadable", len(ids))
+			}
+		}
+	}
 	ix.onPolicyConfig = func(err error) {
 		t.warn("credential-use: the index namespace's admission policy has no parameters; check that cu-policy-params exists (§10.6.1)",
 			"kind", t.gk.String(), "index", ix.ref(), "error", err.Error())
@@ -1177,20 +1198,23 @@ func (s *Shared) recheckIndex(ctx context.Context, t *Tracker) error {
 // index is rebuilt first. A read that fails fails the recheck, which the
 // caller retries: a skipped recheck can strand a hold.
 func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) error {
+	var errs []error
 	cur, err := ix.store.get(ctx)
 	if Classify(err) == ClassNotFound || err == nil && ix.needsRebuild(cur) {
-		// Gone, or never rebuilt since its creation (§10.6.6).
+		// Gone, or never rebuilt since its creation (§10.6.6). A rebuild
+		// that fails doesn't stop the recheck of the lines there are: its
+		// error is returned with the others, and the caller retries.
 		if err := ix.rebuild(ctx); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 		cur, err = ix.store.get(ctx)
 	}
 	if err != nil {
-		return fmt.Errorf("credential-use: reading the index %s for the startup recheck: %w", ix.ref(), err)
+		errs = append(errs, fmt.Errorf("credential-use: reading the index %s for the startup recheck: %w", ix.ref(), err))
+		return errors.Join(errs...)
 	}
 	ix.saw(cur)
 	var bare []ID
-	var errs []error
 	for _, id := range ix.ids(cur.lines) {
 		m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 		switch Classify(err) {

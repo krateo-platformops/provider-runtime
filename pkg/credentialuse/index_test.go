@@ -731,7 +731,7 @@ func TestTheRebuiltMarker(t *testing.T) {
 	if err := ix.add(context.Background(), []ID{SecretRef("ns", "third").ID()}); err != nil || st.rebuilt {
 		t.Fatalf("a merge by an add: %v, marker %v", err, st.rebuilt)
 	}
-	failing := testIndex(st, failingGets{srv})
+	failing := testIndex(st, failingList{srv})
 	if err := failing.rebuild(context.Background()); err == nil || st.rebuilt {
 		t.Fatalf("a failed rebuild: %v, marker %v", err, st.rebuilt)
 	}
@@ -749,10 +749,54 @@ func TestTheRebuiltMarker(t *testing.T) {
 	}
 }
 
-// failingGets fails every Get, as a rebuild meets an API server that can't
-// answer.
-type failingGets struct{ server }
+// failingList fails every List, as a rebuild meets an API server that can't
+// list the holders.
+type failingList struct{ server }
 
-func (failingGets) Get(context.Context, schema.GroupKind, string, string) (*metav1.PartialObjectMetadata, error) {
+func (failingList) List(context.Context, schema.GroupKind, string) ([]metav1.PartialObjectMetadata, error) {
 	return nil, apierrors.NewServiceUnavailable("down")
+}
+
+// holdersServer is objServer with holders to list.
+type holdersServer struct {
+	*objServer
+	holders []metav1.PartialObjectMetadata
+}
+
+func (s holdersServer) List(context.Context, schema.GroupKind, string) ([]metav1.PartialObjectMetadata, error) {
+	return s.holders, nil
+}
+
+// An object a record names that can't be read, as a Secret outside a
+// resourceNames grant, keeps its line in the rebuild, which still completes
+// and sets the marker; the startup recheck goes on through every line past
+// it, enqueuing what it can read and pruning what is bare, and returns the
+// error so that it is retried (§10.6.3, §10.6.5; the reviewer's probe of
+// the marker).
+func TestRecheckWithAnUnreadableRecordedObject(t *testing.T) {
+	unread, held, bare := SecretRef("ns", "a-unread").ID(), SecretRef("ns", "b-held").ID(), SecretRef("ns", "c-bare").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("b-held"), bare: {ObjectMeta: metav1.ObjectMeta{Name: "c-bare"}}}, fail: map[ID]bool{unread: true}}
+	rec, _ := EncodeRecord([]ID{unread})
+	h := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "h", Annotations: map[string]string{AnnotationRefs: rec}}}
+	st := &memStore{exists: true, lines: linesOf([]ID{held, bare}), rv: 1}
+	ix := testIndex(st, holdersServer{srv, []metav1.PartialObjectMetadata{h}})
+	var logged []ID
+	ix.onUnreadable = func(ids []ID) { logged = append(logged, ids...) }
+	var enqueued []ID
+	err := ix.recheck(context.Background(), func(id ID, n string) { enqueued = append(enqueued, id) })
+	if err == nil {
+		t.Error("a line that can't be read is no error: the recheck isn't retried")
+	}
+	if !slices.Equal(enqueued, []ID{held}) {
+		t.Errorf("enqueued %v, want %v", enqueued, []ID{held})
+	}
+	if !st.rebuilt {
+		t.Error("the rebuild didn't complete and set the marker")
+	}
+	if want := linesOf([]ID{unread, held}); !slices.Equal(st.lines, want) {
+		t.Errorf("lines %q, want %q: the unreadable one kept, the bare one pruned", st.lines, want)
+	}
+	if !slices.Equal(logged, []ID{unread}) {
+		t.Errorf("reported unreadable %v, want %v", logged, []ID{unread})
+	}
 }

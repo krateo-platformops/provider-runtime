@@ -1037,6 +1037,15 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   without it, so a process that dies between creating the index and
   rebuilding it, or an index an acquirer recreated while no write loops
   ran, leaves no earlier hold without its line past the next start.
+- **An object the rebuild can't read keeps its line** (the review of the
+  marker, 2026-11-22). A Secret outside a `resourceNames` grant, or one whose
+  grant was revoked after its hold, may carry the kind's finalizer, and the
+  index is a superset (§10.6.3). So the rebuild keeps its line, still
+  completes and sets the marker, and logs each such object once. A 403 is
+  never read as "can't carry". The startup recheck goes on through every
+  line past one it can't read, and the write loops' recheck runs every part,
+  each tracker's index and §10.5's lists outside the caches, whatever fails
+  first. Their errors are joined and retried with backoff.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
   after R3, in one write per batch. A prune that fails retries the batch.
