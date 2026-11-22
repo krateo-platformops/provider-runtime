@@ -142,3 +142,39 @@ func TestWithResolvedObjects(t *testing.T) {
 }
 
 func (m *countingMetrics) UnrecordedReads(kind string) { m.inc("unrecorded_reads " + kind) }
+
+// §7.5, L1: a tracker has synced only once its informers ran and its
+// handlers had their initial state.
+func TestTrackerHasSynced(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"))
+	tr := r.track(t, widgetGK)
+	if tr.HasSynced() {
+		t.Fatal("a tracker whose informers never ran has synced")
+	}
+	r.run(t)
+	eventually(t, "the tracker to sync", tr.HasSynced)
+}
+
+// The record-write memory goes with the holder: an entry is dropped when the
+// holder informer sees it deleted.
+func TestRecordWritesGoWithTheHolder(t *testing.T) {
+	h := newAdapterHolder("ns", "w")
+	r := newFakeRig(t, h, namespaceObject("ns"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	r.setRefs("w", SecretRef("ns", "creds"))
+	if _, err := tr.Acquire(context.Background(), h.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tr.proto.written.get(h.UID); !ok {
+		t.Fatal("no record write remembered")
+	}
+	gvr := schema.GroupVersionResource{Group: widgetGK.Group, Version: "v1", Resource: "widgets"}
+	if err := r.md.Resource(gvr).Namespace("ns").Delete(context.Background(), "w", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the record write to be forgotten", func() bool {
+		_, ok := tr.proto.written.get(h.UID)
+		return !ok
+	})
+}

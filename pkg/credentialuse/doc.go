@@ -36,7 +36,10 @@
 //     label janitor (§10.1), with §12's waiting gauge and events; and
 //     caches restricted to some namespaces (§10.5).
 //
-// Nothing in provider-runtime uses this package yet.
+// provider-runtime's reconciler is its first user (plan, PR 7): see
+// reconciler.CredentialRefsProvider. For a runtime's adapter the package
+// adds KindOptions, Tracker.HasSynced, IsOwnRecordWrite, CheckRead,
+// SummarizeUnheld and WithResolvedObjects (§7.5, §11.9, §12).
 //
 // # Dependencies
 //

@@ -839,6 +839,77 @@ where a standby's informers saw the holder go before its write loops ran
 **Depends on:** PR 6. **Size:** about 900 lines of production code and 1,600
 of tests.
 
+**What the build settled** (2026-11-22), where §7.5 and §8 left room. Items
+marked *(open)* wait for the user:
+
+- *(open)* **A conflict on the record write (A1) is traced** as
+  `k8s.conflict` with a new step, `credential_use`, so that every conflict
+  requeue of the pass keeps its event. That changes the tracing contract
+  (design-tracing §4.5's step list), so it goes to observability as a delta
+  if accepted. The standalone `Forget` Update shares the finalizer removal's
+  error handling, so its conflict is step `finalizer`.
+- **Acquire runs right after the Orphan check, before the trace marker's
+  write**; `pristine` is taken after both, and the marker's locked patch
+  carries A1's resourceVersion.
+- **The re-read after a webhook-changed A1** (`Acquired.Reread`) is live
+  through `WithAPIReader` when set, and through the cached client otherwise:
+  a stale copy only makes the pass's next write conflict, never write over
+  the webhook's change. It is tested on fakes; envtest has no webhook server.
+- **The informers run under the informer runnable's context.** A source
+  whose `Start` comes first starts them, without owning them, so a
+  controller's shutdown doesn't stop another's informers.
+- **The M4 timer counts from election, or from the `NewReconciler` that
+  registered the source when that comes later**; every Reconciler on a
+  Shared is checked.
+- **Every setup error fails both runnables and every pass before the Get**:
+  a `WithFinalizer` without `NamedFinalizer`, a failed `Track` (whatever
+  its error), or the registry's. The tracker's owner finalizers are the
+  `NamedFinalizer`'s name alone: provider-runtime#46 hasn't renamed it yet.
+- **An injected Shared** (`WithCredentialUseShared`) gets the two runnables
+  once per Shared when the manager has a config; with a test manager's nil
+  config the test runs it. A connecter without `CredentialRefsProvider`
+  creates nothing, injected Shared or not.
+- **The source's `Enqueue`** drops a holder before `Start`, and forwards
+  after it, to the queue `Start` received (A22).
+- **`Acquired.RetryAfter`** applies to a pass that ends without an error, a
+  rate-limited requeue or a deferral: it requeues at the smaller of the two.
+  A deferral keeps the governor's time.
+- **A new holder that must not connect** gets the core's error as Synced's
+  message, unwrapped, so that §12's text for a Deleting ref is exact; no
+  event is added. `CredentialUseDegraded` and `CredentialDeleting` are the
+  core's, recorded through `Clients.Events`, which is the manager's
+  `GetEventRecorder("credential-use")`: events.k8s.io/v1 Events (P12), so
+  the provider's RBAC needs `create` and `patch` on `events` in
+  `events.k8s.io`.
+- **The Synced pointer** cuts the reason at 16 characters and caps `<n>` at
+  9999, so a hand-edited annotation can't push it past 160.
+- **`CheckRead`** counts a read as named when the holder's record, its
+  unheld list, or the first level of its refs (Guaranteed ones included)
+  names it, and never for a kind the Disown switch covers; it counts every
+  unnamed read and logs once per (holder, object).
+  `CredentialUseCheckingReader(reader, scheme)` finds the holder on the
+  context Connect and the ExternalClient's methods get, and checks Gets and
+  each item of a List.
+- **`IsOwnRecordWrite`** compares the two versions whole, as unstructured
+  maps, with the record and unheld annotations, `resourceVersion` and
+  `managedFields` set aside; a pair that isn't a `runtime.Object` passes.
+  What A1 wrote is remembered per holder until `Forget` or the holder's
+  deletion.
+- **The metrics** are named `credentialuse.<name>`, which the Prometheus
+  exporter turns into the design's names (`_total` added to counters), and
+  are taken from `WithMetrics` when the recorder implements
+  `credentialuse.MetricsRecorder`, as `telemetry.Metrics` does.
+- **`KindOptions` lives in the core**; the adapter adds the holder, the
+  owner finalizers, `Refs`, the sinks, `PollInterval` (the poll interval)
+  and `TimeoutBound` (the timeout plus 30s).
+- **`AssertCredentialRefsCover(t, ctx, connecter, mg, recordingReader,
+  protected...)`** follows the refs' Next through the fixture, and hands
+  Connect the objects it followed through the new
+  `credentialuse.WithResolvedObjects`.
+- **The degraded log line** is the core's, on every degraded pass, as PR 3
+  built it; §8's "log once per object" isn't enforced there, and the event
+  is throttled.
+
 ### PR 8: PerName mode, the index ConfigMap
 
 **Scope.** `index.go`:

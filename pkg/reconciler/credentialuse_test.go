@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
@@ -52,6 +53,7 @@ var cuWidgetGVR = schema.GroupVersionResource{Group: widgetGVK.Group, Version: w
 type cuWorld struct {
 	t       *testing.T
 	srv     *traceServer
+	dyn     *dynamicfake.FakeDynamicClient
 	s       *credentialuse.Shared
 	metrics *cuMetrics
 	kinds   map[schema.GroupVersionResource]schema.GroupVersionKind
@@ -87,13 +89,25 @@ func newCUWorld(t *testing.T, objs ...client.Object) *cuWorld {
 	mapper.Add(widgetGVK, meta.RESTScopeNamespace)
 	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Secret"}, meta.RESTScopeNamespace)
 	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
+	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
 	crd := &unstructured.Unstructured{}
 	crd.SetAPIVersion("apiextensions.k8s.io/v1")
 	crd.SetKind("CustomResourceDefinition")
 	crd.SetName("widgets." + widgetGVK.Group)
 	crd.SetResourceVersion("1")
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}: "CustomResourceDefinitionList"}, crd)
+	// A ConfigMap a Guaranteed ref names, read live through the dynamic
+	// client, whose "secret" key names a Secret (§9.3).
+	config := &unstructured.Unstructured{Object: map[string]any{"data": map[string]any{"secret": "behind"}}}
+	config.SetAPIVersion("v1")
+	config.SetKind("ConfigMap")
+	config.SetNamespace("demo")
+	config.SetName("config")
+	w.dyn = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}: "CustomResourceDefinitionList",
+			{Version: "v1", Resource: "configmaps"}:                                               "ConfigMapList",
+		}, crd, config)
+	dyn := w.dyn
 	w.s = credentialuse.NewShared(credentialuse.Clients{Metadata: crMeta{w}, Dynamic: dyn, Mapper: mapper}, credentialuse.SharedOptions{})
 	return w
 }
@@ -205,6 +219,9 @@ type cuManager struct {
 func newCUManager(w *cuWorld) *cuManager {
 	return &cuManager{Manager: fake.Manager{Client: w.srv.c, Scheme: w.srv.scheme, Config: &rest.Config{Host: "https://127.0.0.1:1"}}}
 }
+
+// GetEventRecorder is the default Shared's recorder: none.
+func (m *cuManager) GetEventRecorder(string) recorder.EventRecorder { return nil }
 
 func (m *cuManager) Add(r manager.Runnable) error {
 	m.mu.Lock()
@@ -852,4 +869,176 @@ func TestCredentialUseStandaloneForgetOnTheOrphanPath(t *testing.T) {
 			t.Errorf("annotations %v, finalizers %v; want both gone in one write", got.Annotations, got.Finalizers)
 		}
 	})
+}
+
+// §9.2: Connect's context carries what Acquire read for a ref with a Next,
+// for credentialuse.Resolved; here a Guaranteed ConfigMap, read live.
+func TestCredentialUseResolvedOnConnectsContext(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	config := credentialuse.Ref{GroupKind: schema.GroupKind{Kind: "ConfigMap"}, Namespace: "demo", Name: "config", Guaranteed: true,
+		Next: func(u *unstructured.Unstructured) ([]credentialuse.Ref, error) {
+			name, _, _ := unstructured.NestedString(u.Object, "data", "secret")
+			return []credentialuse.Ref{credentialuse.SecretRef("demo", name)}, nil
+		}}
+	var got string
+	p := &widgetProvider{ops: w.srv.ops}
+	r := w.reconciler(nil, p, func(resource.Managed) ([]credentialuse.Ref, error) { return []credentialuse.Ref{config}, nil })
+	startSource(t, r)
+	p.observeHook = func(context.Context, *Widget) {}
+	conn := r.external.ExternalConnectDisconnecter
+	r.external.ExternalConnectDisconnecter = ExternalConnectDisconnecterFns{
+		ConnectFn: func(ctx context.Context, mg resource.Managed) (ExternalClient, error) {
+			if u, ok := credentialuse.Resolved(ctx, config); ok {
+				got, _, _ = unstructured.NestedString(u.Object, "data", "secret")
+			}
+			return conn.Connect(ctx, mg)
+		},
+		DisconnectFn: conn.Disconnect,
+	}
+	mustReconcile(t, r, "w")
+	if got != "behind" {
+		t.Errorf("Resolved on Connect's context gave %q, want the ConfigMap Acquire read", got)
+	}
+}
+
+// §8 step 8 and §6.7: a ref that was Missing for Acquire and appears before
+// the finalizer is written is held by BeforeEstablish, just before it.
+func TestCredentialUseBeforeEstablishHoldsARefThatAppeared(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	p := &widgetProvider{ops: w.srv.ops, exists: func(*Widget) bool { return false }}
+	p.observeHook = func(context.Context, *Widget) {
+		if err := w.srv.raw.Create(context.Background(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "demo"}}); err != nil {
+			t.Error(err)
+		}
+	}
+	r := w.reconciler(nil, p, secretRef("creds"))
+	startSource(t, r)
+	mustReconcile(t, r, "w")
+	ops := w.srv.ops.list()
+	held, added := slices.Index(ops, "md-patch secrets"), slices.Index(ops, "update")
+	if held < 0 || added < 0 || held > added {
+		t.Errorf("calls = %v; want the Secret held (md-patch secrets) before the finalizer's Update", ops)
+	}
+	f, _ := credentialuse.FinalizerName(widgetGVK.GroupKind(), "demo")
+	s := &corev1.Secret{}
+	if err := w.srv.raw.Get(context.Background(), client.ObjectKey{Namespace: "demo", Name: "creds"}, s); err != nil || !slices.Contains(s.Finalizers, f) {
+		t.Errorf("the Secret's finalizers %v (%v) lack %s", s.Finalizers, err, f)
+	}
+}
+
+// §12: the pointer also goes on a pass that failed in Observe.
+func TestCredentialUseSuffixOnAnObserveFailure(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-b"}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "team-b"}})
+	p := &widgetProvider{ops: w.srv.ops, observeErr: errors.New("unauthorized")}
+	r := w.reconciler(nil, p, func(resource.Managed) ([]credentialuse.Ref, error) {
+		return []credentialuse.Ref{credentialuse.SecretRef("team-b", "db")}, nil
+	})
+	startSource(t, r)
+	if _, err := r.Reconcile(context.Background(), reqFor("w")); err == nil {
+		t.Fatal("Reconcile succeeded, want the Observe error")
+	}
+	got := w.srv.widget("w")
+	if want := "observe failed: unauthorized" + unheldSuffix(got); unheldSuffix(got) == "" || got.GetCondition(prv1.TypeSynced).Message != want {
+		t.Errorf("Synced message = %q, want %q", got.GetCondition(prv1.TypeSynced).Message, want)
+	}
+}
+
+// §7.3: a Track that fails, here on DisownPasses × DisownInterval below twice
+// TimeoutBound, is a setup error: the runnables return it.
+func TestCredentialUseTrackErrorFailsStart(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	m := newCUManager(w)
+	w.reconciler(m, &widgetProvider{ops: w.srv.ops}, secretRef("creds"),
+		WithCredentialUse(credentialuse.KindOptions{DisownPasses: 2, DisownInterval: time.Second}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, rn := range m.runnables() {
+		if err := rn.Start(ctx); err == nil || !strings.Contains(err.Error(), "DisownPasses") {
+			t.Errorf("%T.Start = %v, want the Track error", rn, err)
+		}
+	}
+}
+
+// §7.5, IP4: a source's Start starts the informers when nothing has yet, so
+// that EnableWarmup, which starts sources before election, works.
+func TestCredentialUseSourceStartStartsTheInformers(t *testing.T) {
+	w := newCUWorld(t)
+	wr := newSharedWiring(w.s)
+	t.Cleanup(wr.cancelRun)
+	src := &credentialUseSource{kind: "Widget", wiring: wr}
+	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	defer q.ShutDown()
+	if err := src.Start(context.Background(), q); err != nil {
+		t.Fatal(err)
+	}
+	// The fake API server allows no access review, so RunInformers returns
+	// at once: that it returned at all shows it ran.
+	select {
+	case <-wr.runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the source's Start didn't start the informers")
+	}
+}
+
+// §7.5, L1 and A22: WaitForSync waits until the tracker has synced, and the
+// tracker's Enqueue reaches the queue the source got in Start, and nothing
+// before it.
+func TestCredentialUseSourceWaitsAndForwards(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, secretRef("creds"))
+	src := r.cu.src
+	src.enqueue(types.NamespacedName{Namespace: "demo", Name: "early"}) // before Start: dropped
+	q := startSource(t, r)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := src.WaitForSync(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WaitForSync on informers that never ran = %v, want it to wait until ctx ends", err)
+	}
+	src.enqueue(types.NamespacedName{Namespace: "demo", Name: "w"})
+	if q.Len() != 1 {
+		t.Fatalf("queue length = %d, want the one enqueued after Start", q.Len())
+	}
+	if item, _ := q.Get(); item.Name != "w" {
+		t.Errorf("queued %v, want demo/w", item)
+	}
+}
+
+// IP4: the informers need no leader election, and the write loops do.
+func TestCredentialUseRunnablesElection(t *testing.T) {
+	if (informerRunnable{}).NeedLeaderElection() {
+		t.Error("the informer runnable needs leader election; a standby's informers must run")
+	}
+	if !(writeLoopsRunnable{}).NeedLeaderElection() {
+		t.Error("the write-loop runnable doesn't need leader election")
+	}
+}
+
+// A11: concurrent NewReconcilers on one manager share its one Shared, and
+// its two runnables are added once.
+func TestCredentialUseOneSharedPerManager(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	m := newCUManager(w)
+	var wg sync.WaitGroup
+	rs := make([]*Reconciler, 4)
+	for i := range rs {
+		wg.Go(func() {
+			rs[i] = NewReconciler(m, resource.ManagedKind(widgetGVK),
+				WithExternalConnecter(refsConnecter{widgetProvider: &widgetProvider{ops: w.srv.ops}, refs: secretRef("creds")}),
+				WithFinalizer(resource.NewAPIFinalizer(w.srv.c, FinalizerName)))
+		})
+	}
+	wg.Wait()
+	if n := len(m.runnables()); n != 2 {
+		t.Errorf("%d runnables added, want 2 for the manager's one Shared", n)
+	}
+	credentialUseRegistry.mu.Lock()
+	s := credentialUseRegistry.defaults[m]
+	credentialUseRegistry.mu.Unlock()
+	for i, r := range rs {
+		if r.cu.wiring == nil || r.cu.wiring.s != s {
+			t.Errorf("Reconciler %d doesn't use the manager's Shared", i)
+		}
+	}
 }
