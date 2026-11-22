@@ -570,10 +570,10 @@ const (
 	carriesNot carriage = iota // gone, or no finalizer of the kind
 	carriesYes
 	carriesUnknown // the read failed, and may succeed if tried again
-	// carriesForbidden: the authorizer refused the read, class (d) of §6.2,
+	// carriesRBACDenied: the authorizer refused the read, class (d) of §6.2,
 	// as for an object outside a resourceNames grant; trying again can't
 	// help until RBAC changes. Any other 403 is carriesUnknown.
-	carriesForbidden
+	carriesRBACDenied
 )
 
 // carries reads id live, and reports whether it carries a finalizer with the
@@ -593,7 +593,7 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 	}
 	if Classify(err) == ClassRBAC {
 		ix.denied(id, err)
-		return carriesForbidden
+		return carriesRBACDenied
 	}
 	return carriesUnknown
 }
@@ -784,7 +784,7 @@ func (ix *index) rebuild(ctx context.Context) error {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
 			keep = append(keep, id)
-		case carriesUnknown, carriesForbidden:
+		case carriesUnknown, carriesRBACDenied:
 			keep = append(keep, id)
 			unread = append(unread, id)
 		}
@@ -856,7 +856,7 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
 			back = append(back, id)
-		case carriesForbidden:
+		case carriesRBACDenied:
 			// It may carry the prefix, and no retry can tell before RBAC
 			// changes: its line goes back, as for an object that does
 			// (§10.6.3), and the refusal is reported once.
