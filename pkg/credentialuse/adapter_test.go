@@ -2,7 +2,9 @@ package credentialuse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -234,4 +236,51 @@ func TestDegradedIsLoggedOncePerHolder(t *testing.T) {
 	if got := log.n.Load(); got != 3 {
 		t.Errorf("after Forget, a degraded pass logged %d lines in all, want 3", got)
 	}
+}
+
+// §7.4 (the user's decision of 2026-11-22): an unset DisownInterval is
+// derived from TimeoutBound, max(60s, ⌈2 × TimeoutBound / (DisownPasses −
+// 1)⌉), and published on the CRD as derived; one set explicitly is used as
+// given, and refused when it is too short.
+func TestDisownIntervalDerivedFromTheTimeoutBound(t *testing.T) {
+	for _, tc := range []struct {
+		bound, want time.Duration
+		published   string
+	}{
+		{270 * time.Second, 135 * time.Second, "135s"}, // git-provider's 4m timeout plus 30s
+		{90 * time.Second, 60 * time.Second, "60s"},    // the default bound keeps the default
+	} {
+		t.Run(tc.bound.String(), func(t *testing.T) {
+			r := newFakeRig(t, namespaceObject("ns"))
+			o := r.options(widgetGK)
+			o.TimeoutBound = tc.bound
+			tr, err := r.s.Track(context.Background(), o)
+			if err != nil {
+				t.Fatalf("Track with an unset DisownInterval and TimeoutBound %s: %v", tc.bound, err)
+			}
+			if tr.o.DisownInterval != tc.want {
+				t.Errorf("DisownInterval = %s, want %s", tr.o.DisownInterval, tc.want)
+			}
+			crd, err := r.dyn.Resource(crdGVR).Get(context.Background(), crdOf(widgetGK).GetName(), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got published
+			if err := json.Unmarshal([]byte(crd.GetAnnotations()[AnnotationConfig]), &got); err != nil {
+				t.Fatalf("the published settings %q: %v", crd.GetAnnotations()[AnnotationConfig], err)
+			}
+			if got.DisownInterval != tc.published {
+				t.Errorf("published disownInterval = %q, want the derived %q", got.DisownInterval, tc.published)
+			}
+		})
+	}
+	t.Run("explicit and too short", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"))
+		o := r.options(widgetGK)
+		o.TimeoutBound = 270 * time.Second
+		o.DisownInterval = 60 * time.Second
+		if _, err := r.s.Track(context.Background(), o); err == nil || !strings.Contains(err.Error(), "DisownInterval") {
+			t.Errorf("Track = %v, want an explicit interval too short for TimeoutBound refused", err)
+		}
+	})
 }

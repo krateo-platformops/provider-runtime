@@ -854,6 +854,14 @@ of tests.
   (`ok`, `degraded`, `must_not_connect` or `conflict`): counts only, never
   a ref's name or a Secret's data. `credentialuse.release` stays reserved:
   release runs in the write loops, outside any reconcile span.
+- **An unset `DisownInterval` is derived from `TimeoutBound`** (the user's
+  decision, 2026-11-22, from the review of PR 7): `max(60s, ⌈2 ×
+  TimeoutBound / (DisownPasses − 1)⌉)`, after `DisownPasses`' default, in
+  the core's validation, so outside runtimes get it too. With the defaults
+  a reconcile timeout above about 90s, git-provider's 4m among them, made
+  setup refuse to start. The derived value is what is published on the
+  CRD, so processes agree; an interval set explicitly is still refused when
+  too short.
 - **A holder being deleted that carries none of its owner finalizers skips
   Acquire** (the user's decision, 2026-11-22): it has been finalized, isn't
   a user (§6.1), and a record it wrote would be ignored; the rest of its
