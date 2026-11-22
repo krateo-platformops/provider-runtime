@@ -1076,7 +1076,11 @@ func TestIndexFillsAndFails(t *testing.T) {
 	if err := notHeldFor(ns, "s6", ns)(); err != nil {
 		t.Error(err)
 	}
-	// An established holder re-pointed at s6 is Degraded, and proceeds.
+	deleteWidget(t, ns, "w6")
+	gone(t, time.Minute, "widget w6", widgetGet(ns, "w6"))
+	// An established holder re-pointed at s6 is Degraded, and proceeds. Its
+	// A1 drops s1, whose release frees a line afterwards; the pass itself
+	// meets the full index.
 	repoint(t, ns, "w1", "s6")
 	r.c.enqueue(widgetNN(ns, "w1"))
 	cutest.Eventually(t, time.Minute, func() error {
@@ -1086,9 +1090,6 @@ func TestIndexFillsAndFails(t *testing.T) {
 		}
 		return nil
 	})
-	if err := notHeldFor(ns, "s6", ns)(); err != nil {
-		t.Error(err)
-	}
 }
 
 // Start fails clearly when the index namespace is absent (§7.3, §13 shape

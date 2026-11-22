@@ -402,6 +402,12 @@ func TestPerNameUnderResourceNamesRBAC(t *testing.T) {
 	createSecret(t, ns, "s")
 	createSecret(t, ns, "stale")
 	createWidget(t, ns, "w", "s")
+	// The index exists, as another process of the kind left it: a process
+	// that creates it rebuilds it from every record, and the other tests'
+	// holders name Secrets this one may not read.
+	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx}}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 
 	resetPublished(t, cutest.WidgetGVR)
 	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
