@@ -859,9 +859,14 @@ of tests.
   TimeoutBound / (DisownPasses − 1)⌉)`, after `DisownPasses`' default, in
   the core's validation, so outside runtimes get it too. With the defaults
   a reconcile timeout above about 90s, git-provider's 4m among them, made
-  setup refuse to start. The derived value is what is published on the
-  CRD, so processes agree; an interval set explicitly is still refused when
-  too short.
+  setup refuse to start. It is rounded up to a whole second, so the
+  published duration reads back unchanged and still spans the bound. It is
+  derived in validate, before equalOptions and publishConfig, so a second
+  Track or another process compares derived with derived; the derived value
+  is what is published on the CRD. `DisownPasses` of 1 with the interval
+  unset is refused with the "below twice TimeoutBound" error, never a
+  division by zero; an interval set explicitly is still refused when too
+  short.
 - **A holder being deleted that carries none of its owner finalizers skips
   Acquire** (the user's decision, 2026-11-22): it has been finalized, isn't
   a user (§6.1), and a record it wrote would be ignored; the rest of its

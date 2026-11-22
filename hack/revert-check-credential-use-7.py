@@ -173,6 +173,8 @@ MUTANTS = [
     # The review of PR 7.
     ("the interval isn't derived", C + "shared.go",
      [("\t\to.DisownInterval = defaultDisownInterval(o.DisownPasses, o.TimeoutBound)", "\t\to.DisownInterval = DefaultDisownInterval")]),
+    ("the derived interval isn't rounded to a second", C + "shared.go",
+     [("\tif r := d % time.Second; r != 0 {\n\t\td += time.Second - r\n\t}\n", "")]),
     ("the derived interval isn't published", C + "setup.go",
      [("\t\tDisownInterval: formatDuration(o.DisownInterval),", "\t\tDisownInterval: formatDuration(DefaultDisownInterval),")]),
     ("a BeforeEstablish error is ignored", RR,
@@ -242,6 +244,7 @@ KILLERS = {
     "a ref that resolves to nothing passes the cover check": {RT: "TestAssertCredentialRefsCover"},
     "the metrics lose holder_kind": {T: "TestCredentialUseMetrics"},
     "the interval isn't derived": {C: "TestDisownIntervalDerivedFromTheTimeoutBound", R: "TestCredentialUseStartsWithALongTimeout"},
+    "the derived interval isn't rounded to a second": {C: "TestDisownIntervalDerivedFromTheTimeoutBound"},
     "the derived interval isn't published": {C: "TestDisownIntervalDerivedFromTheTimeoutBound", R: "TestCredentialUseStartsWithALongTimeout"},
     "a BeforeEstablish error is ignored": {R: "TestCredentialUseBeforeEstablishErrorAddsNoFinalizer"},
     "an established holder fails closed": {R: "TestCredentialUseEstablishedHolderFailsOpen"},

@@ -1088,9 +1088,12 @@ func (s *Shared) validate(o Options) (Options, error) {
 // defaultDisownInterval is an unset DisownInterval: DefaultDisownInterval,
 // or longer when the kind's TimeoutBound needs it, so that passes zero passes
 // span twice TimeoutBound (§7.4): max(DefaultDisownInterval, ⌈2 ×
-// TimeoutBound / (passes − 1)⌉). A long reconcile timeout then needs no
-// setting (the user's decision, 2026-11-22). With passes below 2 no interval
-// suffices, and validate refuses.
+// TimeoutBound / (passes − 1)⌉), rounded up to a whole second, so that the
+// duration published on the CRD reads back as the same value and the bound
+// still holds after parsing. A long reconcile timeout then needs no setting
+// (the user's decision, 2026-11-22). With passes below 2 no interval
+// suffices: it returns DefaultDisownInterval, never dividing by zero, and
+// validate refuses with its "below twice TimeoutBound" error.
 func defaultDisownInterval(passes int, timeoutBound time.Duration) time.Duration {
 	if passes < 2 || timeoutBound <= 0 {
 		return DefaultDisownInterval
@@ -1099,6 +1102,9 @@ func defaultDisownInterval(passes int, timeoutBound time.Duration) time.Duration
 	d := span / n
 	if d*n < span {
 		d++
+	}
+	if r := d % time.Second; r != 0 {
+		d += time.Second - r
 	}
 	return max(DefaultDisownInterval, d)
 }

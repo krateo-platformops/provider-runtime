@@ -249,6 +249,7 @@ func TestDisownIntervalDerivedFromTheTimeoutBound(t *testing.T) {
 	}{
 		{270 * time.Second, 135 * time.Second, "135s"}, // git-provider's 4m timeout plus 30s
 		{90 * time.Second, 60 * time.Second, "60s"},    // the default bound keeps the default
+		{271 * time.Second, 136 * time.Second, "136s"}, // 542s / 4 = 135.5s, up to a whole second
 	} {
 		t.Run(tc.bound.String(), func(t *testing.T) {
 			r := newFakeRig(t, namespaceObject("ns"))
@@ -272,8 +273,31 @@ func TestDisownIntervalDerivedFromTheTimeoutBound(t *testing.T) {
 			if got.DisownInterval != tc.published {
 				t.Errorf("published disownInterval = %q, want the derived %q", got.DisownInterval, tc.published)
 			}
+			// The published string reads back as the derived value, and the
+			// bound holds for it.
+			parsed, err := time.ParseDuration(got.DisownInterval)
+			if err != nil || parsed != tr.o.DisownInterval || time.Duration(tr.o.DisownPasses-1)*parsed < 2*tc.bound {
+				t.Errorf("published %q parses to %s (%v); want %s, spanning at least %s", got.DisownInterval, parsed, err, tr.o.DisownInterval, 2*tc.bound)
+			}
+			// A second Track of the kind, and a second process, compare the
+			// derived value against the derived value.
+			if again, err := r.s.Track(context.Background(), o); err != nil || again != tr {
+				t.Errorf("a second Track with the interval unset = %v, %v; want the same tracker", again, err)
+			}
+			other := newShared(r.s.c, SharedOptions{}, r.clk)
+			if _, err := other.Track(context.Background(), o); err != nil {
+				t.Errorf("a second process with the interval unset: %v; want it to agree with the published value", err)
+			}
 		})
 	}
+	t.Run("one pass", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"))
+		o := r.options(widgetGK)
+		o.DisownPasses = 1
+		if _, err := r.s.Track(context.Background(), o); err == nil || !strings.Contains(err.Error(), "below twice TimeoutBound") {
+			t.Errorf("Track with DisownPasses 1 and the interval unset = %v; want the \"below twice TimeoutBound\" refusal", err)
+		}
+	})
 	t.Run("explicit and too short", func(t *testing.T) {
 		r := newFakeRig(t, namespaceObject("ns"))
 		o := r.options(widgetGK)
