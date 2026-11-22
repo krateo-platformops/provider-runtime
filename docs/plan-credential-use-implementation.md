@@ -687,6 +687,43 @@ count.
 between branches. **Size:** about 700 lines of production code and 900 of
 tests.
 
+**What the build settled** (2026-11-22), where §7.4 left room:
+
+- **A switch that lists kinds disowns only those** (the user's decision,
+  2026-11-22). A ref of a listed kind is returned Unheld, `Disowned`, and is
+  neither recorded nor written to `unheld`; the other kinds are held as
+  before. A disowned hop with a `Next` is read as an unheld hop is (§9.4),
+  through the shared 10s read, so the refs behind it stay protected unless
+  the switch lists them too.
+- **The switch is checked for every ref, and again just before each A2**,
+  the written skip and `BeforeEstablish`'s A2 included; the pass's last A1
+  then leaves the disowned refs out of the record its earlier A1 wrote.
+- **Each tracker watches its own CRD**, field-selected by name, through an
+  informer `RunInformers` and a late `Track` start beside the holder
+  informer. Its RBAC check names the CRD, so `list` and `watch` on that one
+  name suffice. A change of the switch enqueues every holder of the kind.
+- **A pass counts before it strips**: it lists the holders and, by the
+  marker label, the protected objects of the listed kinds, live and
+  cluster-wide; counts the records that name a listed kind and the kind's
+  finalizers; strips them; then writes the count. So a hold put back after an
+  earlier strip is counted, and resets the settling, rather than stripped
+  unseen; a pass counts zero only when it found nothing to strip. The strip
+  of a protected object is read and made again when the object changed, up to
+  three times.
+- **Removing the switch clears `held-count` and `disown-settled`** from the
+  CRD, at most once per `DisownInterval`: a flag left behind would say an
+  uninstall is safe while the kind is protected again.
+- **The run of zeros is per process, and resets on any non-zero or `unknown`
+  count it reads on the CRD**, its own earlier one included; unit-tested on a
+  fake CRD client (`TestDisownSettling`), and against envtest with a hold put
+  back outside the caches, where only Disown's count can find it.
+- **`DisownPrefix` finds the CRD by `spec.group` and `spec.names.kind`**,
+  since its name needs a plural no mapper knows once it is gone; a list that
+  fails refuses too. `Names`, read with a GET each, replaces the lists.
+  `Index` comes with the index, in PR 8.
+- **LabelScoped only**: PerName's count from the index, and Disown emptying
+  it, come with PR 8.
+
 ### PR 7: The provider-runtime adapter and the reconciler wiring
 
 **Scope.**
@@ -792,6 +829,9 @@ of tests.
   conflict; lines for Missing refs (A14);
 - the pointer on the CRD, written once (A4), with start refused on
   disagreement;
+- Disown in PerName mode (§7.4): the live count from the index with a GET
+  per line, Disown emptying the index, and `DisownPrefixOptions.Index`
+  (from PR 6);
 - the `IndexNamespace` checks (it exists, and holds no holders) at `Track`
   and at acquire time; creating the index when absent;
 - the startup recheck from the index, and the write loops' rescan of it at

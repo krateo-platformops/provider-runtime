@@ -384,7 +384,7 @@ func (s *Shared) RunInformers(ctx context.Context) error {
 	s.informerCtx = ctx
 	var infs []informer
 	for _, t := range s.trackers {
-		infs = append(infs, t.informer())
+		infs = append(infs, t.informer(), t.crdInformer())
 	}
 	for _, p := range s.protected {
 		p.runOwned = true
@@ -427,9 +427,12 @@ func (s *Shared) HasSynced() bool { return s.synced.Load() }
 // An informer is one the core starts, with the resource it lists and
 // watches, for the RBAC check before it starts.
 type informer struct {
-	inf  cache.SharedIndexInformer
-	gvr  schema.GroupVersionResource
-	ns   string // the namespace it is restricted to, or ""
+	inf cache.SharedIndexInformer
+	gvr schema.GroupVersionResource
+	ns  string // the namespace it is restricted to, or ""
+	// name is the one object it is field-selected to, or "": RBAC may then
+	// grant list and watch on that name alone.
+	name string
 	what string
 	// clusterList is set for a protected informer restricted to a
 	// namespace (SharedOptions.Namespaces): the objects of its kind
@@ -442,7 +445,7 @@ type informer struct {
 // setup error). A protected informer restricted to a namespace also needs
 // list in every namespace, for §10.5's rechecks outside the caches.
 func (i informer) preflight(ctx context.Context, s *Shared) error {
-	if err := s.canAccess(ctx, i.gvr, i.ns, "list", "watch"); err != nil {
+	if err := s.canAccessNamed(ctx, i.gvr, i.ns, i.name, "list", "watch"); err != nil {
 		return fmt.Errorf("credential-use: cannot run %s: grant list and watch on %s: %w", i.what, i.gvr.GroupResource(), err)
 	}
 	if i.clusterList {
@@ -463,6 +466,12 @@ var ssarGVR = schema.GroupVersionResource{Group: "authorization.k8s.io", Version
 // rather than on the day the fallback runs. Without Clients.Dynamic it
 // can't check, and fails (N2 of the review of #109).
 func (s *Shared) canAccess(ctx context.Context, gvr schema.GroupVersionResource, namespace string, verbs ...string) error {
+	return s.canAccessNamed(ctx, gvr, namespace, "", verbs...)
+}
+
+// canAccessNamed is canAccess for the object name alone, or for every
+// object when name is "".
+func (s *Shared) canAccessNamed(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, verbs ...string) error {
 	if s.c.Dynamic == nil {
 		return errors.New("credential-use: Clients.Dynamic is required")
 	}
@@ -471,7 +480,7 @@ func (s *Shared) canAccess(ctx context.Context, gvr schema.GroupVersionResource,
 			"apiVersion": "authorization.k8s.io/v1",
 			"kind":       "SelfSubjectAccessReview",
 			"spec": map[string]any{"resourceAttributes": map[string]any{
-				"verb": verb, "group": gvr.Group, "resource": gvr.Resource, "namespace": namespace,
+				"verb": verb, "group": gvr.Group, "resource": gvr.Resource, "namespace": namespace, "name": name,
 			}},
 		}}
 		out, err := s.c.Dynamic.Resource(ssarGVR).Create(ctx, review, metav1.CreateOptions{})
@@ -881,6 +890,14 @@ func (s *Shared) startTracker(ctx, ictx context.Context, t *Tracker, ps []*prote
 	hctx, stop := context.WithCancel(ictx)
 	t.stopHolders = stop
 	if err := s.startAndSync(hctx, ctx, t.holders, "the holder informer of "+t.gk.String()); err != nil {
+		return err
+	}
+	// The Disown switch is read from the CRD's informer, which ends with
+	// the holder informer (§7.4).
+	if err := t.crdInformer().preflight(ctx, s); err != nil {
+		return err
+	}
+	if err := s.startAndSync(hctx, ctx, t.crd, t.crdInformer().what); err != nil {
 		return err
 	}
 	for _, p := range ps {

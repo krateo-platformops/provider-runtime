@@ -108,10 +108,14 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 			s.releaseWorker(ctx)
 		}()
 	}
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		s.runJanitor(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		s.runDisown(ctx)
 	}()
 	go func() {
 		defer wg.Done()
