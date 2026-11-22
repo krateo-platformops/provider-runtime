@@ -199,7 +199,8 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		enqueueBatch: func(id ID, ns string) {
 			s.queue.Add(batchKey{gk, ns}, id)
 		},
-		disowned: func(pk schema.GroupKind) bool { return t.disownSwitch().covers(pk) },
+		disowned:   func(pk schema.GroupKind) bool { return t.disownSwitch().covers(pk) },
+		disownLive: t.disownLive,
 	}
 	for _, pk := range o.Protected {
 		if pk.Content {

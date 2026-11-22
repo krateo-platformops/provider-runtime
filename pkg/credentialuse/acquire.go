@@ -134,6 +134,32 @@ type protocol struct {
 	// protected kind now (§7.4); nil is never. Acquire asks it for every
 	// ref, and again just before each A2 (§10.6.8, interleaving 3).
 	disowned func(schema.GroupKind) bool
+	// disownLive reads the switch live, from the CRD, so that a stale CRD
+	// informer can't let an A2 through after the switch: once per pass,
+	// just before its first A2 (the user's decisions, 2026-11-22). nil is
+	// never.
+	disownLive func(context.Context) (disownSet, error)
+}
+
+// liveDisown returns a pass's live read of the switch: made once, before the
+// pass's first A2, and reused for the rest of the pass. A switch set later in
+// the pass is the window of §10.6.8's interleaving 3, which the pass's own
+// duration, under TimeoutBound, bounds.
+func (p *protocol) liveDisown(ctx context.Context) func(schema.GroupKind) (bool, error) {
+	var set *disownSet
+	return func(gk schema.GroupKind) (bool, error) {
+		if p.disownLive == nil {
+			return false, nil
+		}
+		if set == nil {
+			s, err := p.disownLive(ctx)
+			if err != nil {
+				return false, err
+			}
+			set = &s
+		}
+		return set.covers(gk), nil
+	}
 }
 
 // isDisowned is disowned, false without one.
@@ -341,6 +367,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		}
 		return p.resolve(&a, r, o)
 	}
+	liveDisowned := p.liveDisown(ctx)
 	level := refs
 	for depth := 1; len(level) > 0; depth++ {
 		if depth > maxDepth {
@@ -506,6 +533,19 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				}
 			}
 			if !held {
+				// The switch, read live before the pass's first A2 (§10.6.8,
+				// interleaving 3).
+				switch d, err := liveDisowned(id.GroupKind()); {
+				case err != nil:
+					return fail(fmt.Errorf("credential-use: reading the Disown switch before holding %s: %w", id, err), "Disown")
+				case d:
+					more, err := disown(r)
+					if err != nil {
+						return fail(err, "Refs")
+					}
+					next = append(next, more...)
+					continue
+				}
 				switch class, err := p.write(ctx, id, namespace); class {
 				case ClassNone:
 					a.Held = append(a.Held, r)
@@ -747,6 +787,7 @@ func (p *protocol) wroteDeleting(id ID, namespace string, out *metav1.PartialObj
 // Missing live, and holds any that now exists. On an error, the caller
 // doesn't add its finalizer this pass.
 func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acquired) error {
+	liveDisowned := p.liveDisown(ctx)
 	for _, u := range a.Unheld {
 		if u.Reason != ReasonMissing {
 			continue
@@ -773,6 +814,12 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 			default:
 				return fmt.Errorf("credential-use: checking %s before establishing: %w", id, err)
 			}
+		}
+		switch d, err := liveDisowned(id.GroupKind()); {
+		case err != nil:
+			return fmt.Errorf("credential-use: reading the Disown switch before holding %s: %w", id, err)
+		case d:
+			continue
 		}
 		if class, err := p.write(ctx, id, obj.GetNamespace()); class != ClassNone {
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)

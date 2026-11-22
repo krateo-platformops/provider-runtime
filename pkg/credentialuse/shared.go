@@ -112,9 +112,9 @@ type Options struct {
 	DisownInterval time.Duration
 	DisownPasses   int
 	// TimeoutBound is the kind's largest reconcile or request timeout.
-	// Required: setup checks DisownPasses × DisownInterval against twice it,
-	// and publishes it (§7.3). provider-runtime passes its timeout plus
-	// grace, 90s.
+	// Required: setup checks the span of DisownPasses zero passes,
+	// (DisownPasses − 1) × DisownInterval, against twice it, and publishes
+	// it (§7.3). provider-runtime passes its timeout plus grace, 90s.
 	TimeoutBound time.Duration
 	// Logger and Metrics are rebound with Enqueue, and the same rule holds:
 	// neither may block or call Track.
@@ -1047,8 +1047,10 @@ func (s *Shared) validate(o Options) (Options, error) {
 	if o.DeletionGrace < 0 || o.ProbeInterval < 0 || o.DisownInterval < 0 || o.DisownPasses < 0 || o.MaxDepth < 0 || o.PollInterval < 0 {
 		return o, fmt.Errorf("credential-use: %s: a negative option", gk)
 	}
-	if time.Duration(o.DisownPasses)*o.DisownInterval < 2*o.TimeoutBound {
-		return o, fmt.Errorf("credential-use: %s: DisownPasses × DisownInterval (%d × %s) is below twice TimeoutBound (%s) (§7.4)",
+	// DisownPasses zero passes span DisownPasses − 1 intervals: the first
+	// runs as soon as the switch is seen (the review of PR 6).
+	if time.Duration(o.DisownPasses-1)*o.DisownInterval < 2*o.TimeoutBound {
+		return o, fmt.Errorf("credential-use: %s: (DisownPasses − 1) × DisownInterval ((%d − 1) × %s), the span of the zero passes, is below twice TimeoutBound (%s) (§7.4)",
 			gk, o.DisownPasses, o.DisownInterval, o.TimeoutBound)
 	}
 	if len(o.Protected) == 0 {

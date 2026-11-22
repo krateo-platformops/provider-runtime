@@ -107,7 +107,7 @@ func DisownPrefix(ctx context.Context, c Clients, o DisownPrefixOptions) (Disown
 		if o.DryRun {
 			continue
 		}
-		stripped, err := stripDisowned(ctx, srv, gk, o.Holder, m)
+		stripped, _, err := stripDisowned(ctx, srv, gk, o.Holder, m)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("stripping %s: %w", id, err))
 			continue
@@ -153,36 +153,41 @@ func countPrefix(finalizers []string, prefix string) int {
 // object that changed since it was read, it reads it again and rebuilds the
 // patch, up to maxGuardedAttempts times; any incarnation's holds of holder
 // are stripped, since the prefix is the whole kind's. It reports whether it
-// wrote; an object with nothing of holder's left, or gone, needs no write.
-func stripDisowned(ctx context.Context, srv server, gk, holder schema.GroupKind, m *metav1.PartialObjectMetadata) (bool, error) {
+// wrote, and how many of holder's finalizers the version it stripped
+// carried; an object with nothing of holder's left, or gone, needs no write.
+func stripDisowned(ctx context.Context, srv server, gk, holder schema.GroupKind, m *metav1.PartialObjectMetadata) (bool, int, error) {
+	prefix, err := FinalizerPrefix(holder)
+	if err != nil {
+		return false, 0, err
+	}
 	cur := m
 	var last error
 	for range maxGuardedAttempts {
 		p, err := DisownPatch(cur, holder)
 		if errors.Is(err, ErrNotHeld) {
-			return false, nil
+			return false, 0, nil
 		}
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
 		_, err = srv.Patch(ctx, gk, cur.Namespace, cur.Name, p.Type, p.Data)
 		switch ClassifyJSONPatch(err) {
 		case ClassNone:
-			return true, nil
+			return true, countPrefix(cur.Finalizers, prefix), nil
 		case ClassNotFound:
-			return false, nil
+			return false, 0, nil
 		case ClassStateChanged, ClassConflict:
 			last = err
 		default:
-			return false, err
+			return false, 0, err
 		}
 		cur, err = srv.Get(ctx, gk, m.Namespace, m.Name)
 		if Classify(err) == ClassNotFound {
-			return false, nil
+			return false, 0, nil
 		}
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
 	}
-	return false, fmt.Errorf("credential-use: %d changed reads in a row: %w", maxGuardedAttempts, last)
+	return false, 0, fmt.Errorf("credential-use: %d changed reads in a row: %w", maxGuardedAttempts, last)
 }

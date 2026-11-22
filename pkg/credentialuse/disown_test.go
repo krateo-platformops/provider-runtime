@@ -7,14 +7,21 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	metadatafake "k8s.io/client-go/metadata/fake"
+	clienttesting "k8s.io/client-go/testing"
+	testingclock "k8s.io/utils/clock/testing"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
@@ -149,6 +156,30 @@ func TestDisownPatch(t *testing.T) {
 	})
 }
 
+// TestStripDisownedCountsWhatItRemoved: an A2 that lands between the list
+// and the strip makes the strip read again, and it reports the finalizers
+// it removed, which the pass adds to its count (the review of PR 6).
+func TestStripDisownedCountsWhatItRemoved(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	fA, _ := FinalizerName(widgetGK, "a")
+	fB, _ := FinalizerName(widgetGK, "b")
+	k := secretKey("ns", "s")
+	must(r.m.Create(k, metav1.ObjectMeta{Finalizers: []string{fA}, Labels: map[string]string{MarkerLabel(widgetGK): "true"}}))
+	listed := r.get(t, k)
+	// The late A2, after the list.
+	if _, err := r.m.Patch(k, types.MergePatchType, []byte(`{"metadata":{"finalizers":["`+fA+`","`+fB+`"]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	wrote, removed, err := stripDisowned(ctx, r.srv, k.GK, widgetGK, listed)
+	if err != nil || !wrote || removed != 2 {
+		t.Fatalf("stripDisowned = %v, %d, %v; want a write that removed 2", wrote, removed, err)
+	}
+	if got := r.get(t, k); len(got.Finalizers) != 0 {
+		t.Errorf("finalizers %v", got.Finalizers)
+	}
+}
+
 func TestDisownHolderPatch(t *testing.T) {
 	secret := SecretRef("ns", "s")
 	target := targetRef("c")
@@ -211,6 +242,7 @@ func disownRig(t *testing.T) (*rig, *disownSet) {
 	r, _ := consentRig(t, "")
 	set := &disownSet{}
 	r.p.disowned = func(gk schema.GroupKind) bool { return set.covers(gk) }
+	r.p.disownLive = func(context.Context) (disownSet, error) { return *set, nil }
 	return r, set
 }
 
@@ -340,6 +372,63 @@ func TestAcquireWhileDisowned(t *testing.T) {
 			t.Error("BeforeEstablish held a ref the switch covers")
 		}
 	})
+	t.Run("a stale cache: the live read before the A2 stops it", func(t *testing.T) {
+		r, _ := disownRig(t)
+		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+		r.p.disowned = func(schema.GroupKind) bool { return false } // the informer's watch fails
+		r.p.disownLive = func(context.Context) (disownSet, error) { return parseDisown("all"), nil }
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{SecretRef("ns", "s")})
+		if err != nil || a.MustNotConnect || len(a.Held) != 0 || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonDisowned {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+		if countCalls(r.srv.calls, "patch Secret/s") != 0 {
+			t.Errorf("an A2 under a stale cache: %v", r.srv.calls)
+		}
+		h := r.get(t, widgetKey("ns", "h"))
+		must(r.m.Delete(secretKey("ns", "s")))
+		a2 := Acquired{Unheld: []Unheld{{Ref: SecretRef("ns", "s"), Reason: ReasonMissing}}}
+		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+		if err := r.p.beforeEstablish(ctx, h, a2); err != nil || hasFinalizer(r.get(t, secretKey("ns", "s")), fNS) {
+			t.Errorf("BeforeEstablish = %v under a stale cache, held %v", err, hasFinalizer(r.get(t, secretKey("ns", "s")), fNS))
+		}
+	})
+	t.Run("one live read per pass, before its first A2", func(t *testing.T) {
+		r, _ := disownRig(t)
+		reads := 0
+		r.p.disownLive = func(context.Context) (disownSet, error) { reads++; return disownSet{}, nil }
+		var refs []Ref
+		for _, n := range []string{"a", "b", "c"} {
+			must(r.m.Create(secretKey("ns", n), metav1.ObjectMeta{}))
+			refs = append(refs, SecretRef("ns", n))
+		}
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), refs)
+		if err != nil || len(a.Held) != 3 || reads != 1 {
+			t.Fatalf("acquire = %+v, %v; %d live reads for three A2s, want 1", a, err, reads)
+		}
+		// A pass that writes no A2 reads nothing: the steady state, as in
+		// TestAcquireSkipsInTheSteadyState.
+		r.views = cacheOf{m: r.m}
+		current := r.get(t, widgetKey("ns", "h"))
+		r.p.ver.holderEvent(current.UID, current, r.now)
+		r.tick(time.Millisecond)
+		if _, err := r.p.acquire(ctx, current, refs); err != nil {
+			t.Fatal(err)
+		}
+		reads = 0
+		r.srv.calls = nil
+		if _, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), refs); err != nil || len(r.srv.calls) != 0 || reads != 0 {
+			t.Errorf("acquire = %v, calls %v; %d live reads for a pass that skips every A2, want 0", err, r.srv.calls, reads)
+		}
+	})
+	t.Run("a live read that fails holds nothing", func(t *testing.T) {
+		r, _ := disownRig(t)
+		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+		r.p.disownLive = func(context.Context) (disownSet, error) { return disownSet{}, errors.New("the CRD read failed") }
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{SecretRef("ns", "s")})
+		if err != nil || !a.MustNotConnect || hasFinalizer(r.get(t, secretKey("ns", "s")), fNS) {
+			t.Fatalf("acquire = %+v, %v; want MustNotConnect for a new holder, and no A2", a, err)
+		}
+	})
 	t.Run("the switch off again: held as before", func(t *testing.T) {
 		r, set := disownRig(t)
 		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
@@ -369,7 +458,7 @@ func TestDisownSettling(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crd)
 	s := &Shared{c: Clients{Dynamic: dyn}}
-	tr := &Tracker{s: s, crdName: name, o: Options{DisownPasses: 3}, sink: sinks{logger: logging.NewNopLogger()}}
+	tr := &Tracker{s: s, gk: widgetGK, crdName: name, o: Options{DisownPasses: 3}, sink: sinks{logger: logging.NewNopLogger(), metrics: NopMetrics{}}}
 	read := func() (string, string) {
 		t.Helper()
 		got, err := dyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
@@ -390,7 +479,7 @@ func TestDisownSettling(t *testing.T) {
 	}
 	step := func(count int, known bool, wantCount, wantSettled string) {
 		t.Helper()
-		s.writeDisownCount(ctx, tr, count, known)
+		s.writeDisownCount(ctx, tr, disownSet{}, count, known)
 		if c, st := read(); c != wantCount || st != wantSettled {
 			t.Fatalf("after a count of %d (known %v): held-count %q, settled %q; want %q, %q", count, known, c, st, wantCount, wantSettled)
 		}
@@ -402,6 +491,9 @@ func TestDisownSettling(t *testing.T) {
 	step(0, true, "0", "true")
 	if patches() != before+1 {
 		t.Errorf("%d patches to settle, want 1", patches()-before)
+	}
+	if p := lastPatch(dyn.Actions()); p == nil || !strings.Contains(string(p.GetPatch()), `"resourceVersion"`) {
+		t.Errorf("the count patch isn't guarded by the version read: %v", p)
 	}
 	before = patches()
 	step(0, true, "0", "true")
@@ -427,4 +519,131 @@ func TestDisownSettling(t *testing.T) {
 	step(0, true, "0", "")
 	step(0, true, "0", "")
 	step(0, true, "0", "true")
+
+	// A switch that no longer covers what the pass counted: nothing is
+	// written, and the run starts over.
+	step(0, true, "0", "true")
+	if _, err := dyn.Resource(crdGVR).Patch(ctx, name, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationHeldCount+`":"0","`+AnnotationDisownSettled+`":null,"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	before = patches()
+	s.writeDisownCount(ctx, tr, disownSet{}, 0, true)
+	if patches() != before {
+		t.Error("a count for another switch was written")
+	}
+	all := parseDisown("all")
+	for range 2 {
+		s.writeDisownCount(ctx, tr, all, 0, true)
+	}
+	if c, st := read(); c != "0" || st != "" {
+		t.Fatalf("held-count %q, settled %q after two zero passes under the new switch; want not settled", c, st)
+	}
+	s.writeDisownCount(ctx, tr, all, 0, true)
+	if _, st := read(); st != "true" {
+		t.Fatal("not settled after three zero passes under the new switch")
+	}
+
+	// A conflict reads and decides again (§7.3).
+	conflicts := 1
+	dyn.PrependReactor("patch", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if conflicts > 0 {
+			conflicts--
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: crdGVR.Group, Resource: crdGVR.Resource}, name, errors.New("changed"))
+		}
+		return false, nil, nil
+	})
+	s.writeDisownCount(ctx, tr, all, 1, true)
+	if c, st := read(); c != "1" || st != "" {
+		t.Fatalf("after a conflict: held-count %q, settled %q; want the retry to write 1", c, st)
+	}
+
+	// Every attempt conflicting, three passes in a row: starved, counted once.
+	m := &countingMetrics{}
+	tr.sink.metrics = m
+	for i := range 3 {
+		conflicts = maxCRDWriteAttempts
+		s.writeDisownCount(ctx, tr, all, 2+i, true)
+	}
+	if n := m.count("crd_write_starved " + kindLabel(widgetGK)); n != 1 {
+		t.Errorf("starved counted %d times, want 1", n)
+	}
+	if c, _ := read(); c != "1" {
+		t.Errorf("held-count %q: a starved write landed", c)
+	}
+}
+
+// TestDisownOffClearsTheCount: once the switch is removed, held-count and
+// disown-settled leave the CRD, in a patch guarded by the version the
+// informer has; with nothing to clear, nothing is written.
+func TestDisownOffClearsTheCount(t *testing.T) {
+	ctx := context.Background()
+	const name = "widgets.credentialuse.test.krateo.io"
+	crd := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+		"metadata": map[string]any{"name": name, "resourceVersion": "9", "annotations": map[string]any{
+			AnnotationHeldCount: "0", AnnotationDisownSettled: "true",
+		}},
+	}}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crd)
+	s := &Shared{c: Clients{Dynamic: dyn}}
+	inf, err := newCRDInformer(metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme()), name, testingclock.NewFakeClock(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(inf.GetStore().Add(&metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: name, ResourceVersion: "9",
+		Annotations: map[string]string{AnnotationHeldCount: "0", AnnotationDisownSettled: "true"}}}))
+	tr := &Tracker{s: s, gk: widgetGK, crd: inf, crdName: name, o: Options{DisownInterval: time.Minute}, sink: sinks{logger: logging.NewNopLogger()}}
+	tr.disown.zeros, tr.disown.value = 4, "all"
+	now := time.Now()
+	s.disownOff(ctx, tr, now)
+	got, err := dyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := got.GetAnnotations(); a[AnnotationHeldCount] != "" || a[AnnotationDisownSettled] != "" {
+		t.Errorf("annotations %v, want the count cleared", a)
+	}
+	if p := lastPatch(dyn.Actions()); p == nil || !strings.Contains(string(p.GetPatch()), `"resourceVersion":"9"`) {
+		t.Errorf("the clearing patch isn't guarded by the informer's version: %v", p)
+	}
+	if tr.disown.zeros != 0 || tr.disown.value != "" {
+		t.Errorf("the run survived the switch's removal: zeros %d, value %q", tr.disown.zeros, tr.disown.value)
+	}
+	// Within the interval, no second try.
+	n := len(dyn.Actions())
+	s.disownOff(ctx, tr, now.Add(time.Second))
+	if len(dyn.Actions()) != n {
+		t.Error("a second clearing within DisownInterval")
+	}
+}
+
+// TestDisownPrefixRefusesWhenTheCRDListFails: whether the CRD is gone can't
+// be known, so nothing is stripped.
+func TestDisownPrefixRefusesWhenTheCRDListFails(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"})
+	dyn.PrependReactor("list", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("the list failed")
+	})
+	md := metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme())
+	c := Clients{Metadata: md, Dynamic: dyn, Mapper: meta.NewDefaultRESTMapper(nil)}
+	_, err := DisownPrefix(context.Background(), c, DisownPrefixOptions{Holder: widgetGK, Names: []Ref{SecretRef("ns", "s")}})
+	if err == nil || !strings.Contains(err.Error(), "the list failed") {
+		t.Errorf("DisownPrefix = %v, want the list's failure", err)
+	}
+	for _, a := range md.Actions() {
+		t.Errorf("an API call despite the refusal: %v", a)
+	}
+}
+
+// lastPatch is the last patch among acts, or nil.
+func lastPatch(acts []clienttesting.Action) clienttesting.PatchAction {
+	for i := len(acts) - 1; i >= 0; i-- {
+		if p, ok := acts[i].(clienttesting.PatchAction); ok {
+			return p
+		}
+	}
+	return nil
 }

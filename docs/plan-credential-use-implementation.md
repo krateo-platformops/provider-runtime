@@ -695,9 +695,16 @@ tests.
   before. A disowned hop with a `Next` is read as an unheld hop is (§9.4),
   through the shared 10s read, so the refs behind it stay protected unless
   the switch lists them too.
-- **The switch is checked for every ref, and again just before each A2**,
-  the written skip and `BeforeEstablish`'s A2 included; the pass's last A1
-  then leaves the disowned refs out of the record its earlier A1 wrote.
+- **The switch is checked for every ref, from the CRD informer, and read
+  live, with one GET of the CRD per pass, just before the pass's first A2**,
+  `BeforeEstablish`'s included (the user's decisions, 2026-11-22, from the
+  review of PR 6): a process whose CRD watch fails can't land an A2 after
+  the switch. One read per pass, not per A2, keeps a namespace teardown,
+  whose deleting holders A2 every ref on every pass, at one CRD read per
+  pass; a switch set later in the pass is interleaving 3's window, which the
+  pass's duration, under `TimeoutBound`, bounds. A failed read fails the
+  hold as any A2 error does; a CRD that is gone has no switch. The pass's last A1 leaves the disowned refs out of the record its
+  earlier A1 wrote.
 - **Each tracker watches its own CRD**, field-selected by name, through an
   informer `RunInformers` and a late `Track` start beside the holder
   informer. Its RBAC check names the CRD, so `list` and `watch` on that one
@@ -705,11 +712,25 @@ tests.
 - **A pass counts before it strips**: it lists the holders and, by the
   marker label, the protected objects of the listed kinds, live and
   cluster-wide; counts the records that name a listed kind and the kind's
-  finalizers; strips them; then writes the count. So a hold put back after an
-  earlier strip is counted, and resets the settling, rather than stripped
-  unseen; a pass counts zero only when it found nothing to strip. The strip
-  of a protected object is read and made again when the object changed, up to
-  three times.
+  finalizers; strips them; then writes the count. The strip of a protected
+  object is read and made again when the object changed, up to three times,
+  and the finalizers it removed beyond what the list showed are added to the
+  count. So a hold put back, before the lists or between them and the strip,
+  is counted and resets the settling; a pass counts zero only when it
+  stripped nothing.
+- **The setup check is on the span of the zero passes**, `(DisownPasses −
+  1) × DisownInterval ≥ 2 × TimeoutBound`: the first pass runs as soon as
+  the switch is seen, so `DisownPasses` passes span one interval fewer (the
+  review of PR 6). The defaults give 240s against 180s.
+- **A change of what the switch covers starts the run over**, and makes a
+  pass due at once; and a count write whose GET finds a switch other than
+  the one the pass counted under writes nothing. So widening `Secret` to
+  `all` never settles on the narrower switch's zeros.
+- **Count writes follow §7.3**: a GET, then a patch guarded by its
+  resourceVersion; a conflict reads and decides again, up to 5 attempts; a
+  pass whose every attempt conflicted leaves the write to the next, and
+  three such passes in a row are logged and counted in
+  `credentialuse_crd_write_starved_total`.
 - **Removing the switch clears `held-count` and `disown-settled`** from the
   CRD, at most once per `DisownInterval`: a flag left behind would say an
   uninstall is safe while the kind is protected again.
