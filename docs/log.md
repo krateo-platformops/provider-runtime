@@ -12,6 +12,19 @@ timestamp: 2026-11-21T00:00:00Z
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
 
+## 2026-11-21 — v1.21.1: Ready=Deleting and Ready=Creating keep their transition time
+- **A patch release, from `release/v1.21`** (the user's decision): #119,
+  cherry-picked from main (#120).
+- **A slow deletion, or a create-recovery window, no longer rewrites status
+  on every pass.** Each pass calls `Observe`, which sets Ready, and then sets
+  `Ready=Deleting` (or `Creating`) again, which gave it a new
+  `LastTransitionTime`. So each pass wrote a changed status, and a controller
+  that enqueues on every update reconciled again at once: during a deletion
+  that called `Delete` again, on top of the rate-limited requeue. The
+  condition now keeps its stored time when it is unchanged, as v1.21.0's
+  policy reports do. It predates v1.21.0: the runtime has set these itself
+  since v1.8.1.
+
 ## 2026-11-21 — v1.21.0: the management policy is plumbing's, shared with unstructured-runtime
 - **A minor release, cut from v1.20.1 on `release/v1.21`** (the user's
   decision, 2026-11-21). main carries the unreleased credential-use stack, and
