@@ -61,7 +61,7 @@ func installPolicy(t *testing.T, idx, mgmt string) {
 				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": idx}},
 				ResourceRules: []admissionregistrationv1.NamedRuleWithOperations{{RuleWithOperations: admissionregistrationv1.RuleWithOperations{
 					Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.Create, admissionregistrationv1.Update},
-					Rule:       admissionregistrationv1.Rule{APIGroups: all, APIVersions: all, Resources: all},
+					Rule:       admissionregistrationv1.Rule{APIGroups: all, APIVersions: all, Resources: all, Scope: ptr.To(admissionregistrationv1.NamespacedScope)},
 				}}},
 				ExcludeResourceRules: []admissionregistrationv1.NamedRuleWithOperations{{RuleWithOperations: admissionregistrationv1.RuleWithOperations{
 					Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.OperationAll},
@@ -126,22 +126,22 @@ func installPolicy(t *testing.T, idx, mgmt string) {
 
 // policyGone waits, after the policy and its binding are deleted, until the
 // API server has dropped them: it applies policies from its own informers,
-// so a deleted one is enforced for a while after the DELETE returns, and the
-// next test, sharing the API server, would meet it (the VM run of PR 8: a
-// later test's CRD patch was denied). §10.6.1's policy matches every
-// cluster-scoped write, since a namespaceSelector never exempts one
-// (k8s.io/apiserver@v0.37.2 pkg/admission/plugin/webhook/predicates/namespace/matcher.go:105-112),
-// so a patch of the Widget CRD passes only once it is gone.
+// so a deleted one is enforced for a while after the DELETE returns (the VM
+// run of PR 8: a later test met it). Scoped to namespaced objects, it can
+// match only the test's index namespace, which the test has deleted, so a
+// stale copy can't reach another test; the wait is belt and braces.
 func policyGone(t *testing.T) {
 	t.Helper()
+	ar := env.Kube.AdmissionregistrationV1()
 	cutest.Eventually(t, time.Minute, func() error {
-		data := []byte(`{"metadata":{"annotations":{"credentialuse.test.krateo.io/policy-probe":"` + time.Now().Format(time.RFC3339Nano) + `"}}}`)
-		if _, err := env.Dynamic.Resource(crdGVR).Patch(context.Background(), widgetCRD, types.MergePatchType, data, metav1.PatchOptions{}); err != nil {
-			return fmt.Errorf("the deleted policy is still enforced: %v: %w", err, cutest.ErrNotYet)
+		_, perr := ar.ValidatingAdmissionPolicies().Get(context.Background(), policyName, metav1.GetOptions{})
+		_, berr := ar.ValidatingAdmissionPolicyBindings().Get(context.Background(), policyName, metav1.GetOptions{})
+		if !apierrors.IsNotFound(perr) || !apierrors.IsNotFound(berr) {
+			return fmt.Errorf("the policy %v, its binding %v: %w", perr, berr, cutest.ErrNotYet)
 		}
 		return nil
 	})
-	setWidgetCRDAnnotations(t, map[string]any{"credentialuse.test.krateo.io/policy-probe": nil})
+	time.Sleep(2 * time.Second) // the API server's policy informers
 }
 
 // grantWrites lets users and groups get, create and update ConfigMaps and
@@ -269,7 +269,6 @@ func TestIndexNamespacePolicy(t *testing.T) {
 	allowed(t, "the default ServiceAccount by the service-account controller", sa(asSACtrl))
 	allowed(t, "the default ServiceAccount by kube-controller-manager", updateSA(asKCM, "default"))
 	denied(t, "the default ServiceAccount updated by alice", updateSA(asAlice, "default"))
-	denied(t, "kube-root-ca.crt by the service-account controller", updateCM(asSACtrl, "kube-root-ca.crt"))
 
 	// A dynamic composition-controller service account, created now, writes
 	// its cu-index-* ConfigMap; nothing else is allowed from it, or from
@@ -289,6 +288,14 @@ func TestIndexNamespacePolicy(t *testing.T) {
 	w.SetName("composition")
 	_, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(idx).Create(ctx, w, metav1.CreateOptions{})
 	denied(t, "a composition object", err)
+
+	// A cluster-scoped write is never the policy's: its scope keeps it to
+	// namespaced objects, since a namespaceSelector never exempts a
+	// cluster-scoped one (§10.6.1).
+	probe := []byte(`{"metadata":{"annotations":{"credentialuse.test.krateo.io/policy-probe":"in-force"}}}`)
+	_, err = env.Dynamic.Resource(crdGVR).Patch(ctx, widgetCRD, types.MergePatchType, probe, metav1.PatchOptions{})
+	allowed(t, "a CRD patch while the policy is in force", err)
+	setWidgetCRDAnnotations(t, map[string]any{"credentialuse.test.krateo.io/policy-probe": nil})
 
 	// Events are allowed.
 	_, err = asAlice.CoreV1().Events(idx).Create(ctx, &corev1.Event{

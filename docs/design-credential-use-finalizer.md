@@ -2054,6 +2054,7 @@ proves it.
         - apiGroups: ["*"]
           apiVersions: ["*"]
           resources: ["*"]
+          scope: "Namespaced"                # never a cluster-scoped kind: see below
           operations: ["CREATE", "UPDATE"]   # never DELETE: see below
       excludeResourceRules:                  # the Namespace object itself
         - apiGroups: [""]
@@ -2152,6 +2153,21 @@ proves it.
   would refuse installer's own updates of `krateo-credential-use`. The
   revision 12 sketch said the policy "never matches `v1/Namespace`": that
   was wrong, and is corrected here.
+
+  **The rule's `scope: "Namespaced"` is what keeps the policy to the index
+  namespace** (the user's decision, 2026-11-22). A `namespaceSelector` never
+  exempts a cluster-scoped resource: the matcher returns a match for any
+  request with no namespace that isn't a Namespace
+  (`k8s.io/apiserver@v0.37.2/pkg/admission/plugin/webhook/predicates/namespace/matcher.go:105-112`).
+  Without the scope, the policy would match every CREATE and UPDATE of
+  every cluster-scoped kind in the cluster, CRDs and ClusterRoles among
+  them, and deny each one, since none passes the validation. With it, a rule
+  matches only a request that has a namespace and isn't for a Namespace
+  (`predicates/rules/rules.go:58-72`), so only the index namespace's
+  objects. PR 8's envtest found it, when a deleted copy of the policy still
+  in the API server's cache denied a CRD patch. The Namespace exclusion
+  stays: the scope already leaves the Namespace object out, and the
+  exclusion says so explicitly.
 
   For core-provider, the effect is that composition.krateo.io objects are
   refused there, along with everything else not on the list.

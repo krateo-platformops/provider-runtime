@@ -33,7 +33,7 @@ IX = C + "index.go"
 PN = C + "pername.go"
 AQ = C + "acquire.go"
 FILES = [IX, PN, AQ, C + "release.go", C + "writeloops.go", C + "disown.go", C + "disownprefix.go", C + "uncached.go",
-         C + "prober.go", C + "shared.go", C + "tracker.go", C + "informers.go", C + "adapter.go"]
+         C + "prober.go", C + "shared.go", C + "tracker.go", C + "informers.go", C + "adapter.go", C + "policy_envtest_test.go"]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -129,6 +129,8 @@ MUTANTS = [
      [("\tdelete(t.heldBy, k)\n\tdelete(t.waitingBy, k)\n", "")]),
     ("a stopped watch's late count reaches the gauge", C + "tracker.go",
      [("\tif t.gone || w != nil && w.dead {", "\tif t.gone {")]),
+    ("the test policy matches cluster-scoped writes", C + "policy_envtest_test.go",
+     [(", Scope: ptr.To(admissionregistrationv1.NamespacedScope)}", "}")]),
     ("watch modes needn't agree", PN,
      [("\t\tif c := s.modes[gk]; c != nil && c.mode != pk.Watch {", "\t\tif c := s.modes[gk]; false && c != nil && c.mode != pk.Watch {")]),
     ("the prober lists a PerName kind", C + "prober.go",
@@ -183,6 +185,7 @@ KILLERS = {
     "HasSynced doesn't wait on the index": {C: "TestHasSyncedWaitsOnTheIndex"},
     "a stopped watch stays in the gauge": {C: "TestAStoppedPerNameWatchLeavesTheGauge"},
     "a stopped watch's late count reaches the gauge": {C: "TestAStoppedPerNameWatchLeavesTheGauge"},
+    "the test policy matches cluster-scoped writes": {C: "TestIndexNamespacePolicy"},
     "watch modes needn't agree": {C: "TestWatchModesAgree"},
     "the prober lists a PerName kind": {C: "TestProbePerNameGetsOnly"},
     "the marker sweep lists a PerName kind": {C: "TestPerNameUnderResourceNamesRBAC"},

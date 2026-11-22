@@ -1105,6 +1105,16 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   params found` is wrapped with the hint to check `cu-policy-params`, and
   logged.
 - **`PerNamePoll` is refused at setup** until PR 9.
+- **§10.6.1's policy gains `scope: "Namespaced"` on its resource rule**
+  (the user's decision, 2026-11-22). A `namespaceSelector` never exempts a
+  cluster-scoped resource (`k8s.io/apiserver@v0.37.2`,
+  `predicates/namespace/matcher.go:105-112`), so without the scope the
+  policy would deny every cluster-scoped CREATE and UPDATE in the cluster.
+  The Namespace exclusion stays. The policy isn't deployed anywhere
+  (installer confirmed: not on krateo-057, nor in its charts, pins or CR),
+  so this is a design fix only. A copy installer ships later must carry the
+  scope. The envtest asserts that a CRD patch is allowed while the policy is
+  in force.
 
 ### PR 9: PerNamePoll mode and the provisioner
 
