@@ -52,6 +52,11 @@ func (s *Shared) computeUncachedKinds(t *Tracker) []schema.GroupKind {
 	}
 	var out []schema.GroupKind
 	for _, pk := range t.o.Protected {
+		if pk.Watch == PerName {
+			// Its per-name watches cover every namespace, and the lists
+			// would be forbidden under resourceNames RBAC (§13 shape 1).
+			continue
+		}
 		gk := pk.GVK.GroupKind()
 		m, err := s.c.Mapper.RESTMapping(gk)
 		if err != nil || m.Scope.Name() != meta.RESTScopeNameNamespace {
@@ -68,11 +73,16 @@ func (s *Shared) computeUncachedKinds(t *Tracker) []schema.GroupKind {
 
 // sweepMarkers queues for the janitor every object of ts's protected kinds,
 // in every namespace, that carries one of their marker labels but not the
-// held label.
+// held label. A PerName kind is left out: the list would be forbidden under
+// resourceNames RBAC, and its per-name watches show the janitor every object
+// its index names, labelled or not (§13 shape 1).
 func (s *Shared) sweepMarkers(ctx context.Context, ts []*Tracker) error {
 	for _, t := range ts {
 		var kinds []schema.GroupKind
 		for _, pk := range t.o.Protected {
+			if pk.Watch == PerName {
+				continue
+			}
 			if gk := pk.GVK.GroupKind(); !slices.Contains(kinds, gk) {
 				kinds = append(kinds, gk)
 			}
@@ -158,6 +168,9 @@ func (s *Shared) liveHeldIn(ctx context.Context, t *Tracker, n string) ([]ID, er
 //   - the batch of every (K, N) finalizer of ts on every held object
 //     outside the caches (§10.5), read with one live list per protected
 //     kind;
+//   - for the PerName kinds, the batch of every (K, N) finalizer on every
+//     object the index names, read with a GET each, and the prune of the
+//     lines that name objects without one (recheckIndex, §10.6.5);
 //   - every object that carries a kind's marker label but not the held
 //     label, for the janitor (§10.1): the caches select by the held label,
 //     so a third party that strips it and leaves a marker leaves an object
@@ -189,6 +202,13 @@ func (s *Shared) recheckUncached(ctx context.Context, ts []*Tracker) {
 func (s *Shared) recheckUncachedOnce(ctx context.Context, ts []*Tracker) error {
 	if err := s.sweepMarkers(ctx, ts); err != nil {
 		return err
+	}
+	for _, t := range ts {
+		if t.idx != nil {
+			if err := s.recheckIndex(ctx, t); err != nil {
+				return err
+			}
+		}
 	}
 	byKind := map[schema.GroupKind][]*Tracker{}
 	var kinds []schema.GroupKind
@@ -251,13 +271,13 @@ func (t *Tracker) keptUncached(ids []ID, kept []Kept) {
 	}
 	changed := false
 	for _, id := range ids {
-		if !t.s.namespaceCached(id.Namespace) && t.waitingUncached[id] {
+		if !t.cachedID(id) && t.waitingUncached[id] {
 			delete(t.waitingUncached, id)
 			changed = true
 		}
 	}
 	for _, kp := range kept {
-		if !t.s.namespaceCached(kp.P.Namespace) && !t.waitingUncached[kp.P] {
+		if !t.cachedID(kp.P) && !t.waitingUncached[kp.P] {
 			t.waitingUncached[kp.P] = true
 			changed = true
 		}

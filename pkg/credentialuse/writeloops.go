@@ -47,7 +47,8 @@ var errWriteLoopsRunning = errors.New("credential-use: RunWriteLoops is already 
 // protected object, and every object whose labels the janitor would clean.
 // Beside it, when SharedOptions.Namespaces restricts the caches, one live
 // list per protected kind finds the held objects outside them and enqueues
-// their batches too (§10.5).
+// their batches too (§10.5); and each index is read live, with a GET of
+// each object it names, for the PerName kinds (§10.6.5).
 // The informers may have started long before this process was elected, so
 // this covers what they saw before then, and a leader that died between a
 // holder's Forget and R3 (§7.5, M1 of the review of revision 16).
@@ -108,10 +109,14 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 			s.releaseWorker(ctx)
 		}()
 	}
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		s.runJanitor(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		s.runIndexes(ctx)
 	}()
 	go func() {
 		defer wg.Done()
@@ -136,7 +141,7 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 // rescan enqueues, from every protected cache, the batch of each (K, N)
 // finalizer of a tracked kind, and the objects the janitor would clean.
 func (s *Shared) rescan() {
-	for _, p := range s.protectedInformers() {
+	for _, p := range s.allProtected() {
 		trackers := p.snapshot()
 		for _, obj := range p.inf.GetStore().List() {
 			m, ok := metadataOf(obj)
@@ -201,6 +206,13 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	}
 	res, err := t.proto.release(ctx, k.Namespace, ids)
 	s.reportKept(t, k, res.Kept)
+	if t.idx != nil {
+		// The prune after R3, in one write per batch (§10.6.2, L1). One that
+		// fails retries the batch, whose R1 finds the objects bare again.
+		if perr := t.idx.prune(ctx, t.idx.prunable(res.Bare)); perr != nil {
+			err = errors.Join(err, perr)
+		}
+	}
 	if err != nil {
 		s.retryBatch(ctx, t, k, ids, err)
 		return
@@ -227,7 +239,8 @@ func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []I
 
 // heldIn returns the protected objects that carry t's finalizer for holder
 // namespace n: what a batch added with no objects covers. They are read
-// from the caches, and live in a namespace the caches don't cover (§10.5).
+// from the caches, the per-name ones included, and live in a namespace the
+// caches don't cover (§10.5).
 func (s *Shared) heldIn(ctx context.Context, t *Tracker, n string) ([]ID, error) {
 	var out []ID
 	if !s.namespaceCached(n) {
@@ -237,7 +250,7 @@ func (s *Shared) heldIn(ctx context.Context, t *Tracker, n string) ([]ID, error)
 		}
 		out = append(out, live...)
 	}
-	for _, p := range s.protectedInformers() {
+	for _, p := range s.allProtected() {
 		for _, obj := range p.inf.GetStore().List() {
 			m, ok := metadataOf(obj)
 			if !ok {

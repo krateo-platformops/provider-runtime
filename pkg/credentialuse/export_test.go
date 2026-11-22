@@ -6,6 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Hooks for the envtests of the external test package.
@@ -87,6 +88,84 @@ func (t *Tracker) HolderLists() (lists, streams int64) {
 // HookCalls sets functions that run before and after every API call the
 // trackers' protocols and the janitor make: an error from before fails the
 // call. Set it before Track.
+//
+// The index's calls are hooked too (§10.6), as Ops "index-get",
+// "index-update" and "index-create" on the ConfigMap.
 func (s *Shared) HookCalls(before func(ctx context.Context, c Call) error, after func(c Call, err error)) {
 	s.hooks.wrapServer = func(srv server) server { return hookServer{server: srv, before: before, after: after} }
+	s.hooks.wrapIndex = func(st indexStore) indexStore { return hookIndexStore{st: st, before: before, after: after} }
+}
+
+// PolicyParamsMissing reports whether err is the index namespace's policy
+// failing for want of its parameters, as the tracker matches it (§10.6.1).
+func PolicyParamsMissing(err error) bool { return policyParamsMissing(err) }
+
+// Index is the tracker's index ConfigMap, or false without one.
+func (t *Tracker) Index() (types.NamespacedName, bool) {
+	if t.idx == nil {
+		return types.NamespacedName{}, false
+	}
+	return types.NamespacedName{Namespace: t.idx.namespace, Name: t.idx.name}, true
+}
+
+// PerNameSynced reports whether the per-name watch of id has synced.
+func (t *Tracker) PerNameSynced(id ID) bool {
+	p := t.names.get(id)
+	return p != nil && p.inf.HasSynced()
+}
+
+// PerNameWatches returns the IDs the tracker watches by name.
+func (t *Tracker) PerNameWatches() []ID {
+	var out []ID
+	for _, p := range t.names.all() {
+		out = append(out, ID{Group: p.gk.Group, Kind: p.gk.Kind, Namespace: p.ns, Name: p.name})
+	}
+	return SortedIDs(out)
+}
+
+// PendingIndexChecks returns the objects waiting for a live check of their
+// index line, and whether a rebuild is pending.
+func (t *Tracker) PendingIndexChecks() ([]ID, bool) {
+	t.idx.mu.Lock()
+	defer t.idx.mu.Unlock()
+	return SortedIDs(keysOf(t.idx.pending)), t.idx.lost
+}
+
+// hookIndexStore is an index store whose calls a test hooks.
+type hookIndexStore struct {
+	st     indexStore
+	before func(ctx context.Context, c Call) error
+	after  func(c Call, err error)
+}
+
+func (h hookIndexStore) call(ctx context.Context, op string, f func() error) error {
+	c := Call{Op: op, GK: configMapGroupKind}
+	if hs, ok := h.st.(configMapStore); ok {
+		c.Namespace, c.Name = hs.namespace, hs.name
+	}
+	if h.before != nil {
+		if err := h.before(ctx, c); err != nil {
+			return err
+		}
+	}
+	err := f()
+	if h.after != nil {
+		h.after(c, err)
+	}
+	return err
+}
+
+func (h hookIndexStore) get(ctx context.Context) (v indexVersion, err error) {
+	err = h.call(ctx, "index-get", func() error { v, err = h.st.get(ctx); return err })
+	return v, err
+}
+
+func (h hookIndexStore) update(ctx context.Context, cur indexVersion, lines []string) (v indexVersion, err error) {
+	err = h.call(ctx, "index-update", func() error { v, err = h.st.update(ctx, cur, lines); return err })
+	return v, err
+}
+
+func (h hookIndexStore) create(ctx context.Context, lines []string) (v indexVersion, err error) {
+	err = h.call(ctx, "index-create", func() error { v, err = h.st.create(ctx, lines); return err })
+	return v, err
 }

@@ -1013,6 +1013,93 @@ pruned.
 **Depends on:** PR 7, so the adapter exposes the mode. In the core it needs
 only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
 
+**What the build settled** (2026-11-22), where §10.6 and §13 left room:
+
+- **One rule for every prune** (§10.6.2, A14). A line goes only when its
+  object, read live, carries no finalizer of the kind or is gone, and no
+  holder's record names it. That covers the release batch, the startup
+  recheck and the post-check re-adds. Records are read from the synced
+  holder cache, which a stale cache only keeps a line longer, and an
+  unparseable record keeps every line. Each prune live-GETs every object
+  it removed and adds back any that carries the kind's prefix, or can't be
+  read. A re-add that fails is queued for the write loops, which retry it
+  with backoff until it lands.
+- **The release batch reports `Bare`**: the objects R1 read, or R3's
+  response showed, without a finalizer of the kind, or gone. The prune runs
+  after R3, in one write per batch. A prune that fails retries the batch.
+- **The acquirer keeps the line on every pass.** It adds the line before
+  each A2, `BeforeEstablish`'s included, unless the index informer's view
+  shows it. It checks the line live after each successful A2. A pass that
+  skips A2 also ensures the line from the view, so a line a prune lost
+  while this process's write was the last one comes back. An add or check
+  that fails, the full index included, fails the hold: closed for a new
+  holder, Degraded for an established one. A failed check also drops the
+  A2's written entry, so the next pass writes A2 and checks again.
+- **Disown empties the index under the prune's rule** (§7.4, A15). It
+  counts the union of the index's lines and the records of the kinds the
+  switch covers, with a GET each. It strips them, then prunes those lines
+  and live-GETs each object. Without that GET, an A2 from a pass begun
+  before the switch that lands after the strip would lose its line, and the
+  count from the index and the records would never see it again. A missing
+  or unreadable index, or a GET that fails, makes the count `unknown`.
+- **`DisownPrefixOptions.Index` is only read.** Its lines, with `Names`,
+  replace the lists. A missing index is an error. The index is left as it
+  is: once its objects are stripped it names nothing held, and a kind
+  created again prunes the stale lines at its first start.
+- **Tamper checks, the rebuild and the startup recheck run with the write
+  loops**, so `RunInformers` stays read-only (IP4). Under leader election,
+  only the leader pays the GET per dropped line. The index informer
+  queues dropped lines and deletions, and the write loops drain them every
+  second, with backoff on failure. A drop is this process's own when it
+  removed the line itself: the line is marked before the write, so the
+  informer never takes it for someone else's. A drop whose object the
+  per-name cache shows without the kind's prefix, or gone, needs no check
+  (L5). A restored dropped line is counted in
+  `credentialuse_index_tampered_total`, with a `CredentialUseIndexTampered`
+  Warning event on the index.
+- **Creating the index rebuilds it.** `Track` creates the index when it is
+  absent and then rebuilds it from the records. The write loops recreate a
+  deleted index the same way, and so does an acquirer's add that finds it
+  gone. A kind moved from LabelScoped to PerName therefore starts with a
+  superset. The rebuild's candidates are the records only, as §10.6.6 says,
+  so the residual stays as the design states it.
+- **The index is `<IndexNamespace>/cu-index-<lowercase kind>.<group>`**, as
+  §10.6.1's example `cu-index-repo.git.krateo.io` shows. The CRD's pointer
+  must equal it exactly, or the start is refused. The pointer is written
+  after the namespace and RBAC checks, so a refused start writes nothing.
+- **Track checks the index's grants up front** (§10.6.7):
+  SelfSubjectAccessReviews for `get`, `update`, `list` and `watch` on the
+  index by name, and `create` in its namespace. A missing grant is a setup
+  error that names them.
+- **Every holder kind of a `Shared` must agree on a protected kind's watch
+  mode**, as on its `Content` (PR 4): one informer set serves a kind for
+  all of them, and a Track that disagrees is a setup error. A holder kind
+  may mix modes across protected kinds. Its index then holds lines only for
+  its PerName kinds, and a holder in the index namespace gets no hold for
+  any ref.
+- **The per-name watches are the tracker's own.** There is one
+  metadata-only informer per line of a PerName kind, field-selected by
+  name, started and stopped as the index informer's lines change. Its
+  handlers are the protected handler and the janitor's. They aren't part of
+  `Track`'s sync or `HasSynced`, which wait on the index informer instead.
+  A view that hasn't synced only makes a pass write when it could have
+  skipped. No SelfSubjectAccessReview is made per name. A per-name watch
+  the server forbids is logged once, and its reflector keeps retrying.
+- **A PerName kind counts as cached in every namespace.** Its per-name
+  watches cover every namespace, so `SharedOptions.Namespaces` doesn't
+  restrict it. §10.5's live lists and the marker sweep leave it out: under
+  `resourceNames` they would be forbidden. The prober uses GETs only for
+  it.
+- **The 80% warning** is a `CredentialUseIndexFilling` Warning event on the
+  index, throttled like every event of the core. The fill-ratio gauge is
+  set on every version this process reads or writes.
+- **Class (c) is matched by its text** (§10.6.1). An index write whose
+  error carries both `ValidatingAdmissionPolicy
+  'krateo-credential-use-namespace'` and `failed to configure binding: no
+  params found` is wrapped with the hint to check `cu-policy-params`, and
+  logged.
+- **`PerNamePoll` is refused at setup** until PR 9.
+
 ### PR 9: PerNamePoll mode and the provisioner
 
 **Scope.**

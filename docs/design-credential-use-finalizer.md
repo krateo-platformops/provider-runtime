@@ -1183,8 +1183,10 @@ exported for diagnostics and tests.
     `IndexNamespace` that doesn't exist**, which fails with
     `credential-use: index namespace krateo-credential-use not found: install it (installer release) before enabling PerName`;
     an `IndexNamespace` that holders of the kind live in, or that disagrees
-    with the CRD's pointer; or an `IndexMaxLines` above the ceiling
-    (§10.6).
+    with the CRD's pointer; an `IndexMaxLines` above the ceiling
+    (§10.6); missing grants on the index (§10.6.7); or a watch mode for a
+    protected kind that another holder kind of the same `Shared` tracks
+    with another mode.
 
   Before `Run`, the error makes `Run` fail, so the process refuses to start
   (U2).
@@ -1350,7 +1352,7 @@ lists the protected kinds live by K's marker label, removes every finalizer
 with the prefix `credential-use.<kind>.<group>/` and its epoch, and removes
 the labels as above. In PerName mode it takes the names from the index,
 whose location it can no longer read from the CRD, so it is given the index
-explicitly, or a name list. It refuses to run while the CRD still exists,
+explicitly, or a name list. It only reads the index. It refuses to run while the CRD still exists,
 even if it is being deleted, because then holders may still be deleting and
 need their refs. With `DryRun: true` it only reports. It ships as a function
 and as a one-shot Job recipe in the docs.
@@ -2222,9 +2224,11 @@ proves it.
   two indexes. Moving the index means Disown, then re-pointing the
   annotation by hand.
 - **The tracker owns the ConfigMap entirely** (M2, decided). Charts don't
-  ship it. At start, the tracker creates it if it is absent. Create races
-  between processes are harmless: the loser gets AlreadyExists and reads the
-  winner's.
+  ship it. At start, the tracker creates it if it is absent, and rebuilds it
+  from the records (§10.6.6), so a kind moved from LabelScoped starts with a
+  superset. Create races between processes are harmless: the loser gets
+  AlreadyExists and reads the winner's. Its name is
+  `cu-index-<lowercase kind>.<group>`.
 - **Nobody else should manage it.** If a GitOps tool does anyway, for
   example because it lives in a namespace Argo CD syncs, exclude its data
   from comparison and sync:
@@ -2248,9 +2252,13 @@ re-applies its own adds and removes to what it read, so it never overwrites
 another writer's change.
 
 - **The acquirer adds before A2, then checks after.**
-  1. Before A2 for a P whose line is missing, it adds the line.
+  1. Before A2 for a P whose line is missing, it adds the line. Its view of
+     the index is the informer's. A pass that skips A2 also adds a line the
+     view lacks.
   2. After a successful A2, it **live-GETs the index**. If the line is
-     missing (a concurrent prune removed it), it adds it again.
+     missing (a concurrent prune removed it), it adds it again. A check
+     that fails fails the hold, and drops the A2's `written` entry, so the
+     holder's next pass writes A2 and checks again.
 - **The pruner removes after R3, then checks after.**
   1. After a release batch's R3s, it removes, **in one write per batch**
      (L1), the lines of the objects whose K's marker label R3 removed.
@@ -2263,8 +2271,14 @@ another writer's change.
   prober's GET (§10.3). The release batch prunes it, under the rule above,
   once no record names the ref and the object carries no finalizer of K.
 - **The startup recheck's prune** follows the same rule. It prunes the lines
-  whose objects carry no finalizer with K's prefix, then live-GETs those
-  objects, and adds back any that now do.
+  whose objects carry no finalizer with K's prefix, and that no record names,
+  then live-GETs those objects, and adds back any that now do.
+- **Disown's emptying** (§7.4) follows it too: after its strip, it prunes the
+  lines of the kinds the switch covers and live-GETs those objects. An A2
+  from a pass begun before the switch that lands after the strip keeps its
+  line, and the next pass counts it.
+- **A re-add that fails** after a prune is retried by the write loops until
+  it lands.
 
 #### 10.6.3 Why the index stays a superset
 
@@ -2341,8 +2355,9 @@ missing (§10.6.6).
 #### 10.6.6 Tampering, deletion, and the rebuild (M2, L5)
 
 The tracker watches the ConfigMap by name (or polls it in PerNamePoll mode,
-§10.7). **A change that drops lines this process didn't remove** is checked
-line by line, except for **lines removed alongside a successful R3 the
+§10.7). The write loops make the checks below, so under leader election
+only the leader does. **A change that drops lines this process didn't
+remove** is checked line by line, except for **lines removed alongside a successful R3 the
 tracker can see**. In PerName mode, the per-object watch has already
 delivered that P lost K's last finalizer. Those need no check (L5). Every
 other dropped line costs a GET, in every process: with N processes, N GETs
@@ -3123,7 +3138,12 @@ provider read every Secret's data. That is the grant oasgen removed in
    takes the request's name from that selector and nowhere else
    (`k8s.io/apiserver@v0.37.2/pkg/endpoints/request/requestinfo.go:245-250`).
    So PerName makes one field-selected watch per held object, plus GETs.
-   That fits small held sets, and needs the index (§10.6).
+   That fits small held sets, and needs the index (§10.6). The watches
+   follow the index's lines. They cover every namespace, so
+   `SharedOptions.Namespaces` doesn't restrict them, and no list of the kind
+   is ever made: §10.5's live lists and the marker sweep leave a PerName
+   kind out, and the prober uses GETs only. Every holder kind of one
+   `Shared` must agree on a protected kind's watch mode.
 2. **Provisioned at runtime, by name (`Watch: PerNamePoll`, §10.7).** A
    provider whose names are only known at runtime grants each one in a
    ClusterRole's `resourceNames`, bound by a ClusterRoleBinding. **The grants

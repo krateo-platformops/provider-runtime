@@ -53,6 +53,9 @@ func (t *Tracker) HasSynced() bool {
 	if !t.holders.HasSynced() || !t.crd.HasSynced() {
 		return false
 	}
+	if t.idx != nil && !t.idx.inf.HasSynced() {
+		return false
+	}
 	for _, reg := range t.regs {
 		if !reg.HasSynced() {
 			return false

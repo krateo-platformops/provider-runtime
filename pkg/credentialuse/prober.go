@@ -175,13 +175,15 @@ func (s *Shared) runProber(ctx context.Context) {
 // probe checks t's due Missing refs live (§10.3). Per (kind, namespace),
 // probeGetLimit or fewer names are a GET each; more are one paginated,
 // metadata-only LIST, and a LIST that RBAC refuses, as under resourceNames
-// RBAC, falls back to GETs. It enqueues the holders of every ref it finds.
+// RBAC, falls back to GETs. A PerName kind takes GETs only. It enqueues the holders of every ref it finds.
 func (t *Tracker) probe(ctx context.Context) {
 	now := t.s.clock.Now()
 	srv := t.proto.srv
 	for g, ids := range t.missing.due(now) {
 		var names map[string]bool
-		if len(ids) > probeGetLimit {
+		// A PerName kind is probed with GETs only: the list would be
+		// forbidden under resourceNames RBAC (§13 shape 1).
+		if len(ids) > probeGetLimit && !t.isPerName(g.gk) {
 			list, err := srv.List(ctx, g.gk, g.ns)
 			switch {
 			case err == nil:

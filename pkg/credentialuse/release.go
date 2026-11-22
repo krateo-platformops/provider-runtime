@@ -83,6 +83,10 @@ type ReleaseResult struct {
 	// Kept are the objects being deleted that the batch kept, wherever it
 	// decided to keep them: R0, R1's grace, or R2.
 	Kept []Kept
+	// Bare are the objects the batch read, live, carrying no finalizer of
+	// the holder kind at all, or gone: in R1, or in R3's response. In
+	// PerName mode their index lines may be pruned (§10.6.2).
+	Bare []ID
 	// RequeueAt, when set, is when the batch must run again: the end of a
 	// grace, or a restored epoch's recheck. It is absolute, the deadline
 	// itself rather than a duration from some reading of the clock, so the
@@ -117,6 +121,10 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 	if err != nil {
 		return res, err
 	}
+	prefix, err := FinalizerPrefix(p.holder)
+	if err != nil {
+		return res, err
+	}
 	var errs []error
 
 	// R0. The fast path, from the caches.
@@ -147,6 +155,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			case ClassNone:
 			case ClassNotFound:
 				p.seen.forget(uidOf(p.views, id))
+				res.Bare = append(res.Bare, id)
 				continue // gone: nothing to release
 			default:
 				errs = append(errs, fmt.Errorf("credential-use: reading %s: %w", id, err))
@@ -159,6 +168,9 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			}
 			if !hasFinalizer(m, f) {
 				p.seen.forget(m.UID)
+				if countPrefix(m.Finalizers, prefix) == 0 {
+					res.Bare = append(res.Bare, id)
+				}
 				continue // done
 			}
 			if m.Annotations[f] == "" {
@@ -274,17 +286,21 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				errs = append(errs, err)
 				continue
 			}
-			_, err = p.srv.Patch(ctx, r.id.GroupKind(), r.id.Namespace, r.id.Name, pt.Type, pt.Data)
+			out, err := p.srv.Patch(ctx, r.id.GroupKind(), r.id.Namespace, r.id.Name, pt.Type, pt.Data)
 			switch ClassifyJSONPatch(err) {
 			case ClassNone:
 				p.ver.released(r.meta.UID, n)
 				p.seen.forget(r.meta.UID)
 				res.Released = append(res.Released, r.id)
+				if out != nil && countPrefix(out.Finalizers, prefix) == 0 {
+					// R3 removed the kind's last finalizer, and its marker.
+					res.Bare = append(res.Bare, r.id)
+				}
 			case ClassStateChanged:
 				builtFrom[r.id] = r.meta.ResourceVersion
 				next = append(next, r.id) // back to R1
 			case ClassNotFound:
-				// gone
+				res.Bare = append(res.Bare, r.id) // gone
 			default:
 				errs = append(errs, fmt.Errorf("credential-use: releasing %s: %w", r.id, err))
 			}
