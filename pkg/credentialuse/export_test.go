@@ -79,6 +79,13 @@ func (t *Tracker) ExpireHolderWatch() { t.testLW().expire() }
 // that its reflector falls back to a List.
 func (t *Tracker) RefuseWatchList(refuse bool) { t.testLW().refuseWatchList.Store(refuse) }
 
+// PauseHolderWatch holds the holder informer's watch events, so that its
+// cache lags behind the API server, until ResumeHolderWatch.
+func (t *Tracker) PauseHolderWatch() { t.testLW().pause() }
+
+// ResumeHolderWatch lets the held holder events go.
+func (t *Tracker) ResumeHolderWatch() { t.testLW().resume() }
+
 // HolderLists counts the holder informer's completed lists: by List, and by
 // watch-list stream.
 func (t *Tracker) HolderLists() (lists, streams int64) {

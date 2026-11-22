@@ -20,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -98,6 +99,9 @@ func installPolicy(t *testing.T, idx, mgmt string) {
 		t.Fatal(err)
 	}
 	ar := env.Kube.AdmissionregistrationV1()
+	// Registered first, so it runs last: the test leaves no policy in force
+	// for the next one.
+	t.Cleanup(func() { policyGone(t) })
 	if _, err := ar.ValidatingAdmissionPolicies().Create(ctx, vap, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +122,26 @@ func installPolicy(t *testing.T, idx, mgmt string) {
 		}
 		return nil
 	})
+}
+
+// policyGone waits, after the policy and its binding are deleted, until the
+// API server has dropped them: it applies policies from its own informers,
+// so a deleted one is enforced for a while after the DELETE returns, and the
+// next test, sharing the API server, would meet it (the VM run of PR 8: a
+// later test's CRD patch was denied). §10.6.1's policy matches every
+// cluster-scoped write, since a namespaceSelector never exempts one
+// (k8s.io/apiserver@v0.37.2 pkg/admission/plugin/webhook/predicates/namespace/matcher.go:105-112),
+// so a patch of the Widget CRD passes only once it is gone.
+func policyGone(t *testing.T) {
+	t.Helper()
+	cutest.Eventually(t, time.Minute, func() error {
+		data := []byte(`{"metadata":{"annotations":{"credentialuse.test.krateo.io/policy-probe":"` + time.Now().Format(time.RFC3339Nano) + `"}}}`)
+		if _, err := env.Dynamic.Resource(crdGVR).Patch(context.Background(), widgetCRD, types.MergePatchType, data, metav1.PatchOptions{}); err != nil {
+			return fmt.Errorf("the deleted policy is still enforced: %v: %w", err, cutest.ErrNotYet)
+		}
+		return nil
+	})
+	setWidgetCRDAnnotations(t, map[string]any{"credentialuse.test.krateo.io/policy-probe": nil})
 }
 
 // grantWrites lets users and groups get, create and update ConfigMaps and

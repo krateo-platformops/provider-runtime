@@ -736,6 +736,12 @@ func runSuperset(t *testing.T, sc supersetCase) {
 		}
 		gone(t, time.Minute, "widget h1", widgetGet(ns, "h1"))
 		g.wait(t, "r3") // R2 saw no users
+		// The pruner's view of the records lags: H2's announce isn't in
+		// its holder cache when it decides what to prune. With a current
+		// cache, H2's record keeps the line (§10.6.2), and the race below
+		// can't happen; a lagging cache is its window.
+		tr.PauseHolderWatch()
+		t.Cleanup(tr.ResumeHolderWatch)
 	}
 
 	// H2 announces, and its view shows P's line.
@@ -751,7 +757,8 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	if !sc.startup {
 		g.wait(t, "a2")
 		g.open("r3")
-		g.wait(t, "prune") // R3 landed; the prune waits
+		g.wait(t, "prune") // R3 landed; the prune, decided, waits
+		tr.ResumeHolderWatch()
 		g.open("a2")
 	}
 	g.wait(t, "post") // H2's A2 landed; its read waits
