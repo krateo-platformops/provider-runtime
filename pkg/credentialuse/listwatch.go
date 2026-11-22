@@ -36,6 +36,7 @@ import (
 type listWatch struct {
 	client   lwClient
 	selector string // a label selector, or empty
+	field    string // a field selector, or empty
 	clock    clock.PassiveClock
 	// listed, if set, receives each list's completion time.
 	listed func(time.Time)
@@ -123,6 +124,9 @@ func (l *listWatch) ListWithContext(ctx context.Context, options metav1.ListOpti
 	if l.selector != "" {
 		options.LabelSelector = l.selector
 	}
+	if l.field != "" {
+		options.FieldSelector = l.field
+	}
 	out, cont, err := l.client.list(ctx, options)
 	if err != nil {
 		return nil, err
@@ -136,6 +140,9 @@ func (l *listWatch) ListWithContext(ctx context.Context, options metav1.ListOpti
 func (l *listWatch) WatchWithContext(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
 	if l.selector != "" {
 		options.LabelSelector = l.selector
+	}
+	if l.field != "" {
+		options.FieldSelector = l.field
 	}
 	w, err := l.client.watch(ctx, options)
 	if err != nil {

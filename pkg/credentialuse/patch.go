@@ -307,3 +307,60 @@ func testResourceVersion(read metav1.Object) ([]jsonPatchOp, error) {
 	}
 	return []jsonPatchOp{{Op: "test", Path: "/metadata/resourceVersion", Value: rv}}, nil
 }
+
+// DisownPatch builds Disown's strip of holder kind K from one protected
+// object (§7.4): it removes every finalizer of K, for every holder namespace,
+// and each one's epoch, then K's marker label, and the held label when no
+// other credential-use finalizer is left. It is R3's patch without the user
+// check: it tests the object's resourceVersion as read, so any write in
+// between, an A2 included, is ClassStateChanged, and the strip is read and
+// made again.
+//
+// It returns ErrNotHeld when the object carries no finalizer of K, and no
+// marker label of K to remove either.
+func DisownPatch(read metav1.Object, holder schema.GroupKind) (Patch, error) {
+	prefix, err := FinalizerPrefix(holder)
+	if err != nil {
+		return Patch{}, err
+	}
+	marker := MarkerLabel(holder)
+	var mine []int
+	otherOfAny := false
+	finalizers := read.GetFinalizers()
+	for i, f := range finalizers {
+		switch {
+		case strings.HasPrefix(f, prefix):
+			mine = append(mine, i)
+		case IsCredentialUseFinalizer(f):
+			otherOfAny = true
+		}
+	}
+	labels := read.GetLabels()
+	_, hasMarker := labels[marker]
+	_, hasHeld := labels[LabelHeld]
+	removeHeld := hasHeld && !otherOfAny
+	if len(mine) == 0 && !hasMarker && !removeHeld {
+		return Patch{}, ErrNotHeld
+	}
+	ops, err := testResourceVersion(read)
+	if err != nil {
+		return Patch{}, err
+	}
+	// From the last index down, so that each remove's index still holds.
+	annotations := read.GetAnnotations()
+	for j := len(mine) - 1; j >= 0; j-- {
+		i := mine[j]
+		ops = append(ops, jsonPatchOp{Op: "remove", Path: "/metadata/finalizers/" + strconv.Itoa(i)})
+		if _, ok := annotations[finalizers[i]]; ok {
+			ops = append(ops, jsonPatchOp{Op: "remove", Path: "/metadata/annotations/" + escapePointer(finalizers[i])})
+		}
+	}
+	if hasMarker {
+		ops = append(ops, jsonPatchOp{Op: "remove", Path: "/metadata/labels/" + escapePointer(marker)})
+	}
+	if removeHeld {
+		ops = append(ops, jsonPatchOp{Op: "remove", Path: "/metadata/labels/" + escapePointer(LabelHeld)})
+	}
+	data, err := json.Marshal(ops)
+	return Patch{Type: types.JSONPatchType, Data: data}, err
+}

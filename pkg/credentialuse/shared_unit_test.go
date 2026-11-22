@@ -331,8 +331,10 @@ func TestTrackValidates(t *testing.T) {
 		"no Enqueue":          {func(o *Options) { o.Enqueue = nil }, "Enqueue is required"},
 		"no TimeoutBound":     {func(o *Options) { o.TimeoutBound = 0 }, "TimeoutBound is required"},
 		"disown too short":    {func(o *Options) { o.DisownPasses, o.DisownInterval = 1, time.Minute }, "twice TimeoutBound"},
-		"a bad prefix":        {func(o *Options) { o.Holder = schema.GroupVersionKind{Kind: "Widget", Version: "v1"} }, "needs a kind and a group"},
-		"an unmapped holder":  {func(o *Options) { o.Holder = schema.GroupVersionKind{Group: "x.io", Version: "v1", Kind: "Nope"} }, "can't be mapped"},
+		// 2 × 120s is 240s, but two passes span one interval, 120s, under 180s.
+		"disown's span, not its count": {func(o *Options) { o.DisownPasses, o.DisownInterval = 2, 2*time.Minute }, "twice TimeoutBound"},
+		"a bad prefix":                 {func(o *Options) { o.Holder = schema.GroupVersionKind{Kind: "Widget", Version: "v1"} }, "needs a kind and a group"},
+		"an unmapped holder":           {func(o *Options) { o.Holder = schema.GroupVersionKind{Group: "x.io", Version: "v1", Kind: "Nope"} }, "can't be mapped"},
 		"an unmapped kind": {func(o *Options) {
 			o.Protected = []ProtectedKind{{GVK: schema.GroupVersionKind{Version: "v1", Kind: "Nope"}}}
 		}, "can't be mapped"},

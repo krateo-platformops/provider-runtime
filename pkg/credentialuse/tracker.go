@@ -62,6 +62,13 @@ type Tracker struct {
 	// #109). A sink must not call Track.
 	sinkMu sync.RWMutex
 	sink   sinks
+
+	// Disown (§7.4): crd is the informer on the holder kind's own CRD,
+	// crdName, that carries the switch; disown is this process's progress
+	// towards disown-settled.
+	crd     cache.SharedIndexInformer
+	crdName string
+	disown  disownState
 }
 
 // sinks are where a tracker's events go: the kind's queue, its logger and
@@ -192,6 +199,8 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		enqueueBatch: func(id ID, ns string) {
 			s.queue.Add(batchKey{gk, ns}, id)
 		},
+		disowned:   func(pk schema.GroupKind) bool { return t.disownSwitch().covers(pk) },
+		disownLive: t.disownLive,
 	}
 	for _, pk := range o.Protected {
 		if pk.Content {
@@ -215,6 +224,13 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	if _, err := t.holders.AddEventHandler(holderHandler{t}); err != nil {
 		return nil, err
 	}
+	t.crdName = m.Resource.Resource + "." + m.Resource.Group
+	if t.crd, err = newCRDInformer(s.c.Metadata, t.crdName, s.clock); err != nil {
+		return nil, err
+	}
+	if _, err := t.crd.AddEventHandler(crdHandler{t}); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
 
@@ -233,6 +249,12 @@ func (t *Tracker) listCompleted(at time.Time) {
 
 func (t *Tracker) informer() informer {
 	return informer{inf: t.holders, gvr: t.gvr, what: "the holder informer of " + t.gk.String()}
+}
+
+// crdInformer is the informer on t's own CRD, which carries the Disown
+// switch (§7.4); it needs list and watch on that CRD's name alone.
+func (t *Tracker) crdInformer() informer {
+	return informer{inf: t.crd, gvr: crdGVR, name: t.crdName, what: "the CRD informer of " + t.gk.String()}
 }
 
 // join registers t's handler on protected informer p. On an informer that

@@ -876,6 +876,10 @@ func TestNamespaceRestrictedLiveRead(t *testing.T) {
 			{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get", "list", "watch"}},
 			{APIGroups: []string{cutest.WidgetGVR.Group}, Resources: []string{cutest.WidgetGVR.Resource}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
 			{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, Verbs: []string{"get", "patch"}},
+			// The Disown switch's informer: list and watch on the one CRD,
+			// by name (§7.4).
+			{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"},
+				ResourceNames: []string{cutest.WidgetGVR.Resource + "." + cutest.WidgetGVR.Group}, Verbs: []string{"list", "watch"}},
 			{APIGroups: []string{"authorization.k8s.io"}, Resources: []string{"selfsubjectaccessreviews"}, Verbs: []string{"create"}},
 			// A restricted process rechecks the held Secrets outside its
 			// caches with a list in every namespace (§10.5), so it needs
