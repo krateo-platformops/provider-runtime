@@ -1308,6 +1308,16 @@ default) consecutive passes count zero.
 - **A count that can't be made**, because the index is missing or
   unreadable, or a list fails, is written as `held-count: "unknown"`. That
   clears `disown-settled`, and is never read as zero (§10.6.5).
+- **An object in the index or a record that can't be read** keeps the count
+  `"unknown"` too, since it may carry K's finalizer (the user's decision,
+  2026-11-22). Under `resourceNames` RBAC that is a Secret outside the
+  grant: an ensure wrote its line before an A2 that got a 403. Disown says
+  so: a Warning event on the CRD, `CredentialUseDisownUnreadable`, names
+  each such object and why (`team-a/Secret/nogrant: forbidden`), throttled
+  while the set stays the same; a log line; and the gauge
+  `credentialuse_disown_unreadable`. **The remedy:** grant `get` on the
+  object, or confirm by hand that it carries no finalizer of K and remove
+  its line from the index. Disown then settles.
 
 A non-zero count clears the flag. **Downgrading the runtime, removing the interface from the connecter,
 or uninstalling is safe once `held-count` is `0` and `disown-settled` is
@@ -2357,7 +2367,12 @@ line. The marker label still finds it (§10.6.6).
 #### 10.6.5 Who reads it, and what a missing index means
 
 - **The startup recheck** reads the index, GETs each named object, and
-  enqueues a release batch for every (K, N) finalizer it finds.
+  enqueues a release batch for every (K, N) finalizer it finds. A line whose
+  object the authorizer refuses to read (an RBAC 403, class (d) of §6.2) is
+  kept, logged and counted
+  (`credentialuse_index_read_denied_total`) once per object, and never
+  retried: no retry can read it before RBAC changes. Any other failed read
+  makes the recheck retry with backoff.
 - **Disown** reads it to find what to strip and what to count (§7.4).
 - **`WithHeld`** reads it, and stops at the first line whose object still
   carries K's prefix (§11.6).
@@ -3120,7 +3135,11 @@ revisions counted without naming), `credentialuse_refs_not_held_total`,
 `credentialuse_unrecorded_reads_total` (§11.9),
 `credentialuse_admission_denied_total` (class (e) of §6.2),
 `credentialuse_release_rejected_total` (a release patch that failed against
-an unchanged object, §6.2) and `credentialuse_crd_write_starved_total`
+an unchanged object, §6.2), `credentialuse_disown_unreadable` (gauge, the
+objects Disown's last pass couldn't read, §7.4),
+`credentialuse_index_read_denied_total` (objects the index names that a check
+couldn't read for a 403, once each, §10.6.5) and
+`credentialuse_crd_write_starved_total`
 (§7.3). The core defines them as a
 `MetricsRecorder` interface, and `pkg/telemetry` implements it with
 OpenTelemetry.

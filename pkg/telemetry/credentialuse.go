@@ -28,6 +28,7 @@ type credentialUseMetrics struct {
 	heldObjects      metric.Int64Gauge
 	waitingObjects   metric.Int64Gauge
 	indexFillRatio   metric.Float64Gauge
+	disownUnreadable metric.Int64Gauge
 	degraded         metric.Int64Counter
 	refsNotHeld      metric.Int64Counter
 	consentWithdrawn metric.Int64Counter
@@ -37,6 +38,7 @@ type credentialUseMetrics struct {
 	admissionDenied  metric.Int64Counter
 	releaseRejected  metric.Int64Counter
 	crdWriteStarved  metric.Int64Counter
+	indexReadDenied  metric.Int64Counter
 }
 
 func newCredentialUseMetrics(meter metric.Meter) (credentialUseMetrics, error) {
@@ -54,6 +56,10 @@ func newCredentialUseMetrics(meter metric.Meter) (credentialUseMetrics, error) {
 		metric.WithDescription("How full the holder kind's index ConfigMap is (PerName and PerNamePoll).")); err != nil {
 		return m, err
 	}
+	if m.disownUnreadable, err = meter.Int64Gauge("credentialuse.disown_unreadable",
+		metric.WithDescription("Objects in the index or a record that Disown's last pass couldn't read, keeping its count unknown (PerName).")); err != nil {
+		return m, err
+	}
 	counters := []struct {
 		dst  *metric.Int64Counter
 		name string
@@ -68,6 +74,7 @@ func newCredentialUseMetrics(meter metric.Meter) (credentialUseMetrics, error) {
 		{&m.admissionDenied, "credentialuse.admission_denied", "Acquiring writes refused by admission."},
 		{&m.releaseRejected, "credentialuse.release_rejected", "Release patches that failed against an unchanged object."},
 		{&m.crdWriteStarved, "credentialuse.crd_write_starved", "CRD writes that conflicted on three ticks in a row."},
+		{&m.indexReadDenied, "credentialuse.index_read_denied", "Objects the index names that a check couldn't read for a 403, counted once each; their lines are kept (PerName)."},
 	}
 	for _, c := range counters {
 		if *c.dst, err = meter.Int64Counter(c.name, metric.WithDescription(c.desc)); err != nil {
@@ -134,6 +141,16 @@ func (m *Metrics) AdmissionDenied(holderKindLabel string) {
 // ReleaseRejected implements credentialuse.MetricsRecorder.
 func (m *Metrics) ReleaseRejected(holderKindLabel string) {
 	m.cu.releaseRejected.Add(context.Background(), 1, holderKind(holderKindLabel))
+}
+
+// DisownUnreadable implements credentialuse.MetricsRecorder.
+func (m *Metrics) DisownUnreadable(holderKindLabel string, n int) {
+	m.cu.disownUnreadable.Record(context.Background(), int64(n), holderKind(holderKindLabel))
+}
+
+// IndexReadDenied implements credentialuse.MetricsRecorder.
+func (m *Metrics) IndexReadDenied(holderKindLabel string) {
+	m.cu.indexReadDenied.Add(context.Background(), 1, holderKind(holderKindLabel))
 }
 
 // CRDWriteStarved implements credentialuse.MetricsRecorder.

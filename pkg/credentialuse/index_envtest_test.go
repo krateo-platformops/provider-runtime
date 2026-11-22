@@ -1479,10 +1479,11 @@ func TestDisownCountsAndEmptiesTheIndex(t *testing.T) {
 	}
 }
 
-// An object a record names that the process can't read, as a Secret outside
-// its resourceNames grant, stops neither the startup recheck nor the rest of
-// the write loops' recheck (the reviewer's probe of the marker): the index's
-// rebuild keeps its line and sets the marker; the recheck goes on past it,
+// An object a record names that the process can't read, here because the
+// API server keeps failing for it, stops neither the startup recheck nor the
+// rest of the write loops' recheck (the reviewer's probe of the marker): the
+// index's rebuild keeps its line and sets the marker; the recheck goes on
+// past it, and returns the error for the retry,
 // releasing a readable stale hold and pruning a bare line; and §10.5's list
 // outside the caches still runs, for another holder kind, and releases a
 // hold stranded there.
@@ -1496,7 +1497,8 @@ func TestIndexRecheckWithAnUnreadableRecordedObject(t *testing.T) {
 	t.Cleanup(func() { resetPublished(t, cutest.TargetGVR) })
 
 	// The Widget kind, PerName: a record names a-nogrant, which can't be
-	// read; z-held is a stale hold; z-stale's line names a bare Secret. The
+	// read, a transient error every time (a 403 is reported once and not
+	// retried, TestIndexRecheckDoesntRetryADeniedLine); z-held is a stale hold; z-stale's line names a bare Secret. The
 	// index has no marker.
 	for _, n := range []string{"a-nogrant", "z-held", "z-stale"} {
 		createSecret(t, ns, n)
@@ -1538,7 +1540,7 @@ func TestIndexRecheckWithAnUnreadableRecordedObject(t *testing.T) {
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx, Namespaces: []string{cached}})
 	s.HookCalls(func(_ context.Context, c cu.Call) error {
 		if c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == ns && c.Name == "a-nogrant" {
-			return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, c.Name, errors.New("outside the service account's grant"))
+			return apierrors.NewServiceUnavailable("the API server can't read a-nogrant")
 		}
 		return nil
 	}, nil)
@@ -1577,4 +1579,142 @@ func TestIndexRecheckWithAnUnreadableRecordedObject(t *testing.T) {
 	if !indexRebuilt(t, idx) {
 		t.Error("the marker went")
 	}
+}
+
+// deniedMetrics counts the index's refused reads, and keeps Disown's
+// unreadable gauge.
+type deniedMetrics struct {
+	cu.NopMetrics
+	mu         sync.Mutex
+	denied     int
+	unreadable int
+}
+
+func (m *deniedMetrics) IndexReadDenied(string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.denied++
+}
+
+func (m *deniedMetrics) DisownUnreadable(_ string, n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unreadable = n
+}
+
+func (m *deniedMetrics) get() (int, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.denied, m.unreadable
+}
+
+// A line whose object the authorizer refuses to read (an RBAC 403, class
+// (d)) doesn't make the write loops' recheck retry: retrying can't help until RBAC changes, and
+// the line is kept, so nothing is stranded. The refusal is logged and
+// counted once; a readable stale hold beside it is released (§10.6.5).
+func TestIndexRecheckDoesntRetryADeniedLine(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-denied")
+	createSecret(t, ns, "a-denied")
+	createSecret(t, ns, "z-held")
+	acquireAs(t, ns, "z-held")
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
+		Data: map[string]string{"entries": secretLine(ns, "a-denied") + "\n" + secretLine(ns, "z-held") + "\n"}}
+	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	m := &deniedMetrics{}
+	logs := &warnLog{}
+	var deniedGets atomic.Int32
+	perNameRig(t, idx, func(o *cu.Options) { o.Metrics, o.Logger = m, logs }, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			if c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == ns && c.Name == "a-denied" {
+				deniedGets.Add(1)
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, c.Name, fmt.Errorf(
+					`User "system:serviceaccount:default:provider" cannot get resource "secrets" in API group "" in the namespace %q`, ns))
+			}
+			return nil
+		}, nil)
+	})
+	cutest.Eventually(t, time.Minute, notHeldFor(ns, "z-held", ns))
+	lined(t, idx, secretLine(ns, "z-held"), false)
+	time.Sleep(4 * time.Second) // the recheck's backoff starts at 1s
+	if n := deniedGets.Load(); n != 1 {
+		t.Errorf("the denied Secret was read %d times; want once: the recheck retried", n)
+	}
+	if denied, _ := m.get(); denied != 1 {
+		t.Errorf("index_read_denied counted %d, want 1", denied)
+	}
+	if w := logs.matching("outside the caches failed"); len(w) > 0 {
+		t.Errorf("the recheck failed, and is retried: %v", w)
+	}
+	if len(logs.matching("can't be read (403)")) != 1 {
+		t.Errorf("the refusal wasn't logged once: %v", logs.matching("403"))
+	}
+	lined(t, idx, secretLine(ns, "a-denied"), true)
+}
+
+// Disown under resourceNames RBAC with an index line for a Secret outside
+// the grant, which no record names: it can't be read, so held-count stays
+// "unknown", never zero, and a Warning event on the CRD names it, with the
+// gauge; once the line is removed by hand, the documented remedy, Disown
+// settles (§7.4, the user's decision of 2026-11-22).
+func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-unreadable")
+	const sa = "cu-disown-unreadable"
+	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch", "list", "watch"})
+	createSecret(t, ns, "nogrant")
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
+		Data: map[string]string{"entries": secretLine(ns, "nogrant") + "\n"}}
+	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	m := &deniedMetrics{}
+	r := newWriteRig(t, env.AsServiceAccount("default", sa), cu.SharedOptions{IndexNamespace: idx}, func(o *cu.Options) {
+		perName(o)
+		disownOptions(o)
+		o.Metrics = m
+	}, nil)
+	set("all")
+	cutest.Eventually(t, time.Minute, func() error {
+		if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" {
+			return fmt.Errorf("held-count %q: %w", a[cu.AnnotationHeldCount], cutest.ErrNotYet)
+		}
+		return nil
+	})
+	eventSeen(t, r, cu.EventDisownUnreadable, ns+"/Secret/nogrant: forbidden")
+	if _, n := m.get(); n < 1 {
+		t.Errorf("disown_unreadable = %d, want the unreadable Secret counted", n)
+	}
+	// The other tests' holders' records, which the first pass strips, may
+	// name more; from the second pass the set is the one Secret's, and its
+	// event isn't sent again on every pass.
+	time.Sleep(2 * disownInterval)
+	unreadableEvents := func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		n := 0
+		for _, e := range r.seen {
+			if strings.Contains(e, cu.EventDisownUnreadable) {
+				n++
+			}
+		}
+		return n
+	}
+	before := unreadableEvents()
+	time.Sleep(4 * disownInterval)
+	if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" || a[cu.AnnotationDisownSettled] != "" {
+		t.Fatalf("with the line unreadable: held-count %q, disown-settled %q", a[cu.AnnotationHeldCount], a[cu.AnnotationDisownSettled])
+	}
+	if after := unreadableEvents(); after != before {
+		t.Errorf("the event was recorded %d more times over four passes for the same set: it isn't throttled", after-before)
+	}
+	setIndexLines(t, idx, func(l []string) []string {
+		return slices.DeleteFunc(l, func(x string) bool { return x == secretLine(ns, "nogrant") })
+	})
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
 }

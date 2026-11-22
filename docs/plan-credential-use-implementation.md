@@ -1046,6 +1046,21 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   line past one it can't read, and the write loops' recheck runs every part,
   each tracker's index and §10.5's lists outside the caches, whatever fails
   first. Their errors are joined and retried with backoff.
+- **Unreadable objects are named, and a 403 isn't retried** (the user's
+  decision, 2026-11-22). An object in the index or a record that Disown
+  can't read keeps its count `unknown`. The Warning event
+  `CredentialUseDisownUnreadable` on the CRD names each such object and why,
+  and the sink throttles it while the set is the same. Disown also logs, and
+  sets the gauge `credentialuse_disown_unreadable`. The remedy, for PR 11's
+  runbook: grant `get`, or confirm by hand that the object carries no
+  finalizer of the kind and remove its line. A 403 in the startup recheck,
+  or in the write loops' live checks, is logged and counted once per object
+  (`credentialuse_index_read_denied_total`) and isn't returned as an error,
+  since no retry helps before RBAC changes. That holds only for the
+  authorizer's 403, recognised by its message as class (d) of §6.2; an
+  admission or a policy 403 is an ordinary failure, and retried. The line is kept, and a live
+  check puts it back, so nothing is stranded. Other errors still retry with
+  backoff.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
   after R3, in one write per batch. A prune that fails retries the batch.
@@ -1195,6 +1210,14 @@ a grant past the acquirer's retry budget.
 **Depends on:** PR 8. **Size:** about 1,200 lines of production code and
 1,400 of tests.
 
+**Carried from PR 8's review:** PR 8's startup recheck and live checks
+report an RBAC 403 (class (d)) on an index line once, keep the line, and
+don't retry it, since under PerName's static grants no retry helps before
+RBAC changes. In PerNamePoll a 403 can be a grant still propagating
+(§10.7.2), so PerNamePoll's recheck must retry a 403 for §10.7.2's bound
+before it reports it. Otherwise that object's batch stays unenqueued for a
+whole leader term.
+
 **Carried from PR 5's review** (#123): PR 5 tested the late A2 of §11.3
 rule 3 with a two-process envtest, where the A2's own informer event also
 enqueues the release batch. In PerNamePoll mode no watch delivers it, so the
@@ -1245,6 +1268,10 @@ tests.
   - §5.2's remedy, and uninstalling (§11.5);
   - the Argo CD notes, the `DisownPrefix` Job recipe, and the runbook entry
     for the missing-params message;
+  - the runbook entry for Disown that stays `unknown` with
+    `CredentialUseDisownUnreadable` (PR 8): grant `get` on each object the
+    event names, or confirm by hand that it carries no finalizer of the kind
+    and remove its line from the index;
   - the outside-runtime guide (§7.2);
 - the admission policy sketch, as a reference installer copies;
 - `docs/overview.md`: the new reconcile steps;

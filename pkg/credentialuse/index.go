@@ -295,6 +295,8 @@ type index struct {
 	// onUnreadable reports the recorded objects a rebuild couldn't read, and
 	// kept the lines of.
 	onUnreadable func(ids []ID)
+	// onDenied reports, once per object, a read the API server refused.
+	onDenied func(id ID, err error)
 
 	snap atomic.Pointer[indexSnapshot]
 
@@ -317,6 +319,8 @@ type index struct {
 	lost      bool
 	lostDue   time.Time
 	lostFails int
+	// deniedSeen are the objects whose refused read was reported.
+	deniedSeen map[ID]bool
 }
 
 // A recheck is one pending live check of an object whose line may be
@@ -565,11 +569,17 @@ type carriage int
 const (
 	carriesNot carriage = iota // gone, or no finalizer of the kind
 	carriesYes
-	carriesUnknown // the read failed
+	carriesUnknown // the read failed, and may succeed if tried again
+	// carriesForbidden: the authorizer refused the read, class (d) of §6.2,
+	// as for an object outside a resourceNames grant; trying again can't
+	// help until RBAC changes. Any other 403 is carriesUnknown.
+	carriesForbidden
 )
 
 // carries reads id live, and reports whether it carries a finalizer with the
-// kind's prefix.
+// kind's prefix. An RBAC 403, recognised by the authorizer's message as §6.2
+// does (class (d)), is reported once per object (denied); an admission or
+// policy 403 is an ordinary failure, retried.
 func (ix *index) carries(ctx context.Context, id ID) carriage {
 	m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 	switch Classify(err) {
@@ -581,7 +591,29 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 	case ClassNotFound:
 		return carriesNot
 	}
+	if Classify(err) == ClassRBAC {
+		ix.denied(id, err)
+		return carriesForbidden
+	}
 	return carriesUnknown
+}
+
+// denied reports, once per object, a read of id the API server refused: its
+// line is kept, since the object may carry the kind's finalizer (§10.6.3),
+// and nothing retries the read, which can't succeed until RBAC changes.
+func (ix *index) denied(id ID, err error) {
+	ix.mu.Lock()
+	first := !ix.deniedSeen[id]
+	if first {
+		if ix.deniedSeen == nil {
+			ix.deniedSeen = map[ID]bool{}
+		}
+		ix.deniedSeen[id] = true
+	}
+	ix.mu.Unlock()
+	if first && ix.onDenied != nil {
+		ix.onDenied(id, err)
+	}
 }
 
 // ensure is the acquirer's step before A2 (§10.6.2): it adds id's line
@@ -752,7 +784,7 @@ func (ix *index) rebuild(ctx context.Context) error {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
 			keep = append(keep, id)
-		case carriesUnknown:
+		case carriesUnknown, carriesForbidden:
 			keep = append(keep, id)
 			unread = append(unread, id)
 		}
@@ -823,6 +855,11 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	for _, id := range due {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
+			back = append(back, id)
+		case carriesForbidden:
+			// It may carry the prefix, and no retry can tell before RBAC
+			// changes: its line goes back, as for an object that does
+			// (§10.6.3), and the refusal is reported once.
 			back = append(back, id)
 		case carriesNot:
 			done = append(done, id)
@@ -1122,6 +1159,11 @@ func (t *Tracker) newTrackerIndex() error {
 		t.warn("credential-use: a line dropped from the index named an object that still carries the kind's finalizer; it was added back",
 			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
 	}
+	ix.onDenied = func(id ID, err error) {
+		sinkMetrics{t}.IndexReadDenied(kindLabel(t.gk))
+		t.warn("credential-use: an object the index names can't be read (403); its line is kept, and the read isn't retried until RBAC changes: grant get on it (§10.6.5)",
+			"kind", t.gk.String(), "index", ix.ref(), "object", id.String(), "error", err.Error())
+	}
 	unreadLogged := newReportedSet()
 	ix.onUnreadable = func(ids []ID) {
 		for _, id := range ids {
@@ -1223,6 +1265,14 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 			bare = append(bare, id)
 			continue
 		default:
+			if Classify(err) == ClassRBAC {
+				// The authorizer refused it (class (d)): its line stays,
+				// and no retry can read it before RBAC changes, so it is
+				// reported once, never retried as an error. Any other 403,
+				// an admission or a policy denial, is retried.
+				ix.denied(id, err)
+				continue
+			}
 			errs = append(errs, fmt.Errorf("reading %s: %w", id, err))
 			continue
 		}

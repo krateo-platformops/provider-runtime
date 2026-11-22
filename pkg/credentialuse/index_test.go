@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -81,9 +82,11 @@ func (s *memStore) create(_ context.Context, lines []string, rebuilt bool) (inde
 // objServer serves Get from a map of objects, and fails the names in fail.
 type objServer struct {
 	server
-	objs map[ID]*metav1.PartialObjectMetadata
-	fail map[ID]bool
-	gets []ID
+	objs   map[ID]*metav1.PartialObjectMetadata
+	fail   map[ID]bool
+	forbid map[ID]bool // refused by the authorizer (class (d)), as outside a resourceNames grant
+	policy map[ID]bool // refused with a policy's 403 (class (b))
+	gets   []ID
 }
 
 func (s *objServer) Get(_ context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
@@ -91,6 +94,13 @@ func (s *objServer) Get(_ context.Context, gk schema.GroupKind, ns, name string)
 	s.gets = append(s.gets, id)
 	if s.fail[id] {
 		return nil, apierrors.NewServiceUnavailable("down")
+	}
+	if s.forbid[id] {
+		return nil, rbacForbidden(ns, name)
+	}
+	if s.policy[id] {
+		return nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, name,
+			errors.New("ValidatingAdmissionPolicy 'p' with binding 'p' denied request: no"))
 	}
 	if o := s.objs[id]; o != nil {
 		return o, nil
@@ -798,5 +808,63 @@ func TestRecheckWithAnUnreadableRecordedObject(t *testing.T) {
 	}
 	if !slices.Equal(logged, []ID{unread}) {
 		t.Errorf("reported unreadable %v, want %v", logged, []ID{unread})
+	}
+}
+
+// rbacForbidden is the authorizer's refusal of a GET of Secret ns/name, as
+// the API server writes it: class (d) of §6.2.
+func rbacForbidden(ns, name string) error {
+	return apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, name, fmt.Errorf(
+		`User "system:serviceaccount:default:provider" cannot get resource "secrets" in API group "" in the namespace %q`, ns))
+}
+
+// A line whose object the authorizer refuses to read (an RBAC 403, class
+// (d)) is kept, reported once, and isn't an error: the recheck succeeds,
+// since retrying can't help until RBAC changes. A policy's 403, and a
+// transient error, still make it retry. A live check that meets an RBAC 403
+// puts the line back and leaves nothing pending (§10.6.3, §10.6.5).
+func TestADeniedLineIsReportedOnceAndNotRetried(t *testing.T) {
+	denied, held := SecretRef("ns", "a-denied").ID(), SecretRef("ns", "b-held").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("b-held")}, forbid: map[ID]bool{denied: true}}
+	st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{denied, held}), rv: 1}
+	ix := testIndex(st, srv)
+	var reported []ID
+	ix.onDenied = func(id ID, _ error) { reported = append(reported, id) }
+	var enqueued []ID
+	for range 2 {
+		if err := ix.recheck(context.Background(), func(id ID, _ string) { enqueued = append(enqueued, id) }); err != nil {
+			t.Fatalf("the recheck with a denied line = %v, want no error", err)
+		}
+	}
+	if !slices.Equal(enqueued, []ID{held, held}) || !slices.Equal(reported, []ID{denied}) {
+		t.Errorf("enqueued %v, reported %v; want the held one each time, and the denied one reported once", enqueued, reported)
+	}
+	if !slices.Contains(st.lines, denied.String()) {
+		t.Errorf("the denied line went: %q", st.lines)
+	}
+	if c := Classify(rbacForbidden("ns", "a-denied")); c != ClassRBAC {
+		t.Fatalf("the test's RBAC 403 classifies as %v", c)
+	}
+	srv.fail = map[ID]bool{held: true}
+	if err := ix.recheck(context.Background(), func(ID, string) {}); err == nil {
+		t.Error("a transient error is no error: the recheck isn't retried")
+	}
+	srv.fail, srv.policy = nil, map[ID]bool{held: true}
+	if err := ix.recheck(context.Background(), func(ID, string) {}); err == nil {
+		t.Error("a policy's 403 is no error: the recheck isn't retried")
+	}
+	if !slices.Equal(reported, []ID{denied}) {
+		t.Errorf("reported %v; a policy's 403 was reported as RBAC's", reported)
+	}
+	srv.policy = nil
+
+	// A live check: the line goes back, and nothing stays pending.
+	st.lines = nil
+	ix.queue([]ID{denied}, true)
+	if err := ix.recheckTick(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(st.lines, denied.String()) || len(ix.pending) != 0 {
+		t.Errorf("after a denied live check: lines %q, pending %v", st.lines, ix.pending)
 	}
 }

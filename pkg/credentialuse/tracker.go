@@ -169,6 +169,12 @@ func (m sinkMetrics) AdmissionDenied(k string) {
 func (m sinkMetrics) ReleaseRejected(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.ReleaseRejected(k) })
 }
+func (m sinkMetrics) DisownUnreadable(k string, n int) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.DisownUnreadable(k, n) })
+}
+func (m sinkMetrics) IndexReadDenied(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.IndexReadDenied(k) })
+}
 func (m sinkMetrics) CRDWriteStarved(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.CRDWriteStarved(k) })
 }

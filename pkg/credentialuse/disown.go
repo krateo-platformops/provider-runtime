@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -221,7 +222,8 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	// unreadable index, or a read that fails, makes the count unknown, never
 	// zero (§10.6.5).
 	perName := t.disownPerName(set)
-	var lined []ID // the index's lines of the kinds set covers
+	var lined []ID          // the index's lines of the kinds set covers
+	var unreadable []string // the objects of those that couldn't be read, with why
 	if len(perName) > 0 {
 		named := map[ID]bool{}
 		for i := range holders {
@@ -251,7 +253,10 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			case ClassNotFound:
 				continue
 			default:
+				// It may carry the kind's finalizer: the count is unknown,
+				// never zero, until it can be read (§7.4).
 				known = false
+				unreadable = append(unreadable, unheldRef(id)+": "+shortError(err))
 				continue
 			}
 			n := countPrefix(m.Finalizers, t.prefix)
@@ -290,7 +295,42 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			t.warn("credential-use: Disown couldn't empty the index; the next pass retries", "index", t.idx.ref(), "error", err.Error())
 		}
 	}
+	if len(perName) > 0 {
+		t.reportDisownUnreadable(unreadable)
+	}
 	s.writeDisownCount(ctx, t, set, count, known)
+}
+
+// EventDisownUnreadable (Warning, on the holder kind's CRD): Disown can't
+// read objects its index or the records name, so its count stays "unknown"
+// (§7.4).
+const EventDisownUnreadable = "CredentialUseDisownUnreadable"
+
+// reportDisownUnreadable reports the objects a Disown pass couldn't read:
+// the gauge on every pass, and, when there are some, a log line and a
+// Warning event on the CRD naming each with why, which the event sink
+// throttles while the set stays the same.
+func (t *Tracker) reportDisownUnreadable(unreadable []string) {
+	sinkMetrics{t}.DisownUnreadable(kindLabel(t.gk), len(unreadable))
+	if len(unreadable) == 0 {
+		return
+	}
+	note := "Disown can't read " + strings.Join(unreadable, ", ") + ", so held-count stays unknown: grant get on each, " +
+		"or confirm by hand that it carries no finalizer of " + kindLabel(t.gk) + " and remove its line from the index " + t.idx.ref() + " (§7.4)"
+	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
+	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
+	t.s.events.record(crd, "Warning", EventDisownUnreadable, note)
+	t.warn("credential-use: Disown can't read objects its index or the records name; its count stays unknown",
+		"kind", t.gk.String(), "crd", t.crdName, "unreadable", strings.Join(unreadable, ", "))
+}
+
+// shortError is err as an event names it: its API reason, as "forbidden",
+// or its text.
+func shortError(err error) string {
+	if r := apierrors.ReasonForError(err); r != metav1.StatusReasonUnknown {
+		return strings.ToLower(string(r))
+	}
+	return err.Error()
 }
 
 // disownPerName returns t's PerName kinds that set covers.
