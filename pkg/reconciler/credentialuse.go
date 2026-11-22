@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -757,12 +759,7 @@ const errCredentialUseUnheld = "credential-use: the object's credentials can't b
 func (r *Reconciler) acquireCredentials(ctx, externalCtx context.Context, log logging.Logger, managed resource.Managed, pass *tracePass, cup *credentialUsePass,
 	writeStatus func(error) error) (resource.Managed, context.Context, reconcile.Result, bool, error) {
 	a, err := r.cu.tracker.Acquire(ctx, managed)
-	if errors.Is(err, credentialuse.ErrHolderConflict) {
-		log.Debug("The credential-use record write conflicted; requeueing", "error", err)
-		pass.conflict(tracing.StepCredentialUse)
-		return managed, externalCtx, rateLimitedRequeue(), true, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, credentialuse.ErrHolderConflict) {
 		// Acquire reports every other failure in a; this is one all the same.
 		a.Err = err
 		if credentialuse.IsEstablished(managed, r.cu.owners) {
@@ -770,6 +767,12 @@ func (r *Reconciler) acquireCredentials(ctx, externalCtx context.Context, log lo
 		} else {
 			a.MustNotConnect = true
 		}
+	}
+	pass.event(tracing.EventCredentialUseAcquire, acquireAttributes(a, err)...)
+	if errors.Is(err, credentialuse.ErrHolderConflict) {
+		log.Debug("The credential-use record write conflicted; requeueing", "error", err)
+		pass.conflict(tracing.StepCredentialUse)
+		return managed, externalCtx, rateLimitedRequeue(), true, nil
 	}
 	if a.MustNotConnect {
 		passErr := a.Err
@@ -820,4 +823,36 @@ func (r *Reconciler) removeFinalizer(ctx context.Context, mg resource.Managed) e
 		return r.managed.RemoveFinalizer(ctx, mg)
 	}
 	return pkgerrors.Wrap(resource.IgnoreNotFound(r.client.Update(ctx, mg)), errUpdateManaged)
+}
+
+// acquireAttributes are the credentialuse.acquire event's attributes for one
+// Acquire: counts and the outcome, never a ref's name.
+func acquireAttributes(a credentialuse.Acquired, err error) []attribute.KeyValue {
+	outcome := tracing.CredentialUseOK
+	switch {
+	case errors.Is(err, credentialuse.ErrHolderConflict):
+		outcome = tracing.CredentialUseConflict
+	case a.MustNotConnect:
+		outcome = tracing.CredentialUseMustNotConnect
+	case a.Degraded:
+		outcome = tracing.CredentialUseDegraded
+	}
+	attrs := []attribute.KeyValue{
+		tracing.AttrCredentialUseRefs.Int(len(a.Held) + len(a.Unheld)),
+		tracing.AttrCredentialUseHeld.Int(len(a.Held)),
+		tracing.AttrCredentialUseOutcome.String(outcome),
+	}
+	byReason := map[credentialuse.Reason]int{}
+	for _, u := range a.Unheld {
+		byReason[u.Reason]++
+	}
+	reasons := make([]string, 0, len(byReason))
+	for r := range byReason {
+		reasons = append(reasons, string(r))
+	}
+	slices.Sort(reasons)
+	for _, r := range reasons {
+		attrs = append(attrs, attribute.Int(tracing.AttrCredentialUseUnheldPrefix+r, byReason[credentialuse.Reason(r)]))
+	}
+	return attrs
 }

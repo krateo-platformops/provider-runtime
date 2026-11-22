@@ -839,15 +839,21 @@ where a standby's informers saw the holder go before its write loops ran
 **Depends on:** PR 6. **Size:** about 900 lines of production code and 1,600
 of tests.
 
-**What the build settled** (2026-11-22), where §7.5 and §8 left room. Items
-marked *(open)* wait for the user:
+**What the build settled** (2026-11-22), where §7.5 and §8 left room:
 
-- *(open)* **A conflict on the record write (A1) is traced** as
-  `k8s.conflict` with a new step, `credential_use`, so that every conflict
-  requeue of the pass keeps its event. That changes the tracing contract
-  (design-tracing §4.5's step list), so it goes to observability as a delta
-  if accepted. The standalone `Forget` Update shares the finalizer removal's
-  error handling, so its conflict is step `finalizer`.
+- **A conflict on the record write (A1) is traced** as `k8s.conflict` with a
+  new step, `credential_use`, so that every conflict requeue of the pass
+  keeps its event (the user's decision, 2026-11-22). It changes the tracing
+  contract (design-tracing §4.5's step list), and goes to observability as a
+  delta. The standalone `Forget` Update shares the finalizer removal's error
+  handling, so its conflict is step `finalizer`.
+- **Each Acquire records a `credentialuse.acquire` event** on the reconcile
+  span (the user's decision, 2026-11-22), with
+  `provider_runtime.credentialuse.refs` (the refs named, chains followed),
+  `.held`, `.unheld.<Reason>` (a count per reason present) and `.outcome`
+  (`ok`, `degraded`, `must_not_connect` or `conflict`): counts only, never
+  a ref's name or a Secret's data. `credentialuse.release` stays reserved:
+  release runs in the write loops, outside any reconcile span.
 - **Acquire runs right after the Orphan check, before the trace marker's
   write**; `pristine` is taken after both, and the marker's locked patch
   carries A1's resourceVersion.

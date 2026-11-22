@@ -263,6 +263,7 @@ func TestForegroundDeletionOfAnOwnerCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	established(t, w, ns, nn(ns, "conn"), "w")
+	versions := watchVersions(t, ns, "w")
 
 	deleteWidget(t, ns, "w", metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationForeground)})
 	if wd := getWidget(t, w, ns, "w"); !slices.Contains(wd.Finalizers, metav1.FinalizerDeleteDependents) {
@@ -274,9 +275,14 @@ func TestForegroundDeletionOfAnOwnerCompletes(t *testing.T) {
 	// one write, the Secret is released and goes, while the Widget still
 	// waits for the collector.
 	gone(t, time.Minute, "the Secret", secretGet(ns, "conn"))
-	wd := getWidget(t, w, ns, "w")
-	if slices.Contains(wd.Finalizers, reconciler.FinalizerName) || wd.Annotations[cu.AnnotationRefs] != "" {
-		t.Errorf("Widget finalizers %v, annotations %v; want the owner finalizer and the record gone", wd.Finalizers, wd.Annotations)
+	// The first version without the owner finalizer has no record either:
+	// both went in one write (§8 step 7).
+	first := versions.firstWithout(reconciler.FinalizerName)
+	if first == nil {
+		t.Fatalf("no Widget version without the owner finalizer: %v", getWidget(t, w, ns, "w").Finalizers)
+	}
+	if first.GetAnnotations()[cu.AnnotationRefs] != "" {
+		t.Errorf("the write that removed the owner finalizer left the record: %v", first.GetAnnotations())
 	}
 	if !slices.Contains(w.recorded(), "delete "+ns+"/w") {
 		t.Errorf("no external Delete: %v", w.recorded())

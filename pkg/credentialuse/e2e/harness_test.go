@@ -538,3 +538,47 @@ func (w *i1Watch) seen() []string {
 	defer w.mu.Unlock()
 	return slices.Clone(w.violations)
 }
+
+// versionWatch keeps every version of one Widget a watch delivers.
+type versionWatch struct {
+	mu       sync.Mutex
+	versions []*unstructured.Unstructured
+}
+
+func watchVersions(t *testing.T, ns, name string) *versionWatch {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	wi, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Watch(ctx, metav1.ListOptions{FieldSelector: "metadata.name=" + name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &versionWatch{}
+	go func() {
+		defer wi.Stop()
+		for ev := range wi.ResultChan() {
+			if u, ok := ev.Object.(*unstructured.Unstructured); ok {
+				v.mu.Lock()
+				v.versions = append(v.versions, u)
+				v.mu.Unlock()
+			}
+		}
+	}()
+	return v
+}
+
+// firstWithout returns the first version, after one that carried finalizer
+// f, that doesn't; nil if none has been delivered.
+func (v *versionWatch) firstWithout(f string) *unstructured.Unstructured {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	had := false
+	for _, u := range v.versions {
+		has := slices.Contains(u.GetFinalizers(), f)
+		if had && !has {
+			return u
+		}
+		had = had || has
+	}
+	return nil
+}

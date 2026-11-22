@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource/fake"
+	"github.com/krateo-platformops/provider-runtime/pkg/tracing"
 )
 
 // The adapter's unit tests (plan, PR 7): a Shared on fake clients, whose
@@ -1040,5 +1042,91 @@ func TestCredentialUseOneSharedPerManager(t *testing.T) {
 		if r.cu.wiring == nil || r.cu.wiring.s != s {
 			t.Errorf("Reconciler %d doesn't use the manager's Shared", i)
 		}
+	}
+}
+
+// docs/design-tracing.md §4.5 (the user's decision of 2026-11-22): each
+// Acquire records one credentialuse.acquire event on the reconcile span, with
+// the refs named, how many were held, a count per reason not held (only those
+// present) and the outcome; counts only, never a ref's name.
+func TestTracingCredentialUseAcquireEvent(t *testing.T) {
+	established := func() *Widget {
+		w := newWidget("w", nil)
+		w.Finalizers = []string{FinalizerName}
+		return w
+	}
+	boom := func(resource.Managed) ([]credentialuse.Ref, error) { return nil, errors.New("boom") }
+	cases := map[string]struct {
+		widget *Widget
+		objs   []client.Object
+		refs   func(resource.Managed) ([]credentialuse.Ref, error)
+		change func(w *cuWorld)
+		want   map[string]string
+	}{
+		"ok, held": {
+			widget: newWidget("w", nil),
+			objs:   []client.Object{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "demo"}}},
+			refs:   secretRef("creds"),
+			want:   map[string]string{"refs": "1", "held": "1", "outcome": "ok"},
+		},
+		"ok, unheld by reason": {
+			widget: newWidget("w", nil),
+			objs: []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-b"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "team-b"}}},
+			refs: func(resource.Managed) ([]credentialuse.Ref, error) {
+				return []credentialuse.Ref{credentialuse.SecretRef("demo", "creds"), credentialuse.SecretRef("team-b", "db")}, nil
+			},
+			want: map[string]string{"refs": "2", "held": "0", "outcome": "ok", "unheld.Missing": "1", "unheld.NotConsented": "1"},
+		},
+		"conflict": {
+			widget: newWidget("w", nil),
+			refs:   secretRef("creds"),
+			change: func(w *cuWorld) {
+				w.mdPatch = func(gvr schema.GroupVersionResource, _, name string) error {
+					if gvr == cuWidgetGVR {
+						return kerrors.NewConflict(gvr.GroupResource(), name, errors.New("test"))
+					}
+					return nil
+				}
+			},
+			want: map[string]string{"refs": "0", "held": "0", "outcome": "conflict"},
+		},
+		"must not connect": {widget: newWidget("w", nil), refs: boom, want: map[string]string{"refs": "0", "held": "0", "outcome": "must_not_connect"}},
+		"degraded":         {widget: established(), refs: boom, want: map[string]string{"refs": "0", "held": "0", "outcome": "degraded"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := newCUWorld(t, append([]client.Object{tc.widget}, tc.objs...)...)
+			if tc.change != nil {
+				tc.change(w)
+			}
+			tp, rec := tracer(t)
+			r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, tc.refs, WithTracerProvider(tp))
+			startSource(t, r)
+			_, _ = r.Reconcile(context.Background(), reqFor("w"))
+			root := lastRoot(t, rec)
+			var got map[string]string
+			n := 0
+			for _, e := range root.Events() {
+				if e.Name != tracing.EventCredentialUseAcquire {
+					continue
+				}
+				n++
+				got = map[string]string{}
+				for _, kv := range e.Attributes {
+					key := strings.TrimPrefix(string(kv.Key), "provider_runtime.credentialuse.")
+					got[key] = kv.Value.Emit()
+					if strings.Contains(kv.Value.Emit(), "creds") || strings.Contains(kv.Value.Emit(), "db") {
+						t.Errorf("attribute %s = %q names a ref", kv.Key, kv.Value.Emit())
+					}
+				}
+			}
+			if n != 1 {
+				t.Fatalf("%d credentialuse.acquire events, want 1; events %v", n, events(root))
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("attributes = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
