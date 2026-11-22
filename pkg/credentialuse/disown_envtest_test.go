@@ -253,8 +253,10 @@ func TestDisownSettlesAfterConsecutiveZeroPasses(t *testing.T) {
 
 // A strip that finds more of the kind's finalizers than its pass's list
 // showed, as when an A2 lands between them, adds them to the count (the
-// review of PR 6). The Secret is outside the caches, so only Disown acts on
-// it; the hook puts back a second finalizer just before the first strip.
+// review of PR 6). The Secret is outside the caches, so once the release
+// loop's start-up recheck (§10.5) has released the finalizer it found, only
+// Disown acts on it; the hook puts back a second finalizer just before the
+// first strip.
 func TestAStripCountsWhatItFound(t *testing.T) {
 	cutest.Require(t, env)
 	set := disowning(t)
@@ -275,7 +277,7 @@ func TestAStripCountsWhatItFound(t *testing.T) {
 		}
 	}
 	put(fa)
-	var fired atomic.Bool
+	var armed, fired atomic.Bool
 	var mu sync.Mutex
 	var calls []string // every call on the Secret, with its result, for a failure's report
 	newWriteRig(t, env.Config, cu.SharedOptions{Namespaces: []string{cached}}, func(o *cu.Options) {
@@ -283,7 +285,7 @@ func TestAStripCountsWhatItFound(t *testing.T) {
 		o.DisownInterval, o.DisownPasses, o.TimeoutBound = 3*time.Second, 2, time.Second
 	}, func(s *cu.Shared) {
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
-			if c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.JSONPatchType && fired.CompareAndSwap(false, true) {
+			if armed.Load() && c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.JSONPatchType && fired.CompareAndSwap(false, true) {
 				put(fa, fb) // the late A2, after the list
 			}
 			return nil
@@ -295,6 +297,12 @@ func TestAStripCountsWhatItFound(t *testing.T) {
 			}
 		})
 	})
+	// The start-up recheck releases the finalizer, which no holder records:
+	// wait for it, then put it back, where no informer event reaches the
+	// release loop.
+	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
+	put(fa)
+	armed.Store(true)
 	set("all")
 	var first string
 	cutest.Eventually(t, time.Minute, func() error {
