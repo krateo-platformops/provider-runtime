@@ -300,7 +300,10 @@ say which half each item lands in.
   except the PerName items. It publishes `credential-use.krateo.io/config` on
   the holder CRD once (A4), with bounded retries (L4 of #52's review), and a
   disagreeing process refuses to start. It validates
-  `DisownPasses × DisownInterval ≥ 2 × TimeoutBound` (A6). `NewShared`
+  `(DisownPasses − 1) × DisownInterval ≥ 2 × TimeoutBound` (A6), and
+  derives an unset `DisownInterval` so that it holds. PR 3 validated
+  `DisownPasses × DisownInterval`; PR 6 changed the bound to `(DisownPasses
+  − 1)`, and PR 7 added the derivation. `NewShared`
   creates the (K, N) batch queue before any informer starts, so it buffers
   and deduplicates from the first event, grace timers included (M1 of #52's
   review);
@@ -1247,7 +1250,9 @@ requeues") both need one. *Choice:* add `Acquired.RetryAfter`.
 `DisownPasses × DisownInterval` against "the kind's largest reconcile or
 request timeout" and publishes `timeoutBound`, but `Options` has no such
 field. *Choice:* `Options.TimeoutBound`, which `Track` requires. The adapter
-passes `timeout + reconcileGracePeriod` (90s by default).
+passes `timeout + reconcileGracePeriod` (90s by default). The rule now in
+force is `(DisownPasses − 1) × DisownInterval ≥ 2 × TimeoutBound` (PR 6),
+with an unset interval derived from `TimeoutBound` (PR 7).
 
 **A7. §7.1 vs. §12, §10.6.4 and §11.3: events and metrics.** The core must
 record events on holders, protected objects and the index, but `Clients` has

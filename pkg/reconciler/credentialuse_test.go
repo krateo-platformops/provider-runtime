@@ -947,8 +947,9 @@ func TestCredentialUseSuffixOnAnObserveFailure(t *testing.T) {
 	}
 }
 
-// §7.3: a Track that fails, here on DisownPasses × DisownInterval below twice
-// TimeoutBound, is a setup error: the runnables return it.
+// §7.3: a Track that fails, here on (DisownPasses − 1) × DisownInterval below
+// twice TimeoutBound, with an explicit interval, is a setup error: the
+// runnables return it.
 func TestCredentialUseTrackErrorFailsStart(t *testing.T) {
 	w := newCUWorld(t, newWidget("w", nil))
 	m := newCUManager(w)
