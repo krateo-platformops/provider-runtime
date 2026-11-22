@@ -1176,3 +1176,117 @@ func TestCredentialUseSkipsAcquireOnAFinalizedDeletingHolder(t *testing.T) {
 		}
 	})
 }
+
+// §7.4 (the user's decision of 2026-11-22): with default KindOptions and a
+// long reconcile timeout, as git-provider's 4m, credential-use starts: the
+// core derives Disown's interval from the TimeoutBound the adapter passes.
+// The review's probe.
+func TestCredentialUseStartsWithALongTimeout(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	r := w.reconciler(newCUManager(w), &widgetProvider{ops: w.srv.ops}, secretRef("creds"),
+		WithTimeout(4*time.Minute), WithCredentialUse(credentialuse.KindOptions{}))
+	if r.cu.setupErr != nil || r.cu.tracker == nil {
+		t.Fatalf("default KindOptions with a 4m timeout: setup error %v; want credential-use on", r.cu.setupErr)
+	}
+	cfg := publishedConfig(t, w)
+	if cfg["timeoutBound"] != "270s" || cfg["disownInterval"] != "135s" {
+		t.Errorf("published %v; want timeoutBound 270s and the derived disownInterval 135s", cfg)
+	}
+}
+
+// publishedConfig reads the settings Track published on the Widget CRD.
+func publishedConfig(t *testing.T, w *cuWorld) map[string]any {
+	t.Helper()
+	crd, err := w.dyn.Resource(schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}).
+		Get(context.Background(), "widgets."+widgetGVK.Group, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(crd.GetAnnotations()[credentialuse.AnnotationConfig]), &cfg); err != nil {
+		t.Fatalf("published settings %q: %v", crd.GetAnnotations()[credentialuse.AnnotationConfig], err)
+	}
+	return cfg
+}
+
+// §7.5 and A6: the adapter's TimeoutBound is its reconcile timeout plus the
+// 30s grace, as published on the CRD.
+func TestCredentialUseTimeoutBoundIsTheTimeoutPlusTheGrace(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, secretRef("creds"), WithTimeout(time.Minute))
+	if got := publishedConfig(t, w)["timeoutBound"]; got != "90s" {
+		t.Errorf("published timeoutBound = %v, want 90s: the 1m timeout plus 30s", got)
+	}
+}
+
+// §11.3 and IP2: the adapter passes its poll interval to the core, which caps
+// the backoff of a failed consent read's requeues there: from 1s, doubling
+// to the poll interval.
+func TestCredentialUsePollIntervalCapsTheConsentBackoff(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-b"}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "team-b"}})
+	w.mdGet = func(gvr schema.GroupVersionResource, ns, name string) error {
+		if ns == "team-b" || name == "team-b" {
+			return errors.New("the consent read fails")
+		}
+		return nil
+	}
+	r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, func(resource.Managed) ([]credentialuse.Ref, error) {
+		return []credentialuse.Ref{credentialuse.SecretRef("team-b", "db")}, nil
+	}, WithPollInterval(1500*time.Millisecond),
+		WithPollIntervalHook(func(resource.Managed, time.Duration) time.Duration { return 10 * time.Minute }))
+	startSource(t, r)
+	for pass, want := range []time.Duration{time.Second, 1500 * time.Millisecond} {
+		res, err := r.Reconcile(context.Background(), reqFor("w"))
+		if err != nil || res.RequeueAfter != want {
+			t.Fatalf("pass %d: Reconcile = %+v, %v; want RequeueAfter %s", pass+1, res, err, want)
+		}
+	}
+}
+
+// §8 step 8: when BeforeEstablish fails, the pass writes ReconcileError and
+// returns, without adding the finalizer.
+func TestCredentialUseBeforeEstablishErrorAddsNoFinalizer(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	w.mdGet = func(gvr schema.GroupVersionResource, _, _ string) error {
+		if gvr.Resource == "secrets" {
+			return errors.New("the live read fails")
+		}
+		return nil
+	}
+	r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops, exists: func(*Widget) bool { return false }}, secretRef("creds"))
+	startSource(t, r)
+	if _, err := r.Reconcile(context.Background(), reqFor("w")); err == nil {
+		t.Fatal("Reconcile succeeded, want BeforeEstablish's error")
+	}
+	got := w.srv.widget("w")
+	if pmeta.FinalizerExists(got, FinalizerName) {
+		t.Error("the finalizer was added after BeforeEstablish failed")
+	}
+	if s := got.GetCondition(prv1.TypeSynced); s.Reason != prv1.ReasonReconcileError || !strings.Contains(s.Message, "before establishing") {
+		t.Errorf("Synced = %+v, want ReconcileError naming the check", s)
+	}
+	if slices.Contains(w.srv.ops.list(), "create") {
+		t.Errorf("calls = %v; the pass created after BeforeEstablish failed", w.srv.ops.list())
+	}
+}
+
+// §8 step 5 (R4): an established holder whose acquire fails proceeds to
+// Connect as today (fail open), with no ReconcileError of its own.
+func TestCredentialUseEstablishedHolderFailsOpen(t *testing.T) {
+	wd := initialized(newWidget("w", nil))
+	wd.Finalizers = []string{FinalizerName}
+	w := newCUWorld(t, wd)
+	r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, func(resource.Managed) ([]credentialuse.Ref, error) {
+		return nil, errors.New("boom")
+	})
+	startSource(t, r)
+	mustReconcile(t, r, "w")
+	if !slices.Contains(w.srv.ops.list(), "connect") {
+		t.Errorf("calls = %v; want the degraded pass to connect", w.srv.ops.list())
+	}
+	if s := w.srv.widget("w").GetCondition(prv1.TypeSynced); s.Status != metav1.ConditionTrue {
+		t.Errorf("Synced = %+v, want True: a degraded pass proceeds", s)
+	}
+}

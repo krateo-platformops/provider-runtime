@@ -826,7 +826,9 @@ func (r *Reconciler) removeFinalizer(ctx context.Context, mg resource.Managed) e
 }
 
 // acquireAttributes are the credentialuse.acquire event's attributes for one
-// Acquire: counts and the outcome, never a ref's name.
+// Acquire: counts and the outcome, never a ref's name. refs is held plus
+// unheld, chains followed, so a Guaranteed ref, which is neither, isn't
+// counted.
 func acquireAttributes(a credentialuse.Acquired, err error) []attribute.KeyValue {
 	outcome := tracing.CredentialUseOK
 	switch {

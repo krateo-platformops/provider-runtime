@@ -42,8 +42,9 @@ const (
 	EventCredentialUseRelease = "credentialuse.release"
 )
 
-// The credentialuse.acquire event's attributes: the refs the pass named,
-// chains followed, how many it held, how many it didn't by reason, as
+// The credentialuse.acquire event's attributes: the refs, chains followed,
+// counted as those held plus those not held, so a Guaranteed ref, which is
+// neither, isn't counted; how many it held; how many it didn't by reason, as
 // AttrCredentialUseUnheldPrefix plus the reason (only the reasons present),
 // and the outcome.
 const (

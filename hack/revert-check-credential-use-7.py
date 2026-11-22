@@ -34,7 +34,7 @@ CA = C + "adapter.go"
 E = "pkg/credentialuse/e2e/"
 RT = "pkg/reconciler/reconcilertest/"
 T = "pkg/telemetry/"
-FILES = [RC, RR, CA, "pkg/tracing/names.go", C + "tracker.go", C + "acquire.go", C + "informers.go", RT + "credentialuse.go", T + "credentialuse.go", "pkg/resource/api.go"]
+FILES = [RC, RR, CA, "pkg/tracing/names.go", C + "tracker.go", C + "shared.go", C + "setup.go", C + "acquire.go", C + "informers.go", RT + "credentialuse.go", T + "credentialuse.go", "pkg/resource/api.go"]
 
 ACQUIRE_BLOCK = """	// Credential-use's step 5 (design-credential-use-finalizer §8): hold what Connect will read,
 	// on every pass past the Orphan check, deletion passes included, before the governor's gate,
@@ -170,6 +170,27 @@ MUTANTS = [
      [("\t\tt.degradedLogged.clear(key)\n", "")]),
     ("Forget doesn't clear the log", C + "tracker.go",
      [("\tt.degradedLogged.forget(obj.GetUID())\n", "")]),
+    # The review of PR 7.
+    ("the interval isn't derived", C + "shared.go",
+     [("\t\to.DisownInterval = defaultDisownInterval(o.DisownPasses, o.TimeoutBound)", "\t\to.DisownInterval = DefaultDisownInterval")]),
+    ("the derived interval isn't published", C + "setup.go",
+     [("\t\tDisownInterval: formatDuration(o.DisownInterval),", "\t\tDisownInterval: formatDuration(DefaultDisownInterval),")]),
+    ("a BeforeEstablish error is ignored", RR,
+     [("\t\tif err := r.cu.tracker.BeforeEstablish(ctx, managed, cup.acquired); err != nil {", "\t\tif err := r.cu.tracker.BeforeEstablish(ctx, managed, cup.acquired); false && err != nil {")]),
+    ("an established holder fails closed", RC,
+     [("\tif a.MustNotConnect {", "\tif a.MustNotConnect || a.Degraded {")]),
+    ("the standalone Forget ignores the finalizer", RC,
+     [("\tif !r.cu.active() || !r.cu.tracker.Forget(mg) || credentialuse.IsEstablished(mg, r.cu.owners) {", "\tif !r.cu.active() || !r.cu.tracker.Forget(mg) || false {")]),
+    ("the write loops don't need leader election", RC,
+     [("func (writeLoopsRunnable) NeedLeaderElection() bool { return true }", "func (writeLoopsRunnable) NeedLeaderElection() bool { return false }")]),
+    ("TimeoutBound without the grace", RC,
+     [("\t\tTimeoutBound: r.timeout + reconcileGracePeriod,", "\t\tTimeoutBound: r.timeout,")]),
+    ("PollInterval isn't passed", RC,
+     [("\t\tPollInterval:   r.pollInterval,\n", "")]),
+    ("the event's outcome ignores degraded", RC,
+     [("\tcase a.Degraded:\n\t\toutcome = tracing.CredentialUseDegraded\n", "")]),
+    ("the event's outcome ignores a conflict", RC,
+     [("\tcase errors.Is(err, credentialuse.ErrHolderConflict):\n\t\toutcome = tracing.CredentialUseConflict\n", "")]),
     # §12: the metrics.
     ("the metrics lose holder_kind", T + "credentialuse.go",
      [("\treturn metric.WithAttributes(AttrHolderKind.String(k))", "\treturn metric.WithAttributes()")]),
@@ -220,6 +241,16 @@ KILLERS = {
     "an unnamed read passes the cover check": {RT: "TestAssertCredentialRefsCover"},
     "a ref that resolves to nothing passes the cover check": {RT: "TestAssertCredentialRefsCover"},
     "the metrics lose holder_kind": {T: "TestCredentialUseMetrics"},
+    "the interval isn't derived": {C: "TestDisownIntervalDerivedFromTheTimeoutBound", R: "TestCredentialUseStartsWithALongTimeout"},
+    "the derived interval isn't published": {C: "TestDisownIntervalDerivedFromTheTimeoutBound", R: "TestCredentialUseStartsWithALongTimeout"},
+    "a BeforeEstablish error is ignored": {R: "TestCredentialUseBeforeEstablishErrorAddsNoFinalizer"},
+    "an established holder fails closed": {R: "TestCredentialUseEstablishedHolderFailsOpen"},
+    "the standalone Forget ignores the finalizer": {R: "TestCredentialUseStandaloneForgetOnTheOrphanPath"},
+    "the write loops don't need leader election": {R: "TestCredentialUseRunnablesElection"},
+    "TimeoutBound without the grace": {R: "TestCredentialUseTimeoutBoundIsTheTimeoutPlusTheGrace"},
+    "PollInterval isn't passed": {R: "TestCredentialUsePollIntervalCapsTheConsentBackoff"},
+    "the event's outcome ignores degraded": {R: "TestTracingCredentialUseAcquireEvent"},
+    "the event's outcome ignores a conflict": {R: "TestTracingCredentialUseAcquireEvent"},
     "a degraded pass logs every time": {C: "TestDegradedIsLoggedOncePerHolder"},
     "a pass that isn't degraded doesn't clear the log": {C: "TestDegradedIsLoggedOncePerHolder"},
     "Forget doesn't clear the log": {C: "TestDegradedIsLoggedOncePerHolder"},
