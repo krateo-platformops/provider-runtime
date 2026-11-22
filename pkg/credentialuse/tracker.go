@@ -55,6 +55,9 @@ type Tracker struct {
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).
 	missing *missingRefs
+	// unrecorded are the (holder, object) pairs CheckRead has logged
+	// (§11.9).
+	unrecorded *reportedSet
 
 	// sinkMu guards sink. Every call to a sink holds it for reading, so
 	// that rebind, which holds it for writing, returns only once no call to
@@ -169,11 +172,12 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	}
 	t := &Tracker{
 		s: s, o: o, gk: gk, gvr: m.Resource, prefix: prefix, ver: newVerified(gk),
-		regs:      map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
-		heldBy:    map[protKey]int{},
-		waitingBy: map[protKey]int{},
-		missing:   newMissingRefs(),
-		sink:      sinksOf(o),
+		regs:       map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
+		heldBy:     map[protKey]int{},
+		waitingBy:  map[protKey]int{},
+		missing:    newMissingRefs(),
+		unrecorded: newReportedSet(),
+		sink:       sinksOf(o),
 	}
 	t.proto = &protocol{
 		holder:          gk,
@@ -195,6 +199,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		namespaceViews:  trackerViews{t},
 		backoff:         newConsentBackoff(o.PollInterval),
 		reported:        newReportedSet(),
+		written:         newRecordWrites(),
 		unheldReads:     s.unheldReads,
 		enqueueBatch: func(id ID, ns string) {
 			s.queue.Add(batchKey{gk, ns}, id)

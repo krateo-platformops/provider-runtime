@@ -168,7 +168,14 @@ type traceServer struct {
 
 func newTraceServer(t *testing.T, objs ...client.Object) *traceServer {
 	t.Helper()
-	s := &traceServer{t: t, scheme: widgetScheme(), ops: &apiOps{}}
+	return newTraceServerWithScheme(t, widgetScheme(), objs...)
+}
+
+// newTraceServerWithScheme is newTraceServer with scheme, which must know
+// Widget.
+func newTraceServerWithScheme(t *testing.T, scheme *runtime.Scheme, objs ...client.Object) *traceServer {
+	t.Helper()
+	s := &traceServer{t: t, scheme: scheme, ops: &apiOps{}}
 	s.raw = clientfake.NewClientBuilder().WithScheme(s.scheme).WithStatusSubresource(&Widget{}).WithObjects(objs...).Build()
 	s.c = interceptor.NewClient(s.raw, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {

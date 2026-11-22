@@ -68,9 +68,13 @@ const (
 	StepLateInit      Step = "late_init"
 	StepMarker        Step = "marker"
 	StepStatus        Step = "status"
+	// StepCredentialUse is the credential-use record write (A1), a merge
+	// patch guarded by the object's resourceVersion
+	// (docs/design-credential-use-finalizer.md §6.2, §8 step 5).
+	StepCredentialUse Step = "credential_use"
 )
 
 // Steps returns every Step, in the order above, as a new slice each call.
 func Steps() []Step {
-	return []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker, StepStatus}
+	return []Step{StepConnect, StepObserve, StepHandshake, StepFinalizer, StepCreatePending, StepCreate, StepLateInit, StepMarker, StepStatus, StepCredentialUse}
 }

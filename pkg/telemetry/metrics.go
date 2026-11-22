@@ -80,6 +80,9 @@ type Metrics struct {
 	rateLimitCPURequired     metric.Float64ObservableGauge
 	// rateLimitSnapshot is the governor's state, set by ObserveRateLimit.
 	rateLimitSnapshot atomic.Pointer[func() ratelimit.Snapshot]
+
+	// cu are the credential-use metrics (credentialuse.go).
+	cu credentialUseMetrics
 }
 
 var _ ratelimit.MetricsRecorder = (*Metrics)(nil)
@@ -273,6 +276,9 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 		m.rateLimitLocalCuts, m.rateLimitLocalArrivals, m.rateLimitCPULimit, m.rateLimitCPUUsed,
 		m.rateLimitCPUBackground, m.rateLimitCPUPerReconcile, m.rateLimitCPURequired)
 	if err != nil {
+		return nil, err
+	}
+	if m.cu, err = newCredentialUseMetrics(meter); err != nil {
 		return nil, err
 	}
 

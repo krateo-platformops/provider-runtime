@@ -244,6 +244,8 @@ func (h holderHandler) OnDelete(obj any) {
 		return
 	}
 	h.t.ver.holderEvent(m.UID, nil, h.now())
+	h.t.proto.written.forget(m.UID)
+	h.t.unrecorded.forget(m.UID)
 	h.enqueue(m, nil)
 	// A holder that is gone waits for no Missing ref (§10.3).
 	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)

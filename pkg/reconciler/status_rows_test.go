@@ -12,9 +12,11 @@ import (
 
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
 	"github.com/krateo-platformops/provider-runtime/pkg/meta"
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
@@ -31,6 +33,9 @@ type statusRow struct {
 	pass string
 	// boom says the pass's error wraps errRowBoom.
 	boom bool
+	// world, when set, builds the row's server with a credential-use Shared
+	// over it, and the options that track the Widget in it.
+	world func(t *testing.T, w *Widget) (*traceServer, []ReconcilerOption)
 }
 
 var errRowBoom = errors.New("boom")
@@ -189,6 +194,53 @@ func statusRows() map[string]statusRow {
 			widget:   fresh,
 			provider: plain,
 		},
+		// Credential-use (design-credential-use-finalizer §8): a new object whose
+		// acquire failed must not connect (step 5), and a ref that appeared
+		// before the finalizer can't be read (step 8).
+		"21CredentialUseMustNotConnect": {
+			widget:   fresh,
+			provider: plain,
+			world:    cuRowWorld(func(resource.Managed) ([]credentialuse.Ref, error) { return nil, errRowBoom }, nil),
+			pass:     "credential-use: naming the refs of demo/w: boom", boom: true,
+		},
+		"22CredentialUseBeforeEstablishFailed": {
+			widget:   fresh,
+			provider: absent,
+			world: cuRowWorld(secretRef("creds"), func(w *cuWorld) {
+				// The Secret is Missing for Acquire's write; the live read
+				// before the finalizer fails.
+				w.mdGet = func(gvr schema.GroupVersionResource, _, _ string) error {
+					if gvr.Resource == "secrets" {
+						return errRowBoom
+					}
+					return nil
+				}
+			}),
+			pass: "credential-use: checking /Secret/demo/creds before establishing: boom", boom: true,
+		},
+	}
+}
+
+// cuRowWorld builds a status row's server with a Shared over it, tracking
+// the Widget with refs; change adjusts the world.
+func cuRowWorld(refs func(resource.Managed) ([]credentialuse.Ref, error), change func(w *cuWorld)) func(*testing.T, *Widget) (*traceServer, []ReconcilerOption) {
+	return func(t *testing.T, wd *Widget) (*traceServer, []ReconcilerOption) {
+		w := newCUWorld(t, wd)
+		if change != nil {
+			change(w)
+		}
+		return w.srv, []ReconcilerOption{
+			WithFinalizer(resource.NewAPIFinalizer(w.srv.c, FinalizerName)),
+			WithCredentialUseShared(w.s),
+			withRowRefs(refs),
+		}
+	}
+}
+
+// withRowRefs makes the connecter a status row's provider name refs.
+func withRowRefs(refs func(resource.Managed) ([]credentialuse.Ref, error)) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.cu.refs = refsConnecter{refs: refs}
 	}
 }
 
@@ -203,15 +255,26 @@ func TestStatusConflictOnEveryPath(t *testing.T) {
 	}
 	for name, row := range rows {
 		t.Run(name, func(t *testing.T) {
-			s := newTraceServer(t, row.widget())
+			var s *traceServer
+			var cuOpts []ReconcilerOption
+			if row.world != nil {
+				s, cuOpts = row.world(t, row.widget())
+			} else {
+				s = newTraceServer(t, row.widget())
+			}
 			s.faults.status = func(client.Object) error { return conflictErr() }
 			tp, rec := tracer(t)
 			o := []ReconcilerOption{WithTracerProvider(tp)}
 			if row.options != nil {
 				o = append(o, row.options(t)...)
 			}
+			o = append(o, cuOpts...)
 
-			res, err := newTraceReconciler(s, row.provider(s), o...).Reconcile(context.Background(), reqFor("w"))
+			r := newTraceReconciler(s, row.provider(s), o...)
+			if r.cu.enabled {
+				startSource(t, r)
+			}
+			res, err := r.Reconcile(context.Background(), reqFor("w"))
 
 			if s.ops.count("status-rejected") != 1 {
 				t.Fatalf("ops = %v, want exactly one status write, refused: this row's path wasn't reached", s.ops.list())
@@ -247,21 +310,24 @@ func TestStatusConflictOnEveryPath(t *testing.T) {
 	}
 }
 
-// writeStatusCalls counts the calls to writeStatus in reconciler.go.
+// writeStatusCalls counts the calls to writeStatus in reconciler.go, and in
+// credentialuse.go, whose acquire gets it from the pass.
 func writeStatusCalls(t *testing.T) int {
 	t.Helper()
-	f, err := parser.ParseFile(token.NewFileSet(), "reconciler.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
 	n := 0
-	ast.Inspect(f, func(x ast.Node) bool {
-		if c, ok := x.(*ast.CallExpr); ok {
-			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "writeStatus" {
-				n++
-			}
+	for _, name := range []string{"reconciler.go", "credentialuse.go"} {
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return true
-	})
+		ast.Inspect(f, func(x ast.Node) bool {
+			if c, ok := x.(*ast.CallExpr); ok {
+				if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "writeStatus" {
+					n++
+				}
+			}
+			return true
+		})
+	}
 	return n
 }
