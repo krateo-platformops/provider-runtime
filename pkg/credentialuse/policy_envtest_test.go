@@ -385,48 +385,8 @@ func TestPerNameUnderResourceNamesRBAC(t *testing.T) {
 	idx, ns := indexNamespace(t), env.Namespace(t, "pername-rbac")
 	const sa, provider = "cu-provider", "default"
 	user := "system:serviceaccount:" + provider + ":" + sa
-	cluster := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "cu-pername-" + ns}, Rules: []rbacv1.PolicyRule{
-		{APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{"s", "stale"}, Verbs: []string{"get", "patch", "list", "watch"}},
-		{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get", "list", "watch"}},
-		{APIGroups: []string{cutest.Group}, Resources: []string{"widgets"}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
-		{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, ResourceNames: []string{widgetCRD}, Verbs: []string{"get", "list", "watch", "patch"}},
-	}}
-	if _, err := env.Kube.RbacV1().ClusterRoles().Create(ctx, cluster, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = env.Kube.RbacV1().ClusterRoles().Delete(context.Background(), cluster.Name, metav1.DeleteOptions{})
-	})
-	subjects := []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: provider, Name: sa}}
-	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: cluster.Name}, Subjects: subjects,
-		RoleRef: rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: cluster.Name}}
-	if _, err := env.Kube.RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = env.Kube.RbacV1().ClusterRoleBindings().Delete(context.Background(), crb.Name, metav1.DeleteOptions{})
-	})
-	// §10.6.7: the index by name, and create in its namespace.
-	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "cu-index", Namespace: idx}, Rules: []rbacv1.PolicyRule{
-		{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{widgetIndex}, Verbs: []string{"get", "update", "patch", "list", "watch"}},
-		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create"}},
-	}}
-	if _, err := env.Kube.RbacV1().Roles(idx).Create(ctx, role, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	rb := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "cu-index", Namespace: idx}, Subjects: subjects,
-		RoleRef: rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "cu-index"}}
-	if _, err := env.Kube.RbacV1().RoleBindings(idx).Create(ctx, rb, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	// The grants hold: no list of Secrets without a name.
+	grantPerName(t, ns, idx, sa, []string{"s", "stale"}, []string{"get", "patch", "list", "watch"})
 	asSA := kubeAs(t, env.AsServiceAccount(provider, sa))
-	cutest.Eventually(t, 30*time.Second, func() error {
-		if _, err := asSA.CoreV1().Secrets(ns).Get(ctx, "s", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-			return fmt.Errorf("the grant isn't in force: %v: %w", err, cutest.ErrNotYet)
-		}
-		return nil
-	})
 	if _, err := asSA.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{}); !apierrors.IsForbidden(err) {
 		t.Fatalf("listing Secrets without a name: %v, want forbidden", err)
 	}
@@ -458,6 +418,8 @@ func TestPerNameUnderResourceNamesRBAC(t *testing.T) {
 	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx, Namespaces: []string{"unrelated"}})
 	o := widgetOptions(c.enqueue)
 	o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
+	logs := &warnLog{}
+	o.Logger = logs
 	perName(&o)
 	tr, err := s.Track(ctx, o)
 	if err != nil {
@@ -483,12 +445,68 @@ func TestPerNameUnderResourceNamesRBAC(t *testing.T) {
 	c.enqueue(widgetNN(ns, "w"))
 	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
 	lined(t, idx, secretLine(ns, "s"), false)
+	// A PerName kind is cached in every namespace: the recheck outside the
+	// caches never lists it, which this service account may not (§10.5,
+	// §13 shape 1).
+	if w := logs.matching("outside the caches"); len(w) > 0 {
+		t.Errorf("the recheck outside the caches failed for a PerName kind: %v", w)
+	}
 	if v := c.violations(); len(v) > 0 {
 		t.Errorf("violations: %v", v)
 	}
 	cutest.Eventually(t, time.Minute, func() error {
 		if slices.Contains(tr.PerNameWatches(), cu.SecretRef(ns, "s").ID()) {
 			return fmt.Errorf("the per-name watch stays after the prune: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+}
+
+// grantPerName grants service account default/sa what a PerName process
+// needs under resourceNames RBAC (§13 shape 1, §10.6.7), with secretVerbs
+// on the Secrets named secretNames, in a ClusterRole and a Role in the
+// index namespace idx, both named for ns and removed when the test ends; it
+// returns once the grant is in force.
+func grantPerName(t *testing.T, ns, idx, sa string, secretNames, secretVerbs []string) {
+	t.Helper()
+	ctx := context.Background()
+	cluster := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "cu-pername-" + ns}, Rules: []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: secretNames, Verbs: secretVerbs},
+		{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get", "list", "watch"}},
+		{APIGroups: []string{cutest.Group}, Resources: []string{"widgets"}, Verbs: []string{"get", "list", "watch", "patch", "update"}},
+		{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, ResourceNames: []string{widgetCRD}, Verbs: []string{"get", "list", "watch", "patch"}},
+	}}
+	if _, err := env.Kube.RbacV1().ClusterRoles().Create(ctx, cluster, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = env.Kube.RbacV1().ClusterRoles().Delete(context.Background(), cluster.Name, metav1.DeleteOptions{})
+	})
+	subjects := []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: "default", Name: sa}}
+	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: cluster.Name}, Subjects: subjects,
+		RoleRef: rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: cluster.Name}}
+	if _, err := env.Kube.RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = env.Kube.RbacV1().ClusterRoleBindings().Delete(context.Background(), crb.Name, metav1.DeleteOptions{})
+	})
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "cu-index", Namespace: idx}, Rules: []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{widgetIndex}, Verbs: []string{"get", "update", "patch", "list", "watch"}},
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create"}},
+	}}
+	if _, err := env.Kube.RbacV1().Roles(idx).Create(ctx, role, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rb := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "cu-index", Namespace: idx}, Subjects: subjects,
+		RoleRef: rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "cu-index"}}
+	if _, err := env.Kube.RbacV1().RoleBindings(idx).Create(ctx, rb, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	asSA := kubeAs(t, env.AsServiceAccount("default", sa))
+	cutest.Eventually(t, 30*time.Second, func() error {
+		if _, err := asSA.CoreV1().Secrets(ns).Get(ctx, secretNames[0], metav1.GetOptions{}); !apierrors.IsNotFound(err) && err != nil {
+			return fmt.Errorf("the grant isn't in force: %v: %w", err, cutest.ErrNotYet)
 		}
 		return nil
 	})

@@ -24,6 +24,7 @@ import (
 
 	cu "github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/cutest"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 // widgetIndex is the Widget kind's index name.
@@ -1380,5 +1381,99 @@ func TestIndexAcquirerCreatedIndexIsRebuiltAtStart(t *testing.T) {
 	lined(t, idx, secretLine(ns, "s"), true)
 	if !indexRebuilt(t, idx) {
 		t.Error("the start's rebuild didn't set the marker")
+	}
+}
+
+// warnLog records the warnings a tracker logs.
+type warnLog struct {
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *warnLog) Info(string, ...any)         {}
+func (l *warnLog) Debug(string, ...any)        {}
+func (l *warnLog) Error(error, string, ...any) {}
+func (l *warnLog) Warn(msg string, kv ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, fmt.Sprint(msg, kv))
+}
+func (l *warnLog) WithValues(...any) logging.Logger { return l }
+func (l *warnLog) WithName(string) logging.Logger   { return l }
+
+// matching returns the warnings that contain s.
+func (l *warnLog) matching(s string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, w := range l.warns {
+		if strings.Contains(w, s) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// The startup recheck alone finds a hold whose per-name watch the server
+// forbids: a process that may get and patch a Secret by name, but not list
+// or watch it, has no cache of it, and its rescan sees nothing. The recheck
+// reads the index, GETs the Secret, and enqueues its batch, which releases
+// it, its holder being gone (§10.6.5).
+func TestIndexStartupRecheckWithoutTheWatch(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-recheck-nowatch")
+	const sa = "cu-nowatch"
+	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch"})
+	createSecret(t, ns, "s")
+	acquireAs(t, ns, "s") // held for ns, by a holder that is gone
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
+		Data: map[string]string{"entries": secretLine(ns, "s") + "\n"}}
+	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, c, _ := perNameProcess(t, env.AsServiceAccount("default", sa), idx, nil)
+	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
+	lined(t, idx, secretLine(ns, "s"), false)
+	if v := c.violations(); len(v) > 0 {
+		t.Errorf("violations: %v", v)
+	}
+}
+
+// Disown counts, strips and prunes a hold that only the index knows (§7.4,
+// A15): no record names the Secret, a PerName kind is never listed, and the
+// release loop can't take it, its batch's list of holders failing. The
+// count is non-zero before it settles, the Secret ends stripped, and the
+// index empty.
+func TestDisownCountsAndEmptiesTheIndex(t *testing.T) {
+	cutest.Require(t, env)
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-index")
+	createSecret(t, ns, "x")
+	acquireAs(t, ns, "x")
+	perNameRig(t, idx, disownOptions, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			// R2's consistent list of the holders in ns: the release loop
+			// never decides. Disown lists every namespace.
+			if c.Op == "list" && c.GK == widgetGK && c.Namespace == ns {
+				return errors.New("the release loop can't list the holders")
+			}
+			return nil
+		}, nil)
+	})
+	setIndexLines(t, idx, func(l []string) []string { return append(l, secretLine(ns, "x")) })
+	if err := heldFor(ns, "x", ns)(); err != nil {
+		t.Fatal(err)
+	}
+	counts := watchHeldCount(t)
+	set("all")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if seen := counts(); !slices.ContainsFunc(seen, func(v string) bool { return v != "0" && v != "" && v != "unknown" }) {
+		t.Errorf("held-count before settling: %v; want the index-only hold counted", seen)
+	}
+	stripped(t, ns, "x")
+	lined(t, idx, secretLine(ns, "x"), false)
+	if lines, _ := indexLines(t, idx); len(lines) != 0 {
+		t.Errorf("the index after Disown: %v; want it empty", lines)
 	}
 }

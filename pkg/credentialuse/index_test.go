@@ -98,6 +98,11 @@ func (s *objServer) Get(_ context.Context, gk schema.GroupKind, ns, name string)
 	return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, name)
 }
 
+// List lists nothing: the tests that use objServer read by name.
+func (s *objServer) List(context.Context, schema.GroupKind, string) ([]metav1.PartialObjectMetadata, error) {
+	return nil, nil
+}
+
 func testIndex(st indexStore, srv server) *index {
 	prefix, _ := FinalizerPrefix(widgetGK)
 	return newIndex(widgetGK, prefix, "idx", 5, map[schema.GroupKind]bool{secretGroupKind: true}, st, srv)
@@ -288,8 +293,8 @@ func TestIndexObservesDrops(t *testing.T) {
 	if got := keysOf(ix.pending); len(got) != 1 || got[0] != theirs {
 		t.Errorf("pending = %v, want only %v", got, theirs)
 	}
-	if !ix.pending[theirs].tampered {
-		t.Error("a drop by someone else isn't marked as tampering")
+	if r := ix.pending[theirs]; r == nil || !r.tampered {
+		t.Fatalf("a drop by someone else isn't queued as tampering: %v", ix.pending)
 	}
 	if len(ix.pruned) != 0 {
 		t.Errorf("this process's drop is still expected: %v", ix.pruned)
