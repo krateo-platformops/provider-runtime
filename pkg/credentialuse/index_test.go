@@ -967,14 +967,24 @@ func TestAVouchedLine(t *testing.T) {
 	var wrong []ID
 	ix.onVouchWrong = func(id ID) { wrong = append(wrong, id) }
 
-	// The startup recheck doesn't read it.
-	srv.gets = nil
-	if err := ix.recheck(context.Background(), func(ID, string) {}); err != nil {
+	// The startup recheck reads it, and, unreadable, skips it: no report,
+	// no error, its line kept. A vouched object that can be read and
+	// carries the prefix gets its batch, and the wrong vouch is reported.
+	var denials []ID
+	ix.onDenied = func(id ID, _ error) { denials = append(denials, id) }
+	st.lines = linesOf([]ID{vouched, carrying})
+	var enqueued []ID
+	if err := ix.recheck(context.Background(), func(id ID, _ string) { enqueued = append(enqueued, id) }); err != nil {
 		t.Fatal(err)
 	}
-	if slices.Contains(srv.gets, vouched) {
-		t.Errorf("the recheck read the vouched object: %v", srv.gets)
+	if !slices.Equal(enqueued, []ID{carrying}) || len(denials) != 0 || !slices.Equal(wrong, []ID{carrying}) {
+		t.Errorf("the recheck: enqueued %v, denials %v, wrong vouches %v; want %v enqueued and reported wrong, nothing denied", enqueued, denials, wrong, []ID{carrying})
 	}
+	if !slices.Contains(st.lines, vouched.String()) {
+		t.Errorf("the recheck dropped the unreadable vouched line: %q", st.lines)
+	}
+	wrong = nil
+	ix.vouchWrongSeen = nil
 
 	// A dropped line: the vouched one stays dropped, the unvouched
 	// unreadable one and the vouched one that carries come back.

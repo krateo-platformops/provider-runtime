@@ -494,6 +494,12 @@ func TestIndexA1BeforeTheDisownSwitch(t *testing.T) {
 // watchHeldCount records every value of the CRD's held-count from now on,
 // until the returned function is called, which returns them.
 func watchHeldCount(t *testing.T) func() []string {
+	return watchCRDAnnotation(t, cu.AnnotationHeldCount)
+}
+
+// watchCRDAnnotation records every value of the Widget CRD's annotation key
+// from now on, until the returned function is called, which returns them.
+func watchCRDAnnotation(t *testing.T, key string) func() []string {
 	var mu sync.Mutex
 	var seen []string
 	stop, done := make(chan struct{}), make(chan struct{})
@@ -510,7 +516,7 @@ func watchHeldCount(t *testing.T) func() []string {
 				continue
 			}
 			mu.Lock()
-			if v := crd.GetAnnotations()[cu.AnnotationHeldCount]; len(seen) == 0 || seen[len(seen)-1] != v {
+			if v := crd.GetAnnotations()[key]; len(seen) == 0 || seen[len(seen)-1] != v {
 				seen = append(seen, v)
 			}
 			mu.Unlock()
@@ -1716,11 +1722,22 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 
 	// A hand removal alone isn't a remedy: the line of an object this
 	// process can't read may name a hold, so it comes back (§10.6.3).
+	// A pass between the removal and the restore may count the empty index
+	// as "0", which is a true count then; the restore makes the next pass
+	// "unknown" again, so Disown never settles on the removal alone.
 	line := secretLine(ns, "nogrant")
+	settledSeen := watchCRDAnnotation(t, cu.AnnotationDisownSettled)
 	setIndexLines(t, idx, func(l []string) []string { return slices.DeleteFunc(l, func(x string) bool { return x == line }) })
 	lined(t, idx, line, true)
-	if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" {
-		t.Fatalf("held-count %q after the hand removal alone", a[cu.AnnotationHeldCount])
+	cutest.Eventually(t, time.Minute, func() error {
+		if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" {
+			return fmt.Errorf("held-count %q after the restore: %w", a[cu.AnnotationHeldCount], cutest.ErrNotYet)
+		}
+		return nil
+	})
+	time.Sleep(disownPasses*disownInterval + 2*time.Second)
+	if seen := settledSeen(); slices.Contains(seen, "true") {
+		t.Fatalf("disown-settled after the hand removal alone: %v", seen)
 	}
 
 	// The remedy: the operator vouches for it, here removing its line in the

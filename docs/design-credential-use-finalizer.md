@@ -2377,7 +2377,9 @@ line. The marker label still finds it (§10.6.6).
   (`credentialuse_index_read_denied_total`) once per object, and never
   retried: no retry can read it before RBAC changes. Any other failed read
   makes the recheck retry with backoff. A line an operator vouched for
-  (§10.6.6) isn't read.
+  (§10.6.6) is read like any other: while it can't be read it is skipped,
+  neither reported nor retried, and once readable and held its batch is
+  enqueued.
 - **Disown** reads it to find what to strip and what to count (§7.4).
 - **`WithHeld`** reads it, and stops at the first line whose object still
   carries K's prefix (§11.6).
@@ -2426,8 +2428,8 @@ written as the unheld annotation names refs (`team-a/Secret/nogrant`), the
 objects an operator has checked by hand to carry no finalizer of K. Malformed
 entries are ignored, with a warning once per value. While a vouched object
 can't be read, Disown's count and its strip skip it, the startup recheck
-doesn't read it, the tamper check doesn't restore its dropped line, a prune
-may remove its line, and a rebuild doesn't add it. Every other unreadable
+skips it after its read fails, the tamper check doesn't restore its
+dropped line, a prune may remove its line, and a rebuild doesn't add it. Every other unreadable
 line keeps the superset's rule: restored, and counted unknown. A vouched
 object that can be read and carries K's prefix is treated as any other,
 counted and kept, and the wrong vouch is logged. The process never writes

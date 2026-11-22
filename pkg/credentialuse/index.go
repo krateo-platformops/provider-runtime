@@ -1423,9 +1423,6 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 	vouched := ix.parseVouched(cur.vouched)
 	var bare []ID
 	for _, id := range ix.ids(cur.lines) {
-		if vouched[id] {
-			continue // an operator checked it by hand: not read (§10.6.6)
-		}
 		m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 		switch Classify(err) {
 		case ClassNone:
@@ -1435,6 +1432,12 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 			bare = append(bare, id)
 			continue
 		default:
+			if vouched[id] {
+				// An operator checked by hand that it carries no finalizer
+				// of the kind: while it can't be read, it is skipped,
+				// neither reported nor retried (§10.6.6).
+				continue
+			}
 			if Classify(err) == ClassRBAC {
 				// The authorizer refused it (class (d)): its line stays,
 				// and no retry can read it before RBAC changes, so it is
@@ -1455,6 +1458,9 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 		}
 		if !held {
 			bare = append(bare, id)
+		} else if vouched[id] {
+			// Readable, and held: treated as any other, its batch enqueued.
+			ix.vouchWrong(id)
 		}
 	}
 	if err := ix.prune(ctx, ix.prunable(bare)); err != nil {

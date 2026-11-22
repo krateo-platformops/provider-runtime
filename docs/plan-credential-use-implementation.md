@@ -1070,7 +1070,9 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   ignored with a warning once per value. While a vouched object can't be
   read:
   - Disown's count and strip skip it;
-  - the startup recheck doesn't read it;
+  - the startup recheck reads it, and skips it while the read fails,
+    neither reporting nor retrying it (from the review of the vouch: a
+    vouched object that became readable and held must get its batch);
   - the tamper check doesn't restore its dropped line;
   - a prune may remove its line;
   - a rebuild doesn't add it.

@@ -62,8 +62,9 @@ const (
 	// to carry no finalizer of the kind, comma-separated, each written as
 	// the unheld annotation names a ref: <namespace>/<Kind[.group]>/<name>
 	// (§7.4, §10.6.6). While such an object can't be read, Disown and the
-	// startup recheck skip it, and its line may go. The process never
-	// writes it.
+	// startup recheck skip it after a read that fails, and its line may go;
+	// a vouched object that can be read is treated as any other. The
+	// process never writes it.
 	AnnotationVouched = Domain + "/vouched"
 )
 
