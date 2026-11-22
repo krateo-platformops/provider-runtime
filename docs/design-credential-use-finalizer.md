@@ -999,11 +999,12 @@ type Options struct {
 	Enqueue        func(holder types.NamespacedName) // the caller's queue (§10.2)
 	DeletionGrace  time.Duration            // §5; default 60s
 	ProbeInterval  time.Duration            // missing-ref prober; default 15s (§10.3)
-	DisownInterval time.Duration            // §7.4; default 60s
+	DisownInterval time.Duration            // §7.4; default 60s, longer when TimeoutBound needs it
 	DisownPasses   int                      // §7.4; consecutive zero passes, default 5
 	// TimeoutBound is the kind's largest reconcile or request timeout. It is
-	// required: §7.3 checks DisownPasses × DisownInterval against twice it,
-	// and publishes it. provider-runtime passes its timeout plus grace, 90s.
+	// required: §7.3 checks (DisownPasses − 1) × DisownInterval against twice
+	// it, derives an unset DisownInterval from it (§7.4), and publishes it.
+	// provider-runtime passes its timeout plus grace, 90s by default.
 	TimeoutBound   time.Duration
 	// Enqueue, Logger and Metrics are the kind's sinks; an equal Track
 	// rebinds them (§7.3). None of them may block or call Track: the rebind
@@ -1174,8 +1175,10 @@ exported for diagnostics and tests.
   - an invalid finalizer prefix;
   - an unmappable holder or protected kind;
   - an empty `OwnerFinalizers`;
-  - `DisownPasses × DisownInterval` below twice the kind's largest
-    reconcile or request timeout (§7.4);
+  - `(DisownPasses − 1) × DisownInterval` below twice the kind's largest
+    reconcile or request timeout, `TimeoutBound` (§7.4): an explicit
+    `DisownInterval` too short for it, or `DisownPasses` below 2. An unset
+    interval is derived so that it suffices;
   - in PerName and PerNamePoll modes: no `IndexNamespace`; **an
     `IndexNamespace` that doesn't exist**, which fails with
     `credential-use: index namespace krateo-credential-use not found: install it (installer release) before enabling PerName`;
@@ -1265,7 +1268,8 @@ in every process:
   `credential-use.` finalizer.
 
 **"Safe" is observable cluster-wide**, not only on one process's gauge.
-Every pass of the Disown loop, once per `DisownInterval` (60s by default),
+Every pass of the Disown loop, once per `DisownInterval` (60s by default,
+longer when `TimeoutBound` needs it),
 makes a **live count**. In LabelScoped mode that is label-selected,
 metadata-only, paginated lists of each protected kind by K's marker label,
 counting finalizers with K's prefix. In PerName mode it reads the index and
@@ -1281,10 +1285,20 @@ credential-use.krateo.io/disown-settled: "true"
 process sets `disown-settled` once it has seen `DisownPasses` (**5** by
 default) consecutive passes count zero.
 
-- **Setup validates** `DisownPasses × DisownInterval ≥ 2 ×` the kind's
-  largest reconcile or request timeout (L3). provider-runtime's reconcile
-  timeout plus its grace is 90s by default, so the minimum is 180s, and the
-  defaults give 300s.
+- **Setup validates** `(DisownPasses − 1) × DisownInterval ≥ 2 ×
+  TimeoutBound`, the kind's largest reconcile or request timeout (L3). The
+  first pass runs as soon as the switch is seen, so `DisownPasses` zero
+  passes span one interval fewer (the review of PR 6). provider-runtime's
+  reconcile timeout plus its grace is 90s by default, so the minimum is
+  180s, and the defaults give 4 × 60s = 240s.
+- **An unset `DisownInterval` is derived from `TimeoutBound`**:
+  `max(60s, ⌈2 × TimeoutBound / (DisownPasses − 1)⌉)`, rounded up to a
+  whole second, after `DisownPasses`' default (the user's decision,
+  2026-11-22). The derived value is what §7.3 publishes on the CRD, so every
+  process of the kind agrees on it; an interval set explicitly is validated
+  as given. For example, git-provider's 4m reconcile timeout gives a
+  `TimeoutBound` of 270s, so the interval is ⌈540s / 4⌉ = 135s, and Disown
+  settles in 4 × 135s = 540s after the first zero pass.
 - **The `disown-settled` write tests that `held-count` is `"0"`**, so it
   can't land over a newer non-zero count.
 - **A process that reads a non-zero count** written by another process
@@ -3259,7 +3273,8 @@ on krateo-057:
 - The 80% warning and the full index: a new holder fails closed and an
   established one is Degraded (L2). Setup rejects a cap above the
   ceiling, an index namespace that holds holders, and a short
-  `DisownPasses × DisownInterval` (L3).
+  `(DisownPasses − 1) × DisownInterval`, an explicit interval or a single
+  pass (L3); an unset interval is derived long enough (§7.4).
 - **N processes without leader election** (§6.8): three `Shared` instances
   of one kind, none leader-elected, run the stress test, and Disown and its
   count settle correctly, including a process that reads another's non-zero
