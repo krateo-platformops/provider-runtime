@@ -1266,3 +1266,119 @@ func TestIndexSetupRebuildFailureIsRetried(t *testing.T) {
 	}
 	lined(t, idx, secretLine(ns, "s"), true)
 }
+
+// indexRebuilt reports whether the index in idx carries the marker of a
+// completed rebuild (§10.6.6).
+func indexRebuilt(t *testing.T, idx string) bool {
+	t.Helper()
+	cm, err := env.Kube.CoreV1().ConfigMaps(idx).Get(context.Background(), widgetIndex, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cm.Annotations[cu.AnnotationRebuilt] == "true"
+}
+
+// heldBeforeTheIndex has a LabelScoped process hold Secret ns/s for Widget
+// ns/w, and stop: a hold the PerName index doesn't know.
+func heldBeforeTheIndex(t *testing.T, ns string) {
+	t.Helper()
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	r := newWriteRig(t, env.Config, cu.SharedOptions{}, nil, nil)
+	r.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "s", "w")
+	r.stop()
+}
+
+// A process that creates the index and dies before its rebuild leaves it
+// without the marker; the next start rebuilds it, and the hold made before
+// the index gets its line (§10.6.6, the user's decision of 2026-11-22). A
+// rebuild that fails never sets the marker.
+func TestIndexCrashBeforeTheRebuildIsRebuiltAtRestart(t *testing.T) {
+	cutest.Require(t, env)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-crash-rebuild")
+	heldBeforeTheIndex(t, ns)
+	resetPublished(t, cutest.WidgetGVR)
+	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
+
+	// The process creates the index, and dies before its rebuild: every
+	// list of the holders fails, and it never runs.
+	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	created := false
+	s.HookCalls(func(_ context.Context, c cu.Call) error {
+		if c.Op == "index-create" {
+			created = true
+		}
+		if c.Op == "list" && c.GK == widgetGK && c.Namespace == "" {
+			return errors.New("the process died")
+		}
+		return nil
+	}, nil)
+	o := widgetOptions(func(types.NamespacedName) {})
+	perName(&o)
+	if _, err := s.Track(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("the dying process didn't create the index")
+	}
+	if lines, _ := indexLines(t, idx); slices.Contains(lines, secretLine(ns, "s")) || indexRebuilt(t, idx) {
+		t.Fatalf("after the crash: lines %v, marker %v; want neither", lines, indexRebuilt(t, idx))
+	}
+
+	perNameRig(t, idx, nil, nil)
+	lined(t, idx, secretLine(ns, "s"), true)
+	if !indexRebuilt(t, idx) {
+		t.Error("the restart's rebuild didn't set the marker")
+	}
+}
+
+// An index an acquirer recreated, after a deletion while no write loops
+// ran, carries no marker, and its merges set none; the next start rebuilds
+// it, and the holds it lacked get their lines (§10.6.6).
+func TestIndexAcquirerCreatedIndexIsRebuiltAtStart(t *testing.T) {
+	cutest.Require(t, env)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-acquirer-created")
+	heldBeforeTheIndex(t, ns)
+	resetPublished(t, cutest.WidgetGVR)
+	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
+
+	// A process whose Track found the index rebuilt, and whose write loops
+	// never run.
+	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	o := widgetOptions(func(types.NamespacedName) {})
+	perName(&o)
+	tr, err := s.Track(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !indexRebuilt(t, idx) {
+		t.Fatal("Track's rebuild didn't set the marker")
+	}
+	if err := env.Kube.CoreV1().ConfigMaps(idx).Delete(context.Background(), widgetIndex, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"s2", "s3"} {
+		createSecret(t, ns, n)
+		createWidget(t, ns, "w-"+n, n)
+		w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(context.Background(), "w-"+n, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a, err := tr.Acquire(context.Background(), w); err != nil || len(a.Held) != 1 {
+			t.Fatalf("acquiring for w-%s: %+v, %v", n, a, err)
+		}
+		if indexRebuilt(t, idx) {
+			t.Fatalf("an acquirer's create or merge set the marker (after w-%s)", n)
+		}
+	}
+	if lines, _ := indexLines(t, idx); slices.Contains(lines, secretLine(ns, "s")) || !slices.Contains(lines, secretLine(ns, "s3")) {
+		t.Fatalf("the acquirer's index: %v", lines)
+	}
+
+	perNameRig(t, idx, nil, nil)
+	lined(t, idx, secretLine(ns, "s"), true)
+	if !indexRebuilt(t, idx) {
+		t.Error("the start's rebuild didn't set the marker")
+	}
+}

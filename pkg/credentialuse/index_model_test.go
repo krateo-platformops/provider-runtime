@@ -45,7 +45,7 @@ type modelIndexStore struct {
 }
 
 func (s modelIndexStore) version(o *metav1.PartialObjectMetadata) indexVersion {
-	return indexVersion{lines: decodeIndex(o.Annotations[modelIndexAnnotation]), rv: o.ResourceVersion}
+	return indexVersion{lines: decodeIndex(o.Annotations[modelIndexAnnotation]), rv: o.ResourceVersion, rebuilt: o.Annotations[AnnotationRebuilt] == "true"}
 }
 
 func (s modelIndexStore) get(context.Context) (indexVersion, error) {
@@ -62,11 +62,15 @@ func (s modelIndexStore) get(context.Context) (indexVersion, error) {
 	return v, err
 }
 
-func (s modelIndexStore) update(_ context.Context, cur indexVersion, lines []string) (indexVersion, error) {
+func (s modelIndexStore) update(_ context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
 	var v indexVersion
+	ann := map[string]any{modelIndexAnnotation: encodeIndex(lines)}
+	if rebuilt {
+		ann[AnnotationRebuilt] = "true"
+	}
 	data, _ := json.Marshal(map[string]any{"metadata": map[string]any{
 		"resourceVersion": cur.rv,
-		"annotations":     map[string]any{modelIndexAnnotation: encodeIndex(lines)},
+		"annotations":     ann,
 	}})
 	err := s.a.Call(s.who+" index update", func() error {
 		o, err := s.m.Patch(modelIndexKey, types.MergePatchType, data)
@@ -80,10 +84,14 @@ func (s modelIndexStore) update(_ context.Context, cur indexVersion, lines []str
 	return v, err
 }
 
-func (s modelIndexStore) create(_ context.Context, lines []string) (indexVersion, error) {
+func (s modelIndexStore) create(_ context.Context, lines []string, rebuilt bool) (indexVersion, error) {
 	var v indexVersion
+	ann := map[string]string{modelIndexAnnotation: encodeIndex(lines)}
+	if rebuilt {
+		ann[AnnotationRebuilt] = "true"
+	}
 	err := s.a.Call(s.who+" index create", func() error {
-		if err := s.m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: map[string]string{modelIndexAnnotation: encodeIndex(lines)}}); err != nil {
+		if err := s.m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: ann}); err != nil {
 			return err
 		}
 		o, err := s.m.Get(modelIndexKey)
@@ -188,7 +196,7 @@ func TestModelIndexSuperset(t *testing.T) {
 		m := apimodel.New(s.Clock.Now)
 		seed(m, "ns", "s", nil, true)
 		must(m.Create(nsKey("idx"), metav1.ObjectMeta{}))
-		must(m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: map[string]string{modelIndexAnnotation: encodeIndex([]string{p.String()})}}))
+		must(m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: map[string]string{modelIndexAnnotation: encodeIndex([]string{p.String()}), AnnotationRebuilt: "true"}}))
 		must(m.Create(widgetKey("ns", "h2"), metav1.ObjectMeta{}))
 		s.Go("releaser", 0, func(a *apimodel.Actor) {
 			srv := loggingServer{modelServer{m, a}, "rel", log}
@@ -225,7 +233,7 @@ func TestModelIndexStartupPrune(t *testing.T) {
 		m := apimodel.New(s.Clock.Now)
 		seed(m, "ns", "s", nil, false)
 		must(m.Create(nsKey("idx"), metav1.ObjectMeta{}))
-		must(m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: map[string]string{modelIndexAnnotation: encodeIndex([]string{p.String()})}}))
+		must(m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: map[string]string{modelIndexAnnotation: encodeIndex([]string{p.String()}), AnnotationRebuilt: "true"}}))
 		must(m.Create(widgetKey("ns", "h2"), metav1.ObjectMeta{}))
 		s.Go("releaser", 0, func(a *apimodel.Actor) {
 			ix := modelIndex(m, a, "rel", log)

@@ -2390,6 +2390,16 @@ still carries the prefix is **tampering**, or a lost race. The tracker adds
 those lines back, records a Warning event and counts
 `credentialuse_index_tampered_total`.
 
+**A durable marker closes the crash window** (the user's decision,
+2026-11-22). The index carries `credential-use.krateo.io/rebuilt` only once
+a rebuild from the records has completed: the rebuild sets it in the same
+guarded write as its last merge, and every other create leaves it absent,
+an acquirer's or `Track`'s alike. `Track` and the startup recheck rebuild,
+by merging, an index without it. So a process that dies between creating
+the index and rebuilding it, or an acquirer that recreated a deleted index
+while no write loops ran, leaves no hold without its line past the next
+start.
+
 **If the ConfigMap is deleted**, the tracker recreates it and rebuilds it
 from the records. It lists the holders of K, takes the union of their
 records, GETs each named object, and keeps those that carry a finalizer with

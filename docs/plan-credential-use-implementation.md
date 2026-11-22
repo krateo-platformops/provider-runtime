@@ -1028,10 +1028,15 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   build): a re-add after a prune, an acquirer's post-check that can't read
   the index or can't add the line, as on a full index, and a rebuild that
   fails right after `Track` created the index. Each is queued, and the
-  write loops retry it with backoff until it lands: a later start would
-  find the index present and never rebuild it. A process that dies between
-  creating the index and rebuilding it leaves its earlier holds without
-  lines until each holder's next pass.
+  write loops retry it with backoff until it lands.
+- **A durable marker, `credential-use.krateo.io/rebuilt`, on the index**
+  (the user's decision, 2026-11-22). Only a completed rebuild sets it, in
+  the same guarded write as its last merge, which writes even when it adds
+  no line. Every other create, an acquirer's or `Track`'s, leaves it
+  absent. `Track` and the startup recheck rebuild, by merging, an index
+  without it, so a process that dies between creating the index and
+  rebuilding it, or an index an acquirer recreated while no write loops
+  ran, leaves no earlier hold without its line past the next start.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
   after R3, in one write per batch. A prune that fails retries the batch.

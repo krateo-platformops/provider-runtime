@@ -50,6 +50,16 @@ const (
 	AnnotationIndex = Domain + "/index"
 )
 
+// Keys on a kind's index ConfigMap.
+const (
+	// AnnotationRebuilt marks an index rebuilt from the records since it was
+	// created (§10.6.6): only a rebuild that completed sets it, in the same
+	// guarded write as its last merge. Track and the startup recheck rebuild
+	// an index without it, so that a process that died between creating the
+	// index and rebuilding it leaves no hold without its line.
+	AnnotationRebuilt = Domain + "/rebuilt"
+)
+
 // ClusterScopedName is the name part of a cluster-scoped holder kind's
 // finalizer (§3). A GroupKind is either namespaced or cluster-scoped, so it
 // can't collide with a namespace of that name.

@@ -167,12 +167,12 @@ func (h hookIndexStore) get(ctx context.Context) (v indexVersion, err error) {
 	return v, err
 }
 
-func (h hookIndexStore) update(ctx context.Context, cur indexVersion, lines []string) (v indexVersion, err error) {
-	err = h.call(ctx, "index-update", func() error { v, err = h.st.update(ctx, cur, lines); return err })
+func (h hookIndexStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (v indexVersion, err error) {
+	err = h.call(ctx, "index-update", func() error { v, err = h.st.update(ctx, cur, lines, rebuilt); return err })
 	return v, err
 }
 
-func (h hookIndexStore) create(ctx context.Context, lines []string) (v indexVersion, err error) {
-	err = h.call(ctx, "index-create", func() error { v, err = h.st.create(ctx, lines); return err })
+func (h hookIndexStore) create(ctx context.Context, lines []string, rebuilt bool) (v indexVersion, err error) {
+	err = h.call(ctx, "index-create", func() error { v, err = h.st.create(ctx, lines, rebuilt); return err })
 	return v, err
 }

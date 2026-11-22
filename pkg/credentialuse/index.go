@@ -160,6 +160,8 @@ func union(a, b []string) []string {
 type indexVersion struct {
 	lines []string
 	rv    string
+	// rebuilt: the index carries AnnotationRebuilt (§10.6.6).
+	rebuilt bool
 	// obj is the ConfigMap itself, for the next guarded Update; nil from the
 	// model's store.
 	obj *unstructured.Unstructured
@@ -171,10 +173,13 @@ type indexStore interface {
 	// get reads the index; an error classified ClassNotFound means it
 	// doesn't exist.
 	get(ctx context.Context) (indexVersion, error)
-	// update writes lines over cur, guarded by cur's resourceVersion.
-	update(ctx context.Context, cur indexVersion, lines []string) (indexVersion, error)
-	// create creates the index with lines.
-	create(ctx context.Context, lines []string) (indexVersion, error)
+	// update writes lines over cur, guarded by cur's resourceVersion, and
+	// with rebuilt sets AnnotationRebuilt in the same write; without, it
+	// leaves the annotation as cur had it.
+	update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error)
+	// create creates the index with lines, carrying AnnotationRebuilt only
+	// with rebuilt.
+	create(ctx context.Context, lines []string, rebuilt bool) (indexVersion, error)
 }
 
 // configMapStore is the index ConfigMap, through the dynamic client: get,
@@ -192,7 +197,7 @@ func newConfigMapStore(dyn dynamic.Interface, namespace, name string) configMapS
 // versionOf reads an index ConfigMap.
 func versionOf(u *unstructured.Unstructured) indexVersion {
 	data, _, _ := unstructured.NestedString(u.Object, "data", indexDataKey)
-	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u}
+	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u, rebuilt: u.GetAnnotations()[AnnotationRebuilt] == "true"}
 }
 
 func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
@@ -203,13 +208,21 @@ func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
 	return versionOf(u), nil
 }
 
-func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []string) (indexVersion, error) {
+func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
 	if cur.obj == nil {
 		return indexVersion{}, errors.New("credential-use: an index update needs the version it read")
 	}
 	u := cur.obj.DeepCopy()
 	if err := unstructured.SetNestedField(u.Object, encodeIndex(lines), "data", indexDataKey); err != nil {
 		return indexVersion{}, err
+	}
+	if rebuilt {
+		ann := u.GetAnnotations()
+		if ann == nil {
+			ann = map[string]string{}
+		}
+		ann[AnnotationRebuilt] = "true"
+		u.SetAnnotations(ann)
 	}
 	out, err := s.c.Update(ctx, u, metav1.UpdateOptions{})
 	if err != nil {
@@ -218,13 +231,16 @@ func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []st
 	return versionOf(out), nil
 }
 
-func (s configMapStore) create(ctx context.Context, lines []string) (indexVersion, error) {
+func (s configMapStore) create(ctx context.Context, lines []string, rebuilt bool) (indexVersion, error) {
 	u := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata":   map[string]any{"name": s.name, "namespace": s.namespace},
 		"data":       map[string]any{indexDataKey: encodeIndex(lines)},
 	}}
+	if rebuilt {
+		u.SetAnnotations(map[string]string{AnnotationRebuilt: "true"})
+	}
 	out, err := s.c.Create(ctx, u, metav1.CreateOptions{})
 	if err != nil {
 		return indexVersion{}, err
@@ -391,9 +407,15 @@ func policyParamsMissing(err error) bool {
 
 // add adds ids' lines to the index, merging with what it reads: it
 // re-reads and re-applies them on a conflict. An index that is gone is
-// created with them, and marked for the rebuild from the records
-// (§10.6.6). It fails with errIndexFull past the cap or the size.
-func (ix *index) add(ctx context.Context, ids []ID) error {
+// created with them, without AnnotationRebuilt, and marked for the rebuild
+// from the records (§10.6.6). It fails with errIndexFull past the cap or the
+// size.
+func (ix *index) add(ctx context.Context, ids []ID) error { return ix.merge(ctx, ids, false) }
+
+// merge is add; with rebuilt, it is a rebuild's last merge, and sets
+// AnnotationRebuilt in the same guarded write (§10.6.6), writing even when
+// no line is new.
+func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 	lines := linesOf(ids)
 	var last error
 	for range maxIndexWriteAttempts {
@@ -404,7 +426,7 @@ func (ix *index) add(ctx context.Context, ids []ID) error {
 			if err := ix.fits(lines, 0); err != nil {
 				return err
 			}
-			v, err := ix.store.create(ctx, lines)
+			v, err := ix.store.create(ctx, lines, rebuilt)
 			if Classify(err) == ClassAlreadyExists {
 				last = err
 				continue
@@ -413,13 +435,15 @@ func (ix *index) add(ctx context.Context, ids []ID) error {
 				return ix.writeErr("creating", err)
 			}
 			ix.saw(v)
-			ix.markLost()
+			if !rebuilt {
+				ix.markLost()
+			}
 			return nil
 		default:
 			return fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
 		}
 		next := union(cur.lines, lines)
-		if len(next) == len(cur.lines) {
+		if len(next) == len(cur.lines) && (!rebuilt || cur.rebuilt) {
 			ix.saw(cur)
 			return nil
 		}
@@ -427,7 +451,7 @@ func (ix *index) add(ctx context.Context, ids []ID) error {
 			ix.saw(cur)
 			return err
 		}
-		v, err := ix.store.update(ctx, cur, next)
+		v, err := ix.store.update(ctx, cur, next, rebuilt)
 		if Classify(err) == ClassConflict {
 			last = err
 			continue
@@ -471,7 +495,7 @@ func (ix *index) remove(ctx context.Context, lines []string) ([]string, error) {
 		// the new version before the write returns, never takes the drop
 		// for someone else's.
 		ix.notePruned(present, 1)
-		v, err := ix.store.update(ctx, cur, next)
+		v, err := ix.store.update(ctx, cur, next, false)
 		if err != nil {
 			ix.notePruned(present, -1)
 		}
@@ -724,8 +748,14 @@ func (ix *index) rebuild(ctx context.Context) error {
 			return fmt.Errorf("credential-use: reading %s to rebuild the index %s", id, ix.ref())
 		}
 	}
-	return ix.add(ctx, keep)
+	// The last merge, which sets the marker in the same write.
+	return ix.merge(ctx, keep, true)
 }
+
+// needsRebuild reports whether v, a version of the index read live, lacks
+// the marker of a completed rebuild (§10.6.6): Track and the startup recheck
+// rebuild it then.
+func (ix *index) needsRebuild(v indexVersion) bool { return !v.rebuilt }
 
 // lostTick runs the rebuild if one is due, and reports whether one ran
 // and failed.
@@ -913,28 +943,27 @@ func (t *Tracker) setupIndex(ctx context.Context) error {
 	if err := t.pointIndex(ctx); err != nil {
 		return err
 	}
-	_, err = ix.store.get(ctx)
+	cur, err := ix.store.get(ctx)
 	switch Classify(err) {
 	case ClassNone:
-		return nil
 	case ClassNotFound:
+		// Created without the marker: only the rebuild below sets it.
+		if _, err := ix.store.create(ctx, nil, false); err != nil && Classify(err) != ClassAlreadyExists {
+			return ix.writeErr("creating", err)
+		}
+		cur = indexVersion{}
 	default:
 		return fmt.Errorf("credential-use: %s: reading the index %s: %w", t.gk, ix.ref(), err)
 	}
-	created := false
-	if _, err := ix.store.create(ctx, nil); err == nil {
-		created = true
-	} else if Classify(err) != ClassAlreadyExists {
-		return ix.writeErr("creating", err)
+	if !ix.needsRebuild(cur) {
+		return nil
 	}
-	if !created {
-		return nil // another process created it, and rebuilds it
-	}
-	// A created index may lack the holds made before it: a kind moved from
-	// LabelScoped, or an index deleted while no process ran. A rebuild that
-	// fails here is left to the write loops, which retry it with backoff
-	// (§10.6.2, §10.6.6): a later start finds the index present and
-	// wouldn't rebuild it.
+	// An index without the marker may lack the holds made before it: a kind
+	// moved from LabelScoped, an index deleted while no process ran and
+	// recreated by an acquirer, or a process that died between creating it
+	// and rebuilding it (§10.6.6). A rebuild that fails here is left to the
+	// write loops, which retry it with backoff, and the next start finds the
+	// marker still absent.
 	if err := ix.rebuild(ctx); err != nil {
 		ix.markLost()
 		t.warn("credential-use: rebuilding the new index failed; the write loops retry it",
@@ -1149,7 +1178,8 @@ func (s *Shared) recheckIndex(ctx context.Context, t *Tracker) error {
 // caller retries: a skipped recheck can strand a hold.
 func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) error {
 	cur, err := ix.store.get(ctx)
-	if Classify(err) == ClassNotFound {
+	if Classify(err) == ClassNotFound || err == nil && ix.needsRebuild(cur) {
+		// Gone, or never rebuilt since its creation (§10.6.6).
 		if err := ix.rebuild(ctx); err != nil {
 			return err
 		}

@@ -38,6 +38,7 @@ type memStore struct {
 	beforeCreate func(s *memStore)
 	failGet      error
 	updates      int
+	rebuilt      bool
 }
 
 func (s *memStore) get(context.Context) (indexVersion, error) {
@@ -47,10 +48,10 @@ func (s *memStore) get(context.Context) (indexVersion, error) {
 	if !s.exists {
 		return indexVersion{}, apierrors.NewNotFound(configMapsGR, "cu-index")
 	}
-	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv)}, nil
+	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt}, nil
 }
 
-func (s *memStore) update(_ context.Context, cur indexVersion, lines []string) (indexVersion, error) {
+func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
 	if f := s.beforeUpdate; f != nil {
 		f(s)
 	}
@@ -61,19 +62,20 @@ func (s *memStore) update(_ context.Context, cur indexVersion, lines []string) (
 		return indexVersion{}, apierrors.NewConflict(configMapsGR, "cu-index", errors.New("modified"))
 	}
 	s.lines, s.rv = slices.Clone(lines), s.rv+1
+	s.rebuilt = s.rebuilt || rebuilt
 	s.updates++
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv)}, nil
+	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt}, nil
 }
 
-func (s *memStore) create(_ context.Context, lines []string) (indexVersion, error) {
+func (s *memStore) create(_ context.Context, lines []string, rebuilt bool) (indexVersion, error) {
 	if f := s.beforeCreate; f != nil {
 		f(s)
 	}
 	if s.exists {
 		return indexVersion{}, apierrors.NewAlreadyExists(configMapsGR, "cu-index")
 	}
-	s.exists, s.lines, s.rv = true, slices.Clone(lines), s.rv+1
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv)}, nil
+	s.exists, s.lines, s.rv, s.rebuilt = true, slices.Clone(lines), s.rv+1, rebuilt
+	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: rebuilt}, nil
 }
 
 // objServer serves Get from a map of objects, and fails the names in fail.
@@ -707,4 +709,45 @@ func TestAFullPostCheckIsRetriedByTheWriteLoops(t *testing.T) {
 	if !slices.Contains(st.lines, p.String()) || len(ix.pending) != 0 {
 		t.Errorf("after room was freed: lines %q, pending %v", st.lines, ix.pending)
 	}
+}
+
+// Only a completed rebuild sets the marker, in its last merge's write, even
+// when that merge adds no line; an add, a create by an add, and a rebuild
+// that fails leave it absent (§10.6.6).
+func TestTheRebuiltMarker(t *testing.T) {
+	m := apimodel.New(time.Now)
+	seed(m, "ns", "s", []string{"h"}, true)
+	srv := nsServer{modelServer{m: m}, "ns"}
+	st := &memStore{}
+	ix := testIndex(st, srv)
+	if err := ix.add(context.Background(), []ID{SecretRef("ns", "other").ID()}); err != nil || st.rebuilt {
+		t.Fatalf("a create by an add: %v, marker %v", err, st.rebuilt)
+	}
+	if err := ix.add(context.Background(), []ID{SecretRef("ns", "third").ID()}); err != nil || st.rebuilt {
+		t.Fatalf("a merge by an add: %v, marker %v", err, st.rebuilt)
+	}
+	failing := testIndex(st, failingGets{srv})
+	if err := failing.rebuild(context.Background()); err == nil || st.rebuilt {
+		t.Fatalf("a failed rebuild: %v, marker %v", err, st.rebuilt)
+	}
+	if err := ix.rebuild(context.Background()); err != nil || !st.rebuilt || !slices.Contains(st.lines, SecretRef("ns", "s").ID().String()) {
+		t.Fatalf("a rebuild: %v, marker %v, lines %q", err, st.rebuilt, st.lines)
+	}
+	// A rebuild with nothing new still writes the marker on an index
+	// without it.
+	st2 := &memStore{exists: true, lines: []string{SecretRef("ns", "s").ID().String()}}
+	if err := testIndex(st2, srv).rebuild(context.Background()); err != nil || !st2.rebuilt {
+		t.Errorf("a rebuild that adds no line: %v, marker %v", err, st2.rebuilt)
+	}
+	if !testIndex(st, srv).needsRebuild(indexVersion{}) || testIndex(st, srv).needsRebuild(indexVersion{rebuilt: true}) {
+		t.Error("needsRebuild doesn't follow the marker")
+	}
+}
+
+// failingGets fails every Get, as a rebuild meets an API server that can't
+// answer.
+type failingGets struct{ server }
+
+func (failingGets) Get(context.Context, schema.GroupKind, string, string) (*metav1.PartialObjectMetadata, error) {
+	return nil, apierrors.NewServiceUnavailable("down")
 }
