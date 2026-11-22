@@ -110,7 +110,7 @@ var sourceStartTimeout = 2 * time.Minute
 
 // credentialUseRecorderName names the events the core records (§12): the
 // reportingController of their events.k8s.io/v1 Events.
-const credentialUseRecorderName = "credential-use"
+const credentialUseRecorderName = "credential-use" // #nosec G101 -- an event recorder name, not a credential
 
 // credentialUse is a Reconciler's credential-use state.
 type credentialUse struct {
@@ -606,14 +606,13 @@ func (l writeLoopsRunnable) run(ctx context.Context, writeLoops func(context.Con
 			return err
 		case <-w.failed:
 			cancel()
-			<-errc
-			return w.failErr
+			// The write loops end with ctx; anything else they report joins.
+			return errors.Join(w.failErr, <-errc)
 		case now := <-tick.C:
 			if err := w.unstartedSource(elected, now); err != nil {
 				w.fail(err)
 				cancel()
-				<-errc
-				return err
+				return errors.Join(err, <-errc)
 			}
 		}
 	}
@@ -743,7 +742,7 @@ func (p *credentialUsePass) requeue(res reconcile.Result, err error) reconcile.R
 
 // errCredentialUseUnheld is the message of a pass that must not connect
 // without one from the core.
-const errCredentialUseUnheld = "credential-use: the object's credentials can't be held; not connecting"
+const errCredentialUseUnheld = "credential-use: the object's credentials can't be held; not connecting" // #nosec G101 -- an error message, not a credential
 
 // acquireCredentials is §8's step 5. It returns the pass's object, which an
 // A1 that a webhook changed has it re-read, the context Connect and the

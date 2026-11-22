@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	prv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
@@ -102,10 +103,14 @@ func TestStandaloneForget(t *testing.T) {
 			t.Cleanup(func() { removeFinalizers(t, cutest.WidgetGVR, ns, "w") })
 			established(t, w, ns, nn(ns, "creds"), "w")
 			// A third party strips the owner finalizer, and the external
-			// resource is gone, so the delete path needs no Delete.
-			wd := getWidget(t, w, ns, "w")
-			wd.Finalizers = []string{"test.krateo.io/keep"}
-			if err := w.kube.Update(context.Background(), wd); err != nil {
+			// resource is gone, so the delete path needs no Delete. Its
+			// Update races the reconciler's writes, so it reads afresh and
+			// tries again on a conflict, as a third party would.
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				wd := getWidget(t, w, ns, "w")
+				wd.Finalizers = []string{"test.krateo.io/keep"}
+				return w.kube.Update(context.Background(), wd)
+			}); err != nil {
 				t.Fatal(err)
 			}
 			w.mu.Lock()

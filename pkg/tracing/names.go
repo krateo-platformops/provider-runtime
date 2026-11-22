@@ -36,10 +36,10 @@ const (
 	// EventCredentialUseAcquire: one per credential-use Acquire in the pass
 	// (docs/design-credential-use-finalizer.md §8 step 5), with what it held
 	// and its outcome; never a ref's name or a Secret's data.
-	EventCredentialUseAcquire = "credentialuse.acquire"
+	EventCredentialUseAcquire = "credentialuse.acquire" // #nosec G101 -- a span event name, not a credential
 	// EventCredentialUseRelease is reserved: release runs in the
 	// credential-use write loops, outside any reconcile span.
-	EventCredentialUseRelease = "credentialuse.release"
+	EventCredentialUseRelease = "credentialuse.release" // #nosec G101 -- a span event name, not a credential
 )
 
 // The credentialuse.acquire event's attributes: the refs, chains followed,
@@ -106,7 +106,7 @@ const (
 	// StepCredentialUse is the credential-use record write (A1), a merge
 	// patch guarded by the object's resourceVersion
 	// (docs/design-credential-use-finalizer.md §6.2, §8 step 5).
-	StepCredentialUse Step = "credential_use"
+	StepCredentialUse Step = "credential_use" // #nosec G101 -- a tracing step name, not a credential
 )
 
 // Steps returns every Step, in the order above, as a new slice each call.

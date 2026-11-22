@@ -1116,9 +1116,9 @@ func TestTracingCredentialUseAcquireEvent(t *testing.T) {
 				got = map[string]string{}
 				for _, kv := range e.Attributes {
 					key := strings.TrimPrefix(string(kv.Key), "provider_runtime.credentialuse.")
-					got[key] = kv.Value.Emit()
-					if strings.Contains(kv.Value.Emit(), "creds") || strings.Contains(kv.Value.Emit(), "db") {
-						t.Errorf("attribute %s = %q names a ref", kv.Key, kv.Value.Emit())
+					got[key] = kv.Value.String()
+					if strings.Contains(kv.Value.String(), "creds") || strings.Contains(kv.Value.String(), "db") {
+						t.Errorf("attribute %s = %q names a ref", kv.Key, kv.Value.String())
 					}
 				}
 			}

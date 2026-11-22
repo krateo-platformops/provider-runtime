@@ -1063,7 +1063,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	// A holder being deleted that carries none of its owner finalizers has been finalized
 	// already: it isn't a user (§6.1), so there is nothing to protect, and a record it wrote
 	// would be ignored. Its pass skips Acquire (§8 step 5; the user's decision, 2026-11-22).
-	if r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {
+	if r.cu.active() && (!meta.WasDeleted(managed) || credentialuse.IsEstablished(managed, r.cu.owners)) {
 		var res reconcile.Result
 		var stop bool
 		managed, externalCtx, res, stop, err = r.acquireCredentials(ctx, externalCtx, log, managed, pass, cup, writeStatus)

@@ -42,7 +42,7 @@ ACQUIRE_BLOCK = """	// Credential-use's step 5 (design-credential-use-finalizer 
 	// A holder being deleted that carries none of its owner finalizers has been finalized
 	// already: it isn't a user (§6.1), so there is nothing to protect, and a record it wrote
 	// would be ignored. Its pass skips Acquire (§8 step 5; the user's decision, 2026-11-22).
-	if r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {
+	if r.cu.active() && (!meta.WasDeleted(managed) || credentialuse.IsEstablished(managed, r.cu.owners)) {
 		var res reconcile.Result
 		var stop bool
 		managed, externalCtx, res, stop, err = r.acquireCredentials(ctx, externalCtx, log, managed, pass, cup, writeStatus)
@@ -96,9 +96,9 @@ MUTANTS = [
        "\tif !r.cu.active() || !r.cu.tracker.Forget(mg) || true {")]),
     # §8 step 5: Acquire.
     ("no Acquire", RR,
-     [("\tif r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {", "\tif false && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {")]),
+     [("\tif r.cu.active() && (!meta.WasDeleted(managed) || credentialuse.IsEstablished(managed, r.cu.owners)) {", "\tif false && (!meta.WasDeleted(managed) || credentialuse.IsEstablished(managed, r.cu.owners)) {")]),
     ("a finalized deleting holder acquires", RR,
-     [("\tif r.cu.active() && !(meta.WasDeleted(managed) && !credentialuse.IsEstablished(managed, r.cu.owners)) {", "\tif r.cu.active() {")]),
+     [("\tif r.cu.active() && (!meta.WasDeleted(managed) || credentialuse.IsEstablished(managed, r.cu.owners)) {", "\tif r.cu.active() {")]),
     ("pristine taken before Acquire", RR,
      [(ACQUIRE_BLOCK, ""), (GATE, ACQUIRE_BLOCK + GATE)]),
     ("a record conflict isn't requeued", RC,
