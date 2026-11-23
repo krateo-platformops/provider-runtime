@@ -183,6 +183,41 @@ func TestDisownDrainsTwoProcesses(t *testing.T) {
 	})
 }
 
+// A disown-settled of "true", the form before the flag held the switch's
+// value, settles nothing (§7.4): with the switch off, it is gone once
+// something is held; with the switch on, and nothing held by the count beside
+// it, Disown counts, strips and runs as without it, and the flag becomes the
+// value.
+func TestDisownUnderAnOldTrue(t *testing.T) {
+	cutest.Require(t, env)
+	disowning(t)
+	ns := env.Namespace(t, "disown-old-true")
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	setWidgetCRDAnnotations(t, map[string]any{cu.AnnotationHeldCount: "0", cu.AnnotationDisownSettled: "true"})
+	r := newWriteRig(t, env.Config, cu.SharedOptions{}, disownOptions, nil)
+	r.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "s", "w")
+	if v := widgetCRDAnnotations(t)[cu.AnnotationDisownSettled]; v != "" {
+		t.Errorf("held, with disown-settled %q still there", v)
+	}
+	r.c.stop() // no pass runs under the switch: only Disown drops the ref
+	counts, since := watchHeldCount(t), time.Now()
+	setWidgetCRDAnnotations(t, map[string]any{cu.AnnotationDisown: "all", cu.AnnotationHeldCount: "0", cu.AnnotationDisownSettled: "true"})
+	if a := widgetCRDAnnotations(t); cu.DisownSettled(a) {
+		t.Errorf("settled under an old flag: %v", a)
+	}
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if got, min := time.Since(since), (disownPasses-1)*disownInterval-150*time.Millisecond; got < min {
+		t.Errorf("settled %s after the switch was set, want at least %s", got, min)
+	}
+	if seen := counts(); !slices.ContainsFunc(seen, func(v string) bool { return v != "0" && v != "" && v != "unknown" }) {
+		t.Errorf("held-count under the old flag: %v; want the hold counted", seen)
+	}
+	stripped(t, ns, "s")
+	unrecorded(t, ns, "w")
+}
+
 // Settling takes DisownPasses consecutive zero passes, and a finalizer put
 // back after it, as a late A2 would, resets it (§7.4, L4). The Secret is
 // outside the process's caches, so no informer event brings the release
