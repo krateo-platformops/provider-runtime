@@ -487,9 +487,15 @@ func TestJanitor(t *testing.T) {
 		eventually(t, "the rejection to be counted", func() bool {
 			return r.metrics.count("release_rejected "+kindLabel(widgetGK)) > 0
 		})
-		if !slices.ContainsFunc(r.takeEvents(), func(e string) bool { return strings.Contains(e, EventReleaseRejected) }) {
-			t.Error("no CredentialReleaseRejected event")
-		}
+		// The metric is counted before the event is recorded
+		// (coreReports.ReleaseRejected), so the event is waited for, not
+		// taken in one drain right after the metric, which missed it
+		// intermittently under -race.
+		var seen []string
+		eventually(t, "the CredentialReleaseRejected event", func() bool {
+			seen = append(seen, r.takeEvents()...)
+			return slices.ContainsFunc(seen, func(e string) bool { return strings.Contains(e, EventReleaseRejected) })
+		})
 	})
 }
 
@@ -844,7 +850,14 @@ func TestReleaseLoopRequeuesAtTheGracesEnd(t *testing.T) {
 		t.Fatalf("Acquire = %+v, %v", a, err)
 	}
 	f := mustFinalizer(widgetGK, "out")
-	eventually(t, "the batch to wait for the grace", func() bool { return r.queueTimers() == 1 })
+	// At least one timer: the write loops' recheck outside the caches
+	// (§10.5), which runs beside the release loop from its start, may
+	// enqueue the Secret's batch late, after the deletion, so that it runs
+	// once more and sets a second timer for the same grace's end. A
+	// duplicate requeue is harmless by design: R1 re-checks the grace
+	// (§10.2). Waiting for exactly one timer failed intermittently under
+	// -race, with two timers.
+	eventually(t, "the batch to wait for the grace", func() bool { return r.queueTimers() >= 1 })
 	if !hasFinalizer(r.secretMeta(t, "out", "s"), f) {
 		t.Fatal("released inside the grace")
 	}
