@@ -143,6 +143,28 @@ type protocol struct {
 	// just before its first A2 (the user's decisions, 2026-11-22). nil is
 	// never.
 	disownLive func(context.Context) (disownSet, error)
+
+	// lines keeps the index's lines for the PerName kinds (§10.6.2): the
+	// line before each A2, and the live check after it. Nil keeps none.
+	lines lineKeeper
+}
+
+// lineKeeper is what the acquirer asks of the index (§10.6.2).
+type lineKeeper interface {
+	// covers reports whether refs of kind gk have lines.
+	covers(gk schema.GroupKind) bool
+	// ensure adds id's line unless the index's view shows it: before A2,
+	// and on a pass that skips it, so that a finalizer is never written
+	// without its line having been written first.
+	ensure(ctx context.Context, id ID) error
+	// postCheck reads the index live after a successful A2, and adds id's
+	// line again if a concurrent prune removed it.
+	postCheck(ctx context.Context, id ID) error
+}
+
+// keepsLine reports whether refs of kind gk have index lines.
+func (p *protocol) keepsLine(gk schema.GroupKind) bool {
+	return p.lines != nil && p.lines.covers(gk)
 }
 
 // liveDisown returns a pass's live read of the switch: made once, before the
@@ -507,6 +529,13 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 					held = true
 				}
 			}
+			if held && p.keepsLine(id.GroupKind()) {
+				// A skip still checks the line (§10.6.2): one a prune lost
+				// while this process's write was the last comes back.
+				if err := p.lines.ensure(ctx, id); err != nil {
+					return fail(fmt.Errorf("credential-use: keeping the index line of %s: %w", id, err), "Index")
+				}
+			}
 			if !held && cross[id] && !liveOK[id] {
 				// The gate read consent from the cache, and the skip didn't
 				// hold: every A2 of a cross-namespace ref follows a live
@@ -550,8 +579,18 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 					next = append(next, more...)
 					continue
 				}
-				switch class, err := p.write(ctx, id, namespace); class {
+				if p.keepsLine(id.GroupKind()) {
+					// The line before A2 (§10.6.2): an add that fails, as on
+					// a full index, stops before A2.
+					if err := p.lines.ensure(ctx, id); err != nil {
+						return fail(fmt.Errorf("credential-use: adding the index line of %s: %w", id, err), "Index")
+					}
+				}
+				switch class, uid, err := p.write(ctx, id, namespace); class {
 				case ClassNone:
+					if err := p.checkLine(ctx, id, uid, namespace); err != nil {
+						return fail(err, "Index")
+					}
 					a.Held = append(a.Held, r)
 					held = true
 					if cross[id] && p.enqueueBatch != nil {
@@ -729,54 +768,72 @@ func (p *protocol) announce(ctx context.Context, obj metav1.Object, want []ID, u
 	return added, nil
 }
 
-// write is A2 for one ref: it returns ClassNone when P now carries the
-// finalizer and a fresh epoch, and otherwise the class of the failure:
-// ClassNotFound (Missing), ClassDeleting, or anything else (Degraded, or fail
-// closed). A successful write is recorded in written, keyed by the
-// incarnation the response names, at the time the request was issued.
-func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, error) {
+// write is A2 for one ref: it returns ClassNone, with the incarnation it
+// wrote, when P now carries the finalizer and a fresh epoch, and otherwise
+// the class of the failure: ClassNotFound (Missing), ClassDeleting, or
+// anything else (Degraded, or fail closed). A successful write is recorded
+// in written, keyed by the incarnation the response names, at the time the
+// request was issued.
+func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, types.UID, error) {
 	epoch, err := p.newEpoch()
 	if err != nil {
-		return ClassOther, err
+		return ClassOther, "", err
 	}
 	gk := id.GroupKind()
 	if isBuiltin(gk) {
 		pt, err := AcquireStrategicPatch(p.holder, namespace, epoch)
 		if err != nil {
-			return ClassOther, err
+			return ClassOther, "", err
 		}
 		issued := p.clock.Now()
 		out, err := p.srv.Patch(ctx, gk, id.Namespace, id.Name, pt.Type, pt.Data)
 		if err != nil {
-			return Classify(err), err
+			return Classify(err), "", err
 		}
 		p.ver.wrote(out.UID, namespace, issued)
 		p.wroteDeleting(id, namespace, out)
-		return ClassNone, nil
+		return ClassNone, out.UID, nil
 	}
 	var last error
 	for range maxGuardedAttempts {
 		current, err := p.srv.Get(ctx, gk, id.Namespace, id.Name)
 		if err != nil {
-			return Classify(err), err
+			return Classify(err), "", err
 		}
 		pt, err := AcquireGuardedPatch(current, p.holder, namespace, epoch)
 		if err != nil {
-			return ClassOther, err
+			return ClassOther, "", err
 		}
 		issued := p.clock.Now()
 		out, err := p.srv.Patch(ctx, gk, id.Namespace, id.Name, pt.Type, pt.Data)
 		if err == nil {
 			p.ver.wrote(out.UID, namespace, issued)
 			p.wroteDeleting(id, namespace, out)
-			return ClassNone, nil
+			return ClassNone, out.UID, nil
 		}
 		if c := Classify(err); c != ClassConflict {
-			return c, err
+			return c, "", err
 		}
 		last = err
 	}
-	return ClassOther, fmt.Errorf("credential-use: %d conflicting writes in a row: %w", maxGuardedAttempts, last)
+	return ClassOther, "", fmt.Errorf("credential-use: %d conflicting writes in a row: %w", maxGuardedAttempts, last)
+}
+
+// checkLine is the acquirer's live check of id's index line after a
+// successful A2 for holder namespace n (§10.6.2). When it fails, whether the
+// line survived a concurrent prune is unknown, so the A2's written entry
+// goes: the holder's next pass writes A2 again, and checks again, rather
+// than skipping.
+func (p *protocol) checkLine(ctx context.Context, id ID, uid types.UID, n string) error {
+	if !p.keepsLine(id.GroupKind()) {
+		return nil
+	}
+	err := p.lines.postCheck(ctx, id)
+	if err == nil {
+		return nil
+	}
+	p.ver.released(uid, n)
+	return fmt.Errorf("credential-use: checking the index line of %s after holding it: %w", id, err)
 }
 
 // wroteDeleting tells heldDeleting of an A2 response that shows its object
@@ -826,8 +883,17 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 		case d:
 			continue
 		}
-		if class, err := p.write(ctx, id, obj.GetNamespace()); class != ClassNone {
+		if p.keepsLine(id.GroupKind()) {
+			if err := p.lines.ensure(ctx, id); err != nil {
+				return fmt.Errorf("credential-use: adding the index line of %s before establishing: %w", id, err)
+			}
+		}
+		class, uid, err := p.write(ctx, id, obj.GetNamespace())
+		if class != ClassNone {
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)
+		}
+		if err := p.checkLine(ctx, id, uid, obj.GetNamespace()); err != nil {
+			return err
 		}
 		if cross && p.enqueueBatch != nil {
 			p.enqueueBatch(id, obj.GetNamespace()) // §11.3 rule 3, as after any A2

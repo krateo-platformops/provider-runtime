@@ -42,8 +42,8 @@ type Tracker struct {
 	// heldMu guards the gauges' counts, by protected informer: held
 	// (object, finalizer) pairs, and waiting objects (§12).
 	heldMu    sync.Mutex
-	heldBy    map[protKey]int
-	waitingBy map[protKey]int
+	heldBy    map[countKey]int
+	waitingBy map[countKey]int
 	// waitingUncached are the objects outside the caches that the release
 	// loop last found kept for t's users (§10.5, keptUncached).
 	waitingUncached map[ID]bool
@@ -62,6 +62,9 @@ type Tracker struct {
 	// with an empty ref: §8 logs it once per object, until a pass that
 	// isn't degraded, or Forget, clears it.
 	degradedLogged *reportedSet
+	// misplaced are the holders in the index namespace whose refusal was
+	// logged, once each (§10.6.1).
+	misplaced *reportedSet
 
 	// sinkMu guards sink. Every call to a sink holds it for reading, so
 	// that rebind, which holds it for writing, returns only once no call to
@@ -76,6 +79,12 @@ type Tracker struct {
 	crd     cache.SharedIndexInformer
 	crdName string
 	disown  disownState
+
+	// idx is the kind's index, for its PerName kinds (§10.6), or nil
+	// without any; names are the per-name watches that follow its lines
+	// (§13 shape 1).
+	idx   *index
+	names *perNames
 }
 
 // sinks are where a tracker's events go: the kind's queue, its logger and
@@ -160,6 +169,12 @@ func (m sinkMetrics) AdmissionDenied(k string) {
 func (m sinkMetrics) ReleaseRejected(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.ReleaseRejected(k) })
 }
+func (m sinkMetrics) DisownUnreadable(k string, n int) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.DisownUnreadable(k, n) })
+}
+func (m sinkMetrics) IndexReadDenied(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.IndexReadDenied(k) })
+}
 func (m sinkMetrics) CRDWriteStarved(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.CRDWriteStarved(k) })
 }
@@ -177,12 +192,13 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	t := &Tracker{
 		s: s, o: o, gk: gk, gvr: m.Resource, prefix: prefix, ver: newVerified(gk),
 		regs:       map[*protectedInformer]cache.ResourceEventHandlerRegistration{},
-		heldBy:     map[protKey]int{},
-		waitingBy:  map[protKey]int{},
+		heldBy:     map[countKey]int{},
+		waitingBy:  map[countKey]int{},
 		missing:    newMissingRefs(),
 		unrecorded: newReportedSet(),
 
 		degradedLogged: newReportedSet(),
+		misplaced:      newReportedSet(),
 		sink:           sinksOf(o),
 	}
 	t.proto = &protocol{
@@ -217,6 +233,13 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		if pk.Content {
 			t.proto.contentKinds[pk.GVK.GroupKind()] = true
 		}
+	}
+	t.names = newPerNames(t)
+	if err := t.names.mapKinds(s.c.Mapper, o.Protected); err != nil {
+		return nil, err
+	}
+	if err := t.newTrackerIndex(); err != nil {
+		return nil, err
 	}
 	// The holder informer's list or relist completion is a floor under
 	// every observation of the record (§6.5 L2).
@@ -305,14 +328,34 @@ func (t *Tracker) stopInformers() {
 // that still carries one is waiting for the kind's users, or for the grace.
 // Counting from the caches keeps the gauge right on every replica, not only
 // on the one whose write loops run.
-func (t *Tracker) setCounts(pk protKey, held, waiting int) {
+//
+// w is the per-name watch the counts come from, or nil: a watch that has
+// stopped counts no more.
+func (t *Tracker) setCounts(k countKey, held, waiting int, w *nameWatch) {
 	t.heldMu.Lock()
 	defer t.heldMu.Unlock()
-	if t.gone {
+	if t.gone || w != nil && w.dead {
 		return
 	}
-	t.heldBy[pk], t.waitingBy[pk] = held, waiting
+	t.heldBy[k], t.waitingBy[k] = held, waiting
 	t.reportHeldLocked()
+}
+
+// dropCounts takes a stopped per-name watch's counts off the gauges: its
+// handler gets no deletion for what it counted.
+func (t *Tracker) dropCounts(w *nameWatch) {
+	t.heldMu.Lock()
+	defer t.heldMu.Unlock()
+	w.dead = true
+	k := w.p.countKey()
+	if _, ok := t.heldBy[k]; !ok {
+		return
+	}
+	delete(t.heldBy, k)
+	delete(t.waitingBy, k)
+	if !t.gone {
+		t.reportHeldLocked()
+	}
 }
 
 // reportHeld reports the held gauge again, as after a rebind.
@@ -356,18 +399,32 @@ func (t *Tracker) dropHeld() {
 // Acquired: MustNotConnect for a holder that isn't established, Degraded for
 // one that is.
 func (t *Tracker) Acquire(ctx context.Context, obj metav1.Object) (Acquired, error) {
-	refs, err := t.o.Refs(obj)
-	if err != nil {
+	failed := func(err error, reason string) (Acquired, error) {
 		var a Acquired
-		a.Err = fmt.Errorf("credential-use: naming the refs of %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
+		a.Err = err
 		if IsEstablished(obj, t.o.OwnerFinalizers) {
 			a.Degraded = true
-			t.proto.reports.Degraded(t.gk, "Refs")
+			t.proto.reports.Degraded(t.gk, reason)
 		} else {
 			a.MustNotConnect = true
 		}
 		t.reportOutcome(obj, a)
 		return a, nil
+	}
+	if t.idx != nil && obj.GetNamespace() != "" && obj.GetNamespace() == t.idx.namespace {
+		// The index must outlive every holder, so a holder in its namespace
+		// gets no hold: the start check's backstop, which the namespace's
+		// admission policy makes unreachable (§10.6.1).
+		if t.misplaced.first(consentKey{holder: obj.GetUID()}) {
+			t.warn("credential-use: a holder lives in the index namespace, so it gets no hold: move it, or the index (§10.6.1)",
+				"holder", obj.GetNamespace()+"/"+obj.GetName(), "kind", t.gk.String(), "index", t.idx.ref())
+		}
+		return failed(fmt.Errorf("credential-use: %s/%s lives in the index namespace %s, where no holder may live (§10.6.1)",
+			obj.GetNamespace(), obj.GetName(), t.idx.namespace), "IndexNamespace")
+	}
+	refs, err := t.o.Refs(obj)
+	if err != nil {
+		return failed(fmt.Errorf("credential-use: naming the refs of %s/%s: %w", obj.GetNamespace(), obj.GetName(), err), "Refs")
 	}
 	a, err := t.proto.acquire(ctx, obj, refs)
 	if err != nil {
@@ -398,7 +455,7 @@ func (t *Tracker) noteMissing(obj metav1.Object, a Acquired) {
 // R1 then measures the grace from this first sight. Inside them, the
 // informer does it.
 func (t *Tracker) heldDeleting(id ID, namespace string) {
-	if !t.s.cached(id) {
+	if !t.cachedID(id) {
 		t.s.queue.Add(batchKey{t.gk, namespace}, id)
 	}
 }

@@ -35,6 +35,14 @@ type MetricsRecorder interface {
 	ReleaseRejected(holderKind string)
 	// CRDWriteStarved counts credentialuse_crd_write_starved_total (§7.3).
 	CRDWriteStarved(holderKind string)
+	// DisownUnreadable sets credentialuse_disown_unreadable: the objects in
+	// the index or a record that Disown's last pass couldn't read, which
+	// keep its count "unknown" (§7.4).
+	DisownUnreadable(holderKind string, n int)
+	// IndexReadDenied counts credentialuse_index_read_denied_total: objects
+	// the index names that a check couldn't read for a 403, once each; their
+	// lines are kept (§10.6.5).
+	IndexReadDenied(holderKind string)
 }
 
 // NopMetrics records nothing.
@@ -54,3 +62,5 @@ func (NopMetrics) UnrecordedReads(string)         {}
 func (NopMetrics) AdmissionDenied(string)         {}
 func (NopMetrics) ReleaseRejected(string)         {}
 func (NopMetrics) CRDWriteStarved(string)         {}
+func (NopMetrics) DisownUnreadable(string, int)   {}
+func (NopMetrics) IndexReadDenied(string)         {}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/cache"
@@ -44,8 +46,7 @@ type Clients struct {
 	Events events.EventRecorder
 }
 
-// SharedOptions configure the process-wide state. A later part of the build
-// adds the index (§10.6).
+// SharedOptions configure the process-wide state.
 type SharedOptions struct {
 	// Listers read Guaranteed refs from the caller's cache, by kind (§9.3).
 	// A Guaranteed ref of a kind without one is read live.
@@ -56,7 +57,21 @@ type SharedOptions struct {
 	// holder that reads it (see Tracker.Acquire). The holder informers and
 	// the Namespace informer stay cluster-wide: the release batches start
 	// from holder events, and §5's namespace rows read every namespace.
+	// A PerName kind's per-name watches cover every namespace, so it
+	// doesn't restrict them.
 	Namespaces []string
+	// IndexNamespace is where the holder kinds with PerName kinds keep their
+	// index ConfigMaps (§10.6.1). Required with PerName. It must outlive
+	// every holder, so it must be a namespace no holder lives in: the
+	// recommended one is a dedicated namespace that admission keeps holders
+	// out of, krateo-credential-use, which installer ships. Track refuses a
+	// namespace that doesn't exist or that holds holders of the kind.
+	IndexNamespace string
+	// IndexMaxLines caps each index, in lines; the default is
+	// DefaultIndexMaxLines, and Track refuses one above
+	// IndexMaxLinesCeiling (§10.6.4). Every write also checks a ConfigMap's
+	// 1 MiB.
+	IndexMaxLines int
 }
 
 // A WatchMode is how a protected kind's holds are found (§10).
@@ -65,9 +80,12 @@ type WatchMode int
 const (
 	// LabelScoped: a label-scoped informer on the held label (§10.1).
 	LabelScoped WatchMode = iota
-	// PerName: the index ConfigMap (§10.6), for resourceNames RBAC.
+	// PerName: the index ConfigMap (§10.6), for resourceNames RBAC: one
+	// field-selected watch per object the index names, and GETs (§13 shape
+	// 1). It needs SharedOptions.IndexNamespace.
 	PerName
-	// PerNamePoll: the index, polled (§10.7).
+	// PerNamePoll: the index, polled (§10.7). Not supported yet: Track
+	// refuses it.
 	PerNamePoll
 )
 
@@ -190,7 +208,10 @@ type Shared struct {
 	trackers  map[schema.GroupKind]*Tracker
 	tracking  map[schema.GroupKind]*inflight
 	protected map[protKey]*protectedInformer
-	setupErr  error
+	// modes are the watch modes the trackers of each protected kind share
+	// (claimModesLocked).
+	modes    map[schema.GroupKind]*modeClaim
+	setupErr error
 	// informerCtx is RunInformers' context once it runs, for Track after
 	// start; nil before.
 	informerCtx context.Context
@@ -229,8 +250,10 @@ type hooks struct {
 	// beforeListRecorded runs when a holder informer's list or relist has
 	// completed, just before the completion is recorded.
 	beforeListRecorded func(t *Tracker)
-	// wrapServer wraps the server every tracker and the janitor use.
+	// wrapServer wraps the server every tracker and the janitor use;
+	// wrapIndex, every tracker's index store.
 	wrapServer func(server) server
+	wrapIndex  func(indexStore) indexStore
 }
 
 // NewShared builds the process-wide state. It creates the batch queue before
@@ -265,6 +288,7 @@ func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 		tracking:    map[schema.GroupKind]*inflight{},
 		runDone:     make(chan struct{}),
 		protected:   map[protKey]*protectedInformer{},
+		modes:       map[schema.GroupKind]*modeClaim{},
 	}
 	s.syncTimeout.Store(int64(2 * time.Minute))
 	if c.Metadata != nil {
@@ -295,12 +319,6 @@ func (s *Shared) protectedFor(id ID) *protectedInformer {
 		return p
 	}
 	return s.protected[protKey{id.GroupKind(), ""}]
-}
-
-// cached reports whether id's namespace is covered by a protected cache,
-// whether or not any tracker protects its kind yet.
-func (s *Shared) cached(id ID) bool {
-	return s.namespaceCached(id.Namespace)
 }
 
 // newServer is the server the protocol and the janitor call the API
@@ -391,6 +409,12 @@ func (s *Shared) RunInformers(ctx context.Context) error {
 	var infs []informer
 	for _, t := range s.trackers {
 		infs = append(infs, t.informer(), t.crdInformer())
+		if t.idx != nil {
+			// The per-name watches start as the index informer delivers
+			// its lines, under this context.
+			t.names.start(ctx)
+			infs = append(infs, t.indexInformer())
+		}
 	}
 	for _, p := range s.protected {
 		p.runOwned = true
@@ -783,12 +807,20 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	if err != nil {
 		return nil, setupFailed(err)
 	}
+	if t.idx != nil {
+		if err := t.setupIndex(ctx); err != nil {
+			return nil, setupFailed(err)
+		}
+	}
 	t.uncached = s.computeUncachedKinds(t)
 	// Build the protected informers that may be missing before taking mu:
 	// the mapper may call the API server.
 	var keys []protKey
 	built := map[protKey]*protectedInformer{}
 	for _, pk := range o.Protected {
+		if pk.Watch == PerName {
+			continue // per-name watches, which follow the index (§13 shape 1)
+		}
 		ps, err := s.newProtectedInformers(pk)
 		if err != nil {
 			return nil, setupFailed(err)
@@ -803,6 +835,10 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	// informer stays while any Track or tracker claims it.
 	s.mu.Lock()
 	mine.t = t
+	if err := s.claimModesLocked(o); err != nil {
+		s.mu.Unlock()
+		return nil, setupFailed(err)
+	}
 	var ps []*protectedInformer
 	for _, k := range keys {
 		p := s.protected[k]
@@ -814,6 +850,7 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 			// One informer caches a kind for every tracker, so they must
 			// agree on whether it keeps content (§10.4).
 			s.releaseLocked(ps)
+			s.releaseModesLocked(o)
 			s.mu.Unlock()
 			return nil, setupFailed(fmt.Errorf("credential-use: %s: protected kind %s has Content %v, but another holder kind tracks it with Content %v",
 				gk, k.gk, built[k].content, p.content))
@@ -829,6 +866,7 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 			if err := t.join(p); err != nil {
 				t.leaveAll()
 				s.releaseLocked(ps)
+				s.releaseModesLocked(o)
 				s.mu.Unlock()
 				return nil, setupFailed(err)
 			}
@@ -846,8 +884,12 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 		// informer nobody claims any more goes.
 		t.stopInformers()
 		t.leaveAll()
+		if t.idx != nil {
+			t.names.stopAll()
+		}
 		s.mu.Lock()
 		stops := s.releaseLocked(ps)
+		s.releaseModesLocked(o)
 		s.mu.Unlock()
 		for _, stop := range stops {
 			stop()
@@ -905,6 +947,15 @@ func (s *Shared) startTracker(ctx, ictx context.Context, t *Tracker, ps []*prote
 	}
 	if err := s.startAndSync(hctx, ctx, t.crd, t.crdInformer().what); err != nil {
 		return err
+	}
+	if t.idx != nil {
+		if err := t.indexInformer().preflight(ctx, s); err != nil {
+			return err
+		}
+		t.names.start(hctx)
+		if err := s.startAndSync(hctx, ctx, t.idx.inf, t.indexInformer().what); err != nil {
+			return err
+		}
 	}
 	for _, p := range ps {
 		if err := p.ensureStarted(ctx, ictx, s); err != nil {
@@ -1007,8 +1058,9 @@ func (s *Shared) waitShared(ctx context.Context, p *protectedInformer) error {
 	}
 }
 
-// validate checks o as §7.3 says, except for the PerName items, which come
-// with that mode, and fills in the defaults.
+// validate checks o as §7.3 says, before any API call, and fills in the
+// defaults. Track checks the rest of the PerName items against the API
+// server (setupIndex).
 func (s *Shared) validate(o Options) (Options, error) {
 	gk := o.Holder.GroupKind()
 	if _, err := FinalizerPrefix(gk); err != nil {
@@ -1068,9 +1120,16 @@ func (s *Shared) validate(o Options) (Options, error) {
 			return o, fmt.Errorf("credential-use: %s: protected kind %s is listed twice", gk, pk.GVK.GroupKind())
 		}
 		kinds[pk.GVK.GroupKind()] = true
-		switch {
-		case pk.Watch != LabelScoped:
-			return o, fmt.Errorf("credential-use: %s: protected kind %s: only LabelScoped is supported so far", gk, pk.GVK)
+		switch pk.Watch {
+		case LabelScoped:
+		case PerName:
+			if err := s.validateIndex(gk); err != nil {
+				return o, err
+			}
+		case PerNamePoll:
+			return o, fmt.Errorf("credential-use: %s: protected kind %s: PerNamePoll isn't supported yet", gk, pk.GVK)
+		default:
+			return o, fmt.Errorf("credential-use: %s: protected kind %s: unknown watch mode %d", gk, pk.GVK, pk.Watch)
 		}
 		if _, err := s.c.Mapper.RESTMapping(pk.GVK.GroupKind(), pk.GVK.Version); err != nil {
 			return o, fmt.Errorf("credential-use: %s: the protected kind %s can't be mapped: %w", gk, pk.GVK, err)
@@ -1083,6 +1142,22 @@ func (s *Shared) validate(o Options) (Options, error) {
 		o.Metrics = NopMetrics{}
 	}
 	return o, nil
+}
+
+// validateIndex checks the SharedOptions a PerName kind of holder kind gk
+// needs (§7.3): an IndexNamespace, a cap within the ceiling, and a valid
+// index name.
+func (s *Shared) validateIndex(gk schema.GroupKind) error {
+	if s.o.IndexNamespace == "" {
+		return fmt.Errorf("credential-use: %s: PerName needs SharedOptions.IndexNamespace (§10.6.1)", gk)
+	}
+	if errs := validation.IsDNS1123Label(s.o.IndexNamespace); len(errs) > 0 {
+		return fmt.Errorf("credential-use: %s: SharedOptions.IndexNamespace %q is not a namespace name: %s", gk, s.o.IndexNamespace, strings.Join(errs, "; "))
+	}
+	if s.o.IndexMaxLines < 0 || s.o.IndexMaxLines > IndexMaxLinesCeiling {
+		return fmt.Errorf("credential-use: %s: SharedOptions.IndexMaxLines %d is outside 0 to %d, the ceiling (§10.6.4)", gk, s.o.IndexMaxLines, IndexMaxLinesCeiling)
+	}
+	return validIndexName(gk)
 }
 
 // defaultDisownInterval is an unset DisownInterval: DefaultDisownInterval,
@@ -1176,8 +1251,20 @@ func (s *Shared) newProtectedInformers(pk ProtectedKind) ([]*protectedInformer, 
 
 func (p *protectedInformer) key() protKey { return protKey{p.gk, p.ns} }
 
+// A countKey names one informer's share of a tracker's gauges: a protected
+// informer, and the one object it watches if it is a per-name one.
+type countKey struct {
+	protKey
+	name string
+}
+
+func (p *protectedInformer) countKey() countKey { return countKey{p.key(), p.name} }
+
 // what names p in messages.
 func (p *protectedInformer) what() string {
+	if p.name != "" {
+		return "the per-name informer of " + p.gk.String() + " " + nsName(p.ns, p.name)
+	}
 	if p.ns == "" {
 		return "the protected informer of " + p.gk.String()
 	}

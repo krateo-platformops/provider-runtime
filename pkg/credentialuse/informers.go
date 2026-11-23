@@ -247,6 +247,7 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.proto.written.forget(m.UID)
 	h.t.unrecorded.forget(m.UID)
 	h.t.degradedLogged.forget(m.UID)
+	h.t.misplaced.forget(m.UID)
 	h.enqueue(m, nil)
 	// A holder that is gone waits for no Missing ref (§10.3).
 	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)
@@ -273,9 +274,12 @@ func heldSelector() string { return LabelHeld + "=true" }
 // every tracker that may hold that kind. Each such tracker has its own
 // handler on it (protectedHandler).
 type protectedInformer struct {
-	gk  schema.GroupKind
-	ns  string // the namespace it is restricted to (§10.5), or ""
-	gvr schema.GroupVersionResource
+	gk schema.GroupKind
+	ns string // the namespace it is restricted to (§10.5), or ""
+	// name is the one object a per-name informer watches (§13 shape 1), or
+	// "" for a label-scoped one.
+	name string
+	gvr  schema.GroupVersionResource
 	// content: it caches whole objects, without managedFields and status,
 	// through the dynamic client (§10.4); otherwise metadata only.
 	content bool
@@ -389,6 +393,9 @@ type protectedHandler struct {
 
 	held    int // t's (object, finalizer) pairs in p's cache
 	waiting int // p's cached objects being deleted that carry one of t's finalizers
+	// w is the per-name watch p is, or nil for a label-scoped informer: once
+	// it stops, its counts leave the gauges.
+	w *nameWatch
 }
 
 func (h *protectedHandler) id(m *metav1.PartialObjectMetadata) ID {
@@ -408,7 +415,7 @@ func (h *protectedHandler) count(d, w int) {
 	}
 	h.held += d
 	h.waiting += w
-	h.t.setCounts(h.p.key(), h.held, h.waiting)
+	h.t.setCounts(h.p.countKey(), h.held, h.waiting, h.w)
 }
 
 // waits reports whether m counts as waiting for t's users: it is being
@@ -585,7 +592,7 @@ func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 		// namespace's objects (§10.5).
 		h.s.uncachedDeleting(n.Name)
 	}
-	for _, p := range h.s.protectedInformers() {
+	for _, p := range h.s.allProtected() {
 		for _, m := range p.inNamespace(n.Name) {
 			id := ID{Group: p.gk.Group, Kind: p.gk.Kind, Namespace: m.Namespace, Name: m.Name}
 			for _, t := range p.snapshot() {
@@ -602,6 +609,16 @@ func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 
 // --- the views the protocol reads (§6.4) ---
 
+// protectedFor returns the informer whose cache covers id for t: its
+// per-name watch of id for a PerName kind (§13 shape 1), or the shared
+// label-scoped one; nil when none does.
+func (t *Tracker) protectedFor(id ID) *protectedInformer {
+	if t.isPerName(id.GroupKind()) {
+		return t.names.get(id)
+	}
+	return t.s.protectedFor(id)
+}
+
 // trackerViews are tracker t's views over the shared caches.
 type trackerViews struct{ t *Tracker }
 
@@ -609,7 +626,7 @@ var _ views = trackerViews{}
 
 // Content returns content kind id's cached object (§10.4).
 func (v trackerViews) Content(id ID) (*unstructured.Unstructured, bool) {
-	p := v.t.s.protectedFor(id)
+	p := v.t.protectedFor(id)
 	if p == nil || !p.inf.HasSynced() {
 		return nil, false
 	}
@@ -634,7 +651,7 @@ func (v trackerViews) NamespaceConsent(namespace string) (string, bool) {
 }
 
 func (v trackerViews) Protected(id ID) (*metav1.PartialObjectMetadata, bool) {
-	p := v.t.s.protectedFor(id)
+	p := v.t.protectedFor(id)
 	if p == nil || !p.inf.HasSynced() {
 		return nil, false
 	}

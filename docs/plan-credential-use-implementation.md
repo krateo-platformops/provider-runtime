@@ -1013,6 +1013,170 @@ pruned.
 **Depends on:** PR 7, so the adapter exposes the mode. In the core it needs
 only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
 
+**What the build settled** (2026-11-22), where §10.6 and §13 left room:
+
+- **One rule for every prune** (§10.6.2, A14). A line goes only when its
+  object, read live, carries no finalizer of the kind or is gone, and no
+  holder's record names it. That covers the release batch, the startup
+  recheck and the post-check re-adds. Records are read from the synced
+  holder cache, which a stale cache only keeps a line longer, and an
+  unparseable record keeps every line. Each prune live-GETs every object
+  it removed and adds back any that carries the kind's prefix, or can't be
+  read. A re-add that fails is queued for the write loops, which retry it
+  with backoff until it lands.
+- **What fails is retried by the write loops** (the review of the PR 8
+  build): a re-add after a prune, an acquirer's post-check that can't read
+  the index or can't add the line, as on a full index, and a rebuild that
+  fails right after `Track` created the index. Each is queued, and the
+  write loops retry it with backoff until it lands. A rebuild that fails
+  in `Track` is queued for the write loops as before, though the marker's
+  absence makes the startup recheck rebuild it too: the queuing is kept as
+  an earlier start of the retry (the review of the marker, 2026-11-23).
+- **A durable marker, `credential-use.krateo.io/rebuilt`, on the index**
+  (the user's decision, 2026-11-22). Only a completed rebuild sets it, in
+  the same guarded write as its last merge, which writes even when it adds
+  no line. Every other create, an acquirer's or `Track`'s, leaves it
+  absent. `Track` and the startup recheck rebuild, by merging, an index
+  without it, so a process that dies between creating the index and
+  rebuilding it, or an index an acquirer recreated while no write loops
+  ran, leaves no earlier hold without its line past the next start.
+- **An object the rebuild can't read keeps its line** (the review of the
+  marker, 2026-11-22). A Secret outside a `resourceNames` grant, or one whose
+  grant was revoked after its hold, may carry the kind's finalizer, and the
+  index is a superset (§10.6.3). So the rebuild keeps its line, still
+  completes and sets the marker, and logs each such object once. A 403 is
+  never read as "can't carry". The startup recheck goes on through every
+  line past one it can't read, and the write loops' recheck runs every part,
+  each tracker's index and §10.5's lists outside the caches, whatever fails
+  first. Their errors are joined and retried with backoff.
+- **Unreadable objects are named, and a 403 isn't retried** (the user's
+  decision, 2026-11-22). An object in the index or a record that Disown
+  can't read keeps its count `unknown`. The Warning event
+  `CredentialUseDisownUnreadable` on the CRD names each such object and why,
+  and the sink throttles it while the set is the same. Disown also logs, and
+  sets the gauge `credentialuse_disown_unreadable`. The remedy, for PR 11's
+  runbook: grant `get`, or confirm by hand that the object carries no
+  finalizer of the kind and add it to the index's vouched annotation, then
+  optionally remove its line. A 403 in the startup recheck,
+  or in the write loops' live checks, is logged and counted once per object
+  (`credentialuse_index_read_denied_total`) and isn't returned as an error,
+  since no retry helps before RBAC changes. That holds only for the
+  authorizer's 403, recognised by its message as class (d) of §6.2; an
+  admission or a policy 403 is an ordinary failure, and retried. The line is kept, and a live
+  check puts it back, so nothing is stranded. Other errors still retry with
+  backoff.
+- **An operator vouches for an unreadable object** (the user's decision,
+  2026-11-22, in place of honouring a hand removal). The index's
+  `credential-use.krateo.io/vouched` annotation lists objects, written
+  `ns/Kind[.group]/name`, that an operator checked by hand to carry no
+  finalizer of the kind. Its entries are trimmed, and a malformed one is
+  ignored with a warning once per value. While a vouched object can't be
+  read:
+  - Disown's count and strip skip it;
+  - the startup recheck reads it, and skips it while the read fails,
+    neither reporting nor retrying it (from the review of the vouch: a
+    vouched object that became readable and held must get its batch);
+  - the tamper check doesn't restore its dropped line;
+  - a prune may remove its line;
+  - a rebuild doesn't add it.
+
+  Once readable and carrying the prefix, it is treated normally, and the
+  wrong vouch is logged. Every other unreadable line keeps the superset's
+  rule. The process never writes the annotation, and its writes keep it,
+  as they keep the rebuilt marker. Disown's event names the vouch as the
+  remedy.
+- **The release batch reports `Bare`**: the objects R1 read, or R3's
+  response showed, without a finalizer of the kind, or gone. The prune runs
+  after R3, in one write per batch. A prune that fails retries the batch.
+- **The acquirer keeps the line on every pass.** It adds the line before
+  each A2, `BeforeEstablish`'s included, unless the index informer's view
+  shows it. It checks the line live after each successful A2. A pass that
+  skips A2 also ensures the line from the view, so a line a prune lost
+  while this process's write was the last one comes back. An add or check
+  that fails, the full index included, fails the hold: closed for a new
+  holder, Degraded for an established one. A failed check also drops the
+  A2's written entry, so the next pass writes A2 and checks again.
+- **Disown empties the index under the prune's rule** (§7.4, A15). It
+  counts the union of the index's lines and the records of the kinds the
+  switch covers, with a GET each. It strips them, then prunes those lines
+  and live-GETs each object. Without that GET, an A2 from a pass begun
+  before the switch that lands after the strip would lose its line, and the
+  count from the index and the records would never see it again. A missing
+  or unreadable index, or a GET that fails, makes the count `unknown`.
+- **`DisownPrefixOptions.Index` is only read.** Its lines, with `Names`,
+  replace the lists. A missing index is an error. The index is left as it
+  is: once its objects are stripped it names nothing held, and a kind
+  created again prunes the stale lines at its first start.
+- **Tamper checks, the rebuild and the startup recheck run with the write
+  loops**, so `RunInformers` stays read-only (IP4). Under leader election,
+  only the leader pays the GET per dropped line. The index informer
+  queues dropped lines and deletions, and the write loops drain them every
+  second, with backoff on failure. A drop is this process's own when it
+  removed the line itself: the line is marked before the write, so the
+  informer never takes it for someone else's. A drop whose object the
+  per-name cache shows without the kind's prefix, or gone, needs no check
+  (L5). A restored dropped line is counted in
+  `credentialuse_index_tampered_total`, with a `CredentialUseIndexTampered`
+  Warning event on the index.
+- **§10.6.6 follows IP4** (the review of the PR 8 build, 2026-11-22): the
+  dropped-line checks, their restores and the rebuild run in the write
+  loops, on the leader, or on every process without leader election
+  (§6.8). The index informer only buffers dropped lines and deletions in
+  the index's queue, so a standby loses nothing before its election. The
+  cost is N GETs per dropped line only without leader election.
+- **Creating the index rebuilds it.** `Track` creates the index when it is
+  absent and then rebuilds it from the records. The write loops recreate a
+  deleted index the same way, and so does an acquirer's add that finds it
+  gone. A kind moved from LabelScoped to PerName therefore starts with a
+  superset. The rebuild's candidates are the records only, as §10.6.6 says,
+  so the residual stays as the design states it.
+- **The index is `<IndexNamespace>/cu-index-<lowercase kind>.<group>`**, as
+  §10.6.1's example `cu-index-repo.git.krateo.io` shows. The CRD's pointer
+  must equal it exactly, or the start is refused. The pointer is written
+  after the namespace and RBAC checks, so a refused start writes nothing.
+- **Track checks the index's grants up front** (§10.6.7):
+  SelfSubjectAccessReviews for `get`, `update`, `list` and `watch` on the
+  index by name, and `create` in its namespace. A missing grant is a setup
+  error that names them.
+- **Every holder kind of a `Shared` must agree on a protected kind's watch
+  mode**, as on its `Content` (PR 4): one informer set serves a kind for
+  all of them, and a Track that disagrees is a setup error. A holder kind
+  may mix modes across protected kinds. Its index then holds lines only for
+  its PerName kinds, and a holder in the index namespace gets no hold for
+  any ref.
+- **The per-name watches are the tracker's own.** There is one
+  metadata-only informer per line of a PerName kind, field-selected by
+  name, started and stopped as the index informer's lines change. Its
+  handlers are the protected handler and the janitor's. They aren't part of
+  `Track`'s sync or `HasSynced`, which wait on the index informer instead.
+  A view that hasn't synced only makes a pass write when it could have
+  skipped. No SelfSubjectAccessReview is made per name. A per-name watch
+  the server forbids is logged once, and its reflector keeps retrying.
+- **A PerName kind counts as cached in every namespace.** Its per-name
+  watches cover every namespace, so `SharedOptions.Namespaces` doesn't
+  restrict it. §10.5's live lists and the marker sweep leave it out: under
+  `resourceNames` they would be forbidden. The prober uses GETs only for
+  it.
+- **The 80% warning** is a `CredentialUseIndexFilling` Warning event on the
+  index, throttled like every event of the core. The fill-ratio gauge is
+  set on every version this process reads or writes.
+- **Class (c) is matched by its text** (§10.6.1). An index write whose
+  error carries both `ValidatingAdmissionPolicy
+  'krateo-credential-use-namespace'` and `failed to configure binding: no
+  params found` is wrapped with the hint to check `cu-policy-params`, and
+  logged.
+- **`PerNamePoll` is refused at setup** until PR 9.
+- **§10.6.1's policy gains `scope: "Namespaced"` on its resource rule**
+  (the user's decision, 2026-11-22). A `namespaceSelector` never exempts a
+  cluster-scoped resource (`k8s.io/apiserver@v0.37.2`,
+  `predicates/namespace/matcher.go:105-112`), so without the scope the
+  policy would deny every cluster-scoped CREATE and UPDATE in the cluster.
+  The Namespace exclusion stays. The policy isn't deployed anywhere
+  (installer confirmed: not on krateo-057, nor in its charts, pins or CR),
+  so this is a design fix only. A copy installer ships later must carry the
+  scope. The envtest asserts that a CRD patch is allowed while the policy is
+  in force.
+
 ### PR 9: PerNamePoll mode and the provisioner
 
 **Scope.**
@@ -1070,6 +1234,14 @@ a grant past the acquirer's retry budget.
 **Depends on:** PR 8. **Size:** about 1,200 lines of production code and
 1,400 of tests.
 
+**Carried from PR 8's review:** PR 8's startup recheck and live checks
+report an RBAC 403 (class (d)) on an index line once, keep the line, and
+don't retry it, since under PerName's static grants no retry helps before
+RBAC changes. In PerNamePoll a 403 can be a grant still propagating
+(§10.7.2), so PerNamePoll's recheck must retry a 403 for §10.7.2's bound
+before it reports it. Otherwise that object's batch stays unenqueued for a
+whole leader term.
+
 **Carried from PR 5's review** (#123): PR 5 tested the late A2 of §11.3
 rule 3 with a two-process envtest, where the A2's own informer event also
 enqueues the release batch. In PerNamePoll mode no watch delivers it, so the
@@ -1120,6 +1292,12 @@ tests.
   - §5.2's remedy, and uninstalling (§11.5);
   - the Argo CD notes, the `DisownPrefix` Job recipe, and the runbook entry
     for the missing-params message;
+  - the runbook entry for Disown that stays `unknown` with
+    `CredentialUseDisownUnreadable` (PR 8): grant `get` on each object the
+    event names, or confirm by hand that it carries no finalizer of the kind
+    and add it to the index's `credential-use.krateo.io/vouched`
+    annotation, then optionally remove its line (removing the line alone is
+    undone by the tamper check);
   - the outside-runtime guide (§7.2);
 - the admission policy sketch, as a reference installer copies;
 - `docs/overview.md`: the new reconcile steps;

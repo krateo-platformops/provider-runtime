@@ -91,7 +91,7 @@ func WithCredentialUse(o credentialuse.KindOptions) ReconcilerOption {
 // WithCredentialUseShared has the Reconciler track its kind in s, instead of
 // the Shared NewReconciler builds once per manager with the default
 // SharedOptions (§7.5). A provider that needs other SharedOptions
-// (Namespaces, Listers) builds its own and passes it to every Reconciler of
+// (Namespaces, Listers, IndexNamespace for PerName) builds its own and passes it to every Reconciler of
 // the manager, in production as in tests. With a manager that has a config,
 // NewReconciler adds s's two runnables to it, once per Shared; with a test
 // manager's nil config, the test runs s itself (Run, or RunInformers and

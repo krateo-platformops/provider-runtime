@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // DisownPrefixOptions are DisownPrefix's (§7.4, A8).
@@ -16,11 +17,17 @@ type DisownPrefixOptions struct {
 	// Holder is the deleted holder kind whose holds to strip. Required.
 	Holder schema.GroupKind
 	// Protected are the kinds to list, cluster-wide and live, by Holder's
-	// marker label. Ignored when Names is set.
+	// marker label. Ignored when Index or Names is set.
 	Protected []schema.GroupVersionKind
-	// Names, in place of the lists, are the objects to read and strip one by
-	// one: for resourceNames RBAC, where cluster-wide lists aren't allowed.
-	// A Ref's Next and Guaranteed don't apply.
+	// Index, in place of the lists, is the deleted kind's index ConfigMap
+	// (PerName, §10.6), whose location the CRD can no longer give: every
+	// object a line names is read and stripped one by one, for
+	// resourceNames RBAC, where cluster-wide lists aren't allowed. The index
+	// is only read: it names nothing once its objects are stripped, and a
+	// kind created again prunes its stale lines at its first start.
+	Index *types.NamespacedName
+	// Names, in place of the lists, and beside Index, are the objects to
+	// read and strip one by one. A Ref's Next and Guaranteed don't apply.
 	Names []Ref
 	// DryRun reports what would be stripped, and changes nothing.
 	DryRun bool
@@ -44,7 +51,8 @@ var ErrHolderCRDExists = errors.New("credential-use: the holder kind's CRD still
 
 // DisownPrefix strips a deleted holder kind's holds (§7.4): every finalizer
 // with the prefix credential-use.<kind>.<group>/, and its epoch, from every
-// object Protected lists by the kind's marker label, or from each of Names;
+// object Protected lists by the kind's marker label, or from each object
+// Index's lines and Names name;
 // then the marker label, and the held label where no credential-use
 // finalizer is left. It needs no holder kind and no switch, and refuses while
 // a CRD of Holder exists. An object that changed since it was read is read
@@ -59,8 +67,8 @@ func DisownPrefix(ctx context.Context, c Clients, o DisownPrefixOptions) (Disown
 	if c.Metadata == nil || c.Dynamic == nil || c.Mapper == nil {
 		return rep, errors.New("credential-use: Clients.Metadata, Clients.Dynamic and Clients.Mapper are required")
 	}
-	if len(o.Protected) == 0 && len(o.Names) == 0 {
-		return rep, errors.New("credential-use: DisownPrefix needs Protected or Names")
+	if len(o.Protected) == 0 && len(o.Names) == 0 && o.Index == nil {
+		return rep, errors.New("credential-use: DisownPrefix needs Protected, Index or Names")
 	}
 	if err := refuseWhileCRDExists(ctx, c, o.Holder); err != nil {
 		return rep, err
@@ -69,17 +77,30 @@ func DisownPrefix(ctx context.Context, c Clients, o DisownPrefixOptions) (Disown
 	var objs []metav1.PartialObjectMetadata
 	var kinds []schema.GroupKind
 	var errs []error
-	if len(o.Names) > 0 {
+	if len(o.Names) > 0 || o.Index != nil {
+		names := map[ID]bool{}
 		for _, r := range o.Names {
-			m, err := srv.Get(ctx, r.GroupKind, r.Namespace, r.Name)
+			names[r.ID()] = true
+		}
+		if o.Index != nil {
+			ids, err := readIndex(ctx, c, *o.Index)
+			if err != nil {
+				return rep, err
+			}
+			for _, id := range ids {
+				names[id] = true
+			}
+		}
+		for _, id := range SortedIDs(keysOf(names)) {
+			m, err := srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 			if Classify(err) == ClassNotFound {
 				continue
 			}
 			if err != nil {
-				errs = append(errs, fmt.Errorf("reading %s: %w", r.ID(), err))
+				errs = append(errs, fmt.Errorf("reading %s: %w", id, err))
 				continue
 			}
-			objs, kinds = append(objs, *m), append(kinds, r.GroupKind)
+			objs, kinds = append(objs, *m), append(kinds, id.GroupKind())
 		}
 	} else {
 		for _, gvk := range o.Protected {
@@ -117,6 +138,23 @@ func DisownPrefix(ctx context.Context, c Clients, o DisownPrefixOptions) (Disown
 		}
 	}
 	return rep, errors.Join(errs...)
+}
+
+// readIndex reads the IDs the index ConfigMap at ref names: every line that
+// parses, whatever its kind. A missing index is an error: it names nothing
+// to strip, which the caller must not take for "nothing held".
+func readIndex(ctx context.Context, c Clients, ref types.NamespacedName) ([]ID, error) {
+	v, err := newConfigMapStore(c.Dynamic, ref.Namespace, ref.Name).get(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("credential-use: reading the index %s: %w", ref, err)
+	}
+	var out []ID
+	for _, l := range v.lines {
+		if id, ok := parseIndexLine(l); ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 // refuseWhileCRDExists returns ErrHolderCRDExists while a CRD of holder

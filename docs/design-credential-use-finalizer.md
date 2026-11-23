@@ -1183,8 +1183,10 @@ exported for diagnostics and tests.
     `IndexNamespace` that doesn't exist**, which fails with
     `credential-use: index namespace krateo-credential-use not found: install it (installer release) before enabling PerName`;
     an `IndexNamespace` that holders of the kind live in, or that disagrees
-    with the CRD's pointer; or an `IndexMaxLines` above the ceiling
-    (§10.6).
+    with the CRD's pointer; an `IndexMaxLines` above the ceiling
+    (§10.6); missing grants on the index (§10.6.7); or a watch mode for a
+    protected kind that another holder kind of the same `Shared` tracks
+    with another mode.
 
   Before `Run`, the error makes `Run` fail, so the process refuses to start
   (U2).
@@ -1306,6 +1308,20 @@ default) consecutive passes count zero.
 - **A count that can't be made**, because the index is missing or
   unreadable, or a list fails, is written as `held-count: "unknown"`. That
   clears `disown-settled`, and is never read as zero (§10.6.5).
+- **An object in the index or a record that can't be read** keeps the count
+  `"unknown"` too, since it may carry K's finalizer (the user's decision,
+  2026-11-22). Under `resourceNames` RBAC that is a Secret outside the
+  grant: an ensure wrote its line before an A2 that got a 403. Disown says
+  so: a Warning event on the CRD, `CredentialUseDisownUnreadable`, names
+  each such object and why (`team-a/Secret/nogrant: forbidden`), throttled
+  while the set stays the same; a log line; and the gauge
+  `credentialuse_disown_unreadable`. **The remedy:** grant `get` on the
+  object, or confirm by hand that it carries no finalizer of K and add it
+  to the index's `credential-use.krateo.io/vouched` annotation, and then,
+  optionally, remove its line. Disown then settles. Removing the line
+  alone isn't enough: the tamper check restores the line of an object it
+  can't read (§10.6.6). The vouch, the user's decision of 2026-11-22, is
+  described in §10.6.6.
 
 A non-zero count clears the flag. **Downgrading the runtime, removing the interface from the connecter,
 or uninstalling is safe once `held-count` is `0` and `disown-settled` is
@@ -1350,7 +1366,7 @@ lists the protected kinds live by K's marker label, removes every finalizer
 with the prefix `credential-use.<kind>.<group>/` and its epoch, and removes
 the labels as above. In PerName mode it takes the names from the index,
 whose location it can no longer read from the CRD, so it is given the index
-explicitly, or a name list. It refuses to run while the CRD still exists,
+explicitly, or a name list. It only reads the index. It refuses to run while the CRD still exists,
 even if it is being deleted, because then holders may still be deleting and
 need their refs. With `DryRun: true` it only reports. It ships as a function
 and as a one-shot Job recipe in the docs.
@@ -2052,6 +2068,7 @@ proves it.
         - apiGroups: ["*"]
           apiVersions: ["*"]
           resources: ["*"]
+          scope: "Namespaced"                # never a cluster-scoped kind: see below
           operations: ["CREATE", "UPDATE"]   # never DELETE: see below
       excludeResourceRules:                  # the Namespace object itself
         - apiGroups: [""]
@@ -2151,6 +2168,21 @@ proves it.
   revision 12 sketch said the policy "never matches `v1/Namespace`": that
   was wrong, and is corrected here.
 
+  **The rule's `scope: "Namespaced"` is what keeps the policy to the index
+  namespace** (the user's decision, 2026-11-22). A `namespaceSelector` never
+  exempts a cluster-scoped resource: the matcher returns a match for any
+  request with no namespace that isn't a Namespace
+  (`k8s.io/apiserver@v0.37.2/pkg/admission/plugin/webhook/predicates/namespace/matcher.go:105-112`).
+  Without the scope, the policy would match every CREATE and UPDATE of
+  every cluster-scoped kind in the cluster, CRDs and ClusterRoles among
+  them, and deny each one, since none passes the validation. With it, a rule
+  matches only a request that has a namespace and isn't for a Namespace
+  (`predicates/rules/rules.go:58-72`), so only the index namespace's
+  objects. PR 8's envtest found it, when a deleted copy of the policy still
+  in the API server's cache denied a CRD patch. The Namespace exclusion
+  stays: the scope already leaves the Namespace object out, and the
+  exclusion says so explicitly.
+
   For core-provider, the effect is that composition.krateo.io objects are
   refused there, along with everything else not on the list.
 
@@ -2222,9 +2254,11 @@ proves it.
   two indexes. Moving the index means Disown, then re-pointing the
   annotation by hand.
 - **The tracker owns the ConfigMap entirely** (M2, decided). Charts don't
-  ship it. At start, the tracker creates it if it is absent. Create races
-  between processes are harmless: the loser gets AlreadyExists and reads the
-  winner's.
+  ship it. At start, the tracker creates it if it is absent, and rebuilds it
+  from the records (§10.6.6), so a kind moved from LabelScoped starts with a
+  superset. Create races between processes are harmless: the loser gets
+  AlreadyExists and reads the winner's. Its name is
+  `cu-index-<lowercase kind>.<group>`.
 - **Nobody else should manage it.** If a GitOps tool does anyway, for
   example because it lives in a namespace Argo CD syncs, exclude its data
   from comparison and sync:
@@ -2248,9 +2282,13 @@ re-applies its own adds and removes to what it read, so it never overwrites
 another writer's change.
 
 - **The acquirer adds before A2, then checks after.**
-  1. Before A2 for a P whose line is missing, it adds the line.
+  1. Before A2 for a P whose line is missing, it adds the line. Its view of
+     the index is the informer's. A pass that skips A2 also adds a line the
+     view lacks.
   2. After a successful A2, it **live-GETs the index**. If the line is
-     missing (a concurrent prune removed it), it adds it again.
+     missing (a concurrent prune removed it), it adds it again. A check
+     that fails fails the hold, and drops the A2's `written` entry, so the
+     holder's next pass writes A2 and checks again.
 - **The pruner removes after R3, then checks after.**
   1. After a release batch's R3s, it removes, **in one write per batch**
      (L1), the lines of the objects whose K's marker label R3 removed.
@@ -2263,8 +2301,14 @@ another writer's change.
   prober's GET (§10.3). The release batch prunes it, under the rule above,
   once no record names the ref and the object carries no finalizer of K.
 - **The startup recheck's prune** follows the same rule. It prunes the lines
-  whose objects carry no finalizer with K's prefix, then live-GETs those
-  objects, and adds back any that now do.
+  whose objects carry no finalizer with K's prefix, and that no record names,
+  then live-GETs those objects, and adds back any that now do.
+- **Disown's emptying** (§7.4) follows it too: after its strip, it prunes the
+  lines of the kinds the switch covers and live-GETs those objects. An A2
+  from a pass begun before the switch that lands after the strip keeps its
+  line, and the next pass counts it.
+- **A re-add that fails** after a prune is retried by the write loops until
+  it lands.
 
 #### 10.6.3 Why the index stays a superset
 
@@ -2327,7 +2371,15 @@ line. The marker label still finds it (§10.6.6).
 #### 10.6.5 Who reads it, and what a missing index means
 
 - **The startup recheck** reads the index, GETs each named object, and
-  enqueues a release batch for every (K, N) finalizer it finds.
+  enqueues a release batch for every (K, N) finalizer it finds. A line whose
+  object the authorizer refuses to read (an RBAC 403, class (d) of §6.2) is
+  kept, logged and counted
+  (`credentialuse_index_read_denied_total`) once per object, and never
+  retried: no retry can read it before RBAC changes. Any other failed read
+  makes the recheck retry with backoff. A line an operator vouched for
+  (§10.6.6) is read like any other: while it can't be read it is skipped,
+  neither reported nor retried, and once readable and held its batch is
+  enqueued.
 - **Disown** reads it to find what to strip and what to count (§7.4).
 - **`WithHeld`** reads it, and stops at the first line whose object still
   carries K's prefix (§11.6).
@@ -2344,13 +2396,44 @@ The tracker watches the ConfigMap by name (or polls it in PerNamePoll mode,
 §10.7). **A change that drops lines this process didn't remove** is checked
 line by line, except for **lines removed alongside a successful R3 the
 tracker can see**. In PerName mode, the per-object watch has already
-delivered that P lost K's last finalizer. Those need no check (L5). Every
-other dropped line costs a GET, in every process: with N processes, N GETs
-per dropped line. That cost is accepted. A dropped line whose object no longer carries K's prefix
+delivered that P lost K's last finalizer. Those need no check (L5).
+
+**Where the checks run** (IP4: the informers only read, and every write is
+in the write loops). The dropped-line checks, their restores and the
+rebuild below run in the write loops: on the leader, or on every process
+when there is no leader election (§6.8). The index informer, which runs on
+standbys too, only buffers what it sees, the dropped lines and the
+deletions, in a queue the write loops drain, so a standby loses nothing
+before its election. Every other dropped line therefore costs one GET per
+process that runs the write loops: N GETs per dropped line only with N
+processes and no leader election. That cost is accepted. A dropped line whose object no longer carries K's prefix
 needs nothing: another process pruned it. A dropped line whose object
 still carries the prefix is **tampering**, or a lost race. The tracker adds
 those lines back, records a Warning event and counts
 `credentialuse_index_tampered_total`.
+
+**A durable marker closes the crash window** (the user's decision,
+2026-11-22). The index carries `credential-use.krateo.io/rebuilt` only once
+a rebuild from the records has completed: the rebuild sets it in the same
+guarded write as its last merge, and every other create leaves it absent,
+an acquirer's or `Track`'s alike. `Track` and the startup recheck rebuild,
+by merging, an index without it. So a process that dies between creating
+the index and rebuilding it, or an acquirer that recreated a deleted index
+while no write loops ran, leaves no hold without its line past the next
+start.
+
+**An operator's vouch** (the user's decision, 2026-11-22). The index's
+`credential-use.krateo.io/vouched` annotation lists, comma-separated and
+written as the unheld annotation names refs (`team-a/Secret/nogrant`), the
+objects an operator has checked by hand to carry no finalizer of K. Malformed
+entries are ignored, with a warning once per value. While a vouched object
+can't be read, Disown's count and its strip skip it, the startup recheck
+skips it after its read fails, the tamper check doesn't restore its
+dropped line, a prune may remove its line, and a rebuild doesn't add it. Every other unreadable
+line keeps the superset's rule: restored, and counted unknown. A vouched
+object that can be read and carries K's prefix is treated as any other,
+counted and kept, and the wrong vouch is logged. The process never writes
+the annotation, and its own writes keep it.
 
 **If the ConfigMap is deleted**, the tracker recreates it and rebuilds it
 from the records. It lists the holders of K, takes the union of their
@@ -3072,7 +3155,11 @@ revisions counted without naming), `credentialuse_refs_not_held_total`,
 `credentialuse_unrecorded_reads_total` (§11.9),
 `credentialuse_admission_denied_total` (class (e) of §6.2),
 `credentialuse_release_rejected_total` (a release patch that failed against
-an unchanged object, §6.2) and `credentialuse_crd_write_starved_total`
+an unchanged object, §6.2), `credentialuse_disown_unreadable` (gauge, the
+objects Disown's last pass couldn't read, §7.4),
+`credentialuse_index_read_denied_total` (objects the index names that a check
+couldn't read for a 403, once each, §10.6.5) and
+`credentialuse_crd_write_starved_total`
 (§7.3). The core defines them as a
 `MetricsRecorder` interface, and `pkg/telemetry` implements it with
 OpenTelemetry.
@@ -3123,7 +3210,12 @@ provider read every Secret's data. That is the grant oasgen removed in
    takes the request's name from that selector and nowhere else
    (`k8s.io/apiserver@v0.37.2/pkg/endpoints/request/requestinfo.go:245-250`).
    So PerName makes one field-selected watch per held object, plus GETs.
-   That fits small held sets, and needs the index (§10.6).
+   That fits small held sets, and needs the index (§10.6). The watches
+   follow the index's lines. They cover every namespace, so
+   `SharedOptions.Namespaces` doesn't restrict them, and no list of the kind
+   is ever made: §10.5's live lists and the marker sweep leave a PerName
+   kind out, and the prober uses GETs only. Every holder kind of one
+   `Shared` must agree on a protected kind's watch mode.
 2. **Provisioned at runtime, by name (`Watch: PerNamePoll`, §10.7).** A
    provider whose names are only known at runtime grants each one in a
    ClusterRole's `resourceNames`, bound by a ClusterRoleBinding. **The grants

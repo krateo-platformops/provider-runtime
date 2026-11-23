@@ -338,8 +338,9 @@ func TestTrackValidates(t *testing.T) {
 		"an unmapped kind": {func(o *Options) {
 			o.Protected = []ProtectedKind{{GVK: schema.GroupVersionKind{Version: "v1", Kind: "Nope"}}}
 		}, "can't be mapped"},
-		"PerName":      {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}} }, "only LabelScoped"},
-		"a kind twice": {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK}, {GVK: secretGVK}} }, "listed twice"},
+		"PerNamePoll":                    {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerNamePoll}} }, "PerNamePoll isn't supported yet"},
+		"PerName without IndexNamespace": {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}} }, "SharedOptions.IndexNamespace"},
+		"a kind twice":                   {func(o *Options) { o.Protected = []ProtectedKind{{GVK: secretGVK}, {GVK: secretGVK}} }, "listed twice"},
 	}
 	md := metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme())
 	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())

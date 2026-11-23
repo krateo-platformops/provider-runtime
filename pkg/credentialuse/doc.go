@@ -36,6 +36,12 @@
 //     label janitor (§10.1), with §12's waiting gauge and events; and
 //     caches restricted to some namespaces (§10.5).
 //
+// PerName mode (plan, PR 8) is for resourceNames RBAC, where a protected kind
+// can't be listed: each holder kind keeps an index ConfigMap of what it may
+// hold in SharedOptions.IndexNamespace, kept a superset of its holds by
+// Dekker on both sides, and watches each object the index names by name
+// (§10.6, §13 shape 1). Disown and DisownPrefix read it (§7.4).
+//
 // provider-runtime's reconciler is its first user (plan, PR 7): see
 // reconciler.CredentialRefsProvider. For a runtime's adapter the package
 // adds KindOptions, Tracker.HasSynced, IsOwnRecordWrite, CheckRead,

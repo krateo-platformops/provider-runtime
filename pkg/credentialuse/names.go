@@ -50,6 +50,24 @@ const (
 	AnnotationIndex = Domain + "/index"
 )
 
+// Keys on a kind's index ConfigMap.
+const (
+	// AnnotationRebuilt marks an index rebuilt from the records since it was
+	// created (§10.6.6): only a rebuild that completed sets it, in the same
+	// guarded write as its last merge. Track and the startup recheck rebuild
+	// an index without it, so that a process that died between creating the
+	// index and rebuilding it leaves no hold without its line.
+	AnnotationRebuilt = Domain + "/rebuilt"
+	// AnnotationVouched lists the objects an operator has checked by hand
+	// to carry no finalizer of the kind, comma-separated, each written as
+	// the unheld annotation names a ref: <namespace>/<Kind[.group]>/<name>
+	// (§7.4, §10.6.6). While such an object can't be read, Disown and the
+	// startup recheck skip it after a read that fails, and its line may go;
+	// a vouched object that can be read is treated as any other. The
+	// process never writes it.
+	AnnotationVouched = Domain + "/vouched"
+)
+
 // ClusterScopedName is the name part of a cluster-scoped holder kind's
 // finalizer (§3). A GroupKind is either namespaced or cluster-scoped, so it
 // can't collide with a namespace of that name.

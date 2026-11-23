@@ -33,6 +33,34 @@ type testListWatch struct {
 
 	mu      sync.Mutex
 	watches map[*testWatch]bool
+	// paused, when set, holds every watch event until it is closed: the
+	// informer's cache lags behind the API server meanwhile.
+	paused chan struct{}
+}
+
+// pause holds the watches' events until resume.
+func (l *testListWatch) pause() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.paused == nil {
+		l.paused = make(chan struct{})
+	}
+}
+
+// resume lets the held events go, in order.
+func (l *testListWatch) resume() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.paused != nil {
+		close(l.paused)
+		l.paused = nil
+	}
+}
+
+func (l *testListWatch) gate() chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.paused
 }
 
 var _ cache.ListerWatcherWithContext = (*testListWatch)(nil)
@@ -132,6 +160,13 @@ func (w *testWatch) forward() {
 			}
 			if w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {
 				w.lw.streams.Add(1)
+			}
+			if g := w.lw.gate(); g != nil {
+				select {
+				case <-g:
+				case <-w.done:
+					return
+				}
 			}
 			select {
 			case w.out <- ev:

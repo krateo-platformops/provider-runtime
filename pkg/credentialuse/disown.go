@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -170,8 +171,9 @@ func (s *Shared) runDisown(ctx context.Context) {
 // disownPass is one pass of t's Disown loop (§7.4): it lists, live and
 // cluster-wide, the holders of t's kind and the protected objects of the
 // kinds the switch covers by t's marker label, so that a namespace outside
-// SharedOptions.Namespaces is reached too; counts what they hold; strips it;
-// and writes the count on the CRD.
+// SharedOptions.Namespaces is reached too, or, for a PerName kind, reads each
+// object its index or a record names; counts what they hold; strips it,
+// emptying the index of those kinds; and writes the count on the CRD.
 //
 // The count is what the pass found before its strip, and what the strip
 // removed that the lists hadn't shown: a hold that a pass begun before the
@@ -199,6 +201,9 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	}
 	var objs []object
 	for _, gk := range disownedKinds(t, set) {
+		if t.isPerName(gk) {
+			continue // from the index and the records, below
+		}
 		items, err := s.liveList(ctx, gk, "", MarkerLabel(t.gk))
 		if err != nil {
 			known = false
@@ -208,6 +213,65 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			n := countPrefix(items[i].Finalizers, t.prefix)
 			count += n
 			objs = append(objs, object{gk, &items[i], n})
+		}
+	}
+	// A PerName kind can't be listed under resourceNames RBAC: its objects
+	// are the union of the index's lines and the holders' records, read with
+	// a GET each (§7.4, A15). The index is the superset of the holds
+	// (§10.6.3), and the records must be stripped anyway. A missing or
+	// unreadable index, or a read that fails, makes the count unknown, never
+	// zero (§10.6.5).
+	perName := t.disownPerName(set)
+	var lined []ID          // the index's lines of the kinds set covers
+	var unreadable []string // the objects of those that couldn't be read, with why
+	if len(perName) > 0 {
+		named := map[ID]bool{}
+		for i := range holders {
+			if r := ReadRecord(&holders[i]); !r.Unparseable {
+				for _, id := range r.IDs {
+					if perName[id.GroupKind()] {
+						named[id] = true
+					}
+				}
+			}
+		}
+		cur, err := t.idx.store.get(ctx)
+		if err != nil {
+			known = false
+		}
+		vouched := t.idx.parseVouched(cur.vouched)
+		for _, id := range t.idx.ids(cur.lines) {
+			if perName[id.GroupKind()] {
+				named[id] = true
+				lined = append(lined, id)
+			}
+		}
+		live := s.newServer()
+		for _, id := range SortedIDs(keysOf(named)) {
+			m, err := live.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+			switch Classify(err) {
+			case ClassNone:
+			case ClassNotFound:
+				continue
+			default:
+				if vouched[id] {
+					// An operator checked by hand that it carries no
+					// finalizer of the kind (§7.4): skipped while it can't
+					// be read.
+					continue
+				}
+				// It may carry the kind's finalizer: the count is unknown,
+				// never zero, until it can be read (§7.4).
+				known = false
+				unreadable = append(unreadable, unheldRef(id)+": "+shortError(err))
+				continue
+			}
+			n := countPrefix(m.Finalizers, t.prefix)
+			if n > 0 && vouched[id] {
+				t.idx.vouchWrong(id) // readable, and held: counted as any other
+			}
+			count += n
+			objs = append(objs, object{id.GroupKind(), m, n})
 		}
 	}
 
@@ -230,7 +294,65 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				"object", unheldRef(ID{Group: o.gk.Group, Kind: o.gk.Kind, Namespace: o.m.Namespace, Name: o.m.Name}), "error", err.Error())
 		}
 	}
+	if len(lined) > 0 {
+		// Disown empties the index of the kinds it covers (§7.4), under the
+		// prune's rule (§10.6.2): every pruned object is read again, and
+		// keeps its line if it carries the kind's prefix, as an A2 from a
+		// pass begun before the switch may have put back after the strip.
+		// That line is the next pass's count. A line added since the read
+		// above stays, and is counted by the next pass too.
+		if err := t.idx.prune(ctx, lined); err != nil {
+			t.warn("credential-use: Disown couldn't empty the index; the next pass retries", "index", t.idx.ref(), "error", err.Error())
+		}
+	}
+	if len(perName) > 0 {
+		t.reportDisownUnreadable(unreadable)
+	}
 	s.writeDisownCount(ctx, t, set, count, known)
+}
+
+// EventDisownUnreadable (Warning, on the holder kind's CRD): Disown can't
+// read objects its index or the records name, so its count stays "unknown"
+// (§7.4).
+const EventDisownUnreadable = "CredentialUseDisownUnreadable"
+
+// reportDisownUnreadable reports the objects a Disown pass couldn't read:
+// the gauge on every pass, and, when there are some, a log line and a
+// Warning event on the CRD naming each with why, which the event sink
+// throttles while the set stays the same.
+func (t *Tracker) reportDisownUnreadable(unreadable []string) {
+	sinkMetrics{t}.DisownUnreadable(kindLabel(t.gk), len(unreadable))
+	if len(unreadable) == 0 {
+		return
+	}
+	note := "Disown can't read " + strings.Join(unreadable, ", ") + ", so held-count stays unknown: grant get on each, " +
+		"or confirm by hand that it carries no finalizer of " + kindLabel(t.gk) + " and add it to the " + AnnotationVouched +
+		" annotation of the index " + t.idx.ref() + " (§7.4)"
+	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
+	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
+	t.s.events.record(crd, "Warning", EventDisownUnreadable, note)
+	t.warn("credential-use: Disown can't read objects its index or the records name; its count stays unknown",
+		"kind", t.gk.String(), "crd", t.crdName, "unreadable", strings.Join(unreadable, ", "))
+}
+
+// shortError is err as an event names it: its API reason, as "forbidden",
+// or its text.
+func shortError(err error) string {
+	if r := apierrors.ReasonForError(err); r != metav1.StatusReasonUnknown {
+		return strings.ToLower(string(r))
+	}
+	return err.Error()
+}
+
+// disownPerName returns t's PerName kinds that set covers.
+func (t *Tracker) disownPerName(set disownSet) map[schema.GroupKind]bool {
+	out := map[schema.GroupKind]bool{}
+	for _, gk := range disownedKinds(t, set) {
+		if t.isPerName(gk) {
+			out[gk] = true
+		}
+	}
+	return out
 }
 
 // disownedKinds are t's protected kinds that set covers.

@@ -24,9 +24,10 @@ func TestCredentialUseMetrics(t *testing.T) {
 	m.HeldObjects(kind, 3)
 	m.WaitingObjects(kind, 1)
 	m.IndexFillRatio(kind, 0.5)
+	m.DisownUnreadable(kind, 1)
 	m.Degraded(kind, "Deleting")
 	for _, f := range []func(string){m.RefsNotHeld, m.ConsentWithdrawn, m.RefsReadDenied, m.IndexTampered,
-		m.UnrecordedReads, m.AdmissionDenied, m.ReleaseRejected, m.CRDWriteStarved} {
+		m.UnrecordedReads, m.AdmissionDenied, m.ReleaseRejected, m.CRDWriteStarved, m.IndexReadDenied} {
 		f(kind)
 	}
 	var rm metricdata.ResourceMetrics
@@ -49,7 +50,8 @@ func TestCredentialUseMetrics(t *testing.T) {
 	for _, name := range []string{"credentialuse.held_objects", "credentialuse.waiting_objects", "credentialuse.index_fill_ratio",
 		"credentialuse.degraded", "credentialuse.refs_not_held", "credentialuse.consent_withdrawn", "credentialuse.refs_read_denied",
 		"credentialuse.index_tampered", "credentialuse.unrecorded_reads", "credentialuse.admission_denied",
-		"credentialuse.release_rejected", "credentialuse.crd_write_starved"} {
+		"credentialuse.release_rejected", "credentialuse.crd_write_starved",
+		"credentialuse.disown_unreadable", "credentialuse.index_read_denied"} {
 		attrs, ok := got[name]
 		if !ok {
 			t.Errorf("%s wasn't recorded", name)
