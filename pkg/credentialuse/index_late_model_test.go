@@ -86,13 +86,14 @@ func TestModelIndexDrops(t *testing.T) {
 					st := modelIndexStore{m: m, a: a, who: "prune", log: &log}
 					ix.store = lossyModelStore{st, &losing}
 					_ = ix.prune(context.Background(), []ID{p})
-					for {
-						// The write loops' tick.
+					// The write loops' ticks, each far past the last one's
+					// backoff: none of them depends on the real clock.
+					for now := s.Clock.Now(); ; now = now.Add(24 * time.Hour) {
 						a.Wait("tick", time.Time{}, func() bool { return pending() > 0 || handDone && !undelivered() })
 						if pending() == 0 {
 							return
 						}
-						_ = ix.recheckTick(context.Background(), time.Now().Add(time.Hour))
+						_ = ix.recheckTick(context.Background(), now)
 					}
 				})
 				s.Go("hand", 0, func(a *apimodel.Actor) {
