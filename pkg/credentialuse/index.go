@@ -324,6 +324,11 @@ type index struct {
 	// the records may have been stripped, so a rebuild from them can't tell
 	// that it found every hold (§7.4). Nil is never.
 	disowning func(ctx context.Context) (bool, error)
+	// keptLive reads live, and keptCached tells from the CRD's cache, the
+	// kinds whose lines stay: those the Disown switch covers while it hasn't
+	// settled (§7.4). Nil is none.
+	keptLive   func(ctx context.Context) (disownSet, error)
+	keptCached func(gk schema.GroupKind) bool
 	// onLines sees every version of the index this process reads or
 	// writes, with its lines: the fill gauge and event (§10.6.4).
 	onLines func(lines []string)
@@ -628,7 +633,26 @@ func (ix *index) removed(rv string, lines []string) {
 // Once begun it runs to its end, within pruneBound, whatever ctx does: the
 // queue dies with the process, so a stop between the removal and the re-add
 // would lose the line.
+//
+// While Disown covers a kind and hasn't settled, its lines stay: a hold that
+// lands late has only its line for Disown's count to find it by (§7.4). The
+// switch is read again, live, after the removal, which the cache may lag; one
+// read as off then was set after the removal, so that Disown's first pass
+// comes after it and adds the lines of every record (§7.4, E2).
 func (ix *index) prune(ctx context.Context, ids []ID) error {
+	if ix.keptCached != nil {
+		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return ix.keptCached(id.GroupKind()) })
+	}
+	return ix.removeAndCheck(ctx, ids, true)
+}
+
+// empty is prune for Disown's own emptying, once it has settled: the switch
+// is on, and doesn't keep the lines.
+func (ix *index) empty(ctx context.Context, ids []ID) error {
+	return ix.removeAndCheck(ctx, ids, false)
+}
+
+func (ix *index) removeAndCheck(ctx context.Context, ids []ID, disown bool) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -638,29 +662,46 @@ func (ix *index) prune(ctx context.Context, ids []ID) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pruneBound)
 	defer cancel()
 	tried, err := ix.remove(ctx, linesOf(ids))
-	return errors.Join(err, ix.checkRemoved(ctx, tried))
+	if len(tried) == 0 {
+		return err
+	}
+	kept := func(schema.GroupKind) bool { return false }
+	if disown && ix.keptLive != nil {
+		set, kerr := ix.keptLive(ctx)
+		if kept = set.covers; kerr != nil {
+			// Whether Disown keeps them is unknown: they go back.
+			kept = func(schema.GroupKind) bool { return true }
+			err = errors.Join(err, fmt.Errorf("credential-use: reading the Disown switch after pruning the index %s: %w", ix.ref(), kerr))
+		}
+	}
+	return errors.Join(err, ix.checkRemoved(ctx, tried, kept))
 }
 
 // checkRemoved is the check after a removal of lines tried: it adds back the
-// lines that must stay.
-func (ix *index) checkRemoved(ctx context.Context, tried []string) error {
-	var back, unread []ID
+// lines that must stay, those of the kinds kept among them.
+func (ix *index) checkRemoved(ctx context.Context, tried []string, kept func(schema.GroupKind) bool) error {
+	var back, carry, unread []ID
 	for _, l := range tried {
 		id, ok := parseIndexLine(l)
 		if !ok {
 			continue
 		}
+		if kept(id.GroupKind()) {
+			back = append(back, id)
+			continue
+		}
 		switch ix.carries(ctx, id) {
 		case carriesNot:
 		case carriesYes:
-			back = append(back, id)
+			carry = append(carry, id)
 		default:
 			unread = append(unread, id)
 		}
 	}
-	if len(back)+len(unread) == 0 {
+	if len(back)+len(carry)+len(unread) == 0 {
 		return nil
 	}
+	back = append(back, carry...)
 	// What can't be read may carry the prefix, unless an operator vouched
 	// for it (§10.6.6): read live, since the vouch may have been withdrawn.
 	// An index that can't be read vouches for nothing.
@@ -668,7 +709,7 @@ func (ix *index) checkRemoved(ctx context.Context, tried []string) error {
 	if cur, err := ix.store.get(ctx); err == nil {
 		vouched = ix.parseVouched(cur.vouched)
 	}
-	for _, id := range back {
+	for _, id := range carry {
 		if vouched[id] {
 			ix.vouchWrong(id)
 		}
@@ -1121,7 +1162,23 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	}
 	due = SortedIDs(due)
 	vouched := ix.vouchedNow()
-	var back, failed, done, unread []ID
+	// The kinds whose lines Disown keeps, read live once, if a bare object's
+	// line was dropped.
+	var kept *disownSet
+	keeps := func(gk schema.GroupKind) (bool, error) {
+		if ix.keptLive == nil {
+			return false, nil
+		}
+		if kept == nil {
+			set, err := ix.keptLive(ctx)
+			if err != nil {
+				return false, err
+			}
+			kept = &set
+		}
+		return kept.covers(gk), nil
+	}
+	var back, failed, done, unread, bare []ID
 	for _, id := range due {
 		c := ix.carries(ctx, id)
 		if vouched[id] && c != carriesYes && c != carriesNot {
@@ -1145,7 +1202,17 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 			back = append(back, id)
 			unread = append(unread, id)
 		case carriesNot:
-			done = append(done, id)
+			switch keep, err := keeps(id.GroupKind()); {
+			case err != nil:
+				failed = append(failed, id)
+			case keep:
+				// Disown hasn't settled: a hold may still land on it, and
+				// only its line would show it (§7.4).
+				back = append(back, id)
+				bare = append(bare, id)
+			default:
+				done = append(done, id)
+			}
 		default:
 			failed = append(failed, id)
 		}
@@ -1162,6 +1229,7 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	for _, id := range append(done, back...) {
 		if r := ix.pending[id]; r != nil {
 			switch {
+			case slices.Contains(bare, id): // nothing is held
 			case r.tampered && slices.Contains(unread, id) && slices.Contains(back, id):
 				restoredUnread = append(restoredUnread, id)
 			case r.tampered && slices.Contains(back, id):
@@ -1445,6 +1513,8 @@ func (t *Tracker) newTrackerIndex() error {
 		set, err := t.disownLive(ctx)
 		return len(t.disownPerName(set)) > 0, err
 	}
+	ix.keptLive = t.disownKeeps
+	ix.keptCached = func(gk schema.GroupKind) bool { return keptKinds(t.crdCached()).covers(gk) }
 	ix.onLines = func(lines []string) {
 		ratio := float64(len(lines)) / float64(ix.maxLines)
 		sinkMetrics{t}.IndexFillRatio(kindLabel(t.gk), ratio)

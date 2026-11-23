@@ -554,6 +554,98 @@ func TestAPruneOutlivesAStop(t *testing.T) {
 	}
 }
 
+// While Disown covers the kind and hasn't settled, a prune's lines stay,
+// whatever the CRD's cache shows: the live read after the removal decides,
+// and one that fails puts them back. Disown's own emptying removes them
+// (§7.4).
+func TestAPruneWhileDisownHasntSettled(t *testing.T) {
+	ctx := context.Background()
+	bare := SecretRef("ns", "bare").ID()
+	all := parseDisown("all")
+	for name, tc := range map[string]struct {
+		cached, live disownSet
+		fail         bool
+		empty        bool
+		kept         bool
+		updates      int
+	}{
+		"off":                          {updates: 1},
+		"on, and cached":               {cached: all, live: all, kept: true},
+		"on, and not cached":           {live: all, kept: true, updates: 2},
+		"on for another kind":          {live: parseDisown("ConfigMap"), updates: 1},
+		"unreadable":                   {fail: true, kept: true, updates: 2},
+		"on, and the emptying":         {cached: all, live: all, empty: true, updates: 1},
+		"off, with a cache that isn't": {cached: all, kept: true},
+	} {
+		st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare}), rv: 1}
+		ix := testIndex(st, &objServer{objs: map[ID]*metav1.PartialObjectMetadata{bare: {ObjectMeta: metav1.ObjectMeta{Name: "bare"}}}})
+		ix.keptCached = tc.cached.covers
+		ix.keptLive = func(context.Context) (disownSet, error) {
+			if tc.fail {
+				return disownSet{}, errors.New("the CRD can't be read")
+			}
+			return tc.live, nil
+		}
+		remove := ix.prune
+		if tc.empty {
+			remove = ix.empty
+		}
+		if err := remove(ctx, []ID{bare}); (err != nil) != tc.fail {
+			t.Errorf("%s: %v", name, err)
+		}
+		if got := len(st.lines) == 1; got != tc.kept || st.updates != tc.updates {
+			t.Errorf("%s: the line kept: %v, in %d updates; want %v, in %d", name, got, st.updates, tc.kept, tc.updates)
+		}
+	}
+}
+
+// A bare object's dropped line goes back while Disown covers the kind and
+// hasn't settled, unreported; a switch that can't be read retries the check
+// (§7.4).
+func TestABareDropWhileDisownHasntSettled(t *testing.T) {
+	bare := SecretRef("ns", "bare").ID()
+	st := &memStore{exists: true, rebuilt: true}
+	ix := testIndex(st, &objServer{objs: map[ID]*metav1.PartialObjectMetadata{bare: {ObjectMeta: metav1.ObjectMeta{Name: "bare"}}}})
+	ix.onTampered = func(ID) { t.Error("a bare object's line was reported as tampering") }
+	var set disownSet
+	fail := errors.New("the CRD can't be read")
+	ix.keptLive = func(context.Context) (disownSet, error) { return set, fail }
+	now := time.Now()
+	ix.queue([]ID{bare}, true)
+	if err := ix.recheckTick(context.Background(), now); err == nil || ix.pending[bare] == nil || len(st.lines) != 0 {
+		t.Errorf("with the switch unreadable: %v, pending %v, lines %q", err, ix.pending, st.lines)
+	}
+	set, fail = parseDisown("all"), nil
+	if err := ix.recheckTick(context.Background(), now.Add(time.Hour)); err != nil || len(ix.pending) != 0 || !slices.Equal(st.lines, linesOf([]ID{bare})) {
+		t.Errorf("under the switch: %v, pending %v, lines %q; want the line back", err, ix.pending, st.lines)
+	}
+	set, st.lines = disownSet{}, nil
+	ix.queue([]ID{bare}, true)
+	if err := ix.recheckTick(context.Background(), now); err != nil || len(ix.pending) != 0 || len(st.lines) != 0 {
+		t.Errorf("without it: %v, pending %v, lines %q; want it dropped", err, ix.pending, st.lines)
+	}
+}
+
+// Once settled, Disown removes only the lines a live read proves free: not
+// one whose strip failed, which can't be read and isn't vouched for, or that
+// carries the prefix (§7.4).
+func TestFreeLines(t *testing.T) {
+	id := func(n string) ID { return SecretRef("ns", n).ID() }
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{
+		id("bare"): {ObjectMeta: metav1.ObjectMeta{Name: "bare"}}, id("unstripped"): {ObjectMeta: metav1.ObjectMeta{Name: "unstripped"}}, id("held"): heldObj("held"), id("vouched-held"): heldObj("vouched-held"),
+	}, forbid: map[ID]bool{id("denied"): true, id("vouched"): true}, fail: map[ID]bool{id("failing"): true}}
+	prefix, _ := FinalizerPrefix(widgetGK)
+	tr := &Tracker{gk: widgetGK, prefix: prefix}
+	var lined []ID
+	for _, n := range []string{"bare", "denied", "failing", "gone", "held", "unstripped", "vouched", "vouched-held"} {
+		lined = append(lined, id(n))
+	}
+	got := tr.freeLines(context.Background(), srv, lined, map[ID]bool{id("unstripped"): true}, map[ID]bool{id("vouched"): true, id("vouched-held"): true})
+	if want := []ID{id("bare"), id("gone"), id("vouched")}; !slices.Equal(got, want) {
+		t.Errorf("free = %v, want %v", got, want)
+	}
+}
+
 // The live checks restore the lines of objects that carry the kind's
 // prefix, report a dropped one as tampering, and back off a failed one.
 func TestIndexRecheck(t *testing.T) {
