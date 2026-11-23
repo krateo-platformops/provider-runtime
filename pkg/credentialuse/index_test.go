@@ -1208,6 +1208,48 @@ func TestIndexUnsure(t *testing.T) {
 	}
 }
 
+// duringGet is a memStore whose get runs during as it returns.
+type duringGet struct {
+	*memStore
+	during func()
+}
+
+func (s duringGet) get(ctx context.Context) (indexVersion, error) {
+	v, err := s.memStore.get(ctx)
+	s.during()
+	return v, err
+}
+
+// A read of the index for a count is sure only with nothing owed before it
+// and after it: a re-add that lands during it isn't in what it read, and one
+// that becomes due during it may not be (§7.4).
+func TestReadSure(t *testing.T) {
+	secrets := map[schema.GroupKind]bool{secretGroupKind: true}
+	id := SecretRef("ns", "s").ID()
+	for name, tc := range map[string]struct {
+		before, during func(ix *index)
+		sure           bool
+	}{
+		"nothing owed":           {sure: true},
+		"owed throughout":        {before: func(ix *index) { ix.queue([]ID{id}, false) }},
+		"owed before, not after": {before: func(ix *index) { ix.queue([]ID{id}, false) }, during: func(ix *index) { delete(ix.pending, id) }},
+		"owed after, not before": {during: func(ix *index) { ix.queue([]ID{id}, false) }},
+	} {
+		st := &duringGet{memStore: &memStore{exists: true, rebuilt: true}, during: func() {}}
+		ix := testIndex(st, nil)
+		if tc.during != nil {
+			st.during = func() { tc.during(ix) }
+		}
+		if tc.before != nil {
+			tc.before(ix)
+		}
+		cur, sure, err := ix.readSure(context.Background(), secrets)
+		if err != nil || !cur.rebuilt || sure != tc.sure {
+			t.Errorf("%s: %+v, sure %v, %v; want sure %v", name, cur, sure, err, tc.sure)
+		}
+	}
+}
+
 // failingList fails every List, as a rebuild meets an API server that can't
 // list the holders.
 type failingList struct{ server }

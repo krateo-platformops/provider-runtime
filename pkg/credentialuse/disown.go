@@ -403,7 +403,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				}
 			}
 		}
-		cur, err := t.idx.store.get(ctx)
+		cur, sure, err := t.idx.readSure(ctx, perName)
 		lost := Classify(err) == ClassNotFound || err == nil && !cur.complete()
 		if err != nil || lost {
 			known = false
@@ -416,7 +416,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		}
 		// A line whose check or re-add this process still owes may be
 		// missing from what was read (§7.4).
-		if t.idx.unsure(perName) {
+		if !sure {
 			known = false
 		}
 		vouched = t.idx.parseVouched(cur.vouched)

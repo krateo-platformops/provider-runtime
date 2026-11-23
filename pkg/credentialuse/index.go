@@ -1148,6 +1148,16 @@ func (ix *index) unsure(kinds map[schema.GroupKind]bool) bool {
 	return false
 }
 
+// readSure reads the index live for a count of kinds, and reports whether no
+// line of one may be missing from it (unsure), before the read and after it:
+// a re-add that was pending before it may land too late for it, and be pending
+// no more after it.
+func (ix *index) readSure(ctx context.Context, kinds map[schema.GroupKind]bool) (cur indexVersion, sure bool, err error) {
+	sure = !ix.unsure(kinds)
+	cur, err = ix.store.get(ctx)
+	return cur, sure && !ix.unsure(kinds), err
+}
+
 // switchChanged asks for the rebuild of an index without the marker, which a
 // rebuild under the switch leaves it without.
 func (ix *index) switchChanged() {
