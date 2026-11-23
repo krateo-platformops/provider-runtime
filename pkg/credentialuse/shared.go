@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -825,6 +826,25 @@ func (s *Shared) trackFailed(gk schema.GroupKind, err error) error {
 	}
 }
 
+// neverTracked reports whether no process has tracked kind o.Holder before:
+// its CRD carries neither the index pointer nor the published settings,
+// which every Track writes, so that a kind moved from LabelScoped, which has
+// no pointer, has a history too (§7.4).
+func (s *Shared) neverTracked(ctx context.Context, o Options) (bool, error) {
+	m, err := s.c.Mapper.RESTMapping(o.Holder.GroupKind(), o.Holder.Version)
+	if err != nil {
+		return false, err
+	}
+	crd, err := s.c.Dynamic.Resource(crdGVR).Get(ctx, m.Resource.Resource+"."+m.Resource.Group, metav1.GetOptions{})
+	if err != nil {
+		return false, fmt.Errorf("credential-use: reading the CRD of %s for its history (%s, %s): %w", o.Holder.GroupKind(), AnnotationIndex, AnnotationConfig, err)
+	}
+	ann := crd.GetAnnotations()
+	_, pointer := ann[AnnotationIndex]
+	_, config := ann[AnnotationConfig]
+	return !pointer && !config, nil
+}
+
 // track adds kind o.Holder, which no other Track is adding, within ctx, its
 // budget under the caller's caller.
 func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (*Tracker, error) {
@@ -836,6 +856,14 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 		}
 		return s.setupFailed(err)
 	}
+	fresh := false
+	if slices.ContainsFunc(o.Protected, func(pk ProtectedKind) bool { return pk.Watch == PerName }) {
+		// Read before this Track writes either annotation.
+		var err error
+		if fresh, err = s.neverTracked(ctx, o); err != nil {
+			return nil, setupFailed(err)
+		}
+	}
 	if err := s.publishConfig(ctx, o); err != nil {
 		return nil, setupFailed(err)
 	}
@@ -844,6 +872,7 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 		return nil, setupFailed(err)
 	}
 	if t.idx != nil {
+		t.idx.setFresh(fresh)
 		if err := t.setupIndex(ctx); err != nil {
 			return nil, setupFailed(err)
 		}

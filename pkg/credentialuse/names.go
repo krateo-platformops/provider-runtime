@@ -66,6 +66,12 @@ const (
 	// a vouched object that can be read is treated as any other. The
 	// process never writes it.
 	AnnotationVouched = Domain + "/vouched"
+	// AnnotationVouchedIndex is an operator's word, after the index was lost
+	// while Disown was on, that no object carries a finalizer of the kind
+	// but those the index names (§7.4). Its value is the index ConfigMap's
+	// metadata.uid, so that it holds for that ConfigMap only: a later loss,
+	// or a restored copy, needs a new one. The process never writes it.
+	AnnotationVouchedIndex = Domain + "/vouched-index"
 )
 
 // ClusterScopedName is the name part of a cluster-scoped holder kind's

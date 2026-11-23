@@ -995,6 +995,97 @@ func TestTheRebuiltMarker(t *testing.T) {
 	}
 }
 
+// While Disown is on, a rebuild can't tell that the records still name every
+// hold, so it merges the lines and leaves the marker off, unless the kind
+// was never tracked before; the rebuild after the switch sets it. A switch
+// that can't be read fails the rebuild (§7.4, §10.6.6).
+func TestARebuildUnderDisownLeavesNoMarker(t *testing.T) {
+	ctx := context.Background()
+	m := apimodel.New(time.Now)
+	seed(m, "ns", "s", []string{"h"}, true)
+	srv := nsServer{modelServer{m: m}, "ns"}
+	line := SecretRef("ns", "s").ID().String()
+	st := &memStore{}
+	ix := testIndex(st, srv)
+	on, fail := true, error(nil)
+	ix.disowning = func(context.Context) (bool, error) { return on, fail }
+	fail = errors.New("the CRD can't be read")
+	if err := ix.rebuild(ctx); !errors.Is(err, fail) || st.exists {
+		t.Errorf("a rebuild that can't read the switch = %v, index created %v", err, st.exists)
+	}
+	fail = nil
+	if err := ix.rebuild(ctx); err != nil || st.rebuilt || !slices.Contains(st.lines, line) {
+		t.Errorf("a rebuild under the switch: %v, marker %v, lines %q; want the line and no marker", err, st.rebuilt, st.lines)
+	}
+	ix.lost = false
+	ix.saw(indexVersion{})
+	if ix.switchChanged(); !ix.lost {
+		t.Error("a switch that changes over an index without the marker asks for no rebuild")
+	}
+	on = false
+	if err := ix.rebuild(ctx); err != nil || !st.rebuilt {
+		t.Errorf("a rebuild after the switch: %v, marker %v", err, st.rebuilt)
+	}
+	ix.lost = false
+	ix.saw(indexVersion{rebuilt: true})
+	if ix.switchChanged(); ix.lost {
+		t.Error("a switch that changes over a rebuilt index asks for a rebuild")
+	}
+
+	// A kind never tracked before had no hold; once rebuilt, a loss is one.
+	on = true
+	st = &memStore{}
+	ix = testIndex(st, srv)
+	ix.disowning = func(context.Context) (bool, error) { return on, nil }
+	ix.setFresh(true)
+	if err := ix.rebuild(ctx); err != nil || !st.rebuilt || ix.isFresh() {
+		t.Errorf("the first rebuild of a kind never tracked: %v, marker %v, still fresh %v", err, st.rebuilt, ix.isFresh())
+	}
+	st.exists, st.rebuilt, st.lines = false, false, nil
+	if err := ix.rebuild(ctx); err != nil || st.rebuilt {
+		t.Errorf("a rebuild after it was lost: %v, marker %v; want none", err, st.rebuilt)
+	}
+}
+
+// An index names every hold once a rebuild completed, or an operator
+// vouched for that very ConfigMap (§7.4).
+func TestIndexVersionComplete(t *testing.T) {
+	for _, c := range []struct {
+		v    indexVersion
+		want bool
+	}{
+		{indexVersion{uid: "a"}, false},
+		{indexVersion{}, false}, // no uid vouches for no uid
+		{indexVersion{uid: "a", rebuilt: true}, true},
+		{indexVersion{uid: "a", vouchedIndex: "a"}, true},
+		{indexVersion{uid: "b", vouchedIndex: "a"}, false}, // restored, or lost again
+		{indexVersion{uid: "a", vouched: "a"}, false},
+	} {
+		if got := c.v.complete(); got != c.want {
+			t.Errorf("%+v is complete: %v, want %v", c.v, got, c.want)
+		}
+	}
+}
+
+// A pending live check of a kind, or a rebuild that is due, means a line of
+// it may be missing (§7.4).
+func TestIndexUnsure(t *testing.T) {
+	secrets, others := map[schema.GroupKind]bool{secretGroupKind: true}, map[schema.GroupKind]bool{configMapGroupKind: true}
+	ix := testIndex(&memStore{}, nil)
+	if ix.unsure(secrets) {
+		t.Error("unsure with nothing pending")
+	}
+	ix.queue([]ID{SecretRef("ns", "s").ID()}, false)
+	if !ix.unsure(secrets) || ix.unsure(others) {
+		t.Errorf("with a Secret's check pending: unsure of Secrets %v, of ConfigMaps %v", ix.unsure(secrets), ix.unsure(others))
+	}
+	ix = testIndex(&memStore{}, nil)
+	ix.markLost()
+	if !ix.unsure(secrets) {
+		t.Error("sure with a rebuild due")
+	}
+}
+
 // failingList fails every List, as a rebuild meets an API server that can't
 // list the holders.
 type failingList struct{ server }

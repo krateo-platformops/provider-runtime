@@ -234,6 +234,11 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	var unreadable []string // the objects of those that couldn't be read, with why
 	var texts []string      // and the errors
 	if len(perName) > 0 {
+		// The live checks due are made first, so that one a drop queued a
+		// moment ago doesn't make the count unknown.
+		if err := t.idx.recheckTick(ctx, s.clock.Now()); err != nil {
+			known = false
+		}
 		named := map[ID]bool{}
 		for i := range holders {
 			if r := ReadRecord(&holders[i]); !r.Unparseable {
@@ -245,9 +250,20 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			}
 		}
 		cur, err := t.idx.store.get(ctx)
-		if err != nil {
+		lost := Classify(err) == ClassNotFound || err == nil && !cur.complete()
+		if err != nil || lost {
 			known = false
+		}
+		switch {
+		case lost && !t.idx.isFresh():
+			t.reportIndexLost(cur)
+		case err != nil:
 			t.reportDisownFailed(ctx, "read the index "+t.idx.ref(), err, "grant get on it", "")
+		}
+		// A line whose check or re-add this process still owes may be
+		// missing from what was read (§7.4).
+		if t.idx.unsure(perName) {
+			known = false
 		}
 		vouched := t.idx.parseVouched(cur.vouched)
 		for _, id := range t.idx.ids(cur.lines) {
@@ -350,6 +366,34 @@ func (t *Tracker) reportDisownUnreadable(ctx context.Context, unreadable, texts 
 	t.s.events.record(crd, "Warning", EventDisownUnreadable, note)
 	t.warn("credential-use: Disown can't read objects its index or the records name; its count stays unknown",
 		"kind", t.gk.String(), "crd", t.crdName, "unreadable", strings.Join(unreadable, ", "), "errors", strings.Join(texts, "; "))
+}
+
+// EventIndexLost (Warning, on the holder kind's CRD): the index was lost
+// while Disown is on, so its count stays "unknown" (§7.4).
+const EventIndexLost = "CredentialUseIndexLost"
+
+// reportIndexLost reports an index that is missing, or that no rebuild
+// completed, while Disown is on: the records it would be rebuilt from may be
+// stripped already, so only an operator can tell that nothing else is held.
+// The event sink throttles it while cur is the same ConfigMap.
+func (t *Tracker) reportIndexLost(cur indexVersion) {
+	uid := cur.uid
+	if uid == "" {
+		uid = "<its metadata.uid, once it exists again>"
+	}
+	var kinds []string
+	for gk := range t.idx.kinds {
+		kinds = append(kinds, gk.String())
+	}
+	slices.Sort(kinds)
+	note := "the index " + t.idx.ref() + " was lost, and Disown strips the records that named its holds, so held-count stays unknown: list the objects of " +
+		strings.Join(kinds, ", ") + " labelled " + MarkerLabel(t.gk) + "=true, remove every finalizer that starts with " + t.prefix +
+		" from them, then run: kubectl annotate configmap -n " + t.idx.namespace + " " + t.idx.name + " " + AnnotationVouchedIndex + "=" + uid + " (§7.4)"
+	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
+	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
+	t.s.events.record(crd, "Warning", EventIndexLost, note)
+	t.warn("credential-use: the index was lost while Disown is on; its count stays unknown until an operator vouches for the index",
+		"kind", t.gk.String(), "crd", t.crdName, "index", t.idx.ref(), "uid", cur.uid)
 }
 
 // notServed reports whether err is a 404 that isn't about an object: its kind
@@ -556,6 +600,9 @@ func (h crdHandler) OnUpdate(oldObj, newObj any) {
 	n, ok2 := metadataOf(newObj)
 	if !ok1 || !ok2 || o.Annotations[AnnotationDisown] == n.Annotations[AnnotationDisown] {
 		return
+	}
+	if h.t.idx != nil {
+		h.t.idx.switchChanged()
 	}
 	for _, obj := range h.t.holders.GetStore().List() {
 		if m, ok := metadataOf(obj); ok {

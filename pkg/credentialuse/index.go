@@ -190,11 +190,18 @@ type indexVersion struct {
 	rv    string
 	// rebuilt: the index carries AnnotationRebuilt (§10.6.6).
 	rebuilt bool
-	// vouched is AnnotationVouched's value, as the operator wrote it.
-	vouched string
+	// vouched is AnnotationVouched's value, as the operator wrote it;
+	// vouchedIndex, AnnotationVouchedIndex's. uid is the ConfigMap's.
+	vouched, vouchedIndex, uid string
 	// obj is the ConfigMap itself, for the next guarded Update; nil from the
 	// model's store.
 	obj *unstructured.Unstructured
+}
+
+// complete reports whether v names every hold: a rebuild of it completed, or
+// an operator vouched for this very ConfigMap after a loss (§7.4).
+func (v indexVersion) complete() bool {
+	return v.rebuilt || v.uid != "" && v.vouchedIndex == v.uid
 }
 
 // indexStore is where the index lives: the ConfigMap, through the dynamic
@@ -227,8 +234,9 @@ func newConfigMapStore(dyn dynamic.Interface, namespace, name string) configMapS
 // versionOf reads an index ConfigMap.
 func versionOf(u *unstructured.Unstructured) indexVersion {
 	data, _, _ := unstructured.NestedString(u.Object, "data", indexDataKey)
-	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u,
-		rebuilt: u.GetAnnotations()[AnnotationRebuilt] == "true", vouched: u.GetAnnotations()[AnnotationVouched]}
+	ann := u.GetAnnotations()
+	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u, uid: string(u.GetUID()),
+		rebuilt: ann[AnnotationRebuilt] == "true", vouched: ann[AnnotationVouched], vouchedIndex: ann[AnnotationVouchedIndex]}
 }
 
 func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
@@ -284,6 +292,7 @@ func (s configMapStore) create(ctx context.Context, lines []string, rebuilt bool
 type indexSnapshot struct {
 	lines   map[string]bool
 	vouched map[ID]bool
+	rebuilt bool
 }
 
 // index is one holder kind's index (§10.6), for its PerName kinds. Its
@@ -311,6 +320,10 @@ type index struct {
 	// holder cache: a line for an object without the kind's finalizer is
 	// kept while one does (§10.6.2). Nil is never.
 	recorded func(id ID) bool
+	// disowning reads live whether the Disown switch covers a PerName kind:
+	// the records may have been stripped, so a rebuild from them can't tell
+	// that it found every hold (§7.4). Nil is never.
+	disowning func(ctx context.Context) (bool, error)
 	// onLines sees every version of the index this process reads or
 	// writes, with its lines: the fill gauge and event (§10.6.4).
 	onLines func(lines []string)
@@ -356,6 +369,10 @@ type index struct {
 	lost      bool
 	lostDue   time.Time
 	lostFails int
+	// fresh: the kind was never tracked before this process's Track, and
+	// had no index, so that a missing one, until this process has rebuilt
+	// it, isn't a lost one (§7.4).
+	fresh bool
 	// deniedSeen are the objects whose refused read was reported.
 	deniedSeen map[ID]bool
 	// vouchWarned are the vouched annotation's values whose malformed
@@ -413,7 +430,7 @@ func (ix *index) covers(gk schema.GroupKind) bool { return ix != nil && ix.kinds
 
 // saw keeps v as this process's view, and reports its lines.
 func (ix *index) saw(v indexVersion) {
-	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines)), vouched: ix.parseVouched(v.vouched)}
+	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines)), vouched: ix.parseVouched(v.vouched), rebuilt: v.rebuilt}
 	for _, l := range v.lines {
 		s.lines[l] = true
 	}
@@ -989,8 +1006,60 @@ func (ix *index) rebuild(ctx context.Context) error {
 	if len(unread) > 0 && ix.onUnreadable != nil {
 		ix.onUnreadable(unread)
 	}
-	// The last merge, which sets the marker in the same write.
-	return ix.merge(ctx, keep, true)
+	// The last merge, which sets the marker in the same write, unless
+	// Disown may have stripped the records it was rebuilt from: read after
+	// the list, a switch that is off had stripped none of them.
+	mark := true
+	if ix.disowning != nil && !ix.isFresh() {
+		on, err := ix.disowning(ctx)
+		if err != nil {
+			return fmt.Errorf("credential-use: reading the Disown switch to rebuild the index %s: %w", ix.ref(), err)
+		}
+		mark = !on
+	}
+	if err := ix.merge(ctx, keep, mark); err != nil {
+		return err
+	}
+	if mark {
+		ix.setFresh(false)
+	}
+	return nil
+}
+
+func (ix *index) isFresh() bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	return ix.fresh
+}
+
+func (ix *index) setFresh(fresh bool) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.fresh = fresh
+}
+
+// unsure reports whether a line of one of kinds may be missing: one whose
+// live check, or re-add, is pending, or any, until a rebuild that is due.
+func (ix *index) unsure(kinds map[schema.GroupKind]bool) bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.lost {
+		return true
+	}
+	for id := range ix.pending {
+		if kinds[id.GroupKind()] {
+			return true
+		}
+	}
+	return false
+}
+
+// switchChanged asks for the rebuild of an index without the marker, which a
+// rebuild under the switch leaves it without.
+func (ix *index) switchChanged() {
+	if s := ix.snap.Load(); s != nil && !s.rebuilt {
+		ix.markLost()
+	}
 }
 
 // needsRebuild reports whether v, a version of the index read live, lacks
@@ -1221,9 +1290,13 @@ func (t *Tracker) setupIndex(ctx context.Context) error {
 	cur, err := ix.store.get(ctx)
 	switch Classify(err) {
 	case ClassNone:
+		ix.setFresh(false)
 	case ClassNotFound:
 		// Created without the marker: only the rebuild below sets it.
-		if _, err := ix.store.create(ctx, nil, false); err != nil && Classify(err) != ClassAlreadyExists {
+		switch _, err := ix.store.create(ctx, nil, false); {
+		case Classify(err) == ClassAlreadyExists:
+			ix.setFresh(false)
+		case err != nil:
 			return ix.writeErr("creating", err)
 		}
 		cur = indexVersion{}
@@ -1368,6 +1441,10 @@ func (t *Tracker) newTrackerIndex() error {
 	}
 	ix := newIndex(t.gk, t.prefix, s.o.IndexNamespace, s.indexMaxLines(), kinds, store, t.proto.srv)
 	ix.recorded = t.recorded
+	ix.disowning = func(ctx context.Context) (bool, error) {
+		set, err := t.disownLive(ctx)
+		return len(t.disownPerName(set)) > 0, err
+	}
 	ix.onLines = func(lines []string) {
 		ratio := float64(len(lines)) / float64(ix.maxLines)
 		sinkMetrics{t}.IndexFillRatio(kindLabel(t.gk), ratio)

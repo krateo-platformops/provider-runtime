@@ -1008,8 +1008,104 @@ func TestIndexRebuildMergesWithAConcurrentAdd(t *testing.T) {
 	}
 }
 
+// vouchIndex sets the operator's vouch for the index itself in idx, for uid,
+// or for the ConfigMap that is there.
+func vouchIndex(t *testing.T, idx, uid string) {
+	t.Helper()
+	editIndex(t, idx, func(cm *corev1.ConfigMap) {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		if cm.Annotations[cu.AnnotationVouchedIndex] = uid; uid == "" {
+			cm.Annotations[cu.AnnotationVouchedIndex] = string(cm.UID)
+		}
+	})
+}
+
+// staysUnknown waits until Disown's count is "unknown", and checks that it
+// stays so for longer than a run of zero passes.
+func staysUnknown(t *testing.T) {
+	t.Helper()
+	cutest.Eventually(t, time.Minute, func() error {
+		if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" {
+			return fmt.Errorf("held-count %q: %w", a[cu.AnnotationHeldCount], cutest.ErrNotYet)
+		}
+		return nil
+	})
+	counts, settled := watchHeldCount(t), watchCRDAnnotation(t, cu.AnnotationDisownSettled)
+	time.Sleep((disownPasses + 2) * disownInterval)
+	if seen := counts(); slices.ContainsFunc(seen, func(v string) bool { return v != "unknown" }) {
+		t.Errorf("held-count while unknown: %v", seen)
+	}
+	if seen := settled(); slices.Contains(seen, "true") {
+		t.Errorf("disown-settled while the count is unknown: %v", seen)
+	}
+}
+
+// Whether a missing index is a lost one, with Disown on before the kind's
+// first Track (§7.4): it is when the CRD shows that the kind was tracked
+// before, by the pointer or the published settings; a kind never tracked
+// settles; and an index that is there, rebuilt, is intact whatever the CRD
+// shows, and its lines count.
+func TestIndexLostUnderDisown(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	ref := func(idx string) string { return idx + "/" + widgetIndex }
+	for name, tc := range map[string]struct {
+		before func(t *testing.T, idx, ns string)
+		lost   bool
+	}{
+		"never tracked": {before: func(*testing.T, string, string) {}},
+		"a pointer, and no index": {before: func(t *testing.T, idx, _ string) {
+			setWidgetCRDAnnotations(t, map[string]any{cu.AnnotationIndex: ref(idx)})
+		}, lost: true},
+		"moved from LabelScoped": {before: func(t *testing.T, _, _ string) {
+			s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
+			s.SetLandingMargin(0)
+			o := widgetOptions(func(types.NamespacedName) {})
+			o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
+			disownOptions(&o)
+			if _, err := s.Track(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+		}, lost: true},
+		"the CRD recreated, the index kept": {before: func(t *testing.T, idx, ns string) {
+			createSecret(t, ns, "leftover")
+			acquireAs(t, ns, "leftover")
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
+				Data: map[string]string{"entries": secretLine(ns, "leftover") + "\n"}}
+			if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			set := disowning(t)
+			idx, ns := indexNamespace(t), env.Namespace(t, "idx-lost")
+			set("all")
+			r := perNameRig(t, idx, disownOptions, func(*cu.Shared) { tc.before(t, idx, ns) })
+			if !tc.lost {
+				cutest.Eventually(t, time.Minute, settledAtZero(t))
+				if name != "never tracked" {
+					stripped(t, ns, "leftover")
+				}
+				return
+			}
+			staysUnknown(t)
+			eventSeen(t, r, cu.EventIndexLost, cu.AnnotationVouchedIndex)
+			// Another ConfigMap's vouch isn't this one's.
+			vouchIndex(t, idx, "00000000-0000-0000-0000-000000000000")
+			staysUnknown(t)
+			vouchIndex(t, idx, "")
+			cutest.Eventually(t, time.Minute, settledAtZero(t))
+		})
+	}
+}
+
 // A missing or unreadable index keeps Disown's count "unknown", never "0"
-// (§10.6.5, L4); once it can be read again, Disown settles.
+// (§10.6.5, L4). Once an unreadable one can be read again, Disown settles.
+// A missing one was lost: the rebuild under the switch doesn't settle it
+// either, until an operator vouches for the new index (§7.4).
 func TestIndexUnreadableKeepsTheCountUnknown(t *testing.T) {
 	cutest.Require(t, env)
 	for _, missing := range []bool{false, true} {
@@ -1052,6 +1148,17 @@ func TestIndexUnreadableKeepsTheCountUnknown(t *testing.T) {
 				t.Errorf("held-count was 0 with the index unreadable: %v", seen)
 			}
 			failing.Store(false)
+			if missing {
+				cutest.Eventually(t, time.Minute, func() error {
+					if _, ok := indexLines(t, idx); !ok {
+						return fmt.Errorf("the index isn't recreated: %w", cutest.ErrNotYet)
+					}
+					return nil
+				})
+				staysUnknown(t)
+				eventSeen(t, r, cu.EventIndexLost, cu.AnnotationVouchedIndex)
+				vouchIndex(t, idx, "")
+			}
 			cutest.Eventually(t, time.Minute, settledAtZero(t))
 		})
 	}
