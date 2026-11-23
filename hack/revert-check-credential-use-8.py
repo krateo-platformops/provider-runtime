@@ -234,7 +234,7 @@ KILLERS = {
     "a holder in the index namespace is held": {C: "TestIndexNamespaceChecks"},
     "a cap above the ceiling is accepted": {C: "TestTrackValidatesIndex"},
     "Disown ignores the index": {C: "TestDisownCountsAndEmptiesTheIndex|TestIndexA1BeforeTheDisownSwitch"},
-    "Disown doesn't empty the index": {C: "TestDisownCountsAndEmptiesTheIndex|TestIndexA1BeforeTheDisownSwitch"},
+    "Disown doesn't empty the index": {C: "TestDisownEmptiesTheIndexItself|TestDisownCountsAndEmptiesTheIndex|TestIndexA1BeforeTheDisownSwitch"},
     "an unreadable index counts": {C: "TestIndexUnreadableKeepsTheCountUnknown"},
     "DisownPrefix ignores Index": {C: "TestDisownPrefixFromTheIndex"},
     "per-name watches don't follow the index": {C: "TestIndexLinesBeforeA2AndPrunedAfterR3|TestIndexTampering|TestPerNameUnderResourceNamesRBAC"},

@@ -1178,10 +1178,19 @@ func TestIndexCreatedAtStartRebuildsFromRecords(t *testing.T) {
 	if _, ok := indexLines(t, idx); ok {
 		t.Fatal("an index exists before the first PerName start")
 	}
-	perNameRig(t, idx, nil, nil)
+	// Track alone, with neither informers nor write loops: the rebuild is
+	// Track's own, not the startup recheck's.
+	resetPublished(t, cutest.WidgetGVR)
+	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
+	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	o := widgetOptions(func(types.NamespacedName) {})
+	perName(&o)
+	if _, err := s.Track(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
 	lines, ok := indexLines(t, idx)
-	if !ok || !slices.Contains(lines, secretLine(ns, "s")) {
-		t.Fatalf("the index after the first start: %v, %v; want the held Secret's line", lines, ok)
+	if !ok || !slices.Contains(lines, secretLine(ns, "s")) || !indexRebuilt(t, idx) {
+		t.Fatalf("the index right after Track: %v, %v, marker %v; want the held Secret's line, rebuilt", lines, ok, indexRebuilt(t, idx))
 	}
 }
 
@@ -1260,6 +1269,7 @@ func TestIndexSetupRebuildFailureIsRetried(t *testing.T) {
 	labelScoped.stop()
 
 	var failed atomic.Bool
+	var tr *cu.Tracker
 	perNameRig(t, idx, nil, func(s *cu.Shared) {
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
 			// The rebuild's list of every holder, once.
@@ -1268,6 +1278,20 @@ func TestIndexSetupRebuildFailureIsRetried(t *testing.T) {
 			}
 			return nil
 		}, nil)
+		// Track's own result, before any write loop runs: the rebuild that
+		// failed is queued for the write loops, as the marker's absence
+		// would also make the startup recheck do.
+		resetPublished(t, cutest.WidgetGVR)
+		o := widgetOptions(func(types.NamespacedName) {})
+		perName(&o)
+		o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
+		var err error
+		if tr, err = s.Track(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+		if _, lost := tr.PendingIndexChecks(); !lost {
+			t.Error("the failed rebuild isn't queued for the write loops when Track returns")
+		}
 	})
 	if !failed.Load() {
 		t.Fatal("the start's rebuild never listed the holders")
@@ -1740,16 +1764,18 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		t.Fatalf("disown-settled after the hand removal alone: %v", seen)
 	}
 
-	// The remedy: the operator vouches for it, here removing its line in the
-	// same edit. The line stays removed, and Disown settles.
+	// The remedy: the operator vouches for it, and leaves the line. Disown
+	// meets the vouched line, skips it while it can't be read, settles, and
+	// its emptying removes the line for good.
 	editIndex(t, idx, func(cm *corev1.ConfigMap) {
 		if cm.Annotations == nil {
 			cm.Annotations = map[string]string{}
 		}
 		cm.Annotations[cu.AnnotationVouched] = ns + "/Secret/nogrant"
-		cm.Data["entries"] = strings.ReplaceAll(cm.Data["entries"], line+"\n", "")
 	})
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	lined(t, idx, line, false)
+	time.Sleep(2 * time.Second) // the write loops' ticks
 	if lines, _ := indexLines(t, idx); slices.Contains(lines, line) {
 		t.Errorf("the vouched line came back: %v", lines)
 	}
@@ -1825,5 +1851,36 @@ func TestDisownCountsAVouchedObjectThatCarries(t *testing.T) {
 	stripped(t, ns, "x")
 	if len(logs.matching("the vouch is wrong")) == 0 {
 		t.Error("the wrong vouch wasn't logged")
+	}
+}
+
+// Disown empties the index itself (§7.4): a hold that a record names, and
+// the index lists, is stripped with the record, and its line pruned by
+// Disown's emptying. Nothing else can prune it here: the holder cache is
+// held at the version whose record names the Secret, so the release batch
+// that follows the strip keeps the line (§10.6.2, a line a record names).
+func TestDisownEmptiesTheIndexItself(t *testing.T) {
+	cutest.Require(t, env)
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-empties")
+	createSecret(t, ns, "x")
+	createWidget(t, ns, "w", "x")
+	r := perNameRig(t, idx, disownOptions, nil)
+	r.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "x", "w")
+	lined(t, idx, secretLine(ns, "x"), true)
+	r.c.stop() // no more passes: the holder isn't held again after Disown
+	r.tr.PauseHolderWatch()
+	t.Cleanup(r.tr.ResumeHolderWatch)
+
+	counts := watchHeldCount(t)
+	set("all")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if seen := counts(); !slices.ContainsFunc(seen, func(v string) bool { return v != "0" && v != "" && v != "unknown" }) {
+		t.Errorf("held-count before settling: %v; want the hold counted", seen)
+	}
+	stripped(t, ns, "x")
+	if lines, _ := indexLines(t, idx); len(lines) != 0 {
+		t.Errorf("the index after Disown: %v; want it empty", lines)
 	}
 }
