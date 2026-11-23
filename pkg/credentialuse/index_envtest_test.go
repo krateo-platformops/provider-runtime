@@ -912,8 +912,8 @@ func eventSeen(t *testing.T, r *writeRig, parts ...string) {
 }
 
 // A hand edit that drops a held line is restored, with the event and the
-// tampering metric; a dropped line whose R3 the per-name watch has shown,
-// a bare Secret's, is never read (§10.6.6, L5).
+// tampering metric; a bare Secret's dropped line is read once, though the
+// per-name watch shows it bare, and stays dropped (§10.6.6).
 func TestIndexTampering(t *testing.T) {
 	cutest.Require(t, env)
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-tamper")
@@ -955,12 +955,18 @@ func TestIndexTampering(t *testing.T) {
 		}
 		return nil
 	})
-	time.Sleep(2 * time.Second) // the write loops' ticks
-	if n := bareGets.Load(); n != 0 {
-		t.Errorf("the bare Secret's dropped line was read %d times; its R3 was in the per-name cache", n)
+	cutest.Eventually(t, time.Minute, func() error {
+		if bareGets.Load() == 0 {
+			return fmt.Errorf("the bare Secret's dropped line wasn't read: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	time.Sleep(3 * time.Second) // the write loops' ticks: no second read
+	if n := bareGets.Load(); n != 1 {
+		t.Errorf("the bare Secret's dropped line was read %d times, want once", n)
 	}
-	if lines, _ := indexLines(t, idx); slices.Contains(lines, secretLine(ns, "bare")) {
-		t.Errorf("the bare Secret's line came back: %v", lines)
+	if lines, ok := indexLines(t, idx); !ok || slices.Contains(lines, secretLine(ns, "bare")) {
+		t.Errorf("the bare Secret's line came back, or the index is gone: %v", lines)
 	}
 	if pending, _ := r.tr.PendingIndexChecks(); len(pending) != 0 {
 		t.Errorf("checks still pending: %v", pending)

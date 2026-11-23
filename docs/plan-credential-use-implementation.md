@@ -1126,11 +1126,12 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   loops**, so `RunInformers` stays read-only (IP4). Under leader election,
   only the leader pays the GET per dropped line. The index informer
   queues dropped lines and deletions, and the write loops drain them every
-  second, with backoff on failure. A drop is this process's own when it
-  removed the line itself: the line is marked before the write, so the
-  informer never takes it for someone else's. A drop whose object the
-  per-name cache shows without the kind's prefix, or gone, needs no check
-  (L5). A restored dropped line is counted in
+  second, with backoff on failure. A drop is this process's own
+  only in the version a successful removal of its own returned; every other
+  is checked, one whose object the per-name cache shows released included
+  (the user's decision, 2026-11-23, in place of L5's skip). Marking a line
+  before the write took a concurrent hand removal for this process's own,
+  and lost the line of a held object. A restored dropped line is counted in
   `credentialuse_index_tampered_total`, with a `CredentialUseIndexTampered`
   Warning event on the index.
 - **§10.6.6 follows IP4** (the review of the PR 8 build, 2026-11-22): the

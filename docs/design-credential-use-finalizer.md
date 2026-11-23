@@ -3045,9 +3045,15 @@ missing (§10.6.6).
 
 The tracker watches the ConfigMap by name (or polls it in PerNamePoll mode,
 §10.7). **A change that drops lines this process didn't remove** is checked
-line by line, except for **lines removed alongside a successful R3 the
-tracker can see**. In PerName mode, the per-object watch has already
-delivered that P lost K's last finalizer. Those need no check (L5).
+line by line, with one live GET each. **A drop is this process's own only
+when the version that shows it is the one a successful write of its own
+returned**, whichever of the event and the response comes first. Anything
+else is checked: a drop seen while a removal of the same line conflicts, or
+has an unknown outcome, may be someone else's (the user's decision,
+2026-11-23). So is a drop the per-object watch shows released. That cache
+can lag a hold, and the process that made the drop can die before its own
+check after it, so L5's exception for a visible R3 is withdrawn. A drop
+delivered while its object's check runs is checked again.
 
 **Where the checks run** (IP4: the informers only read, and every write is
 in the write loops). The dropped-line checks, their restores and the
@@ -4076,7 +4082,9 @@ on krateo-057:
   `deletionGrace` refuses to start (L3). A rollout with two `RefsFunc`
   versions stays safe and is measured for churn. Both owner finalizer
   names are accepted during provider-runtime#46.
-- Tamper checks skip lines whose R3 was seen, and GET the rest (L5).
+- Tamper checks GET every dropped line once, except those of a version this
+  process's own write returned; a removal's conflict or lost response, and a
+  drop during its check, lose no line (§10.6.6).
 - **Cross-namespace consent** (§11.3): a ref without consent gets no line,
   no grant and no A2, and Connect proceeds with `CredentialRefNotHeld`;
   consent by object, by namespace, and `*` on an object; a `*` on a
@@ -4688,7 +4696,7 @@ were not retried.
 | L2 §10.6.3's sentence amended; the negligible residual | §10.6.3 |
 | L3 `DeletionGrace`, `DisownPasses`, `DisownInterval` and the timeout bound published on the CRD, write-once, start fails on disagreement; a mixed `Protected` or `RefsFunc` is safe per pass but churns; `OwnerFinalizers` is a set during provider-runtime#46 | §7.3, §7.1, §6.1 |
 | L4 A 403 on A2 is retried for about 8s; why Degraded is harmless | §10.7.2 |
-| L5 Tamper checks skip lines with a visible R3; the N× GET cost accepted | §10.6.6 |
+| L5 Tamper checks skip lines with a visible R3 (withdrawn 2026-11-23: every drop but this process's own is read); the N× GET cost accepted | §10.6.6 |
 | L6 ClusterRole updates coalesced per cycle; the cost of a 2,000-name rule, with the linear match cited | §10.7.1, §10.7.3 |
 
 **Revision 7** (cross-namespace consent and the provisioner):
