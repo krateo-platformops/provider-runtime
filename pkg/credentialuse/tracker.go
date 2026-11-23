@@ -215,6 +215,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		seen:            s.seen,
 		reports:         coreReports{metrics: sinkMetrics{t}, events: s.events, warn: t.warn},
 		newEpoch:        NewEpoch,
+		a2Bound:         o.TimeoutBound,
 		heldDeleting:    t.heldDeleting,
 		mustWait:        func(n string, o Waiting) bool { return s.mustWait(batchKey{gk, n}, o) },
 		maxDepth:        o.MaxDepth,

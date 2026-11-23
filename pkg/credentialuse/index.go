@@ -329,6 +329,10 @@ type index struct {
 	// settled (§7.4). Nil is none.
 	keptLive   func(ctx context.Context) (disownSet, error)
 	keptCached func(gk schema.GroupKind) bool
+	// now is the clock, and margin how long after its context ended an A2
+	// may land (LandingMargin).
+	now    func() time.Time
+	margin time.Duration
 	// onLines sees every version of the index this process reads or
 	// writes, with its lines: the fill gauge and event (§10.6.4).
 	onLines func(lines []string)
@@ -368,6 +372,11 @@ type index struct {
 	// they carry the kind's prefix: lines someone else dropped, and re-adds
 	// that failed. tampered marks those that came from a drop.
 	pending map[ID]*recheck
+	// late are the A2s whose outcome this process doesn't know, and when
+	// the landing margin after each is over: the write loops then check its
+	// object live, as a pending one, and enqueue its release batch. One entry
+	// per object and holder namespace, so the A2s of one margin bound it.
+	late map[lateHold]time.Time
 	// lost: the index was seen deleted, or recreated by an add; the write
 	// loops rebuild it from the records (§10.6.6). lostDue is when the next
 	// try is due, lostFails how many failed in a row.
@@ -401,6 +410,12 @@ type recheck struct {
 	drop string
 }
 
+// A lateHold is an A2 of id for holder namespace n that may land late.
+type lateHold struct {
+	id ID
+	n  string
+}
+
 // An ownRemoval is one successful removal by this process: the version it
 // returned, and the lines it removed.
 type ownRemoval struct {
@@ -424,6 +439,8 @@ func newIndex(holder schema.GroupKind, prefix, namespace string, maxLines int, k
 		holder: holder, prefix: prefix, namespace: namespace, name: IndexName(holder), maxLines: maxLines,
 		kinds: kinds, store: store, srv: srv,
 		pending: map[ID]*recheck{},
+		late:    map[lateHold]time.Time{},
+		now:     time.Now, margin: LandingMargin,
 	}
 }
 
@@ -905,6 +922,37 @@ func (ix *index) postCheck(ctx context.Context, id ID) error {
 	return nil
 }
 
+// unknownA2 is the acquirer's step after an A2 whose outcome is unknown
+// (§10.6.2): the check after a successful one, at once, for a write that has
+// landed; and one more once the landing margin is over, for a write that
+// lands after a prune took the line its object then seemed not to need.
+func (ix *index) unknownA2(ctx context.Context, id ID, n string) {
+	due := ix.now().Add(ix.margin)
+	ix.mu.Lock()
+	ix.late[lateHold{id, n}] = due
+	ix.mu.Unlock()
+	_ = ix.postCheck(ctx, id) // what fails is queued
+}
+
+// lateTick queues the live check of each A2 whose landing margin is over, and
+// hands enqueue its release batch, as the acquirer owes it: its holder may be
+// gone.
+func (ix *index) lateTick(now time.Time, enqueue func(id ID, n string)) {
+	ix.mu.Lock()
+	var due []lateHold
+	for l, at := range ix.late {
+		if !now.Before(at) {
+			due = append(due, l)
+			delete(ix.late, l)
+			ix.queueLocked([]ID{l.id}, false, "")
+		}
+	}
+	ix.mu.Unlock()
+	for _, l := range due {
+		enqueue(l.id, l.n)
+	}
+}
+
 // prunable returns those of ids whose lines may go: of a PerName kind, and
 // named by no holder's record (§10.6.2). The caller has read each, live,
 // without a finalizer of the kind, or gone.
@@ -1089,6 +1137,11 @@ func (ix *index) unsure(kinds map[schema.GroupKind]bool) bool {
 	}
 	for id := range ix.pending {
 		if kinds[id.GroupKind()] {
+			return true
+		}
+	}
+	for l := range ix.late {
+		if kinds[l.id.GroupKind()] {
 			return true
 		}
 	}
@@ -1509,6 +1562,7 @@ func (t *Tracker) newTrackerIndex() error {
 	}
 	ix := newIndex(t.gk, t.prefix, s.o.IndexNamespace, s.indexMaxLines(), kinds, store, t.proto.srv)
 	ix.recorded = t.recorded
+	ix.now, ix.margin = s.clock.Now, s.landingMargin()
 	ix.disowning = func(ctx context.Context) (bool, error) {
 		set, err := t.disownLive(ctx)
 		return len(t.disownPerName(set)) > 0, err
@@ -1602,6 +1656,7 @@ func (s *Shared) runIndexes(ctx context.Context) {
 				if err := t.idx.lostTick(ctx, now); err != nil {
 					t.warn("credential-use: rebuilding the index failed; it is retried", "kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
 				}
+				t.idx.lateTick(now, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
 				if err := t.idx.recheckTick(ctx, now); err != nil {
 					t.warn("credential-use: a live check for the index failed; it is retried", "kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
 				}

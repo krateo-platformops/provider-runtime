@@ -810,9 +810,11 @@ func TestProbePerNameGetsOnly(t *testing.T) {
 // fakeLines is a lineKeeper that records what the acquirer asks of it, and
 // fails postCheck while failPost is set.
 type fakeLines struct {
-	ensured, checked []ID
-	failPost         bool
+	ensured, checked, unknown []ID
+	failPost                  bool
 }
+
+func (f *fakeLines) unknownA2(_ context.Context, id ID, _ string) { f.unknown = append(f.unknown, id) }
 
 func (f *fakeLines) covers(gk schema.GroupKind) bool { return gk == secretGroupKind }
 func (f *fakeLines) ensure(_ context.Context, id ID) error {
