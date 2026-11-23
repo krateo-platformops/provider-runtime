@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -288,7 +289,8 @@ func TestALostLeaseWithAnA2InFlight(t *testing.T) {
 
 // Two writers of the CRD that never agree keep Disown from settling, and say
 // so: the flag never appears, the count stays right, and one event names
-// them. Once they stop, Disown settles (§7.4).
+// both, though each takes the field, and its entry in managedFields, from the
+// other. Once they stop, Disown settles (§7.4).
 func TestDisownUnderTwoWritersThatNeverAgree(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
@@ -323,6 +325,13 @@ func TestDisownUnderTwoWritersThatNeverAgree(t *testing.T) {
 			}
 		}
 	}()
+	// Also when the test fails: writers left running would keep every later
+	// test's Disown from settling.
+	stopWriters := sync.OnceValue(func() error {
+		close(stop)
+		return <-done
+	})
+	t.Cleanup(func() { _ = stopWriters() })
 	counts, settled := watchHeldCount(t), watchCRDAnnotation(t, cu.AnnotationDisownSettled)
 	set("all")
 	eventSeen(t, r, cu.EventDisownRestarted, "writer-a", "writer-b")
@@ -345,8 +354,7 @@ func TestDisownUnderTwoWritersThatNeverAgree(t *testing.T) {
 	if n != 1 {
 		t.Errorf("reported %d times within its throttle, want once", n)
 	}
-	close(stop)
-	if err := <-done; err != nil {
+	if err := stopWriters(); err != nil {
 		t.Fatal(err)
 	}
 	cutest.Eventually(t, time.Minute, settledAtZero(t))

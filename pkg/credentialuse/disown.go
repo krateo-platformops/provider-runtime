@@ -211,11 +211,13 @@ type disownState struct {
 	startRV, rv string
 	// began is when this pass started. changed: the CRD changed under this
 	// process's run, which starts over. restarts counts those in a row, and
-	// wanting is when the first zero pass of them was; reported, when they
-	// were last reported (EventDisownRestarted).
+	// wanting is when the first zero pass of them was; writers are the CRD's
+	// newest at each, the last first; reported, when they were last reported
+	// (EventDisownRestarted).
 	began, wanting, reported time.Time
 	changed                  bool
 	restarts                 int
+	writers                  []crdWriter
 	// starved counts the passes in a row whose count write conflicted on
 	// every attempt (§7.3).
 	starved int
@@ -246,7 +248,7 @@ func (s *Shared) runDisown(ctx context.Context) {
 			t.disown.mu.Lock()
 			if k := set.key(); t.disown.value != k {
 				t.disown.value, t.disown.zeros, t.disown.next = k, 0, time.Time{}
-				t.disown.restarts, t.disown.wanting = 0, time.Time{}
+				t.disown.endRestarts()
 			}
 			due := !now.Before(t.disown.next)
 			t.disown.mu.Unlock()
@@ -807,16 +809,18 @@ const EventDisownRestarted = "CredentialUseDisownRestarted"
 // CRD changed, after a pass that counted cur and read crd: each is counted
 // in the metric, and when they have gone on for two spans of a run without
 // one of them done, the CRD's last writers are reported, at most once per
-// eventThrottle. A count that isn't zero, this process's or another's, and a
-// flag that stands, end them: then it isn't the CRD's changes that keep
-// Disown from settling. The writes of the count and the flag themselves stop
-// once every process counts the same, so they end too.
+// eventThrottle: the newest at each restart, of two that write the same field
+// over each other too, and then the others of its managedFields. A count that
+// isn't zero, this process's or another's, and a flag that stands, end them:
+// then it isn't the CRD's changes that keep Disown from settling. The writes
+// of the count and the flag themselves stop once every process counts the
+// same, so they end too.
 func (t *Tracker) noteRestart(crd *unstructured.Unstructured, cur string) {
 	d, ann := &t.disown, crd.GetAnnotations()
 	d.mu.Lock()
 	prev := ann[AnnotationHeldCount]
 	if cur != "0" || prev != "" && prev != "0" || DisownSettled(ann) || d.zeros >= t.o.DisownPasses {
-		d.restarts, d.wanting = 0, time.Time{}
+		d.endRestarts()
 		d.mu.Unlock()
 		return
 	}
@@ -824,10 +828,14 @@ func (t *Tracker) noteRestart(crd *unstructured.Unstructured, cur string) {
 		d.wanting = d.began
 	}
 	changed := d.changed
+	var now []crdWriter
 	if changed {
 		d.restarts++
+		now = crdWriters(crd)
+		d.writers = lastWriters(now[:min(1, len(now))], d.writers)
 	}
 	restarts, lasted := d.restarts, d.began.Sub(d.wanting)
+	writers := writersText(lastWriters(d.writers, now))
 	report := changed && lasted >= 2*time.Duration(t.o.DisownPasses-1)*t.o.DisownInterval &&
 		(d.reported.IsZero() || d.began.Sub(d.reported) >= eventThrottle)
 	if report {
@@ -840,7 +848,6 @@ func (t *Tracker) noteRestart(crd *unstructured.Unstructured, cur string) {
 	if !report {
 		return
 	}
-	writers := crdWriters(crd)
 	obj := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	obj.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(obj, "Warning", EventDisownRestarted, fmt.Sprintf(
@@ -850,9 +857,45 @@ func (t *Tracker) noteRestart(crd *unstructured.Unstructured, cur string) {
 		"kind", t.gk.String(), "crd", t.crdName, "restarts", restarts, "in", lasted.String(), "writers", writers)
 }
 
-// crdWriters names the last three writers of crd in its managedFields, newest
-// first, other than of the count and the flag alone.
-func crdWriters(crd *unstructured.Unstructured) string {
+// endRestarts forgets the runs that started over. d.mu is held.
+func (d *disownState) endRestarts() {
+	d.restarts, d.wanting, d.writers = 0, time.Time{}, nil
+}
+
+// A crdWriter is a writer of the CRD as its managedFields name it.
+type crdWriter struct{ manager, text string }
+
+// maxWriters is how many writers a report names.
+const maxWriters = 3
+
+// lastWriters is newer and then older, one entry per manager, the first,
+// maxWriters at most.
+func lastWriters(newer, older []crdWriter) []crdWriter {
+	var out []crdWriter
+	for _, w := range slices.Concat(newer, older) {
+		if len(out) < maxWriters && !slices.ContainsFunc(out, func(o crdWriter) bool { return o.manager == w.manager }) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// writersText names ws.
+func writersText(ws []crdWriter) string {
+	if len(ws) == 0 {
+		return "none in its managedFields"
+	}
+	var out []string
+	for _, w := range ws {
+		out = append(out, w.text)
+	}
+	return strings.Join(out, "; ")
+}
+
+// crdWriters are the writers in crd's managedFields, newest first, other than
+// of the count and the flag alone. managedFields keep the last writer of each
+// field only.
+func crdWriters(crd *unstructured.Unstructured) []crdWriter {
 	entries := crd.GetManagedFields()
 	entries = slices.DeleteFunc(entries, func(e metav1.ManagedFieldsEntry) bool { return ownsOnlyDisownFields(e) })
 	slices.SortStableFunc(entries, func(a, b metav1.ManagedFieldsEntry) int {
@@ -865,8 +908,8 @@ func crdWriters(crd *unstructured.Unstructured) string {
 		}
 		return bt.Compare(at)
 	})
-	var out []string
-	for _, e := range entries[:min(3, len(entries))] {
+	var out []crdWriter
+	for _, e := range entries {
 		w := e.Manager + " (" + string(e.Operation)
 		if e.Subresource != "" {
 			w += " of " + e.Subresource
@@ -874,12 +917,9 @@ func crdWriters(crd *unstructured.Unstructured) string {
 		if e.Time != nil {
 			w += ", " + e.Time.UTC().Format(time.RFC3339)
 		}
-		out = append(out, w+")")
+		out = append(out, crdWriter{e.Manager, w + ")"})
 	}
-	if len(out) == 0 {
-		return "none in its managedFields"
-	}
-	return strings.Join(out, "; ")
+	return out
 }
 
 // ownsOnlyDisownFields reports whether e owns nothing but annotations of the

@@ -1087,6 +1087,7 @@ func eventSeen(t *testing.T, r *writeRig, parts ...string) {
 	cutest.Eventually(t, time.Minute, func() error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		var some []string
 		for _, e := range r.seen {
 			all := true
 			for _, p := range parts {
@@ -1095,8 +1096,11 @@ func eventSeen(t *testing.T, r *writeRig, parts ...string) {
 			if all {
 				return nil
 			}
+			if strings.Contains(e, parts[0]) {
+				some = append(some, e)
+			}
 		}
-		return fmt.Errorf("no event with %q: %w", parts, cutest.ErrNotYet)
+		return fmt.Errorf("no event with %q; with the first of them: %q: %w", parts, some, cutest.ErrNotYet)
 	})
 }
 

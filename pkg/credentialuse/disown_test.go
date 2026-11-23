@@ -919,6 +919,64 @@ func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
 	}
 }
 
+// TestDisownReportsWritersThatOverwriteEachOther: writers of one field, each
+// of which takes it, and so its entry in managedFields, from the one before:
+// the report names the newest at each restart of the streak, the last three,
+// each with its operation and subresource; and nobody of a streak before
+// (§7.4; the user's decision, 2026-11-23).
+func TestDisownReportsWritersThatOverwriteEachOther(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	crd := crdOf(widgetGK)
+	crd.SetAnnotations(map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0"})
+	rv := 1
+	answer := func(clienttesting.Action) (bool, runtime.Object, error) {
+		rv++
+		u := crd.DeepCopy()
+		u.SetResourceVersion(strconv.Itoa(rv))
+		return true, u, nil
+	}
+	r.dyn.PrependReactor("get", "customresourcedefinitions", answer)
+	r.dyn.PrependReactor("patch", "customresourcedefinitions", answer)
+	pass := func(writer string, count int) {
+		manager, subresource, _ := strings.Cut(writer, "/")
+		at := metav1.NewTime(r.clk.Now())
+		crd.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: manager, Operation: metav1.ManagedFieldsOperationUpdate, Subresource: subresource,
+			APIVersion: "apiextensions.k8s.io/v1", Time: &at, FieldsType: "FieldsV1", FieldsV1: metav1.NewFieldsV1(`{"f:metadata":{"f:labels":{"f:x":{}}}}`)}})
+		r.s.disownStarts(ctx, tr)
+		r.s.writeDisownCount(ctx, tr, parseDisown("all"), count, true)
+		r.clk.Step(tr.o.DisownInterval)
+	}
+	for _, streak := range []struct{ writers, want []string }{
+		{[]string{"writer-a", "writer-b/status"}, []string{"writer-a (Update,", "writer-b (Update of status,"}},
+		{[]string{"writer-c"}, []string{"writer-c (Update,"}},
+		{[]string{"writer-d", "writer-e", "writer-f", "writer-g"}, []string{"writer-d (Update,", "writer-g (Update,", "writer-f (Update,"}},
+	} {
+		// Two spans, and the pass that reports.
+		for i := range 2*(tr.o.DisownPasses-1) + 1 {
+			pass(streak.writers[i%len(streak.writers)], 0)
+		}
+		got := slices.DeleteFunc(r.takeEvents(), func(e string) bool { return !strings.Contains(e, EventDisownRestarted) })
+		if len(got) != 1 {
+			t.Fatalf("%v: %d reports %v, want one", streak.writers, len(got), got)
+		}
+		if n := strings.Count(got[0], "writer-"); n != len(streak.want) {
+			t.Errorf("%v: the report %q names %d writers, want %d", streak.writers, got[0], n, len(streak.want))
+		}
+		at := -1
+		for _, w := range streak.want {
+			i := strings.Index(got[0], w)
+			if i <= at {
+				t.Errorf("%v: the report %q doesn't name %v, the last first", streak.writers, got[0], streak.want)
+			}
+			at = i
+		}
+		pass("writer-x", 1) // a hold ends the streak
+		r.clk.Step(eventThrottle)
+	}
+}
+
 // TestAHoldClearsAStaleFlag: before a pass's first A2, a disown-settled that
 // a switch of another value left is removed, guarded by the version the
 // switch was read at; a flag of the value it has now stays. One that can't be
