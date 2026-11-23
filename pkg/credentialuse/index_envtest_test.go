@@ -445,7 +445,9 @@ func TestIndexA1BeforeTheDisownSwitch(t *testing.T) {
 			var early atomic.Int32
 			unsettled := func() bool { return settledAtZero(t)() != nil }
 			r := perNameRig(t, idx, func(o *cu.Options) {
-				o.DisownInterval, o.DisownPasses, o.TimeoutBound = 5*time.Second, 3, 5*time.Second
+				// Two intervals fit in TimeoutBound, which bounds the A2: it
+				// lands after the first zero count, and before its end.
+				o.DisownInterval, o.DisownPasses, o.TimeoutBound = 2*time.Second, 6, 5*time.Second
 			}, func(s *cu.Shared) {
 				s.HookCalls(func(_ context.Context, c cu.Call) error {
 					if c.Op == "index-update" && armed.Load() && !slices.Contains(c.Lines, line) && unsettled() {
