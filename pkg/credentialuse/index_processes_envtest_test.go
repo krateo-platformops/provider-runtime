@@ -284,3 +284,89 @@ func TestALostLeaseWithAnA2InFlight(t *testing.T) {
 	lined(t, idx, line, false)
 	stripped(t, ns, "s")
 }
+
+// A dropped line whose live check keeps failing may name a hold: the count
+// is unknown while the check is pending, though nothing else names the
+// Secret, and the index can be read (§7.4).
+func TestDisownWaitsForAPendingCheck(t *testing.T) {
+	cutest.Require(t, env)
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-pending")
+	createSecret(t, ns, "x")
+	acquireAs(t, ns, "x")
+	line := secretLine(ns, "x")
+	createIndex(t, idx, line)
+	var failing atomic.Bool
+	failing.Store(true)
+	r := perNameRig(t, idx, disownOptions, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			if failing.Load() && c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == ns {
+				return errors.New("the API server keeps failing for it")
+			}
+			return nil
+		}, nil)
+	})
+	set("all")
+	staysUnknown(t)
+	setIndexLines(t, idx, func(l []string) []string { return slices.DeleteFunc(l, func(x string) bool { return x == line }) })
+	cutest.Eventually(t, time.Minute, func() error {
+		if p, _ := r.tr.PendingIndexChecks(); len(p) == 0 {
+			return fmt.Errorf("no check is pending: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	staysUnknown(t)
+	lined(t, idx, line, false)
+	failing.Store(false)
+	cutest.Eventually(t, 2*time.Minute, settledAtZero(t))
+	stripped(t, ns, "x")
+}
+
+// An A2 lands after its response was lost, its holder was gone, and a batch
+// had pruned the line of a Secret it found bare: once the landing margin is
+// over, the sender checks the Secret again, and releases it (§10.6.2).
+func TestALateA2IsReleased(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-late")
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	line := secretLine(ns, "s")
+	var lost atomic.Bool
+	r := perNameRig(t, idx, nil, func(s *cu.Shared) {
+		s.SetLandingMargin(15 * time.Second)
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			// Every A2 the process sends: the holder never gets its finalizer.
+			if c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.StrategicMergePatchType {
+				lost.Store(true)
+				return errors.New("the response was lost")
+			}
+			return nil
+		}, nil)
+	})
+	r.c.enqueue(widgetNN(ns, "w"))
+	cutest.Eventually(t, time.Minute, func() error {
+		if !lost.Load() {
+			return fmt.Errorf("no A2 was sent: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	r.c.stop()
+	deleteWidget(t, ns, "w")
+	gone(t, time.Minute, "widget w", widgetGet(ns, "w"))
+	lined(t, idx, line, false)
+	epoch, err := cu.NewEpoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := cu.AcquireStrategicPatch(widgetGK, ns, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Kube.CoreV1().Secrets(ns).Patch(ctx, "s", p.Type, p.Data, metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
+	lined(t, idx, line, false)
+	stripped(t, ns, "s")
+}

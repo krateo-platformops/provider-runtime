@@ -521,6 +521,34 @@ func TestADropDuringItsCheckSurvives(t *testing.T) {
 	}
 }
 
+// A vouch withdrawn while a prune of its line is under way doesn't count: the
+// check after it reads the vouch live, whatever this process last saw.
+func TestAVouchWithdrawnDuringAPrune(t *testing.T) {
+	id := SecretRef("ns", "x").ID()
+	st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{id}), rv: 1, vouched: "ns/Secret/x"}
+	srv := &getHook{objServer: &objServer{forbid: map[ID]bool{id: true}}}
+	ix := testIndex(st, srv)
+	srv.on = func() { st.vouched = "" } // after the prune's write has returned
+	if err := ix.prune(context.Background(), []ID{id}); err != nil || !slices.Equal(st.lines, linesOf([]ID{id})) {
+		t.Errorf("the vouch withdrawn: %v, lines %q; want its line back", err, st.lines)
+	}
+	srv.on = func() { st.vouched = "ns/Secret/x" }
+	if err := ix.prune(context.Background(), []ID{id}); err != nil || len(st.lines) != 0 {
+		t.Errorf("vouched for meanwhile: %v, lines %q; want it pruned", err, st.lines)
+	}
+}
+
+// getHook is an objServer that runs on before each Get.
+type getHook struct {
+	*objServer
+	on func()
+}
+
+func (s *getHook) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	s.on()
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
 // stopServer is an objServer that fails once its context is done, as the API
 // client does.
 type stopServer struct{ *objServer }
