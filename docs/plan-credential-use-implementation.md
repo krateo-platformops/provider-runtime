@@ -1460,9 +1460,8 @@ checked, and neither have the scripts of PRs 1 to 3a:
 | 4 | a held ref with a Next needn't be Content | its indentation; the commit isn't traced |
 | 5 | an unheld hop isn't followed | PR 6: a second copy, for disowned hops, matches too |
 | 5 | a withdrawn ref stays with an unfollowed hop | PR 6 |
-
-The index fix re-anchored the two it found in 6 and 7 ("no live read before
-BeforeEstablish's A2" and "HasSynced is always true", both moved by PR 8).
+| 6 | no live read before BeforeEstablish's A2 | PR 8: the `p.write` call |
+| 7 | HasSynced is always true | PR 8: the index informer's sync added |
 
 ## 5. Ambiguities and contradictions, and what I'd choose
 

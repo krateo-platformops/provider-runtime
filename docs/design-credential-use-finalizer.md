@@ -1953,9 +1953,13 @@ else changed in between.
   settles. Once runs that started over have gone on for two spans, `2 ×
   (DisownPasses − 1) × DisownInterval`, with nothing held, a Warning event
   on the CRD, `CredentialUseDisownRestarted`, and a log line name the CRD's
-  last three writers from its managedFields, at most once per 10 minutes per
-  process. `credentialuse_disown_restarts_total` counts every restart.
-  **The remedy** is to find and stop the writer. For core-provider's CRDs:
+  last writers, at most once per 10 minutes per process. managedFields keep
+  only the last writer of each field, so the process remembers the newest at
+  each restart, and names those first, then the others there: three managers
+  at most, each with its operation and subresource. **Two writers under one
+  manager name look like one**, as the two core-provider writers of a remote
+  kind's hub copy may. `credentialuse_disown_restarts_total` counts every
+  restart. **The remedy** is to find and stop the writer. For core-provider's CRDs:
   79 composition CRDs on krateo-057 were watched for 560s with no
   resourceVersion change (measured, with a working control); managedFields'
   newest write was about 14 hours old; its apply path returns early when
@@ -1998,7 +2002,9 @@ else changed in between.
 - **A line this process may still owe** keeps the count `"unknown"`: while a
   live check or a re-add of a covered kind's line is pending, the landing
   margin of an A2 of unknown outcome is running (§10.6.2), or a rebuild is
-  due, the index read may lack a held object's line.
+  due, the index read may lack a held object's line. It looks before the
+  read and after it: a re-add pending before may land too late for the read,
+  and be pending no more after it.
 
 A non-zero or unknown count clears the flag. **Downgrading the runtime,
 removing the interface from the connecter, or uninstalling is safe once
@@ -4706,6 +4712,12 @@ writing for #510:
     owner's decision.
 
 ### 16.3 unstructured-runtime (core-provider)
+
+**Superseded in part** (the user's decision, 2026-11-23): core-provider's
+CompositionDefinition becomes the holder, on the hub, LabelScoped, in place
+of each composition through unstructured-runtime. What follows was written
+for the latter, and is core-provider's to confirm or replace. §7.2 stands:
+other outside runtimes use it.
 
 It has the same deadlock (§1, and core-provider#402 for the chart
 `passwordRef` in the composition controller's Delete). It integrates the
