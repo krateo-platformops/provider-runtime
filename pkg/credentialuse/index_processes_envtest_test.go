@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -283,6 +284,72 @@ func TestALostLeaseWithAnA2InFlight(t *testing.T) {
 	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
 	lined(t, idx, line, false)
 	stripped(t, ns, "s")
+}
+
+// Two writers of the CRD that never agree keep Disown from settling, and say
+// so: the flag never appears, the count stays right, and one event names
+// them. Once they stop, Disown settles (§7.4).
+func TestDisownUnderTwoWritersThatNeverAgree(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	set := disowning(t)
+	ns := env.Namespace(t, "disown-writers")
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	r := newWriteRig(t, env.Config, cu.SharedOptions{}, disownOptions, nil)
+	r.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "s", "w")
+	write := func(manager string, value any) error {
+		data := fmt.Sprintf(`{"metadata":{"labels":{"credentialuse.test.krateo.io/writer":%q}}}`, value)
+		if value == nil {
+			data = `{"metadata":{"labels":{"credentialuse.test.krateo.io/writer":null}}}`
+		}
+		_, err := env.Dynamic.Resource(crdGVR).Patch(ctx, widgetCRD, types.MergePatchType, []byte(data), metav1.PatchOptions{FieldManager: manager})
+		return err
+	}
+	stop, done := make(chan struct{}), make(chan error, 1)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				done <- write("writer-a", nil)
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			w := []string{"writer-a", "writer-b"}[i%2]
+			if err := write(w, w); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	counts, settled := watchHeldCount(t), watchCRDAnnotation(t, cu.AnnotationDisownSettled)
+	set("all")
+	eventSeen(t, r, cu.EventDisownRestarted, "writer-a", "writer-b")
+	time.Sleep(2 * (disownPasses + 1) * disownInterval)
+	if seen := settled(); slices.ContainsFunc(seen, func(v string) bool { return v != "" }) {
+		t.Errorf("settled while the CRD kept changing: %v", seen)
+	}
+	stripped(t, ns, "s")
+	if seen := counts(); len(seen) == 0 || seen[len(seen)-1] != "0" || slices.Contains(seen, "unknown") {
+		t.Errorf("held-count while the CRD kept changing: %v; want it to end at 0, never unknown", seen)
+	}
+	r.mu.Lock()
+	n := 0
+	for _, e := range r.seen {
+		if strings.Contains(e, cu.EventDisownRestarted) {
+			n++
+		}
+	}
+	r.mu.Unlock()
+	if n != 1 {
+		t.Errorf("reported %d times within its throttle, want once", n)
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
 }
 
 // A dropped line whose live check keeps failing may name a hold: the count

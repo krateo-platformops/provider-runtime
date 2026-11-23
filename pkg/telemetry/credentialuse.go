@@ -44,6 +44,7 @@ type credentialUseMetrics struct {
 	releaseRejected  metric.Int64Counter
 	crdWriteStarved  metric.Int64Counter
 	indexReadDenied  metric.Int64Counter
+	disownRestarts   metric.Int64Counter
 }
 
 func newCredentialUseMetrics(meter metric.Meter) (credentialUseMetrics, error) {
@@ -81,6 +82,7 @@ func newCredentialUseMetrics(meter metric.Meter) (credentialUseMetrics, error) {
 		{&m.releaseRejected, "credentialuse.release_rejected", "Release patches that failed against an unchanged object."},
 		{&m.crdWriteStarved, "credentialuse.crd_write_starved", "CRD writes that conflicted on three ticks in a row."},
 		{&m.indexReadDenied, "credentialuse.index_read_denied", "Objects the index names that a check couldn't read for a 403, counted once each; their lines are kept (PerName)."},
+		{&m.disownRestarts, "credentialuse.disown_restarts", "Disown's runs of zero passes that started over because the CRD changed."},
 	}
 	for _, c := range counters {
 		if *c.dst, err = meter.Int64Counter(c.name, metric.WithDescription(c.desc)); err != nil {
@@ -162,6 +164,11 @@ func (m *Metrics) DisownUnreadable(holderKindLabel string, n int) {
 // IndexReadDenied implements credentialuse.MetricsRecorder.
 func (m *Metrics) IndexReadDenied(holderKindLabel string) {
 	m.cu.indexReadDenied.Add(context.Background(), 1, holderKind(holderKindLabel))
+}
+
+// DisownRestarts implements credentialuse.MetricsRecorder.
+func (m *Metrics) DisownRestarts(holderKindLabel string) {
+	m.cu.disownRestarts.Add(context.Background(), 1, holderKind(holderKindLabel))
 }
 
 // CRDWriteStarved implements credentialuse.MetricsRecorder.

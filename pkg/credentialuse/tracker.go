@@ -178,6 +178,9 @@ func (m sinkMetrics) IndexReadDenied(k string) {
 func (m sinkMetrics) RefsConflicting(k, asked string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.RefsConflicting(k, asked) })
 }
+func (m sinkMetrics) DisownRestarts(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.DisownRestarts(k) })
+}
 func (m sinkMetrics) CRDWriteStarved(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.CRDWriteStarved(k) })
 }

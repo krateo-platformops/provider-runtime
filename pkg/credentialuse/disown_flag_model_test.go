@@ -62,7 +62,7 @@ func exploreFlag(t *testing.T, c flagCase) (violations int, sample string, settl
 			must(err)
 			sec, err := m.Get(secret)
 			must(err)
-			if disownSettled(crd.Annotations) {
+			if DisownSettled(crd.Annotations) {
 				settled = true
 				if bad == nil && countPrefix(sec.Finalizers, prefix) > 0 && parseDisown(crd.Annotations[AnnotationDisown]).covers(secretGroupKind) {
 					bad = fmt.Errorf("held under %v: log %q", crd.Annotations, log)

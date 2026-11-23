@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -720,7 +721,7 @@ func TestDisownSettledIsTheSwitchsValue(t *testing.T) {
 		"an old build's true":       {ann(d, "all", c, "0", s, "true"), false, true},
 		"an old true and no switch": {ann(c, "0", s, "true"), false, true},
 	} {
-		if got := disownSettled(tc.ann); got != tc.settled {
+		if got := DisownSettled(tc.ann); got != tc.settled {
 			t.Errorf("%s: settled %v, want %v", name, got, tc.settled)
 		}
 		if got := staleSettled(tc.ann); got != tc.stale {
@@ -783,6 +784,138 @@ func TestDisownRunsOverAnUnchangedCRD(t *testing.T) {
 	}
 	if settled, write := pass(d, done, "5", "5", "1"); settled || !write {
 		t.Errorf("a hold under another process's flag: settled %v, write %v; want it cleared", settled, write)
+	}
+}
+
+// TestDisownsFirstPassNeedsItsCRD: a pass that couldn't read the CRD as it
+// started is of no run: the switch may have been set during it (§7.4).
+func TestDisownsFirstPassNeedsItsCRD(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, tr.crdName, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fail := true
+	r.dyn.PrependReactor("get", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return fail, nil, errors.New("the CRD can't be read")
+	})
+	r.s.disownStarts(ctx, tr)
+	fail = false
+	for i := range tr.o.DisownPasses + 1 {
+		if i > 0 {
+			r.s.disownStarts(ctx, tr)
+		}
+		if got, want := r.s.writeDisownCount(ctx, tr, parseDisown("all"), 0, true), i == tr.o.DisownPasses; got != want {
+			t.Errorf("pass %d: settled %v, want %v", i+1, got, want)
+		}
+	}
+}
+
+// TestDisownReportsARunThatKeepsRestarting: the CRD changes under every
+// pass, as with two writers that never agree: Disown doesn't settle, and
+// writes nothing; each restart is counted; and once they have gone on for two
+// spans, the CRD's last writers are reported, at most once per eventThrottle,
+// without the entry of the count's and the flag's own writes. Once the CRD
+// stays as it is, Disown settles, and nothing more is counted (§7.4; the
+// user's decision, 2026-11-23).
+func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	entry := func(manager, subresource, fields string, age time.Duration) metav1.ManagedFieldsEntry {
+		at := metav1.NewTime(r.clk.Now().Add(-age))
+		return metav1.ManagedFieldsEntry{Manager: manager, Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "apiextensions.k8s.io/v1",
+			Time: &at, FieldsType: "FieldsV1", FieldsV1: metav1.NewFieldsV1(fields), Subresource: subresource}
+	}
+	crd := crdOf(widgetGK)
+	crd.SetAnnotations(map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0"})
+	crd.SetManagedFields([]metav1.ManagedFieldsEntry{
+		entry("older", "", `{"f:spec":{"f:scope":{}}}`, time.Hour),
+		entry("hub-writer", "", `{"f:spec":{"f:versions":{}}}`, time.Minute),
+		entry("kube-apiserver", "status", `{"f:status":{"f:conditions":{}}}`, 2*time.Minute),
+		entry("the-tracker", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}}}}`, time.Second),
+		entry("spoke-writer", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}},"f:labels":{"f:x":{}}}}`, 0),
+		entry("oldest", "", `{"f:spec":{"f:group":{}}}`, 2*time.Hour),
+	})
+	rv, changing := 1, true
+	r.dyn.PrependReactor("get", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if changing {
+			rv++
+		}
+		u := crd.DeepCopy()
+		u.SetResourceVersion(strconv.Itoa(rv))
+		return true, u, nil
+	})
+	var patches int
+	r.dyn.PrependReactor("patch", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		patches++
+		u := crd.DeepCopy()
+		u.SetResourceVersion(strconv.Itoa(rv))
+		return true, u, nil
+	})
+	pass := func() bool {
+		r.s.disownStarts(ctx, tr)
+		settled := r.s.writeDisownCount(ctx, tr, parseDisown("all"), 0, true)
+		r.clk.Step(tr.o.DisownInterval)
+		return settled
+	}
+	reports := func() []string {
+		return slices.DeleteFunc(r.takeEvents(), func(e string) bool { return !strings.Contains(e, EventDisownRestarted) })
+	}
+	span := time.Duration(tr.o.DisownPasses-1) * tr.o.DisownInterval
+	restarts := func() int { return r.metrics.count("disown_restarts " + kindLabel(widgetGK)) }
+	n := int(2 * span / tr.o.DisownInterval)
+	for range n {
+		if pass() {
+			t.Fatal("settled under a CRD that keeps changing")
+		}
+	}
+	if got := reports(); len(got) != 0 || restarts() != n {
+		t.Errorf("before two spans: reports %v, %d restarts counted; want none, and %d", got, restarts(), n)
+	}
+	pass()
+	got := reports()
+	if len(got) != 1 {
+		t.Fatalf("after two spans: %d reports %v, want one", len(got), got)
+	}
+	want := []string{"spoke-writer (Update", "hub-writer (Update", "kube-apiserver (Update of status"}
+	at := -1
+	for _, w := range want {
+		i := strings.Index(got[0], w)
+		if i <= at {
+			t.Errorf("the report %q doesn't name %v, newest first", got[0], want)
+		}
+		at = i
+	}
+	if strings.Contains(got[0], "the-tracker") || strings.Contains(got[0], "older") || !strings.Contains(got[0], strconv.Itoa(n+1)+" times") {
+		t.Errorf("the report %q names the count's own writes, or more than three writers, or not how often", got[0])
+	}
+	for range int(eventThrottle/tr.o.DisownInterval) - 1 {
+		pass()
+	}
+	if got := reports(); len(got) != 0 {
+		t.Errorf("reported again within its throttle: %v", got)
+	}
+	pass()
+	if got := reports(); len(got) != 1 {
+		t.Errorf("%d reports once the throttle is over, want one", len(got))
+	}
+	if patches != 0 {
+		t.Errorf("%d writes of an unchanged count", patches)
+	}
+	changing = false
+	before, settled := restarts(), false
+	for range tr.o.DisownPasses + 1 {
+		settled = pass()
+	}
+	if !settled || patches == 0 {
+		t.Errorf("settled %v, with %d writes, once the CRD stays as it is", settled, patches)
+	}
+	// The change seen at the first of those passes was the last.
+	if n := restarts() - before; n > 1 {
+		t.Errorf("%d restarts counted over a CRD that stays as it is", n)
 	}
 }
 

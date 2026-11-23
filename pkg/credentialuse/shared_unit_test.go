@@ -222,6 +222,7 @@ func (m *countingMetrics) RefsConflicting(kind, asked string) {
 func (m *countingMetrics) AdmissionDenied(kind string) { m.inc("admission_denied " + kind) }
 func (m *countingMetrics) ReleaseRejected(kind string) { m.inc("release_rejected " + kind) }
 func (m *countingMetrics) CRDWriteStarved(kind string) { m.inc("crd_write_starved " + kind) }
+func (m *countingMetrics) DisownRestarts(kind string)  { m.inc("disown_restarts " + kind) }
 
 // WaitingObjects keeps the waiting gauge's last value, by kind.
 func (m *countingMetrics) WaitingObjects(kind string, n int) {
