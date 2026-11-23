@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -116,10 +117,26 @@ func (t *Tracker) crdLive(ctx context.Context) (map[string]string, error) {
 	return m.Annotations, nil
 }
 
+// disownSettled reports whether the CRD's annotations ann say that Disown
+// has settled under the switch as it is now: disown-settled is the switch's
+// own value, as written, so one left by another value, or by none, isn't it
+// (§7.4; the user's decision, 2026-11-23).
+func disownSettled(ann map[string]string) bool {
+	v := ann[AnnotationDisown]
+	return v != "" && ann[AnnotationDisownSettled] == v && ann[AnnotationHeldCount] == "0"
+}
+
+// staleSettled reports whether ann carries a disown-settled of another value
+// of the switch than it has now, or of one that is gone.
+func staleSettled(ann map[string]string) bool {
+	f, ok := ann[AnnotationDisownSettled]
+	return ok && f != ann[AnnotationDisown]
+}
+
 // keptKinds are the kinds whose index lines stay under the CRD's
 // annotations ann: those the switch covers while it hasn't settled (§7.4).
 func keptKinds(ann map[string]string) disownSet {
-	if ann[AnnotationHeldCount] == "0" && ann[AnnotationDisownSettled] == "true" {
+	if disownSettled(ann) {
 		return disownSet{}
 	}
 	return parseDisown(ann[AnnotationDisown])
@@ -131,13 +148,48 @@ func (t *Tracker) disownKeeps(ctx context.Context) (disownSet, error) {
 	return keptKinds(ann), err
 }
 
-// disownLive reads the switch live, from the CRD itself, for a pass's check
-// before its first A2 (§10.6.8, interleaving 3; the user's decisions,
-// 2026-11-22): a stale CRD informer, whose watch fails, can't let an A2
-// through after the switch. A CRD that is gone has no switch.
+// disownLive reads the switch live, from the CRD itself. A CRD that is gone
+// has no switch.
 func (t *Tracker) disownLive(ctx context.Context) (disownSet, error) {
 	ann, err := t.crdLive(ctx)
 	return parseDisown(ann[AnnotationDisown]), err
+}
+
+// disownForHold is disownLive for a pass's check before its first A2
+// (§10.6.8, interleaving 3; the user's decisions, 2026-11-22): a stale CRD
+// informer, whose watch fails, can't let an A2 through after the switch.
+//
+// It also removes a disown-settled that a switch of another value left,
+// guarded by the version it read: a hold made now must not stand under a
+// flag that says nothing is held, should that value come back (§7.4; the
+// user's decision, 2026-11-23). One it can't remove fails the pass: no A2.
+func (t *Tracker) disownForHold(ctx context.Context) (disownSet, error) {
+	m, err := t.s.c.Metadata.Resource(crdGVR).Get(ctx, t.crdName, metav1.GetOptions{})
+	if Classify(err) == ClassNotFound {
+		return disownSet{}, nil
+	}
+	if err != nil {
+		return disownSet{}, err
+	}
+	if staleSettled(m.Annotations) {
+		data, err := json.Marshal(map[string]any{"metadata": map[string]any{
+			"resourceVersion": m.ResourceVersion,
+			"annotations":     map[string]any{AnnotationDisownSettled: nil},
+		}})
+		if err != nil {
+			return disownSet{}, err
+		}
+		_, err = t.s.c.Dynamic.Resource(crdGVR).Patch(ctx, t.crdName, types.MergePatchType, data, metav1.PatchOptions{})
+		switch Classify(err) {
+		case ClassNone:
+		case ClassRBAC:
+			return disownSet{}, fmt.Errorf("removing the leftover %s from CRD %s, without which nothing may be held: grant patch on customresourcedefinitions %s (§7.3): %w",
+				AnnotationDisownSettled, t.crdName, t.crdName, err)
+		default:
+			return disownSet{}, fmt.Errorf("removing the leftover %s from CRD %s, without which nothing may be held: %w", AnnotationDisownSettled, t.crdName, err)
+		}
+	}
+	return parseDisown(m.Annotations[AnnotationDisown]), nil
 }
 
 // disownState is one tracker's progress towards disown-settled (§7.4).
@@ -149,6 +201,11 @@ type disownState struct {
 	value string
 	zeros int       // consecutive passes this process counted zero
 	next  time.Time // when the next pass is due
+	// startRV is the CRD's version read as this pass starts, and rv the one
+	// at the end of the pass before: a run of zeros is of passes over a CRD
+	// nobody changed, so that no switch turned off and on again in between
+	// goes unseen, whatever the informer delivered (§7.4).
+	startRV, rv string
 	// starved counts the passes in a row whose count write conflicted on
 	// every attempt (§7.3).
 	starved int
@@ -181,11 +238,9 @@ func (s *Shared) runDisown(ctx context.Context) {
 				t.disown.value, t.disown.zeros, t.disown.next = k, 0, time.Time{}
 			}
 			due := !now.Before(t.disown.next)
-			if due {
-				t.disown.next = now.Add(t.o.DisownInterval)
-			}
 			t.disown.mu.Unlock()
 			if due {
+				s.disownStarts(ctx, t)
 				s.disownPass(ctx, t, set)
 			}
 		}
@@ -195,6 +250,61 @@ func (s *Shared) runDisown(ctx context.Context) {
 		case <-s.clock.After(disownTick):
 		}
 	}
+}
+
+// disownStarts reads the CRD's version as a pass of t starts, and then when
+// the next is due: the passes of a run are an interval apart from a time no
+// earlier than the version they run over.
+func (s *Shared) disownStarts(ctx context.Context, t *Tracker) {
+	rv := ""
+	crd, err := s.c.Dynamic.Resource(crdGVR).Get(ctx, t.crdName, metav1.GetOptions{})
+	if err == nil {
+		rv = crd.GetResourceVersion()
+	}
+	now := s.clock.Now()
+	t.disown.mu.Lock()
+	defer t.disown.mu.Unlock()
+	t.disown.next = now.Add(t.o.DisownInterval)
+	if t.disown.startRV = rv; err != nil {
+		t.disown.zeros = 0
+	}
+}
+
+// decide is what a pass that counted cur does with the CRD it read, with
+// annotations ann and version rv: whether this process has settled, in
+// passes zero passes in a row, and whether to write. t.disown.mu is held.
+//
+// A process whose own run isn't done leaves the flag of one whose run is, if
+// it is of the switch's value now: it clears it only with a count to write,
+// or when it is another value's.
+func (d *disownState) decide(ann map[string]string, rv, cur string, passes int) (settled, write bool) {
+	prev, flag := ann[AnnotationHeldCount], ann[AnnotationDisownSettled]
+	if prev != "" && prev != "0" {
+		// Someone counted a hold: this pass's zero, if it is one, is
+		// the first of a new run.
+		d.zeros = min(d.zeros, 1)
+		if cur != "0" {
+			d.zeros = 0
+		}
+	}
+	if d.zeros > 1 && rv != d.rv {
+		d.zeros = 1 // the CRD changed since the pass before
+	}
+	if d.startRV != "" && rv != d.startRV {
+		d.zeros = 0 // it changed during this one
+	}
+	settled = cur == "0" && d.zeros >= passes
+	switch {
+	case prev != cur:
+		write = true
+	case cur == "0" && settled:
+		write = flag != ann[AnnotationDisown]
+	case cur == "0":
+		write = staleSettled(ann)
+	default:
+		write = flag != ""
+	}
+	return settled, write
 }
 
 // disownPass is one pass of t's Disown loop (§7.4): it lists, live and
@@ -592,7 +702,8 @@ func disownHolderPatch(h *metav1.PartialObjectMetadata, set disownSet) ([]byte, 
 // it read; a conflict reads and decides again, at most maxCRDWriteAttempts
 // times. A non-zero or unknown count read on the CRD, from another process
 // or this one's earlier pass, starts the run of zeros over, so settled never
-// lands over a newer non-zero count. A switch that no longer covers what the
+// lands over a newer non-zero count, and so does any other change of the CRD.
+// disown-settled is the switch's value, as written. A switch that no longer covers what the
 // pass counted writes nothing, and starts the run over: the count is another
 // switch's. The fields are written only when they change, since a CRD write
 // rebuilds the API server's OpenAPI. A pass whose write conflicted on every
@@ -626,25 +737,16 @@ func (s *Shared) writeDisownCount(ctx context.Context, t *Tracker, set disownSet
 			t.disown.mu.Unlock()
 			return false
 		}
-		prev := ann[AnnotationHeldCount]
 		t.disown.mu.Lock()
-		if prev != "" && prev != "0" {
-			// Someone counted a hold: this pass's zero, if it is one, is
-			// the first of a new run.
-			t.disown.zeros = min(t.disown.zeros, 1)
-			if cur != "0" {
-				t.disown.zeros = 0
-			}
-		}
-		settled := cur == "0" && t.disown.zeros >= t.o.DisownPasses
+		settled, write := t.disown.decide(ann, crd.GetResourceVersion(), cur, t.o.DisownPasses)
 		t.disown.mu.Unlock()
-		if prev == cur && (ann[AnnotationDisownSettled] == "true") == settled {
-			s.disownWritten(t)
+		if !write {
+			s.disownWritten(t, crd.GetResourceVersion())
 			return settled
 		}
 		var settledValue any // null removes it: a non-zero or unknown count clears the flag
 		if settled {
-			settledValue = "true"
+			settledValue = ann[AnnotationDisown]
 		}
 		data, err := json.Marshal(map[string]any{"metadata": map[string]any{
 			"resourceVersion": crd.GetResourceVersion(),
@@ -653,9 +755,9 @@ func (s *Shared) writeDisownCount(ctx context.Context, t *Tracker, set disownSet
 		if err != nil {
 			return false
 		}
-		_, err = crds.Patch(ctx, t.crdName, types.MergePatchType, data, metav1.PatchOptions{})
+		out, err := crds.Patch(ctx, t.crdName, types.MergePatchType, data, metav1.PatchOptions{})
 		if err == nil {
-			s.disownWritten(t)
+			s.disownWritten(t, out.GetResourceVersion())
 			return settled
 		}
 		if Classify(err) != ClassConflict {
@@ -679,10 +781,11 @@ func (s *Shared) writeDisownCount(ctx context.Context, t *Tracker, set disownSet
 	return false
 }
 
-// disownWritten records a count write that landed, or had nothing to change.
-func (s *Shared) disownWritten(t *Tracker) {
+// disownWritten records a count write that landed, or had nothing to change,
+// leaving the CRD at version rv.
+func (s *Shared) disownWritten(t *Tracker, rv string) {
 	t.disown.mu.Lock()
-	t.disown.starved = 0
+	t.disown.starved, t.disown.rv = 0, rv
 	t.disown.mu.Unlock()
 }
 

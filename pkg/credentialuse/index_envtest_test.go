@@ -443,7 +443,7 @@ func TestIndexA1BeforeTheDisownSwitch(t *testing.T) {
 			}
 			// Index writes without the line, before Disown has settled.
 			var early atomic.Int32
-			unsettled := func() bool { return widgetCRDAnnotations(t)[cu.AnnotationDisownSettled] != "true" }
+			unsettled := func() bool { return settledAtZero(t)() != nil }
 			r := perNameRig(t, idx, func(o *cu.Options) {
 				o.DisownInterval, o.DisownPasses, o.TimeoutBound = 5*time.Second, 3, 5*time.Second
 			}, func(s *cu.Shared) {
@@ -605,19 +605,24 @@ func TestDisownLinesLeftByTheSettler(t *testing.T) {
 	lined(t, idx, line, true)
 	stripped(t, ns, "s")
 
-	// The flag the first process left is its own; the second clears it
-	// until its own run is done.
-	counts := watchHeldCount(t)
+	// The flag the first process left stays: it is of this switch, and
+	// nothing has been held since.
+	counts, settled := watchHeldCount(t), watchCRDAnnotation(t, cu.AnnotationDisownSettled)
 	perNameRig(t, idx, disownOptions, nil)
 	lined(t, idx, line, false)
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
 	if seen := counts(); slices.ContainsFunc(seen, func(v string) bool { return v != "0" }) {
 		t.Errorf("held-count with only a bare line left: %v; want 0 throughout", seen)
 	}
+	if seen := settled(); slices.ContainsFunc(seen, func(v string) bool { return v != "all" }) {
+		t.Errorf("disown-settled in the second process: %v; want all throughout", seen)
+	}
 }
 
 // A switch turned off and on again starts the settling over, and a hold made
-// in between is counted and stripped (§7.4).
+// in between is counted and stripped (§7.4). The flag of the run before is
+// gone before the hold is there, though the loop may not have looked yet. No
+// pass runs after the switch is back, so that only Disown drops the ref.
 func TestDisownTurnedOffAndOnAgain(t *testing.T) {
 	cutest.Require(t, env)
 	set := disowning(t)
@@ -632,16 +637,19 @@ func TestDisownTurnedOffAndOnAgain(t *testing.T) {
 	lined(t, idx, secretLine(ns, "s"), false)
 	setWidgetCRDAnnotations(t, map[string]any{cu.AnnotationDisown: nil})
 	r.c.enqueue(widgetNN(ns, "w"))
+	cutest.Eventually(t, time.Minute, heldFor(ns, "s", ns))
+	if v := widgetCRDAnnotations(t)[cu.AnnotationDisownSettled]; v != "" {
+		t.Errorf("held again, with disown-settled %q still there", v)
+	}
 	established(t, ns, "s", "w")
 	lined(t, idx, secretLine(ns, "s"), true)
-	counts := watchHeldCount(t)
+	r.c.stop()
+	counts, again := watchHeldCount(t), time.Now()
 	set("all")
-	cutest.Eventually(t, time.Minute, func() error {
-		if err := settledAtZero(t)(); err != nil {
-			return err
-		}
-		return notHeldFor(ns, "s", ns)()
-	})
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if got, min := time.Since(again), (disownPasses-1)*disownInterval-150*time.Millisecond; got < min {
+		t.Errorf("settled %s after the switch was set again, want at least %s", got, min)
+	}
 	if seen := counts(); !slices.ContainsFunc(seen, func(v string) bool { return v != "0" && v != "" && v != "unknown" }) {
 		t.Errorf("held-count after the switch was set again: %v; want the hold counted", seen)
 	}
@@ -1195,7 +1203,7 @@ func staysUnknown(t *testing.T) {
 	if seen := counts(); slices.ContainsFunc(seen, func(v string) bool { return v != "unknown" }) {
 		t.Errorf("held-count while unknown: %v", seen)
 	}
-	if seen := settled(); slices.Contains(seen, "true") {
+	if seen := settled(); slices.ContainsFunc(seen, func(v string) bool { return v != "" }) {
 		t.Errorf("disown-settled while the count is unknown: %v", seen)
 	}
 }
@@ -2045,7 +2053,7 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		return nil
 	})
 	time.Sleep(disownPasses*disownInterval + 2*time.Second)
-	if seen := settledSeen(); slices.Contains(seen, "true") {
+	if seen := settledSeen(); slices.ContainsFunc(seen, func(v string) bool { return v != "" }) {
 		t.Fatalf("disown-settled after the hand removal alone: %v", seen)
 	}
 

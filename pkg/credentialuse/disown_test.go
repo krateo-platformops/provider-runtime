@@ -491,7 +491,7 @@ func TestDisownSettling(t *testing.T) {
 	const name = "widgets.credentialuse.test.krateo.io"
 	crd := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
-		"metadata": map[string]any{"name": name, "resourceVersion": "1"},
+		"metadata": map[string]any{"name": name, "resourceVersion": "1", "annotations": map[string]any{AnnotationDisown: "Secret"}},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crd)
@@ -517,7 +517,7 @@ func TestDisownSettling(t *testing.T) {
 	}
 	step := func(count int, known bool, wantCount, wantSettled string) {
 		t.Helper()
-		s.writeDisownCount(ctx, tr, disownSet{}, count, known)
+		s.writeDisownCount(ctx, tr, parseDisown("Secret"), count, known)
 		if c, st := read(); c != wantCount || st != wantSettled {
 			t.Fatalf("after a count of %d (known %v): held-count %q, settled %q; want %q, %q", count, known, c, st, wantCount, wantSettled)
 		}
@@ -526,7 +526,7 @@ func TestDisownSettling(t *testing.T) {
 	step(0, true, "0", "")
 	step(0, true, "0", "")
 	before := patches()
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 	if patches() != before+1 {
 		t.Errorf("%d patches to settle, want 1", patches()-before)
 	}
@@ -534,7 +534,7 @@ func TestDisownSettling(t *testing.T) {
 		t.Errorf("the count patch isn't guarded by the version read: %v", p)
 	}
 	before = patches()
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 	if patches() != before {
 		t.Error("an unchanged count was written: every CRD write rebuilds the API server's OpenAPI")
 	}
@@ -543,7 +543,7 @@ func TestDisownSettling(t *testing.T) {
 	step(1, true, "1", "")
 	step(0, true, "0", "")
 	step(0, true, "0", "")
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 
 	// Another process's non-zero count, read on the CRD, resets this one's
 	// run, and so does an unknown count.
@@ -556,17 +556,17 @@ func TestDisownSettling(t *testing.T) {
 	step(0, false, "unknown", "")
 	step(0, true, "0", "")
 	step(0, true, "0", "")
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 
 	// A switch that no longer covers what the pass counted: nothing is
 	// written, and the run starts over.
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 	if _, err := dyn.Resource(crdGVR).Patch(ctx, name, types.MergePatchType,
 		[]byte(`{"metadata":{"annotations":{"`+AnnotationHeldCount+`":"0","`+AnnotationDisownSettled+`":null,"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	before = patches()
-	s.writeDisownCount(ctx, tr, disownSet{}, 0, true)
+	s.writeDisownCount(ctx, tr, parseDisown("Secret"), 0, true)
 	if patches() != before {
 		t.Error("a count for another switch was written")
 	}
@@ -578,7 +578,7 @@ func TestDisownSettling(t *testing.T) {
 		t.Fatalf("held-count %q, settled %q after two zero passes under the new switch; want not settled", c, st)
 	}
 	s.writeDisownCount(ctx, tr, all, 0, true)
-	if _, st := read(); st != "true" {
+	if _, st := read(); st != "all" {
 		t.Fatal("not settled after three zero passes under the new switch")
 	}
 
@@ -684,6 +684,160 @@ func lastPatch(acts []clienttesting.Action) clienttesting.PatchAction {
 		}
 	}
 	return nil
+}
+
+// TestDisownSettledIsTheSwitchsValue: Disown has settled only under the
+// switch's value as written, whatever the kinds it covers, and never with no
+// switch; anything else left there is stale, an old "true" included. The
+// index's lines stay until then (§7.4; the user's decision, 2026-11-23).
+func TestDisownSettledIsTheSwitchsValue(t *testing.T) {
+	ann := func(kv ...string) map[string]string {
+		out := map[string]string{}
+		for i := 0; i < len(kv); i += 2 {
+			out[kv[i]] = kv[i+1]
+		}
+		return out
+	}
+	d, c, s := AnnotationDisown, AnnotationHeldCount, AnnotationDisownSettled
+	for name, tc := range map[string]struct {
+		ann            map[string]string
+		settled, stale bool
+	}{
+		"settled":                   {ann(d, "all", c, "0", s, "all"), true, false},
+		"settled, some kinds":       {ann(d, "Secret, ConfigMap", c, "0", s, "Secret, ConfigMap"), true, false},
+		"not settled":               {ann(d, "all", c, "0"), false, false},
+		"no switch, nothing left":   {nil, false, false},
+		"no switch, a count left":   {ann(c, "0"), false, false},
+		"no switch, a flag left":    {ann(c, "0", s, "all"), false, true},
+		"no switch, an empty flag":  {ann(c, "0", s, ""), false, false},
+		"an empty switch and flag":  {ann(d, "", c, "0", s, ""), false, false},
+		"a count":                   {ann(d, "all", c, "1", s, "all"), false, false},
+		"unknown":                   {ann(d, "all", c, "unknown", s, "all"), false, false},
+		"widened":                   {ann(d, "all", c, "0", s, "Secret"), false, true},
+		"narrowed":                  {ann(d, "Secret", c, "0", s, "all"), false, true},
+		"reordered":                 {ann(d, "ConfigMap,Secret", c, "0", s, "Secret,ConfigMap"), false, true},
+		"another spacing":           {ann(d, "Secret, ConfigMap", c, "0", s, "Secret,ConfigMap"), false, true},
+		"an old build's true":       {ann(d, "all", c, "0", s, "true"), false, true},
+		"an old true and no switch": {ann(c, "0", s, "true"), false, true},
+	} {
+		if got := disownSettled(tc.ann); got != tc.settled {
+			t.Errorf("%s: settled %v, want %v", name, got, tc.settled)
+		}
+		if got := staleSettled(tc.ann); got != tc.stale {
+			t.Errorf("%s: stale %v, want %v", name, got, tc.stale)
+		}
+		if got, want := keptKinds(tc.ann).on(), parseDisown(tc.ann[d]).on() && !tc.settled; got != want {
+			t.Errorf("%s: the lines stay: %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestDisownRunsOverAnUnchangedCRD: a run of zero passes is of passes over
+// one version of the CRD, but for this process's own writes: a switch turned
+// off and on again, whatever the informer delivered, starts it over. A
+// process whose run isn't done leaves the flag of one whose run is (§7.4).
+func TestDisownRunsOverAnUnchangedCRD(t *testing.T) {
+	on := map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0"}
+	done := map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0", AnnotationDisownSettled: "all"}
+	stale := map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0", AnnotationDisownSettled: "true"}
+	pass := func(d *disownState, ann map[string]string, start, end, cur string) (bool, bool) {
+		if d.startRV = start; cur == "0" {
+			d.zeros++
+		} else {
+			d.zeros = 0
+		}
+		settled, write := d.decide(ann, end, cur, 3)
+		d.rv = end
+		return settled, write
+	}
+	d := &disownState{}
+	for i, want := range []bool{false, false, true} {
+		if settled, write := pass(d, on, "5", "5", "0"); settled != want || write != want {
+			t.Errorf("pass %d over an unchanged CRD: settled %v, write %v, want %v", i+1, settled, write, want)
+		}
+	}
+	// Changed since the last pass: this one is the first of a new run.
+	d = &disownState{}
+	pass(d, on, "5", "5", "0")
+	pass(d, on, "5", "5", "0")
+	for i, want := range []bool{false, false, true} {
+		if settled, _ := pass(d, on, "7", "7", "0"); settled != want {
+			t.Errorf("pass %d after the CRD changed: settled %v, want %v", i+1, settled, want)
+		}
+	}
+	// Changed during a pass: that pass is of no run.
+	d = &disownState{}
+	pass(d, on, "5", "5", "0")
+	pass(d, on, "5", "6", "0")
+	for i, want := range []bool{false, false, true} {
+		if settled, _ := pass(d, on, "6", "6", "0"); settled != want {
+			t.Errorf("pass %d after the CRD changed during one: settled %v, want %v", i+1, settled, want)
+		}
+	}
+	d = &disownState{}
+	if settled, write := pass(d, done, "5", "5", "0"); settled || write {
+		t.Errorf("another process's flag, of this switch: settled %v, write %v; want it left alone", settled, write)
+	}
+	if settled, write := pass(d, stale, "5", "5", "0"); settled || !write {
+		t.Errorf("a flag of another value: settled %v, write %v; want it cleared", settled, write)
+	}
+	if settled, write := pass(d, done, "5", "5", "1"); settled || !write {
+		t.Errorf("a hold under another process's flag: settled %v, write %v; want it cleared", settled, write)
+	}
+}
+
+// TestAHoldClearsAStaleFlag: before a pass's first A2, a disown-settled that
+// a switch of another value left is removed, guarded by the version the
+// switch was read at; a flag of the value it has now stays. One that can't be
+// removed fails the read, and so the A2, naming the grant (§7.4).
+func TestAHoldClearsAStaleFlag(t *testing.T) {
+	ctx := context.Background()
+	const name = "widgets.credentialuse.test.krateo.io"
+	gvk := crdGVR.GroupVersion().WithKind("CustomResourceDefinition")
+	for title, tc := range map[string]struct {
+		ann   map[string]string
+		fail  error
+		clear bool
+		want  string // in the error
+	}{
+		"off, a flag left":      {ann: map[string]string{AnnotationHeldCount: "0", AnnotationDisownSettled: "all"}, clear: true},
+		"off, an old true left": {ann: map[string]string{AnnotationHeldCount: "0", AnnotationDisownSettled: "true"}, clear: true},
+		"narrowed":              {ann: map[string]string{AnnotationDisown: "Secret", AnnotationHeldCount: "0", AnnotationDisownSettled: "all"}, clear: true},
+		"its own":               {ann: map[string]string{AnnotationDisown: "Secret", AnnotationHeldCount: "0", AnnotationDisownSettled: "Secret"}},
+		"nothing":               {},
+		"a conflict": {ann: map[string]string{AnnotationDisownSettled: "all"}, clear: true, want: "leftover",
+			fail: apierrors.NewConflict(schema.GroupResource{Group: crdGVR.Group, Resource: crdGVR.Resource}, name, errors.New("changed"))},
+		"no grant": {ann: map[string]string{AnnotationDisownSettled: "all"}, clear: true, want: "grant patch on customresourcedefinitions",
+			fail: apierrors.NewForbidden(schema.GroupResource{Group: crdGVR.Group, Resource: crdGVR.Resource}, name,
+				errors.New(`User "u" cannot patch resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope`))},
+	} {
+		m := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: name, ResourceVersion: "9", Annotations: tc.ann}}
+		m.SetGroupVersionKind(gvk)
+		scheme := metadatafake.NewTestScheme()
+		must(metav1.AddMetaToScheme(scheme))
+		crd := &unstructured.Unstructured{Object: map[string]any{"apiVersion": gvk.GroupVersion().String(), "kind": gvk.Kind,
+			"metadata": map[string]any{"name": name, "resourceVersion": "9"}}}
+		dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crd)
+		dyn.PrependReactor("patch", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return tc.fail != nil, nil, tc.fail
+		})
+		tr := &Tracker{s: &Shared{c: Clients{Dynamic: dyn, Metadata: metadatafake.NewSimpleMetadataClient(scheme, m)}}, gk: widgetGK, crdName: name}
+		set, err := tr.disownForHold(ctx)
+		if (err != nil) != (tc.want != "") || err != nil && !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error naming %q", title, err, tc.want)
+		}
+		if err == nil && set.key() != parseDisown(tc.ann[AnnotationDisown]).key() {
+			t.Errorf("%s: the switch read is %+v", title, set)
+		}
+		p := lastPatch(dyn.Actions())
+		if (p != nil) != tc.clear {
+			t.Errorf("%s: patched %v, want %v", title, p != nil, tc.clear)
+		}
+		if p != nil && !strings.Contains(string(p.GetPatch()), `"resourceVersion":"9"`) {
+			t.Errorf("%s: the patch isn't guarded by the version read: %s", title, p.GetPatch())
+		}
+	}
 }
 
 // TestDisownPassesAreAnIntervalApart: a tracker's next pass is due an

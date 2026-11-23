@@ -74,7 +74,8 @@ func disowning(t *testing.T) func(value string) {
 func settledAtZero(t *testing.T) func() error {
 	return func() error {
 		a := widgetCRDAnnotations(t)
-		if a[cu.AnnotationHeldCount] != "0" || a[cu.AnnotationDisownSettled] != "true" {
+		// What a reader compares (§7.4).
+		if d := a[cu.AnnotationDisown]; a[cu.AnnotationHeldCount] != "0" || d == "" || a[cu.AnnotationDisownSettled] != d {
 			return fmt.Errorf("held-count %q, disown-settled %q: %w", a[cu.AnnotationHeldCount], a[cu.AnnotationDisownSettled], cutest.ErrNotYet)
 		}
 		return nil
@@ -203,7 +204,7 @@ func TestDisownSettlesAfterConsecutiveZeroPasses(t *testing.T) {
 		if a[cu.AnnotationHeldCount] == "0" && firstZero.IsZero() {
 			firstZero = time.Now()
 		}
-		if a[cu.AnnotationDisownSettled] == "true" && firstZero.IsZero() {
+		if a[cu.AnnotationDisownSettled] != "" && firstZero.IsZero() {
 			t.Fatal("settled before any zero count was seen")
 		}
 		return settledAtZero(t)()

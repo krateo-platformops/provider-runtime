@@ -40,7 +40,10 @@ const (
 	AnnotationDisown = Domain + "/disown"
 	// AnnotationHeldCount is Disown's live count (§7.4).
 	AnnotationHeldCount = Domain + "/held-count"
-	// AnnotationDisownSettled is set once Disown has finished (§7.4).
+	// AnnotationDisownSettled is set, once Disown has finished, to the
+	// switch's value, as AnnotationDisown has it. Disown has settled if and
+	// only if AnnotationDisown is set and not empty, this equals it, and
+	// AnnotationHeldCount is "0": a plain comparison of the strings (§7.4).
 	AnnotationDisownSettled = Domain + "/disown-settled"
 	// AnnotationConfig holds the settings every process of a kind shares
 	// (§7.3).
