@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
 
@@ -1947,8 +1948,9 @@ func TestIndexRecheckDoesntRetryADeniedLine(t *testing.T) {
 // Disown under resourceNames RBAC with an index line for a Secret outside
 // the grant, which no record names: it can't be read, so held-count stays
 // "unknown", never zero, and a Warning event on the CRD names it, with the
-// gauge; once the line is removed by hand, the documented remedy, Disown
-// settles (§7.4, the user's decision of 2026-11-22).
+// gauge; removing the line by hand doesn't help, and once an operator vouches
+// for the Secret, the documented remedy, Disown settles (§7.4, the user's
+// decision of 2026-11-22). No write removes the line before that (§7.4).
 func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
@@ -1956,6 +1958,7 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-unreadable")
 	const sa = "cu-disown-unreadable"
 	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch", "list", "watch"})
+	stripUnreadableRecords(t, kubeAs(t, env.AsServiceAccount("default", sa)))
 	createSecret(t, ns, "nogrant")
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
 		Data: map[string]string{"entries": secretLine(ns, "nogrant") + "\n"}}
@@ -1963,15 +1966,11 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := secretLine(ns, "nogrant")
-	// While keepLine is set, no index write that would leave the index
-	// without the line starts. writing counts the index writes the hook let
-	// through that haven't returned: one let through before the set, as a
-	// Disown pass's emptying, may still land after it. A write is counted
-	// before keepLine is loaded, so once keepLine is set and writing reads
-	// zero, every write let through before the set has landed.
-	var keepLine atomic.Bool
-	var writing atomic.Int32
-	isWrite := func(c cu.Call) bool { return c.Op == "index-update" || c.Op == "index-create" }
+	// No index write that would leave the index without the line gets
+	// through until the test has seen Disown settle over it; tried counts
+	// them.
+	var mayGo atomic.Bool
+	var tried atomic.Int32
 	m := &deniedMetrics{}
 	r := newWriteRig(t, env.AsServiceAccount("default", sa), cu.SharedOptions{IndexNamespace: idx}, func(o *cu.Options) {
 		perName(o)
@@ -1979,20 +1978,12 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		o.Metrics = m
 	}, func(s *cu.Shared) {
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
-			if !isWrite(c) {
-				return nil
-			}
-			writing.Add(1)
-			if keepLine.Load() && !slices.Contains(c.Lines, line) {
-				writing.Add(-1)
+			if (c.Op == "index-update" || c.Op == "index-create") && !mayGo.Load() && !slices.Contains(c.Lines, line) {
+				tried.Add(1)
 				return errors.New("the index can't lose the line")
 			}
 			return nil
-		}, func(c cu.Call, _ error) {
-			if isWrite(c) {
-				writing.Add(-1)
-			}
-		})
+		}, nil)
 	})
 	set("all")
 	cutest.Eventually(t, time.Minute, func() error {
@@ -2005,9 +1996,8 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	if _, n := m.get(); n < 1 {
 		t.Errorf("disown_unreadable = %d, want the unreadable Secret counted", n)
 	}
-	// The other tests' holders' records, which the first pass strips, may
-	// name more; from the second pass the set is the one Secret's, and its
-	// event isn't sent again on every pass.
+	// The set is the one Secret's, and its event isn't sent again on every
+	// pass.
 	time.Sleep(2 * disownInterval)
 	unreadableEvents := func() int {
 		r.mu.Lock()
@@ -2048,30 +2038,13 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		t.Fatalf("disown-settled after the hand removal alone: %v", seen)
 	}
 
-	// The remedy: the operator vouches for it, and leaves the line. Disown's
-	// emptying can't remove the line while keepLine is set, so every pass
-	// meets the vouched line it can't read: it skips it, and settles. Then
-	// the emptying removes the line for good.
-	//
-	// Until the vouch, each pass's emptying removes the line and puts it
-	// back, since the object can't be read (§10.6.2). A removal let through
-	// before the set may land after it; its re-add keeps the line, so the
-	// hook lets it through, and the line is back once both have landed.
-	// From then on nothing can remove it.
-	keepLine.Store(true)
-	cutest.Eventually(t, time.Minute, func() error {
-		if n := writing.Load(); n > 0 {
-			return fmt.Errorf("%d index writes in flight: %w", n, cutest.ErrNotYet)
-		}
-		lines, ok := indexLines(t, idx)
-		if !ok {
-			t.Fatal("the index is gone")
-		}
-		if !slices.Contains(lines, line) {
-			return fmt.Errorf("index %v, waiting for the emptying's re-add of %s: %w", lines, line, cutest.ErrNotYet)
-		}
-		return nil
-	})
+	// The remedy: the operator vouches for it, and leaves the line. Every
+	// pass meets the vouched line it can't read, skips it, and settles; then
+	// the emptying, which the hook holds back until the test has looked,
+	// removes the line for good.
+	if n := tried.Load(); n != 0 {
+		t.Errorf("%d index writes tried to remove the line before Disown settled", n)
+	}
 	editIndex(t, idx, func(cm *corev1.ConfigMap) {
 		if cm.Annotations == nil {
 			cm.Annotations = map[string]string{}
@@ -2084,7 +2057,7 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	} else if !slices.Contains(lines, line) {
 		t.Fatalf("the vouched line went before Disown settled: %v; the test needs Disown to meet it", lines)
 	}
-	keepLine.Store(false)
+	mayGo.Store(true)
 	lined(t, idx, line, false)
 	time.Sleep(2 * time.Second) // the write loops' ticks
 	if lines, ok := indexLines(t, idx); !ok {
@@ -2094,6 +2067,35 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	}
 	if v := indexAnnotations(t, idx)[cu.AnnotationVouched]; v != ns+"/Secret/nogrant" {
 		t.Errorf("the vouched annotation after Disown's writes: %q", v)
+	}
+}
+
+// stripUnreadableRecords removes the records, left by other tests, that name
+// a Secret k can't read: Disown keeps a line for every object a record
+// names, so a test of a restricted process would count them unknown. A
+// record whose Secrets k can read, or that are gone for it, stays.
+func stripUnreadableRecords(t *testing.T, k kubernetes.Interface) {
+	t.Helper()
+	ctx := context.Background()
+	widgets, err := env.Dynamic.Resource(cutest.WidgetGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range widgets.Items {
+		w := &widgets.Items[i]
+		for _, id := range cu.ReadRecord(w).IDs {
+			if id.Kind != "Secret" || id.Group != "" {
+				continue
+			}
+			if _, err := k.CoreV1().Secrets(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{}); !apierrors.IsForbidden(err) {
+				continue
+			}
+			if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(w.GetNamespace()).Patch(ctx, w.GetName(), types.MergePatchType,
+				[]byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, cu.AnnotationRefs)), metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				t.Fatal(err)
+			}
+			break
+		}
 	}
 }
 
@@ -2193,7 +2195,9 @@ func TestDisownEmptiesTheIndexItself(t *testing.T) {
 		t.Errorf("held-count before settling: %v; want the hold counted", seen)
 	}
 	stripped(t, ns, "x")
-	if lines, _ := indexLines(t, idx); len(lines) != 0 {
-		t.Errorf("the index after Disown: %v; want it empty", lines)
+	// The emptying follows the write of the settled flag.
+	lined(t, idx, secretLine(ns, "x"), false)
+	if lines, ok := indexLines(t, idx); !ok || len(lines) != 0 {
+		t.Errorf("the index after Disown: %v, %v; want it there, and empty", lines, ok)
 	}
 }
