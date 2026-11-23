@@ -1703,12 +1703,20 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	var keepLine atomic.Bool // the index can't be written while set
 	m := &deniedMetrics{}
 	r := newWriteRig(t, env.AsServiceAccount("default", sa), cu.SharedOptions{IndexNamespace: idx}, func(o *cu.Options) {
 		perName(o)
 		disownOptions(o)
 		o.Metrics = m
-	}, nil)
+	}, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			if keepLine.Load() && c.Op == "index-update" {
+				return errors.New("the index can't be written")
+			}
+			return nil
+		}, nil)
+	})
 	set("all")
 	cutest.Eventually(t, time.Minute, func() error {
 		if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" {
@@ -1764,9 +1772,11 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		t.Fatalf("disown-settled after the hand removal alone: %v", seen)
 	}
 
-	// The remedy: the operator vouches for it, and leaves the line. Disown
-	// meets the vouched line, skips it while it can't be read, settles, and
-	// its emptying removes the line for good.
+	// The remedy: the operator vouches for it, and leaves the line. Disown's
+	// emptying can't remove the line while the index can't be written, so
+	// every pass meets the vouched line it can't read: it skips it, and
+	// settles. Then the emptying removes the line for good.
+	keepLine.Store(true)
 	editIndex(t, idx, func(cm *corev1.ConfigMap) {
 		if cm.Annotations == nil {
 			cm.Annotations = map[string]string{}
@@ -1774,6 +1784,10 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		cm.Annotations[cu.AnnotationVouched] = ns + "/Secret/nogrant"
 	})
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if lines, _ := indexLines(t, idx); !slices.Contains(lines, line) {
+		t.Fatalf("the vouched line went before Disown settled: %v; the test needs Disown to meet it", lines)
+	}
+	keepLine.Store(false)
 	lined(t, idx, line, false)
 	time.Sleep(2 * time.Second) // the write loops' ticks
 	if lines, _ := indexLines(t, idx); slices.Contains(lines, line) {

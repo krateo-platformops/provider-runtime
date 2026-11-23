@@ -1028,7 +1028,10 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   build): a re-add after a prune, an acquirer's post-check that can't read
   the index or can't add the line, as on a full index, and a rebuild that
   fails right after `Track` created the index. Each is queued, and the
-  write loops retry it with backoff until it lands.
+  write loops retry it with backoff until it lands. A rebuild that fails
+  in `Track` is queued for the write loops as before, though the marker's
+  absence makes the startup recheck rebuild it too: the queuing is kept as
+  an earlier start of the retry (the review of the marker, 2026-11-23).
 - **A durable marker, `credential-use.krateo.io/rebuilt`, on the index**
   (the user's decision, 2026-11-22). Only a completed rebuild sets it, in
   the same guarded write as its last merge, which writes even when it adds
