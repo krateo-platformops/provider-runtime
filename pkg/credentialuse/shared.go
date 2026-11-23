@@ -137,17 +137,19 @@ type Options struct {
 	// DisownInterval and DisownPasses are Disown's pass interval and its
 	// consecutive zero passes (§7.4); DisownPasses defaults to 5. An unset
 	// DisownInterval is derived from the kind's TimeoutBound, after
-	// DisownPasses' default: max(60s, ⌈2 × TimeoutBound / (DisownPasses −
-	// 1)⌉), so a long reconcile timeout needs no setting (the user's decision,
-	// 2026-11-22). That derived value is what Track publishes on the CRD, so
-	// every process of the kind agrees on it. An interval that is set is
-	// used as given, and Track refuses one too short for TimeoutBound.
+	// DisownPasses' default: max(60s, ⌈span / (DisownPasses − 1)⌉), where
+	// span is max(2 × TimeoutBound, TimeoutBound + LandingMargin), so a long
+	// reconcile timeout needs no setting (the user's decisions, 2026-11-22
+	// and 2026-11-23). That derived value is what Track publishes on the CRD,
+	// so every process of the kind agrees on it. An interval that is set is
+	// used as given, and Track refuses one too short for the span.
 	DisownInterval time.Duration
 	DisownPasses   int
 	// TimeoutBound is the kind's largest reconcile or request timeout.
 	// Required: setup checks the span of DisownPasses zero passes,
-	// (DisownPasses − 1) × DisownInterval, against twice it, and publishes
-	// it (§7.3). provider-runtime passes its timeout plus grace, 90s.
+	// (DisownPasses − 1) × DisownInterval, against it and LandingMargin, and
+	// publishes it (§7.3). provider-runtime passes its timeout plus grace,
+	// 90s.
 	TimeoutBound time.Duration
 	// Logger and Metrics are rebound with Enqueue, and the same rule holds:
 	// neither may block or call Track.
@@ -167,6 +169,11 @@ const (
 	DefaultDisownInterval = 60 * time.Second
 	DefaultDisownPasses   = 5
 	DefaultMaxDepth       = 3
+	// LandingMargin is how long after its context has ended a write is
+	// allowed to land: the API server's default --request-timeout (§7.4; the
+	// user's decision, 2026-11-23). It is a margin, not a proof: nothing
+	// bounds a landing from end to end.
+	LandingMargin = 60 * time.Second
 )
 
 // secretGVK is the default protected kind.
@@ -270,6 +277,17 @@ type hooks struct {
 	// released sees, and may change, what a batch's release returned, before
 	// the release loop acts on it.
 	released func(*ReleaseResult)
+	// landingMargin replaces LandingMargin, so that Disown's passes can be
+	// short.
+	landingMargin *time.Duration
+}
+
+// landingMargin is LandingMargin, or the tests' own.
+func (s *Shared) landingMargin() time.Duration {
+	if m := s.hooks.landingMargin; m != nil {
+		return *m
+	}
+	return LandingMargin
 }
 
 // NewShared builds the process-wide state. It creates the batch queue before
@@ -1116,7 +1134,7 @@ func (s *Shared) validate(o Options) (Options, error) {
 		o.DisownPasses = DefaultDisownPasses
 	}
 	if o.DisownInterval == 0 {
-		o.DisownInterval = defaultDisownInterval(o.DisownPasses, o.TimeoutBound)
+		o.DisownInterval = defaultDisownInterval(o.DisownPasses, disownSpan(o.TimeoutBound, s.landingMargin()))
 	}
 	if o.MaxDepth == 0 {
 		o.MaxDepth = DefaultMaxDepth
@@ -1129,9 +1147,10 @@ func (s *Shared) validate(o Options) (Options, error) {
 	}
 	// DisownPasses zero passes span DisownPasses − 1 intervals: the first
 	// runs as soon as the switch is seen (the review of PR 6).
-	if time.Duration(o.DisownPasses-1)*o.DisownInterval < 2*o.TimeoutBound {
-		return o, fmt.Errorf("credential-use: %s: (DisownPasses − 1) × DisownInterval ((%d − 1) × %s), the span of the zero passes, is below twice TimeoutBound (%s) (§7.4)",
-			gk, o.DisownPasses, o.DisownInterval, o.TimeoutBound)
+	if span, need := time.Duration(o.DisownPasses-1)*o.DisownInterval, disownSpan(o.TimeoutBound, s.landingMargin()); span < need {
+		return o, fmt.Errorf("credential-use: %s: (DisownPasses − 1) × DisownInterval ((%d − 1) × %s), the span of the zero passes, is %s, below max(2 × TimeoutBound, TimeoutBound + %s) = %s with TimeoutBound %s: "+
+			"leave DisownInterval unset, with DisownPasses at least 2, to have it derived, or raise either (§7.4)",
+			gk, o.DisownPasses, o.DisownInterval, span, s.landingMargin(), need, o.TimeoutBound)
 	}
 	if len(o.Protected) == 0 {
 		o.Protected = []ProtectedKind{{GVK: secretGVK}}
@@ -1182,20 +1201,28 @@ func (s *Shared) validateIndex(gk schema.GroupKind) error {
 	return validIndexName(gk)
 }
 
+// disownSpan is the least the zero passes that settle Disown must span
+// (§7.4): max(2 × timeoutBound, timeoutBound + margin). A pass that began
+// before the switch ends its context within timeoutBound of it. The last
+// zero pass starts at least the span after the switch, so it sees a write
+// that landed within margin of that end.
+func disownSpan(timeoutBound, margin time.Duration) time.Duration {
+	return max(2*timeoutBound, timeoutBound+margin)
+}
+
 // defaultDisownInterval is an unset DisownInterval: DefaultDisownInterval,
-// or longer when the kind's TimeoutBound needs it, so that passes zero passes
-// span twice TimeoutBound (§7.4): max(DefaultDisownInterval, ⌈2 ×
-// TimeoutBound / (passes − 1)⌉), rounded up to a whole second, so that the
-// duration published on the CRD reads back as the same value and the bound
-// still holds after parsing. A long reconcile timeout then needs no setting
-// (the user's decision, 2026-11-22). With passes below 2 no interval
-// suffices: it returns DefaultDisownInterval, never dividing by zero, and
-// validate refuses with its "below twice TimeoutBound" error.
-func defaultDisownInterval(passes int, timeoutBound time.Duration) time.Duration {
-	if passes < 2 || timeoutBound <= 0 {
+// or longer when the span (disownSpan) needs it: max(DefaultDisownInterval,
+// ⌈span / (passes − 1)⌉), rounded up to a whole second, so that the duration
+// published on the CRD reads back as the same value and the bound still
+// holds after parsing. A long reconcile timeout then needs no setting (the
+// user's decision, 2026-11-22). With passes below 2 no interval suffices: it
+// returns DefaultDisownInterval, never dividing by zero, and validate
+// refuses.
+func defaultDisownInterval(passes int, span time.Duration) time.Duration {
+	if passes < 2 {
 		return DefaultDisownInterval
 	}
-	span, n := 2*timeoutBound, time.Duration(passes-1)
+	n := time.Duration(passes - 1)
 	d := span / n
 	if d*n < span {
 		d++

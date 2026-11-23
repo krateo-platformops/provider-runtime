@@ -732,7 +732,12 @@ tests.
 - **The setup check is on the span of the zero passes**, `(DisownPasses −
   1) × DisownInterval ≥ 2 × TimeoutBound`: the first pass runs as soon as
   the switch is seen, so `DisownPasses` passes span one interval fewer (the
-  review of PR 6). The defaults give 240s against 180s.
+  review of PR 6). The defaults give 240s against 180s. Since 2026-11-23
+  (the user's decision) the bound is `max(2 × TimeoutBound, TimeoutBound +
+  LandingMargin)`, `LandingMargin` 60s, and an unset interval is derived
+  from it, also for few passes and a small `TimeoutBound`. A tracker's
+  passes are an interval apart from its own clock reading, taken after its
+  switch's.
 - **A change of what the switch covers starts the run over**, and makes a
   pass due at once; and a count write whose GET finds a switch other than
   the one the pass counted under writes nothing. So widening `Secret` to

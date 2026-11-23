@@ -333,11 +333,16 @@ func TestTrackValidates(t *testing.T) {
 		"no Refs":             {func(o *Options) { o.Refs = nil }, "Refs is required"},
 		"no Enqueue":          {func(o *Options) { o.Enqueue = nil }, "Enqueue is required"},
 		"no TimeoutBound":     {func(o *Options) { o.TimeoutBound = 0 }, "TimeoutBound is required"},
-		"disown too short":    {func(o *Options) { o.DisownPasses, o.DisownInterval = 1, time.Minute }, "twice TimeoutBound"},
+		"disown too short":    {func(o *Options) { o.DisownPasses, o.DisownInterval = 1, time.Minute }, "below max(2 × TimeoutBound"},
 		// 2 × 120s is 240s, but two passes span one interval, 120s, under 180s.
-		"disown's span, not its count": {func(o *Options) { o.DisownPasses, o.DisownInterval = 2, 2*time.Minute }, "twice TimeoutBound"},
-		"a bad prefix":                 {func(o *Options) { o.Holder = schema.GroupVersionKind{Kind: "Widget", Version: "v1"} }, "needs a kind and a group"},
-		"an unmapped holder":           {func(o *Options) { o.Holder = schema.GroupVersionKind{Group: "x.io", Version: "v1", Kind: "Nope"} }, "can't be mapped"},
+		"disown's span, not its count": {func(o *Options) { o.DisownPasses, o.DisownInterval = 2, 2*time.Minute }, "below max(2 × TimeoutBound"},
+		// Each half of the max on its own, a second short of it.
+		"disown under twice the bound": {func(o *Options) { o.DisownPasses, o.DisownInterval = 2, 179*time.Second }, "= 3m0s"},
+		"disown under the bound and the landing": {func(o *Options) {
+			o.TimeoutBound, o.DisownPasses, o.DisownInterval = 10*time.Second, 2, 69*time.Second
+		}, "TimeoutBound + 1m0s) = 1m10s"},
+		"a bad prefix":       {func(o *Options) { o.Holder = schema.GroupVersionKind{Kind: "Widget", Version: "v1"} }, "needs a kind and a group"},
+		"an unmapped holder": {func(o *Options) { o.Holder = schema.GroupVersionKind{Group: "x.io", Version: "v1", Kind: "Nope"} }, "can't be mapped"},
 		"an unmapped kind": {func(o *Options) {
 			o.Protected = []ProtectedKind{{GVK: schema.GroupVersionKind{Version: "v1", Kind: "Nope"}}}
 		}, "can't be mapped"},

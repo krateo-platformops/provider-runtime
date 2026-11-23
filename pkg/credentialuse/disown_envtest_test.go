@@ -34,8 +34,8 @@ const (
 	disownPasses   = 3
 )
 
-// disownOptions shorten Disown's passes for the tests: 3 × 1s, over twice
-// a TimeoutBound of 1s (§7.4).
+// disownOptions shorten Disown's passes for the tests: 3 passes over 2s,
+// twice a TimeoutBound of 1s (§7.4), under a rig's LandingMargin of 0.
 func disownOptions(o *cu.Options) {
 	o.DisownInterval, o.DisownPasses, o.TimeoutBound = disownInterval, disownPasses, time.Second
 }

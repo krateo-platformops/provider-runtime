@@ -141,9 +141,12 @@ const disownTick = time.Second
 // loops, since it writes.
 func (s *Shared) runDisown(ctx context.Context) {
 	for {
-		now := s.clock.Now()
 		for _, t := range s.trackerList() {
 			set := t.disownSwitch()
+			// After the switch is read, and for each tracker: the passes of
+			// a run span its intervals from a time no earlier than the
+			// switch, however long other trackers' passes take.
+			now := s.clock.Now()
 			if !set.on() {
 				s.disownOff(ctx, t, now)
 				continue

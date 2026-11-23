@@ -55,6 +55,10 @@ func (s *Shared) QueueLoad() (ready, working int) {
 	return len(s.queue.ready), len(s.queue.working)
 }
 
+// SetLandingMargin replaces LandingMargin, so that Disown's passes can be
+// short. Set it before Track.
+func (s *Shared) SetLandingMargin(d time.Duration) { s.hooks.landingMargin = &d }
+
 // QueuedBatch reports whether the batch of holder kind gk in namespace ns is
 // waiting, and the protected objects it covers.
 func (s *Shared) QueuedBatch(gk schema.GroupKind, ns string) (bool, []ID) {

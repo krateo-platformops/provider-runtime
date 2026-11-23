@@ -686,6 +686,42 @@ func lastPatch(acts []clienttesting.Action) clienttesting.PatchAction {
 	return nil
 }
 
+// TestDisownPassesAreAnIntervalApart: a tracker's next pass is due an
+// interval after this one was about to start, not after the loop's look,
+// however long another tracker's pass took in between: the passes of a run
+// span its intervals (§7.4).
+func TestDisownPassesAreAnIntervalApart(t *testing.T) {
+	r := newFakeRig(t)
+	trackers := map[string]*Tracker{"widgets": r.track(t, widgetGK), "gadgets": r.track(t, gadgetGK)}
+	for _, tr := range trackers {
+		must(tr.crd.GetStore().Add(&metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: tr.crdName,
+			Annotations: map[string]string{AnnotationDisown: "all"}}}))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := map[string]time.Time{}
+	r.md.PrependReactor("list", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		res := a.GetResource().Resource
+		if trackers[res] != nil && started[res].IsZero() {
+			started[res] = r.clk.Now()
+			r.clk.Step(30 * time.Second) // the pass takes this long
+			if len(started) == len(trackers) {
+				cancel()
+			}
+		}
+		return false, nil, nil
+	})
+	r.s.runDisown(ctx)
+	if len(started) != len(trackers) {
+		t.Fatalf("passes started: %v, want one of each tracker", started)
+	}
+	for res, tr := range trackers {
+		if want := started[res].Add(tr.o.DisownInterval); tr.disown.next.Before(want) {
+			t.Errorf("%s: the next pass is due %s before an interval after this one started", res, want.Sub(tr.disown.next))
+		}
+	}
+}
+
 // TestDisownPassCounts: a pass counts a holder whose record names a covered
 // ref, with no finalizer anywhere, and a list that fails makes the count
 // unknown, never zero (§7.4).

@@ -1845,16 +1845,29 @@ credential-use.krateo.io/disown-settled: "true"
 process sets `disown-settled` once it has seen `DisownPasses` (**5** by
 default) consecutive passes count zero.
 
-- **Setup validates** `(DisownPasses − 1) × DisownInterval ≥ 2 ×
-  TimeoutBound`, the kind's largest reconcile or request timeout (L3). The
-  first pass runs as soon as the switch is seen, so `DisownPasses` zero
-  passes span one interval fewer (the review of PR 6). provider-runtime's
-  reconcile timeout plus its grace is 90s by default, so the minimum is
-  180s, and the defaults give 4 × 60s = 240s.
+- **Setup validates** `(DisownPasses − 1) × DisownInterval ≥ max(2 ×
+  TimeoutBound, TimeoutBound + LandingMargin)`, where `TimeoutBound` is the
+  kind's largest reconcile or request timeout (L3) and `LandingMargin` is a
+  constant, 60s, the API server's default `--request-timeout` (the user's
+  decision, 2026-11-23). It is a margin, not a proof: nothing bounds from
+  end to end how long after its context ended a write may still land. The
+  first pass runs as soon as the switch is seen, so
+  `DisownPasses` zero passes span one interval fewer (the review of PR 6).
+  provider-runtime's reconcile timeout plus its grace is 90s by default, so
+  the minimum is 180s, and the defaults give 4 × 60s = 240s.
+- **What the span gives.** Let T be when the switch was set. A pass that
+  read it live as off started before T, so its context ends by T +
+  `TimeoutBound`, `BeforeEstablish` included. The first zero pass starts at
+  or after T, and each next one at least an interval later: each tracker's
+  clock is read after its switch, so another tracker's slow pass can't eat
+  into the span. So the last zero pass starts at least `LandingMargin`
+  after the last such context ended, and reads a write that landed within
+  it. **A write that lands later than the margin isn't covered**: Disown may
+  already have settled.
 - **An unset `DisownInterval` is derived from `TimeoutBound`**:
-  `max(60s, ⌈2 × TimeoutBound / (DisownPasses − 1)⌉)`, rounded up to a
-  whole second, after `DisownPasses`' default (the user's decision,
-  2026-11-22). The derived value is what §7.3 publishes on the CRD, so every
+  `max(60s, ⌈span / (DisownPasses − 1)⌉)`, with the span above, rounded up
+  to a whole second, after `DisownPasses`' default (the user's decisions,
+  2026-11-22 and 2026-11-23). The derived value is what §7.3 publishes on the CRD, so every
   process of the kind agrees on it; an interval set explicitly is validated
   as given. For example, git-provider's 4m reconcile timeout gives a
   `TimeoutBound` of 270s, so the interval is ⌈540s / 4⌉ = 135s, and Disown

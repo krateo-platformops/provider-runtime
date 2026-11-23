@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -238,23 +239,36 @@ func TestDegradedIsLoggedOncePerHolder(t *testing.T) {
 	}
 }
 
-// §7.4 (the user's decision of 2026-11-22): an unset DisownInterval is
-// derived from TimeoutBound, max(60s, ⌈2 × TimeoutBound / (DisownPasses −
-// 1)⌉), and published on the CRD as derived; one set explicitly is used as
-// given, and refused when it is too short.
+// §7.4 (the user's decisions of 2026-11-22 and 2026-11-23): an unset
+// DisownInterval is derived from TimeoutBound, max(60s, ⌈max(2 ×
+// TimeoutBound, TimeoutBound + LandingMargin) / (DisownPasses − 1)⌉), and
+// published on the CRD as derived, for every TimeoutBound and DisownPasses;
+// one set explicitly is used as given, and refused when it is too short.
 func TestDisownIntervalDerivedFromTheTimeoutBound(t *testing.T) {
 	for _, tc := range []struct {
-		bound, want time.Duration
-		published   string
+		bound     time.Duration
+		passes    int // 0 is the default
+		want      time.Duration
+		published string
 	}{
-		{270 * time.Second, 135 * time.Second, "135s"}, // git-provider's 4m timeout plus 30s
-		{90 * time.Second, 60 * time.Second, "60s"},    // the default bound keeps the default
-		{271 * time.Second, 136 * time.Second, "136s"}, // 542s / 4 = 135.5s, up to a whole second
+		{270 * time.Second, 0, 135 * time.Second, "135s"}, // git-provider's 4m timeout plus 30s
+		{90 * time.Second, 0, 60 * time.Second, "60s"},    // the default bound keeps the default
+		{271 * time.Second, 0, 136 * time.Second, "136s"}, // 542s / 4 = 135.5s, up to a whole second
+		// Two passes span one interval, so a small bound needs the margin.
+		{time.Second, 2, 61 * time.Second, "61s"},
+		{1500 * time.Millisecond, 2, 62 * time.Second, "62s"},
+		{10 * time.Second, 2, 70 * time.Second, "70s"},
+		{59 * time.Second, 2, 119 * time.Second, "119s"},
+		{60 * time.Second, 2, 120 * time.Second, "120s"}, // the two halves meet
+		{61 * time.Second, 2, 122 * time.Second, "122s"},
+		{90 * time.Second, 2, 180 * time.Second, "180s"},
+		{10 * time.Second, 3, 60 * time.Second, "60s"},
+		{65 * time.Second, 3, 65 * time.Second, "65s"},
 	} {
-		t.Run(tc.bound.String(), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s in %d passes", tc.bound, tc.passes), func(t *testing.T) {
 			r := newFakeRig(t, namespaceObject("ns"))
 			o := r.options(widgetGK)
-			o.TimeoutBound = tc.bound
+			o.TimeoutBound, o.DisownPasses = tc.bound, tc.passes
 			tr, err := r.s.Track(context.Background(), o)
 			if err != nil {
 				t.Fatalf("Track with an unset DisownInterval and TimeoutBound %s: %v", tc.bound, err)
@@ -276,8 +290,9 @@ func TestDisownIntervalDerivedFromTheTimeoutBound(t *testing.T) {
 			// The published string reads back as the derived value, and the
 			// bound holds for it.
 			parsed, err := time.ParseDuration(got.DisownInterval)
-			if err != nil || parsed != tr.o.DisownInterval || time.Duration(tr.o.DisownPasses-1)*parsed < 2*tc.bound {
-				t.Errorf("published %q parses to %s (%v); want %s, spanning at least %s", got.DisownInterval, parsed, err, tr.o.DisownInterval, 2*tc.bound)
+			need := max(2*tc.bound, tc.bound+60*time.Second)
+			if err != nil || parsed != tr.o.DisownInterval || time.Duration(tr.o.DisownPasses-1)*parsed < need {
+				t.Errorf("published %q parses to %s (%v); want %s, spanning at least %s", got.DisownInterval, parsed, err, tr.o.DisownInterval, need)
 			}
 			// A second Track of the kind, and a second process, compare the
 			// derived value against the derived value.
@@ -294,8 +309,8 @@ func TestDisownIntervalDerivedFromTheTimeoutBound(t *testing.T) {
 		r := newFakeRig(t, namespaceObject("ns"))
 		o := r.options(widgetGK)
 		o.DisownPasses = 1
-		if _, err := r.s.Track(context.Background(), o); err == nil || !strings.Contains(err.Error(), "below twice TimeoutBound") {
-			t.Errorf("Track with DisownPasses 1 and the interval unset = %v; want the \"below twice TimeoutBound\" refusal", err)
+		if _, err := r.s.Track(context.Background(), o); err == nil || !strings.Contains(err.Error(), "with DisownPasses at least 2") {
+			t.Errorf("Track with DisownPasses 1 and the interval unset = %v; want the refusal that names the fix", err)
 		}
 	})
 	t.Run("explicit and too short", func(t *testing.T) {

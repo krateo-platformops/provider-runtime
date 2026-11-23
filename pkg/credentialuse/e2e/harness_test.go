@@ -132,14 +132,14 @@ func widgetScheme() *runtime.Scheme {
 // The settings every test's managers share. They are published on the CRD
 // (§7.3), so every manager of a test, and of the next, must agree on them.
 // TimeoutBound is the reconcile timeout plus 30s, 40s, so (DisownPasses − 1)
-// × DisownInterval must be at least 80s.
+// × DisownInterval must be at least 100s.
 const (
 	testGrace   = 3 * time.Second
 	testTimeout = 10 * time.Second
 )
 
 func kindOptions() cu.KindOptions {
-	return cu.KindOptions{DeletionGrace: testGrace, ProbeInterval: time.Second, DisownInterval: 500 * time.Millisecond, DisownPasses: 200}
+	return cu.KindOptions{DeletionGrace: testGrace, ProbeInterval: time.Second, DisownInterval: 500 * time.Millisecond, DisownPasses: 201}
 }
 
 // resetPublished removes the kind's published settings, so that a test leaves
