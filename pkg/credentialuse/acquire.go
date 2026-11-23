@@ -105,6 +105,8 @@ type protocol struct {
 	// a2Bound bounds an A2 whose caller's context has no deadline: the
 	// kind's TimeoutBound; 0 is no bound.
 	a2Bound time.Duration
+	// a2Grace and callGrace, if set, replace the constants of those names.
+	a2Grace, callGrace time.Duration
 	// restoredEpochRequeue, if set, replaces the constant of that name
 	// (epochRequeue).
 	restoredEpochRequeue time.Duration
@@ -202,8 +204,29 @@ type callContexts struct {
 	stop  func()
 }
 
+// graces are a2Grace and callGrace, or a test's own.
+func (p *protocol) graces() (a2, call time.Duration) {
+	a2, call = a2Grace, callGrace
+	if p.a2Grace > 0 {
+		a2 = p.a2Grace
+	}
+	if p.callGrace > 0 {
+		call = p.callGrace
+	}
+	return a2, call
+}
+
+// checkIn is cc's context for one line check, which may take callGrace even
+// while the caller's context lives: an API server that hangs mustn't hold a
+// pass without a deadline.
+func (p *protocol) checkIn(cc callContexts) (context.Context, context.CancelFunc) {
+	_, call := p.graces()
+	return context.WithTimeout(cc.check, call)
+}
+
 // detach returns the contexts of one call under ctx.
 func (p *protocol) detach(ctx context.Context) callContexts {
+	a2, call := p.graces()
 	base := context.WithoutCancel(ctx)
 	check, endCheck := context.WithCancel(base)
 	var write context.Context
@@ -222,7 +245,7 @@ func (p *protocol) detach(ctx context.Context) callContexts {
 		mu.Lock()
 		defer mu.Unlock()
 		if !stopped {
-			timers = append(timers, time.AfterFunc(a2Grace, endWrite), time.AfterFunc(callGrace, endCheck))
+			timers = append(timers, time.AfterFunc(a2, endWrite), time.AfterFunc(call, endCheck))
 		}
 	})
 	return callContexts{write: write, check: check, stop: func() {
@@ -705,7 +728,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				}
 				switch class, uid, err := p.write(ctx, cc, id, namespace); class {
 				case ClassNone:
-					if err := p.checkLine(cc.check, id, uid, namespace); err != nil {
+					if err := p.checkLine(cc, id, uid, namespace); err != nil {
 						return fail(err, "Index")
 					}
 					a.Held = append(a.Held, r)
@@ -905,7 +928,9 @@ func (p *protocol) write(ctx context.Context, cc callContexts, id ID, namespace 
 	issuedOne := false
 	defer func() {
 		if issuedOne && mayHaveLanded(err) && p.keepsLine(id.GroupKind()) {
-			p.lines.unknownA2(cc.check, id, namespace)
+			check, cancel := p.checkIn(cc)
+			defer cancel()
+			p.lines.unknownA2(check, id, namespace)
 			if p.enqueueBatch != nil {
 				p.enqueueBatch(id, namespace)
 			}
@@ -964,11 +989,11 @@ func (p *protocol) write(ctx context.Context, cc callContexts, id ID, namespace 
 // line survived a concurrent prune is unknown, so the A2's written entry
 // goes: the holder's next pass writes A2 again, and checks again, rather
 // than skipping.
-func (p *protocol) checkLine(ctx context.Context, id ID, uid types.UID, n string) error {
+func (p *protocol) checkLine(cc callContexts, id ID, uid types.UID, n string) error {
 	if !p.keepsLine(id.GroupKind()) {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, callGrace)
+	ctx, cancel := p.checkIn(cc)
 	defer cancel()
 	err := p.lines.postCheck(ctx, id)
 	if err == nil {
@@ -1036,7 +1061,7 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 		if class != ClassNone {
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)
 		}
-		if err := p.checkLine(cc.check, id, uid, obj.GetNamespace()); err != nil {
+		if err := p.checkLine(cc, id, uid, obj.GetNamespace()); err != nil {
 			return err
 		}
 		if cross && p.enqueueBatch != nil {
