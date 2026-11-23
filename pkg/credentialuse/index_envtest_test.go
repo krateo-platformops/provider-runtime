@@ -1703,7 +1703,16 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	var keepLine atomic.Bool // the index can't be written while set
+	line := secretLine(ns, "nogrant")
+	// While keepLine is set, no index write that would leave the index
+	// without the line starts. writing counts the index writes the hook let
+	// through that haven't returned: one let through before the set, as a
+	// Disown pass's emptying, may still land after it. A write is counted
+	// before keepLine is loaded, so once keepLine is set and writing reads
+	// zero, every write let through before the set has landed.
+	var keepLine atomic.Bool
+	var writing atomic.Int32
+	isWrite := func(c cu.Call) bool { return c.Op == "index-update" || c.Op == "index-create" }
 	m := &deniedMetrics{}
 	r := newWriteRig(t, env.AsServiceAccount("default", sa), cu.SharedOptions{IndexNamespace: idx}, func(o *cu.Options) {
 		perName(o)
@@ -1711,11 +1720,20 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		o.Metrics = m
 	}, func(s *cu.Shared) {
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
-			if keepLine.Load() && c.Op == "index-update" {
-				return errors.New("the index can't be written")
+			if !isWrite(c) {
+				return nil
+			}
+			writing.Add(1)
+			if keepLine.Load() && !slices.Contains(c.Lines, line) {
+				writing.Add(-1)
+				return errors.New("the index can't lose the line")
 			}
 			return nil
-		}, nil)
+		}, func(c cu.Call, _ error) {
+			if isWrite(c) {
+				writing.Add(-1)
+			}
+		})
 	})
 	set("all")
 	cutest.Eventually(t, time.Minute, func() error {
@@ -1757,7 +1775,6 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	// A pass between the removal and the restore may count the empty index
 	// as "0", which is a true count then; the restore makes the next pass
 	// "unknown" again, so Disown never settles on the removal alone.
-	line := secretLine(ns, "nogrant")
 	settledSeen := watchCRDAnnotation(t, cu.AnnotationDisownSettled)
 	setIndexLines(t, idx, func(l []string) []string { return slices.DeleteFunc(l, func(x string) bool { return x == line }) })
 	lined(t, idx, line, true)
@@ -1773,10 +1790,29 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	}
 
 	// The remedy: the operator vouches for it, and leaves the line. Disown's
-	// emptying can't remove the line while the index can't be written, so
-	// every pass meets the vouched line it can't read: it skips it, and
-	// settles. Then the emptying removes the line for good.
+	// emptying can't remove the line while keepLine is set, so every pass
+	// meets the vouched line it can't read: it skips it, and settles. Then
+	// the emptying removes the line for good.
+	//
+	// Until the vouch, each pass's emptying removes the line and puts it
+	// back, since the object can't be read (§10.6.2). A removal let through
+	// before the set may land after it; its re-add keeps the line, so the
+	// hook lets it through, and the line is back once both have landed.
+	// From then on nothing can remove it.
 	keepLine.Store(true)
+	cutest.Eventually(t, time.Minute, func() error {
+		if n := writing.Load(); n > 0 {
+			return fmt.Errorf("%d index writes in flight: %w", n, cutest.ErrNotYet)
+		}
+		lines, ok := indexLines(t, idx)
+		if !ok {
+			t.Fatal("the index is gone")
+		}
+		if !slices.Contains(lines, line) {
+			return fmt.Errorf("index %v, waiting for the emptying's re-add of %s: %w", lines, line, cutest.ErrNotYet)
+		}
+		return nil
+	})
 	editIndex(t, idx, func(cm *corev1.ConfigMap) {
 		if cm.Annotations == nil {
 			cm.Annotations = map[string]string{}
@@ -1784,13 +1820,17 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		cm.Annotations[cu.AnnotationVouched] = ns + "/Secret/nogrant"
 	})
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
-	if lines, _ := indexLines(t, idx); !slices.Contains(lines, line) {
+	if lines, ok := indexLines(t, idx); !ok {
+		t.Fatal("the index went before Disown settled")
+	} else if !slices.Contains(lines, line) {
 		t.Fatalf("the vouched line went before Disown settled: %v; the test needs Disown to meet it", lines)
 	}
 	keepLine.Store(false)
 	lined(t, idx, line, false)
 	time.Sleep(2 * time.Second) // the write loops' ticks
-	if lines, _ := indexLines(t, idx); slices.Contains(lines, line) {
+	if lines, ok := indexLines(t, idx); !ok {
+		t.Error("the index went after Disown's emptying")
+	} else if slices.Contains(lines, line) {
 		t.Errorf("the vouched line came back: %v", lines)
 	}
 	if v := indexAnnotations(t, idx)[cu.AnnotationVouched]; v != ns+"/Secret/nogrant" {

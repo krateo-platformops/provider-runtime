@@ -118,7 +118,8 @@ func (t *Tracker) HolderLists() (lists, streams int64) {
 // call. Set it before Track.
 //
 // The index's calls are hooked too (§10.6), as Ops "index-get",
-// "index-update" and "index-create" on the ConfigMap.
+// "index-update" and "index-create" on the ConfigMap; a write's Call carries
+// the lines it leaves.
 func (s *Shared) HookCalls(before func(ctx context.Context, c Call) error, after func(c Call, err error)) {
 	s.hooks.wrapServer = func(srv server) server { return hookServer{server: srv, before: before, after: after} }
 	s.hooks.wrapIndex = func(st indexStore) indexStore { return hookIndexStore{st: st, before: before, after: after} }
@@ -166,8 +167,8 @@ type hookIndexStore struct {
 	after  func(c Call, err error)
 }
 
-func (h hookIndexStore) call(ctx context.Context, op string, f func() error) error {
-	c := Call{Op: op, GK: configMapGroupKind}
+func (h hookIndexStore) call(ctx context.Context, op string, lines []string, f func() error) error {
+	c := Call{Op: op, GK: configMapGroupKind, Lines: lines}
 	if hs, ok := h.st.(configMapStore); ok {
 		c.Namespace, c.Name = hs.namespace, hs.name
 	}
@@ -184,16 +185,16 @@ func (h hookIndexStore) call(ctx context.Context, op string, f func() error) err
 }
 
 func (h hookIndexStore) get(ctx context.Context) (v indexVersion, err error) {
-	err = h.call(ctx, "index-get", func() error { v, err = h.st.get(ctx); return err })
+	err = h.call(ctx, "index-get", nil, func() error { v, err = h.st.get(ctx); return err })
 	return v, err
 }
 
 func (h hookIndexStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (v indexVersion, err error) {
-	err = h.call(ctx, "index-update", func() error { v, err = h.st.update(ctx, cur, lines, rebuilt); return err })
+	err = h.call(ctx, "index-update", lines, func() error { v, err = h.st.update(ctx, cur, lines, rebuilt); return err })
 	return v, err
 }
 
 func (h hookIndexStore) create(ctx context.Context, lines []string, rebuilt bool) (v indexVersion, err error) {
-	err = h.call(ctx, "index-create", func() error { v, err = h.st.create(ctx, lines, rebuilt); return err })
+	err = h.call(ctx, "index-create", lines, func() error { v, err = h.st.create(ctx, lines, rebuilt); return err })
 	return v, err
 }
