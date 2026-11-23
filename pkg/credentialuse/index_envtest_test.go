@@ -420,10 +420,16 @@ func TestIndexNeverEstablishedHolderDeletedWhileDown(t *testing.T) {
 // counts the finalizer through the index, the record being gone: the
 // settling resets, and the loop strips it again. So it does when the late
 // A2's response is lost, and the pass never checks its line after it (§7.4).
+//
+// The line keeps the Secret's per-name watch too, whose event has the
+// release loop take the late hold, nobody using it, before Disown's next
+// pass: with it running the end is the same, whichever strips it first. With
+// it held off, only Disown's count can find the hold.
 func TestIndexA1BeforeTheDisownSwitch(t *testing.T) {
 	cutest.Require(t, env)
-	for _, lost := range []bool{false, true} {
-		t.Run(fmt.Sprintf("response lost=%v", lost), func(t *testing.T) {
+	for _, tc := range []struct{ lost, releases bool }{{lost: false}, {lost: true}, {lost: true, releases: true}} {
+		t.Run(fmt.Sprintf("response lost=%v, release loop=%v", tc.lost, tc.releases), func(t *testing.T) {
+			lost := tc.lost
 			ctx := context.Background()
 			set := disowning(t)
 			idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-late")
@@ -444,6 +450,11 @@ func TestIndexA1BeforeTheDisownSwitch(t *testing.T) {
 				s.HookCalls(func(_ context.Context, c cu.Call) error {
 					if c.Op == "index-update" && armed.Load() && !slices.Contains(c.Lines, line) && unsettled() {
 						early.Add(1)
+					}
+					// R2's list of the holders in ns: without it the release
+					// loop never decides. Disown lists every namespace.
+					if !tc.releases && c.Op == "list" && c.GK == widgetGK && c.Namespace == ns {
+						return errors.New("the release loop can't list the holders")
 					}
 					if !armed.Load() || !theA2(c) || !fired.CompareAndSwap(false, true) {
 						return nil
@@ -513,7 +524,7 @@ func TestIndexA1BeforeTheDisownSwitch(t *testing.T) {
 			cutest.Eventually(t, 2*time.Minute, settledAtZero(t))
 			seen := counts()
 			stripped(t, ns, "s")
-			if !slices.Contains(seen, "1") {
+			if !tc.releases && !slices.Contains(seen, "1") {
 				t.Errorf("held-count from the late A2 on: %v; want it counted before settling", seen)
 			}
 			if n := early.Load(); n != 0 {
