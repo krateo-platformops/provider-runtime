@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -16,12 +17,14 @@ import (
 )
 
 // A Lister reads one object of a kind from the caller's cache, for a
-// Guaranteed ref (§9.3). A missing object is a NotFound error.
+// Guaranteed ref (§9.3). A missing object is a NotFound error. The ref's Next
+// is given what it returns, status included, so a cache that drops status
+// hides it from the Next. The tracker doesn't change the object it returns.
 type Lister func(namespace, name string) (*unstructured.Unstructured, error)
 
-// contentReader reads one object whole, live (§9.1 step 2, §9.3). It is apart
-// from server, which is metadata only, so that the model's server needn't
-// carry content.
+// contentReader reads one object whole, live, status included (§9.1 step 2,
+// §9.3): never from a content cache. It is apart from server, which is
+// metadata only, so that the model's server needn't carry content.
 type contentReader interface {
 	Content(ctx context.Context, gk schema.GroupKind, namespace, name string) (*unstructured.Unstructured, error)
 }
@@ -73,7 +76,8 @@ func WithResolved(ctx context.Context, a Acquired) context.Context {
 // Resolved returns the object ref named, exactly as this pass's Acquire read
 // it after holding it (§9.2): not a newer cached copy, which could name an
 // object this pass never held. It has one for each ref with a Next that was
-// held, or Guaranteed, and was followed. The object is the caller's to keep.
+// held, or Guaranteed, and was followed: a Guaranteed ref's with its status,
+// as its Next saw it. The object is the caller's to keep.
 func Resolved(ctx context.Context, ref Ref) (*unstructured.Unstructured, bool) {
 	m, _ := ctx.Value(resolvedKey{}).(map[ID]*unstructured.Unstructured)
 	u, ok := m[ref.ID()]
@@ -100,27 +104,44 @@ func (p *protocol) readHop(ctx context.Context, id ID) (*unstructured.Unstructur
 }
 
 // asCached is u as a content cache keeps it, without managedFields and
-// status, so a Next sees the same shape however the hop was read.
+// status, so a held or unheld hop's Next sees the same shape however the hop
+// was read. A Guaranteed ref's doesn't (withoutManagedFields).
 func asCached(u *unstructured.Unstructured) *unstructured.Unstructured {
 	out, _ := contentTransform(u)
 	return out.(*unstructured.Unstructured)
 }
 
+// withoutManagedFields is u without managedFields, its status kept: what a
+// Guaranteed ref's Next is given (§9.3). Like contentTransform, it doesn't
+// change u, which may be the caller's cached copy.
+func withoutManagedFields(u *unstructured.Unstructured) *unstructured.Unstructured {
+	out := &unstructured.Unstructured{Object: maps.Clone(u.Object)}
+	if md, ok := out.Object["metadata"].(map[string]any); ok {
+		md = maps.Clone(md)
+		delete(md, "managedFields")
+		out.Object["metadata"] = md
+	}
+	return out
+}
+
 // readGuaranteed reads Guaranteed ref r (§9.3): through the caller's lister
-// for its kind, or live.
+// for its kind, or live. Its Next sees the object with its status (the user's
+// decision, 2026-11-23), so it never reads a content cache, which keeps none
+// (§10.4), even when r's kind is also a protected kind with Content; nor the
+// shared read of unheld hops (sharedReads), which keeps none either.
 func (p *protocol) readGuaranteed(ctx context.Context, r Ref) (*unstructured.Unstructured, error) {
 	if l := p.listers[r.GroupKind]; l != nil {
 		u, err := l(r.Namespace, r.Name)
 		if err != nil {
 			return nil, err
 		}
-		return asCached(u), nil
+		return withoutManagedFields(u), nil
 	}
 	u, err := p.contents.Content(ctx, r.GroupKind, r.Namespace, r.Name)
 	if err != nil {
 		return nil, err
 	}
-	return asCached(u), nil
+	return withoutManagedFields(u), nil
 }
 
 // follow calls r's Next on obj, the object read for it.

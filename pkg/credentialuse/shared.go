@@ -49,7 +49,8 @@ type Clients struct {
 // SharedOptions configure the process-wide state.
 type SharedOptions struct {
 	// Listers read Guaranteed refs from the caller's cache, by kind (§9.3).
-	// A Guaranteed ref of a kind without one is read live.
+	// A Guaranteed ref of a kind without one is read live. Its Next sees
+	// the status a lister returns, so a lister's cache should keep status.
 	Listers map[schema.GroupKind]Lister
 	// Namespaces restricts the protected-object caches to these namespaces
 	// (§10.5); the default is every namespace. A ref outside them is read

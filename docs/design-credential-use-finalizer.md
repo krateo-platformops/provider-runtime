@@ -1713,7 +1713,23 @@ provider declares this with `Ref.Guaranteed: true`. A guaranteed ref:
   still held;
 - is read through a lister the caller supplies for that kind
   (`SharedOptions.Listers`), or with a live GET if there is none;
+- has its `Next` given the object **with its status**, without
+  `managedFields`;
 - counts as covered for `AssertCredentialRefsCover` (§11.9).
+
+**A guaranteed ref's `Next` sees status** (the user's decision,
+2026-11-23). An older-version composition controller reads its chart's
+`passwordRef` from the CompositionDefinition's
+`status.managed.versionInfo[v].chart`, so its `Next` must see status, and
+`RefsFunc` stays pure (§9.1), so the provider can't read its lister there
+instead. The rule holds however the ref was read: through the caller's
+lister, which should keep status, or live. It is never read from a content
+cache, which keeps none (§10.4), even when its kind is also a protected
+kind with `Content` and another holder holds the object; nor from the shared
+10s read of an unheld hop (§9.4), which keeps none either. Nothing new goes
+unseen: the tracker watches no guaranteed object, so a change to its spec
+or to its status is picked up on the holder's next pass either way. A held
+or unheld hop's `Next` still sees no status (§10.4).
 
 **The fallback is flagged as unverified.** The guarantee depends on the
 compositions carrying the labels the CompositionDefinition's check selects
@@ -1924,8 +1940,11 @@ an object would go unseen: the metadata caches keep only `credential-use.`
 keys, and a metadata change moves no generation, so nothing would enqueue
 its holders (§9.2). Such a ref is an Acquire error that names the fix. A
 `Guaranteed` ref isn't held, so it may have a `Next` on any kind. Every
-`Next` is given the object without `managedFields` and `status`, however it
-was read.
+`Next` is given the object without `managedFields`, however it was read. A
+held or unheld hop's `Next` is also given it without `status`, as its
+content cache keeps it, even when it was read live. A `Guaranteed` ref's
+`Next` is given its status (the user's decision, 2026-11-23, §9.3), so a
+guaranteed ref is never read from a content cache.
 
 ### 10.5 Namespace-restricted caches (R10)
 

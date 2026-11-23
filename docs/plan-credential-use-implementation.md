@@ -512,7 +512,15 @@ of tests.
   decision, from the review of #122): a re-point of a metadata-only object
   would go unseen, so it is an Acquire error naming the fix. A `Guaranteed`
   ref isn't held and may have one on any kind. Every `Next` gets the object
-  without `managedFields` and `status`, however it was read.
+  without `managedFields`, however it was read, and a held or unheld hop's
+  without `status` too.
+- **A `Guaranteed` ref's `Next` sees its status** (the user's decision,
+  2026-11-23, after the build): core-provider's older-version composition
+  reads its chart's `passwordRef` from the CompositionDefinition's status,
+  and `RefsFunc` stays pure. It is read through the caller's lister or live,
+  never from a content cache or the shared read of an unheld hop, which keep
+  no status, even when its kind is also a protected kind with `Content`.
+  Nothing watches it, so nothing new goes unseen (§9.3).
 - **A hop with a `Next` that a pass can't hold** (Missing, Deleting) leaves
   the record's refs in place, since what lies behind it is unknown (the
   review of #122: without it, a Degraded pass dropped the Secret behind a

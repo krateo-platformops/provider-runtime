@@ -38,7 +38,10 @@ func (f *fakeContents) Content(_ context.Context, gk schema.GroupKind, namespace
 	if err != nil {
 		return nil, err
 	}
-	// A status, as the server would return, which no Next may see.
+	// A status and managedFields, as the server would return: only a
+	// Guaranteed ref's Next may see the status (§9.3), and no Next sees
+	// managedFields.
+	md["managedFields"] = []any{map[string]any{"manager": "kubectl", "operation": "Update"}}
 	u := &unstructured.Unstructured{Object: map[string]any{"metadata": md, "status": map[string]any{"ready": true}}}
 	u.SetKind(gk.Kind)
 	if spec, ok := f.specs[ID{Group: gk.Group, Kind: gk.Kind, Namespace: namespace, Name: name}]; ok {
@@ -86,6 +89,37 @@ func nextOf(obj *unstructured.Unstructured) ([]Ref, error) {
 
 func targetRef(name string) Ref {
 	return Ref{GroupKind: targetGK, Namespace: "ns", Name: name, Next: nextOf}
+}
+
+// sawNext returns r with a Next that keeps a copy of each object it is
+// given, then calls r's own.
+func sawNext(r Ref, seen *[]*unstructured.Unstructured) Ref {
+	next := r.Next
+	r.Next = func(obj *unstructured.Unstructured) ([]Ref, error) {
+		*seen = append(*seen, obj.DeepCopy())
+		return next(obj)
+	}
+	return r
+}
+
+// nextSaw fails t unless Next was called, and every object it was given has
+// its status when wantStatus, none otherwise, and no managedFields.
+func nextSaw(t *testing.T, seen []*unstructured.Unstructured, wantStatus bool) {
+	t.Helper()
+	if len(seen) == 0 {
+		t.Fatal("Next wasn't called")
+	}
+	for i, o := range seen {
+		if _, has := o.Object["status"]; has != wantStatus {
+			t.Errorf("call %d: Next saw a status: %v, want %v", i, has, wantStatus)
+		}
+		if _, has, _ := unstructured.NestedFieldNoCopy(o.Object, "metadata", "managedFields"); has {
+			t.Errorf("call %d: Next saw managedFields", i)
+		}
+		if name, _, _ := unstructured.NestedString(o.Object, "spec", "ref", "name"); name == "" {
+			t.Errorf("call %d: Next saw no spec: %v", i, o.Object)
+		}
+	}
 }
 
 func chainRecord(t *testing.T, r *rig, holder string) []ID {
@@ -266,10 +300,13 @@ func TestChainGuaranteedRefs(t *testing.T) {
 		r, fc := chainRig(t)
 		r.target(fc, "cd", "Secret", "password")
 		must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{}))
-		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{guaranteed()})
+		var seen []*unstructured.Unstructured
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{sawNext(guaranteed(), &seen)})
 		if err != nil || a.MustNotConnect || len(a.Held) != 1 {
 			t.Fatalf("acquire = %+v, %v", a, err)
 		}
+		// Its Next sees the status (the user's decision, 2026-11-23).
+		nextSaw(t, seen, true)
 		if got := chainRecord(t, r, "h"); !slices.Equal(got, []ID{SecretRef("ns", "password").ID()}) {
 			t.Errorf("record = %v, want only the Secret", got)
 		}
@@ -284,18 +321,84 @@ func TestChainGuaranteedRefs(t *testing.T) {
 		r, fc := chainRig(t)
 		r.target(fc, "cd", "Secret", "password")
 		must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{}))
+		cached, err := fc.Content(ctx, targetGK, "ns", "cd")
+		if err != nil {
+			t.Fatal(err)
+		}
 		listed := 0
 		r.p.listers = map[schema.GroupKind]Lister{targetGK: func(ns, name string) (*unstructured.Unstructured, error) {
 			listed++
-			return fc.Content(ctx, targetGK, ns, name)
+			return cached, nil // the caller's cached copy, not to be changed
 		}}
 		r.srv.calls = nil
-		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{guaranteed()})
+		var seen []*unstructured.Unstructured
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{sawNext(guaranteed(), &seen)})
 		if err != nil || len(a.Held) != 1 || listed != 1 {
 			t.Fatalf("acquire = %+v, %v, listed %d", a, err, listed)
 		}
-		if got, ok := Resolved(WithResolved(ctx, a), guaranteed()); !ok || got.Object["status"] != nil {
-			t.Errorf("Resolved = %v, %v; want the lister's object without its status", got, ok)
+		if slices.Contains(r.srv.calls, "content Target/cd") {
+			t.Errorf("calls = %v; want no live read beside the lister", r.srv.calls)
+		}
+		nextSaw(t, seen, true)
+		got, ok := Resolved(WithResolved(ctx, a), guaranteed())
+		if !ok || got.Object["status"] == nil || got.GetManagedFields() != nil {
+			t.Errorf("Resolved = %v, %v; want the lister's object with its status, without managedFields", got, ok)
+		}
+		if _, has := cached.Object["status"]; !has || cached.GetManagedFields() == nil {
+			t.Error("the read changed the lister's cached object")
+		}
+	})
+	t.Run("of a protected kind with Content, its Next sees the status the content cache doesn't keep", func(t *testing.T) {
+		// Target is a protected kind with Content in chainRig, and held by
+		// h0, so its content cache has it, without status (§10.4). A
+		// Guaranteed read of it must not use that copy.
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Secret", "password")
+		must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{}))
+		cc := &fakeContentCache{objs: map[ID]*unstructured.Unstructured{}}
+		r.p.contentCache = cc
+		if a, err := r.p.acquire(ctx, r.holder(t, "h0", false), []Ref{targetRef("cd")}); err != nil || len(a.Held) != 2 {
+			t.Fatalf("h0: acquire = %+v, %v", a, err)
+		}
+		if !hasFinalizer(r.get(t, targetKey("cd")), fNS) {
+			t.Fatal("h0 didn't hold the Target")
+		}
+		live, err := fc.Content(ctx, targetGK, "ns", "cd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cc.objs[targetID("cd")] = asCached(live)
+		var seen []*unstructured.Unstructured
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{sawNext(guaranteed(), &seen)})
+		if err != nil || a.MustNotConnect || len(a.Held) != 1 {
+			t.Fatalf("h: acquire = %+v, %v", a, err)
+		}
+		nextSaw(t, seen, true)
+	})
+	t.Run("not served from the shared read of an unheld hop", func(t *testing.T) {
+		// h1's Target is disowned, so it is read through the shared 10s
+		// read, which keeps no status; h2 then names it Guaranteed within
+		// the 10s.
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Secret", "password")
+		must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{}))
+		r.p.unheldReads = newSharedReads(rigClock{r})
+		r.p.disowned = func(gk schema.GroupKind) bool { return gk == targetGK }
+		var unheld []*unstructured.Unstructured
+		a, err := r.p.acquire(ctx, r.holder(t, "h1", false), []Ref{sawNext(targetRef("cd"), &unheld)})
+		if err != nil || a.MustNotConnect || len(a.Unheld) != 1 || a.Unheld[0].Reason != ReasonDisowned {
+			t.Fatalf("h1: acquire = %+v, %v", a, err)
+		}
+		nextSaw(t, unheld, false)
+		r.srv.calls = nil
+		var seen []*unstructured.Unstructured
+		a, err = r.p.acquire(ctx, r.holder(t, "h2", false), []Ref{sawNext(guaranteed(), &seen)})
+		if err != nil || a.MustNotConnect || len(a.Held) != 1 {
+			t.Fatalf("h2: acquire = %+v, %v", a, err)
+		}
+		nextSaw(t, seen, true)
+		if !slices.Contains(r.srv.calls, "content Target/cd") {
+			t.Errorf("calls = %v; want a live read of the Guaranteed ref", r.srv.calls)
 		}
 	})
 	t.Run("one that can't be read fails, and isn't Missing", func(t *testing.T) {
@@ -398,6 +501,34 @@ func TestChainKeepsWhatAnUnfollowedHopLeadsTo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeContentCache is the content caches' view, from objs.
+type fakeContentCache struct {
+	objs map[ID]*unstructured.Unstructured
+}
+
+func (f *fakeContentCache) Content(id ID) (*unstructured.Unstructured, bool) {
+	u, ok := f.objs[id]
+	return u, ok
+}
+
+// TestChainHeldHopNextSeesNoStatus: a held hop's Next sees neither status nor
+// managedFields, as its content cache would give it (§10.4); only a
+// Guaranteed ref's sees the status (§9.3).
+func TestChainHeldHopNextSeesNoStatus(t *testing.T) {
+	r, fc := chainRig(t)
+	r.target(fc, "kt", "Secret", "s")
+	must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+	var seen []*unstructured.Unstructured
+	a, err := r.p.acquire(context.Background(), r.holder(t, "h", false), []Ref{sawNext(targetRef("kt"), &seen)})
+	if err != nil || a.MustNotConnect || len(a.Held) != 2 {
+		t.Fatalf("acquire = %+v, %v", a, err)
+	}
+	if !slices.Contains(r.srv.calls, "content Target/kt") {
+		t.Fatalf("calls = %v; want a live read of the hop", r.srv.calls)
+	}
+	nextSaw(t, seen, false)
 }
 
 func TestResolvedIsTheHeldReadNotANewerOne(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,6 +280,111 @@ func TestARepointedTargetEnqueuesItsHolders(t *testing.T) {
 		return nil
 	})
 	settled()
+}
+
+// nextSeen counts what a Next was given: calls, and of those, the objects
+// with a status and those with managedFields.
+type nextSeen struct{ calls, status, managedFields atomic.Int64 }
+
+func (s *nextSeen) see(u *unstructured.Unstructured) {
+	s.calls.Add(1)
+	if _, has := u.Object["status"]; has {
+		s.status.Add(1)
+	}
+	if _, has, _ := unstructured.NestedFieldNoCopy(u.Object, "metadata", "managedFields"); has {
+		s.managedFields.Add(1)
+	}
+}
+
+// A Guaranteed ref's Next sees the object with its status (the user's
+// decision, 2026-11-23; §9.3), even when its kind is also a protected kind
+// with Content whose cache holds it without status, as another Widget holds
+// it here. That Widget's held hop's Next still sees no status (§10.4), and
+// no Next sees managedFields. This is core-provider's case: an older-version
+// composition reads its chart's passwordRef from the CompositionDefinition's
+// status.
+func TestAGuaranteedRefSeesStatusWhereTheContentCacheHasNone(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	var held, guaranteed nextSeen
+	secretOf := func(seen *nextSeen) func(*unstructured.Unstructured) ([]cu.Ref, error) {
+		return func(kt *unstructured.Unstructured) ([]cu.Ref, error) {
+			seen.see(kt)
+			secret, _, err := unstructured.NestedString(kt.Object, "spec", "secret")
+			if err != nil || secret == "" {
+				return nil, fmt.Errorf("Target %s names no secret: %v", kt.GetName(), err)
+			}
+			return []cu.Ref{cu.SecretRef(kt.GetNamespace(), secret)}, nil
+		}
+	}
+	// spec.target names a held Target; spec.guaranteed a Guaranteed one.
+	refs := func(obj metav1.Object) ([]cu.Ref, error) {
+		u := obj.(*unstructured.Unstructured)
+		ref := cu.Ref{GroupKind: cutest.TargetGVK.GroupKind(), Namespace: obj.GetNamespace()}
+		if name, _, _ := unstructured.NestedString(u.Object, "spec", "target"); name != "" {
+			ref.Name, ref.Next = name, secretOf(&held)
+			return []cu.Ref{ref}, nil
+		}
+		if name, _, _ := unstructured.NestedString(u.Object, "spec", "guaranteed"); name != "" {
+			ref.Name, ref.Next, ref.Guaranteed = name, secretOf(&guaranteed), true
+			return []cu.Ref{ref}, nil
+		}
+		return nil, nil
+	}
+	r := newWriteRig(t, env.Config, cu.SharedOptions{}, func(o *cu.Options) {
+		o.Refs = refs
+		o.Protected = []cu.ProtectedKind{{GVK: secretGVK}, {GVK: cutest.TargetGVK, Content: true}}
+	}, nil)
+	ns := env.Namespace(t, "guaranteed-status")
+	createSecret(t, ns, "s")
+	// The Target CRD has no status subresource, so a create keeps status.
+	kt := &unstructured.Unstructured{Object: map[string]any{
+		"spec":   map[string]any{"secret": "s"},
+		"status": map[string]any{"phase": "Ready"},
+	}}
+	kt.SetGroupVersionKind(cutest.TargetGVK)
+	kt.SetNamespace(ns)
+	kt.SetName("kt")
+	got, err := env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns).Create(ctx, kt, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, has := got.Object["status"]; !has || got.GetManagedFields() == nil {
+		t.Fatalf("the Target was created without status or managedFields: %v", got.Object)
+	}
+
+	// w1 holds the Target, so it is labelled and in the content cache.
+	createChainWidget(t, ns, "w1", "kt")
+	r.c.enqueue(widgetNN(ns, "w1"))
+	chainEstablished(t, ns, "kt", "s", "w1")
+
+	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"guaranteed": "kt"}}}
+	u.SetGroupVersionKind(cutest.WidgetGVK)
+	u.SetNamespace(ns)
+	u.SetName("w2")
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Create(ctx, u, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	r.c.enqueue(widgetNN(ns, "w2"))
+	cutest.Eventually(t, time.Minute, func() error {
+		obj, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(ctx, "w2", metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		// Only the Secret: a Guaranteed ref isn't recorded.
+		if rec := cu.ReadRecord(obj); !hasString(obj.GetFinalizers(), ownerFinalizer) ||
+			!rec.Names(cu.SecretRef(ns, "s").ID()) || len(rec.IDs) != 1 {
+			return fmt.Errorf("widget w2 not established (record %v): %w", rec.IDs, cutest.ErrNotYet)
+		}
+		return nil
+	})
+
+	if n, s, m := guaranteed.calls.Load(), guaranteed.status.Load(), guaranteed.managedFields.Load(); n == 0 || s != n || m != 0 {
+		t.Errorf("the Guaranteed ref's Next: %d calls, %d with a status, %d with managedFields; want every call with a status, none with managedFields", n, s, m)
+	}
+	if n, s, m := held.calls.Load(), held.status.Load(), held.managedFields.Load(); n == 0 || s != 0 || m != 0 {
+		t.Errorf("the held hop's Next: %d calls, %d with a status, %d with managedFields; want none with either", n, s, m)
+	}
 }
 
 // configRefs is a Widget's RefsFunc through a ConfigMap: spec.config names a

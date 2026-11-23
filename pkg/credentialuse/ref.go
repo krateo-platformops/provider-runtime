@@ -20,14 +20,20 @@ type Ref struct {
 
 	// Next, when set, names the refs found inside this object. The tracker
 	// calls it after the object is held, with the object it read (§9),
-	// without managedFields and status. A held ref with a Next must be of a
-	// protected kind with Content (§10.4): the content cache is how a
-	// re-point of it is seen.
+	// always without managedFields. A held or unheld hop's object has no
+	// status either, since the content caches keep none (§10.4); a
+	// Guaranteed ref's has its status, however it was read (§9.3). A held
+	// ref with a Next must be of a protected kind with Content (§10.4): the
+	// content cache is how a re-point of it is seen.
 	Next func(obj *unstructured.Unstructured) ([]Ref, error)
 
 	// Guaranteed declares that the object's own controller already keeps it
 	// alive while the holder exists (§9.3). It is neither recorded nor held;
-	// its Next is still followed.
+	// its Next is still followed, and is given the object with its status
+	// (the user's decision, 2026-11-23): read through SharedOptions.Listers
+	// for its kind, or live, never from a content cache, even when its kind
+	// is also a protected kind with Content. Nothing watches it, so a change
+	// to its spec or status is seen on the holder's next pass.
 	Guaranteed bool
 }
 
