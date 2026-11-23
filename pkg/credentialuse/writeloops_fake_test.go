@@ -109,6 +109,9 @@ type Call struct {
 	Namespace string
 	Name      string
 	PatchType types.PatchType
+	// Lines are, for an index-update or an index-create, the lines the
+	// write leaves in the index.
+	Lines []string
 }
 
 // hookServer lets a test act before a server call, or fail it, and see its
