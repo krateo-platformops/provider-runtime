@@ -311,10 +311,6 @@ type index struct {
 	// holder cache: a line for an object without the kind's finalizer is
 	// kept while one does (§10.6.2). Nil is never.
 	recorded func(id ID) bool
-	// released reports whether this process's per-name cache shows id
-	// without the kind's prefix, or gone: a dropped line whose R3 the
-	// tracker saw needs no check (§10.6.6, L5). Nil is never.
-	released func(id ID) bool
 	// onLines sees every version of the index this process reads or
 	// writes, with its lines: the fill gauge and event (§10.6.4).
 	onLines func(lines []string)
@@ -345,10 +341,11 @@ type index struct {
 	inf cache.SharedIndexInformer
 
 	mu sync.Mutex
-	// pruned are the lines this process removed that its informer hasn't
-	// yet delivered as dropped: their drop is this process's own, not
-	// someone else's (§10.6.6).
-	pruned map[string]int
+	// own are this process's latest removals whose drop its informer hasn't
+	// delivered, at most maxOwnRemovals: a drop is this process's own only
+	// when the version that shows it is one a successful write of it
+	// returned (§10.6.6).
+	own []ownRemoval
 	// pending are the objects to check live, and re-add the line of if
 	// they carry the kind's prefix: lines someone else dropped, and re-adds
 	// that failed. tampered marks those that came from a drop.
@@ -374,13 +371,36 @@ type recheck struct {
 	tampered bool
 	due      time.Time
 	fails    int
+	// queued counts how often it was queued: a check deletes it only if it
+	// wasn't queued again meanwhile, since what it read may be older.
+	queued int
+	// drop, if set, is the version whose drop alone queued it: should this
+	// process's own write turn out to have made that version, it goes.
+	drop string
 }
+
+// An ownRemoval is one successful removal by this process: the version it
+// returned, and the lines it removed.
+type ownRemoval struct {
+	rv    string
+	lines []string
+}
+
+const (
+	// maxOwnRemovals bounds index.own. A removal it forgets costs a live
+	// check of each of its lines.
+	maxOwnRemovals = 64
+	// pruneBound bounds a prune, its check after it and its re-add included,
+	// once it has begun, whatever its context does: below the 30s a manager
+	// gives its runnables to stop by default, so that a graceful stop
+	// doesn't come between a removal and its re-add.
+	pruneBound = 15 * time.Second
+)
 
 func newIndex(holder schema.GroupKind, prefix, namespace string, maxLines int, kinds map[schema.GroupKind]bool, store indexStore, srv server) *index {
 	return &index{
 		holder: holder, prefix: prefix, namespace: namespace, name: IndexName(holder), maxLines: maxLines,
 		kinds: kinds, store: store, srv: srv,
-		pruned:  map[string]int{},
 		pending: map[ID]*recheck{},
 	}
 }
@@ -519,18 +539,20 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 }
 
 // remove removes lines from the index, merging with what it reads, and
-// returns the lines it removed: those the index had. A missing index has
-// nothing to remove.
-func (ix *index) remove(ctx context.Context, lines []string) ([]string, error) {
+// returns every line one of its attempts tried to remove, whatever came of
+// it: an attempt that conflicted, because someone else removed the line
+// first, and one whose outcome is unknown, leave a line out as well as one
+// that succeeded. A missing index has nothing to remove.
+func (ix *index) remove(ctx context.Context, lines []string) (tried []string, err error) {
 	var last error
 	for range maxIndexWriteAttempts {
 		cur, err := ix.store.get(ctx)
 		switch Classify(err) {
 		case ClassNone:
 		case ClassNotFound:
-			return nil, nil
+			return tried, nil
 		default:
-			return nil, fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
+			return tried, fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
 		}
 		var present []string
 		next := slices.DeleteFunc(slices.Clone(cur.lines), func(l string) bool {
@@ -542,61 +564,100 @@ func (ix *index) remove(ctx context.Context, lines []string) ([]string, error) {
 		})
 		if len(present) == 0 {
 			ix.saw(cur)
-			return nil, nil
+			return tried, nil
 		}
-		// Marked before the write, so that the informer, which may deliver
-		// the new version before the write returns, never takes the drop
-		// for someone else's.
-		ix.notePruned(present, 1)
+		tried = union(tried, present)
 		v, err := ix.store.update(ctx, cur, next, false)
-		if err != nil {
-			ix.notePruned(present, -1)
-		}
 		if Classify(err) == ClassConflict {
 			last = err
 			continue
 		}
 		if err != nil {
-			return nil, ix.writeErr("removing from", err)
+			return tried, ix.writeErr("removing from", err)
 		}
 		ix.saw(v)
-		return present, nil
+		ix.removed(v.rv, present)
+		return tried, nil
 	}
-	return nil, fmt.Errorf("credential-use: %d conflicting writes of the index %s in a row: %w", maxIndexWriteAttempts, ix.ref(), last)
+	return tried, fmt.Errorf("credential-use: %d conflicting writes of the index %s in a row: %w", maxIndexWriteAttempts, ix.ref(), last)
 }
 
-// notePruned counts lines as this process's own removals, d at a time.
-func (ix *index) notePruned(lines []string, d int) {
+// removed records that this process's removal of lines made version rv. The
+// informer may have delivered it before the write returned, and queued its
+// drops: those go, unless something else queued them too.
+func (ix *index) removed(rv string, lines []string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	for _, l := range lines {
-		if ix.pruned[l] += d; ix.pruned[l] <= 0 {
-			delete(ix.pruned, l)
+		if id, ok := parseIndexLine(l); ok {
+			if r := ix.pending[id]; r != nil && rv != "" && r.drop == rv {
+				delete(ix.pending, id)
+			}
 		}
+	}
+	ix.own = append(ix.own, ownRemoval{rv: rv, lines: lines})
+	if n := len(ix.own) - maxOwnRemovals; n > 0 {
+		ix.own = slices.Delete(ix.own, 0, n)
 	}
 }
 
-// prune removes ids' lines in one write, then reads each object it removed
-// live, and adds back the line of any that carries the kind's prefix again,
-// or can't be read (§10.6.2): an A2 that raced the prune. A re-add that
-// fails is queued for the write loops, which retry it until it lands, and
-// the error is returned.
+// prune removes ids' lines in one write, then reads every object whose line
+// an attempt tried to remove live, and adds back the line of any that
+// carries the kind's prefix again, or can't be read (§10.6.2): an A2 that
+// raced the prune, or a line someone else removed while this write
+// conflicted. A re-add that fails is queued for the write loops, which retry
+// it until it lands, and the error is returned.
+//
+// Once begun it runs to its end, within pruneBound, whatever ctx does: the
+// queue dies with the process, so a stop between the removal and the re-add
+// would lose the line.
 func (ix *index) prune(ctx context.Context, ids []ID) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	removed, err := ix.remove(ctx, linesOf(ids))
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	vouched := ix.vouchedNow()
-	var back []ID
-	for _, l := range removed {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pruneBound)
+	defer cancel()
+	tried, err := ix.remove(ctx, linesOf(ids))
+	return errors.Join(err, ix.checkRemoved(ctx, tried))
+}
+
+// checkRemoved is the check after a removal of lines tried: it adds back the
+// lines that must stay.
+func (ix *index) checkRemoved(ctx context.Context, tried []string) error {
+	var back, unread []ID
+	for _, l := range tried {
 		id, ok := parseIndexLine(l)
 		if !ok {
 			continue
 		}
-		if ix.keepsLine(ctx, id, vouched) {
+		switch ix.carries(ctx, id) {
+		case carriesNot:
+		case carriesYes:
+			back = append(back, id)
+		default:
+			unread = append(unread, id)
+		}
+	}
+	if len(back)+len(unread) == 0 {
+		return nil
+	}
+	// What can't be read may carry the prefix, unless an operator vouched
+	// for it (§10.6.6): read live, since the vouch may have been withdrawn.
+	// An index that can't be read vouches for nothing.
+	var vouched map[ID]bool
+	if cur, err := ix.store.get(ctx); err == nil {
+		vouched = ix.parseVouched(cur.vouched)
+	}
+	for _, id := range back {
+		if vouched[id] {
+			ix.vouchWrong(id)
+		}
+	}
+	for _, id := range unread {
+		if !vouched[id] {
 			back = append(back, id)
 		}
 	}
@@ -608,24 +669,6 @@ func (ix *index) prune(ctx context.Context, ids []ID) error {
 		return err
 	}
 	return nil
-}
-
-// keepsLine reads id live, after its line was removed, and reports whether
-// the line must come back: the object carries the kind's prefix, or can't be
-// read and may, unless an operator vouched for it (§10.6.6). A vouched
-// object that turns out to carry the prefix keeps its line, and the wrong
-// vouch is logged.
-func (ix *index) keepsLine(ctx context.Context, id ID, vouched map[ID]bool) bool {
-	switch ix.carries(ctx, id) {
-	case carriesNot:
-		return false
-	case carriesYes:
-		if vouched[id] {
-			ix.vouchWrong(id)
-		}
-		return true
-	}
-	return !vouched[id]
 }
 
 // What a live read found of an object's holds.
@@ -826,12 +869,20 @@ func (ix *index) prunable(ids []ID) []ID {
 func (ix *index) queue(ids []ID, tampered bool) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	ix.queueLocked(ids, tampered, "")
+}
+
+// queueLocked is queue, for a drop that version drop showed, if set. ix.mu
+// is held.
+func (ix *index) queueLocked(ids []ID, tampered bool, drop string) {
 	for _, id := range ids {
 		if r := ix.pending[id]; r != nil {
 			r.tampered = r.tampered || tampered
+			r.queued++
+			r.drop = ""
 			continue
 		}
-		ix.pending[id] = &recheck{tampered: tampered}
+		ix.pending[id] = &recheck{tampered: tampered, drop: drop}
 	}
 }
 
@@ -846,49 +897,33 @@ func (ix *index) markLost() {
 
 // observed is the informer's handler's work on a new version of the index
 // (§10.6.6). old is the version before it, or nil for the first. Every line
-// old had that cur hasn't was dropped: this process's own removals are
-// expected; a drop alongside an R3 this process saw needs nothing; every
-// other is queued for a live check.
+// old had that cur hasn't was dropped. A drop is this process's own only if
+// cur is the version a successful removal of it returned; every other is
+// queued for a live check, which costs a GET at most. One delivered before
+// this process's write returned is queued too, until the write returns with
+// that version (removed).
 func (ix *index) observed(old *indexVersion, cur indexVersion) {
 	ix.saw(cur)
-	present := map[string]bool{}
-	for _, l := range cur.lines {
-		present[l] = true
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	var mine []string
+	if i := slices.IndexFunc(ix.own, func(o ownRemoval) bool { return o.rv != "" && o.rv == cur.rv }); i >= 0 {
+		mine = ix.own[i].lines
+		ix.own = slices.Delete(ix.own, i, i+1)
+	}
+	if old == nil {
+		return
 	}
 	var check []ID
-	ix.mu.Lock()
-	for l := range ix.pruned {
-		if present[l] {
-			// Back since this process removed it: a later drop is
-			// someone else's.
-			delete(ix.pruned, l)
+	for _, l := range old.lines {
+		if slices.Contains(cur.lines, l) || slices.Contains(mine, l) {
+			continue
 		}
-	}
-	if old != nil {
-		for _, l := range old.lines {
-			if present[l] {
-				continue
-			}
-			if ix.pruned[l] > 0 {
-				if ix.pruned[l]--; ix.pruned[l] == 0 {
-					delete(ix.pruned, l)
-				}
-				continue
-			}
-			id, ok := parseIndexLine(l)
-			if !ok || !ix.kinds[id.GroupKind()] {
-				continue
-			}
-			if ix.released != nil && ix.released(id) {
-				continue // the R3 is in the per-name cache (L5)
-			}
+		if id, ok := parseIndexLine(l); ok && ix.kinds[id.GroupKind()] {
 			check = append(check, id)
 		}
 	}
-	ix.mu.Unlock()
-	if len(check) > 0 {
-		ix.queue(check, true)
-	}
+	ix.queueLocked(check, true, cur.rv)
 }
 
 // ids returns the IDs of v's lines of the PerName kinds.
@@ -999,13 +1034,16 @@ func backoffAfter(n int) time.Duration {
 // recheckTick makes the live checks that are due: each object that carries
 // the kind's prefix gets its line back, in one write, and a dropped line so
 // restored is reported as tampering (§10.6.6). A check that fails is retried
-// with backoff.
+// with backoff. An object queued again while its check runs is checked
+// again: what this check read may be older.
 func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	ix.mu.Lock()
 	var due []ID
+	queued := map[ID]int{}
 	for id, r := range ix.pending {
 		if !now.Before(r.due) {
 			due = append(due, id)
+			queued[id] = r.queued
 		}
 	}
 	ix.mu.Unlock()
@@ -1059,6 +1097,10 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 				restoredUnread = append(restoredUnread, id)
 			case r.tampered && slices.Contains(back, id):
 				tampered = append(tampered, id)
+			}
+			if r.queued != queued[id] {
+				r.due, r.fails = time.Time{}, 0
+				continue
 			}
 			delete(ix.pending, id)
 		}
@@ -1326,7 +1368,6 @@ func (t *Tracker) newTrackerIndex() error {
 	}
 	ix := newIndex(t.gk, t.prefix, s.o.IndexNamespace, s.indexMaxLines(), kinds, store, t.proto.srv)
 	ix.recorded = t.recorded
-	ix.released = t.names.released
 	ix.onLines = func(lines []string) {
 		ratio := float64(len(lines)) / float64(ix.maxLines)
 		sinkMetrics{t}.IndexFillRatio(kindLabel(t.gk), ratio)

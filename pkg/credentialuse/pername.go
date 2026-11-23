@@ -220,18 +220,6 @@ func (n *perNames) all() []*protectedInformer {
 	return out
 }
 
-// released reports whether id's per-name cache has synced and shows it
-// without a finalizer of the kind, or gone: the R3 that went with a dropped
-// line is visible there (§10.6.6, L5).
-func (n *perNames) released(id ID) bool {
-	p := n.get(id)
-	if p == nil || !p.inf.HasSynced() {
-		return false
-	}
-	m, ok := p.get(id.Namespace, id.Name)
-	return !ok || countPrefix(m.Finalizers, n.t.prefix) == 0
-}
-
 // cachedID reports whether the core's caches cover id for t: a PerName
 // kind's per-name watches cover every namespace, so §10.5's live paths don't
 // apply to it; any other kind's, when SharedOptions.Namespaces covers id's

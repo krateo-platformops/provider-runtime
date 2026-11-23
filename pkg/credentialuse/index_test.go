@@ -344,30 +344,213 @@ func TestIndexPruneChecksAfter(t *testing.T) {
 	}
 }
 
-// A drop is someone else's unless this process removed the line; a drop
-// whose R3 the per-name cache shows needs no check (§10.6.6, L5).
+// A drop is this process's own only in the version a successful removal of
+// it returned, and only for the lines that removal removed (§10.6.6);
+// whichever comes first, the event or the write's return.
 func TestIndexObservesDrops(t *testing.T) {
-	mine, theirs, released := SecretRef("ns", "mine").ID(), SecretRef("ns", "theirs").ID(), SecretRef("ns", "released").ID()
+	mine, theirs := SecretRef("ns", "mine").ID(), SecretRef("ns", "theirs").ID()
+	kept := SecretRef("ns", "kept").ID().String()
+	old := indexVersion{lines: linesOf([]ID{mine, theirs, SecretRef("ns", "kept").ID()}), rv: "7"}
+	only := func(t *testing.T, ix *index, want ...ID) {
+		t.Helper()
+		if got := SortedIDs(keysOf(ix.pending)); !slices.Equal(got, SortedIDs(want)) {
+			t.Errorf("pending = %v, want %v", got, want)
+		}
+	}
+	for _, eventFirst := range []bool{true, false} {
+		ix := testIndex(&memStore{}, nil)
+		// One delivery shows this process's removal of mine, and, coalesced
+		// with it, someone else's of theirs.
+		event := func() { ix.observed(&old, indexVersion{lines: []string{kept}, rv: "9"}) }
+		if eventFirst {
+			event()
+		}
+		ix.removed("9", []string{mine.String()})
+		if !eventFirst {
+			event()
+		}
+		only(t, ix, theirs)
+		if r := ix.pending[theirs]; r == nil || !r.tampered {
+			t.Fatalf("a drop by someone else isn't queued as tampering: %v", ix.pending)
+		}
+	}
+	// Coalesced past this process's version into someone else's: checked.
 	ix := testIndex(&memStore{}, nil)
-	ix.released = func(id ID) bool { return id == released }
-	old := indexVersion{lines: linesOf([]ID{mine, theirs, released, SecretRef("ns", "kept").ID()})}
-	ix.notePruned([]string{mine.String()}, 1)
-	ix.observed(&old, indexVersion{lines: linesOf([]ID{SecretRef("ns", "kept").ID()})})
-	if got := keysOf(ix.pending); len(got) != 1 || got[0] != theirs {
-		t.Errorf("pending = %v, want only %v", got, theirs)
-	}
-	if r := ix.pending[theirs]; r == nil || !r.tampered {
-		t.Fatalf("a drop by someone else isn't queued as tampering: %v", ix.pending)
-	}
-	if len(ix.pruned) != 0 {
-		t.Errorf("this process's drop is still expected: %v", ix.pruned)
-	}
+	ix.removed("9", []string{mine.String()})
+	ix.observed(&old, indexVersion{lines: []string{kept}, rv: "10"})
+	only(t, ix, mine, theirs)
 	// A line this process removed, back since, is someone else's to drop.
-	ix.notePruned([]string{mine.String()}, 1)
-	ix.observed(nil, indexVersion{lines: linesOf([]ID{mine})})
-	ix.observed(&indexVersion{lines: linesOf([]ID{mine})}, indexVersion{})
-	if ix.pending[mine] == nil {
-		t.Error("a line removed, put back, then dropped by someone else isn't checked")
+	ix = testIndex(&memStore{}, nil)
+	ix.removed("9", []string{mine.String()})
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "8"}, indexVersion{rv: "9"})
+	ix.observed(&indexVersion{rv: "9"}, indexVersion{lines: linesOf([]ID{mine}), rv: "10"})
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "10"}, indexVersion{rv: "11"})
+	only(t, ix, mine)
+	// A drop queued for another reason too isn't taken back.
+	ix = testIndex(&memStore{}, nil)
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "8"}, indexVersion{rv: "9"})
+	ix.queue([]ID{mine}, false)
+	ix.removed("9", []string{mine.String()})
+	only(t, ix, mine)
+	// What this process remembers is bounded; a removal it forgot is checked.
+	ix = testIndex(&memStore{}, nil)
+	ix.removed("9", []string{mine.String()})
+	for i := range maxOwnRemovals {
+		ix.removed(strconv.Itoa(100+i), nil)
+	}
+	if len(ix.own) != maxOwnRemovals {
+		t.Errorf("%d removals remembered, want %d", len(ix.own), maxOwnRemovals)
+	}
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "8"}, indexVersion{rv: "9"})
+	only(t, ix, mine)
+}
+
+// lossyStore is a memStore whose next update lands, and then fails as with
+// its response lost; afterLoss runs in between, and afterGet after each get.
+type lossyStore struct {
+	*memStore
+	lose      bool
+	afterLoss func()
+	afterGet  func()
+}
+
+func (s *lossyStore) get(ctx context.Context) (indexVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return indexVersion{}, err
+	}
+	v, err := s.memStore.get(ctx)
+	if s.afterGet != nil {
+		s.afterGet()
+	}
+	return v, err
+}
+
+func (s *lossyStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return indexVersion{}, err
+	}
+	v, err := s.memStore.update(ctx, cur, lines, rebuilt)
+	if err == nil && s.lose {
+		s.lose = false
+		if s.afterLoss != nil {
+			s.afterLoss()
+		}
+		return indexVersion{}, apierrors.NewTimeoutError("the response was lost", 1)
+	}
+	return v, err
+}
+
+// Every line an attempt of a prune tried to remove is checked after it,
+// whatever came of the attempt, and whether its drop is delivered before or
+// after the attempt returns (§10.6.2, §10.6.6): a conflict with someone
+// else's removal of the line, and a removal whose response was lost. The
+// object is held, or can't be read; either way its line is back, without a
+// later check's help.
+func TestPruneChecksWhatItTried(t *testing.T) {
+	id := SecretRef("ns", "x").ID()
+	for _, unreadable := range []bool{false, true} {
+		for _, fault := range []string{"conflict", "lost response"} {
+			for _, event := range []string{"before", "after", "never"} {
+				t.Run(fmt.Sprintf("unreadable=%v/%s/event %s the return", unreadable, fault, event), func(t *testing.T) {
+					srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{id: heldObj("x")}, forbid: map[ID]bool{id: unreadable}}
+					st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{id}), rv: 1}}
+					ix := testIndex(st, srv)
+					deliver := func() { ix.observed(&indexVersion{lines: linesOf([]ID{id}), rv: "1"}, indexVersion{rv: "2"}) }
+					before := func() {
+						if event == "before" {
+							deliver()
+						}
+					}
+					if fault == "conflict" {
+						st.beforeUpdate = func(s *memStore) {
+							s.beforeUpdate, s.lines, s.rv = nil, nil, s.rv+1
+							before()
+						}
+					} else {
+						st.lose, st.afterLoss = true, before
+					}
+					err := ix.prune(context.Background(), []ID{id})
+					if (err != nil) != (fault == "lost response") {
+						t.Errorf("prune = %v", err)
+					}
+					if !slices.Equal(st.lines, linesOf([]ID{id})) {
+						t.Fatalf("after the prune: %q, want its line back", st.lines)
+					}
+					if event == "after" {
+						deliver()
+					}
+					if err := ix.recheckTick(context.Background(), time.Now()); err != nil {
+						t.Fatal(err)
+					}
+					if !slices.Equal(st.lines, linesOf([]ID{id})) || len(ix.pending) != 0 {
+						t.Errorf("after the live checks: %q, pending %v", st.lines, ix.pending)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A drop delivered while its object's check runs survives the check, which
+// read the line before it (§10.6.6).
+func TestADropDuringItsCheckSurvives(t *testing.T) {
+	id := SecretRef("ns", "x").ID()
+	for _, unreadable := range []bool{false, true} {
+		srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{id: heldObj("x")}, forbid: map[ID]bool{id: unreadable}}
+		st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{id}), rv: 1}}
+		ix := testIndex(st, srv)
+		ix.queue([]ID{id}, false)
+		st.afterGet = func() { // the check's add has read the line
+			st.afterGet = nil
+			st.lines, st.rv = nil, st.rv+1
+			ix.observed(&indexVersion{lines: linesOf([]ID{id}), rv: "1"}, indexVersion{rv: "2"})
+		}
+		now := time.Now()
+		if err := ix.recheckTick(context.Background(), now); err != nil {
+			t.Fatal(err)
+		}
+		if ix.pending[id] == nil {
+			t.Fatal("the check took the drop delivered during it")
+		}
+		if err := ix.recheckTick(context.Background(), now); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(st.lines, linesOf([]ID{id})) || len(ix.pending) != 0 {
+			t.Errorf("unreadable=%v: after the next check: %q, pending %v", unreadable, st.lines, ix.pending)
+		}
+	}
+}
+
+// stopServer is an objServer that fails once its context is done, as the API
+// client does.
+type stopServer struct{ *objServer }
+
+func (s stopServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
+// A graceful stop ends ctx in the middle of a prune: the write isn't
+// aborted, and the check after it and the re-add run to their end, within
+// pruneBound (§10.6.2). A prune that hasn't begun doesn't.
+func TestAPruneOutlivesAStop(t *testing.T) {
+	held, denied := SecretRef("ns", "held").ID(), SecretRef("ns", "denied").ID()
+	srv := stopServer{&objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}, forbid: map[ID]bool{denied: true}}}
+	st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{denied, held}), rv: 1}}
+	ix := testIndex(st, srv)
+	ctx, stop := context.WithCancel(context.Background())
+	st.beforeUpdate = func(*memStore) { stop() }
+	if err := ix.prune(ctx, []ID{denied, held}); err != nil {
+		t.Errorf("prune = %v", err)
+	}
+	if want := linesOf([]ID{denied, held}); !slices.Equal(st.lines, want) {
+		t.Errorf("after a stop in the middle of the prune: %q, want %q", st.lines, want)
+	}
+	updates := st.updates
+	if err := ix.prune(ctx, []ID{held}); !errors.Is(err, context.Canceled) || st.updates != updates {
+		t.Errorf("a prune begun after the stop = %v, with %d updates", err, st.updates-updates)
 	}
 }
 
