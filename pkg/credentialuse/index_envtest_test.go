@@ -721,10 +721,25 @@ type gates struct {
 	mu      sync.Mutex
 	reached map[string]chan struct{}
 	opened  map[string]chan struct{}
+	dead    chan struct{} // closed when the process is killed
 }
 
 func newGates() *gates {
-	return &gates{reached: map[string]chan struct{}{}, opened: map[string]chan struct{}{}}
+	return &gates{reached: map[string]chan struct{}{}, opened: map[string]chan struct{}{}, dead: make(chan struct{})}
+}
+
+// errKilled is a call of a killed process: it doesn't happen.
+var errKilled = errors.New("the process was killed")
+
+// killed is errKilled once the process is killed: a context that ends is a
+// stop, which what mustn't be cut short outlives, and not a crash.
+func (g *gates) killed() error {
+	select {
+	case <-g.dead:
+		return errKilled
+	default:
+		return nil
+	}
 }
 
 func (g *gates) chans(name string) (reached, opened chan struct{}) {
@@ -748,7 +763,9 @@ func (g *gates) hold(ctx context.Context, name string) error {
 	g.mu.Unlock()
 	select {
 	case <-opened:
-		return nil
+		return g.killed()
+	case <-g.dead:
+		return errKilled
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -810,6 +827,9 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	var relIndexGets, acqUpdates, relUpdates atomic.Int32
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
 	s.HookCalls(func(ctx context.Context, c cu.Call) error {
+		if err := g.killed(); err != nil {
+			return err
+		}
 		role := roleOf(ctx)
 		if role == "rel" && c.Op == "index-get" {
 			if n := relIndexGets.Add(1); armed.Load() && sc.startup && n == 2 {
@@ -938,6 +958,7 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	g.wait(t, "post") // H2's A2 landed; its read waits
 
 	crash := func() {
+		close(g.dead) // every later call of the process fails
 		kill()
 		killPasses()
 		loops.Wait()
