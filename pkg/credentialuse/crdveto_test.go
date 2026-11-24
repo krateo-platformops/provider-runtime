@@ -141,18 +141,23 @@ func TestTheDiscoverysVeto(t *testing.T) {
 		want string
 		asks []string
 	}{
-		"the group serves other kinds":                {with: func(*fakeDiscovery) {}, gone: true, asks: []string{group, v1}},
-		"the group isn't served":                      {with: func(d *fakeDiscovery) { d.serve("v1", "gadgets", "") }, gone: true, asks: []string{group}},
-		"two versions, of other kinds":                {with: func(d *fakeDiscovery) { d.serve("v2", "gizmos", "Gizmo") }, gone: true, asks: []string{group, v1, v2}},
-		"another plural":                              {with: func(d *fakeDiscovery) { d.serve("v1", "widgetries", "Widget") }, want: "widgetries in credentialuse.test.krateo.io/v1 serves the kind now", asks: []string{group, v1}},
-		"another plural, at a later version":          {with: func(d *fakeDiscovery) { d.serve("v2", "widgetries", "Widget") }, want: "restart the process", asks: []string{group, v1, v2}},
-		"the same finalizer, by its case":             {with: func(d *fakeDiscovery) { d.serve("v1", "wIDGETs", "WIDGET") }, want: "restart the process"},
-		"a subresource of the kind":                   {with: func(d *fakeDiscovery) { d.serve("v1", "things/widget", "Widget") }, want: "restart the process"},
-		"its own resource, by a server that lags":     {with: func(d *fakeDiscovery) { d.serve("v1", "widgets", "Widget") }, want: "restart the process"},
-		"the group: 403":                              {with: code(group, 403), want: "grant get on the URLs /apis/*, as system:discovery does"},
-		"a version: 403":                              {with: code(v1, 403), want: "grant get on the URLs /apis/*, as system:discovery does"},
-		"the group: 500":                              {with: code(group, 500), want: "whether another resource serves it"},
-		"a version: 404":                              {with: code(v1, 404), want: "whether another resource serves it"},
+		"the group serves other kinds":               {with: func(*fakeDiscovery) {}, gone: true, asks: []string{group, v1}},
+		"the group isn't served":                     {with: func(d *fakeDiscovery) { d.serve("v1", "gadgets", "") }, gone: true, asks: []string{group}},
+		"two versions, of other kinds":               {with: func(d *fakeDiscovery) { d.serve("v2", "gizmos", "Gizmo") }, gone: true, asks: []string{group, v1, v2}},
+		"another plural":                             {with: func(d *fakeDiscovery) { d.serve("v1", "widgetries", "Widget") }, want: "widgetries in credentialuse.test.krateo.io/v1 serves the kind now", asks: []string{group, v1}},
+		"another plural, at a later version":         {with: func(d *fakeDiscovery) { d.serve("v2", "widgetries", "Widget") }, want: "restart the process", asks: []string{group, v1, v2}},
+		"the same finalizer, by its case":            {with: func(d *fakeDiscovery) { d.serve("v1", "wIDGETs", "WIDGET") }, want: "restart the process"},
+		"a subresource of the kind":                  {with: func(d *fakeDiscovery) { d.serve("v1", "things/widget", "Widget") }, want: "restart the process"},
+		"its own resource, by a server that lags":    {with: func(d *fakeDiscovery) { d.serve("v1", "widgets", "Widget") }, want: "discovery still shows widgets in credentialuse.test.krateo.io/v1"},
+		"its own subresource, by a server that lags": {with: func(d *fakeDiscovery) { d.serve("v1", "widgets/status", "Widget") }, want: "discovery still shows widgets/status in"},
+		"the kind in another group": {gone: true, with: body(v1, `{"kind":"APIResourceList","groupVersion":"credentialuse.test.krateo.io/v1",`+
+			`"resources":[{"name":"gadgets/scale","group":"autoscaling","version":"v1","kind":"Widget"}]}`)},
+		"the kind in its group, named": {want: "restart the process", with: body(v1, `{"kind":"APIResourceList","groupVersion":"credentialuse.test.krateo.io/v1",`+
+			`"resources":[{"name":"widgetries","group":"credentialuse.test.krateo.io","kind":"Widget"}]}`)},
+		"the group: 403": {with: code(group, 403), want: "grant get on the URLs /apis/*, as system:discovery does"},
+		"a version: 403": {with: code(v1, 403), want: "grant get on the URLs /apis/*, as system:discovery does"},
+		"the group: 500": {with: code(group, 500), want: "whether another resource serves it"},
+		"a version: 404": {with: code(v1, 404), want: "whether another resource serves it"},
 		"a later version: 503, its server being down": {with: code(v2, 503), want: "whether another resource serves it"},
 		"the group: unreachable":                      {with: answer(group, func() (*http.Response, error) { return nil, errors.New("connection refused") }), want: "connection refused"},
 		"the group: not JSON":                         {with: body(group, "<html>"), want: "whether another resource serves it"},
@@ -173,6 +178,9 @@ func TestTheDiscoverysVeto(t *testing.T) {
 			}
 			if err != nil && !errors.Is(err, errTest404) {
 				t.Errorf("noHolders = %v: it lost the list's error", err)
+			}
+			if err != nil && strings.HasPrefix(c.want, "discovery still") && strings.Contains(err.Error(), "restart") {
+				t.Errorf("noHolders = %v: a restarted process couldn't track the kind", err)
 			}
 			if err != nil && !strings.Contains(c.want, "grant") && strings.Contains(err.Error(), "grant") {
 				t.Errorf("noHolders = %v: no grant is missing", err)

@@ -57,12 +57,17 @@ func (t *Tracker) noHolders(ctx context.Context, listErr error) error {
 	case !crdNotFound(err, t.crdName):
 		return unread(listErr, "whether its CRD is gone, and its holders with it", "get on the CRD "+t.crdName, err)
 	}
-	resource, err := t.servedElsewhere(ctx)
+	resource, gv, err := t.servedElsewhere(ctx)
+	plural, _, _ := strings.Cut(resource, "/")
 	switch {
 	case err != nil:
 		return unread(listErr, "whether another resource serves it, now that the CRD "+t.crdName+" is gone", "get on the URLs /apis/*, as system:discovery does", err)
+	case plural == t.gvr.Resource:
+		// As just after the CRD went: no restart is needed, or would help,
+		// since Track needs the CRD.
+		return fmt.Errorf("%w (the CRD %s is gone, but discovery still shows %s in %s, so its holds stay until it doesn't)", listErr, t.crdName, resource, gv)
 	case resource != "":
-		return fmt.Errorf("%w (the CRD %s is gone, but %s serves the kind now, so its holds stay: restart the process)", listErr, t.crdName, resource)
+		return fmt.Errorf("%w (the CRD %s is gone, but %s in %s serves the kind now, so its holds stay: restart the process)", listErr, t.crdName, resource, gv)
 	}
 	return nil
 }
@@ -82,47 +87,51 @@ func unread(listErr error, what, grant string, err error) error {
 const discoveryTimeout = 10 * time.Second
 
 // servedElsewhere reads K's group in the API server's discovery, live: the
-// group, then each version of it. It returns the first resource of kind K, or
-// "" when none is, as when the group isn't served at all. A version that can't
-// be read, of an aggregated API server that is down for one, is an error: the
-// kind may be there. No other group is read.
+// group, then each version of it. It returns the first resource of kind K, with
+// its group-version, or "" when none is, as when the group isn't served at all.
+// A version that can't be read, of an aggregated API server that is down for
+// one, is an error: the kind may be there. No other group is read.
 //
-// The group's own document, and not the list of groups: just after a CRD is
-// created, the API server serves its objects and this document before the
-// list, which waits for the group's APIService.
-func (t *Tracker) servedElsewhere(ctx context.Context) (string, error) {
+// The group's own document, and not the list of groups: just after a group's
+// first CRD is created, the API server serves its objects and this document
+// before the list, which waits for the group's APIService. A version that comes
+// later to a group waits for its APIService in both.
+func (t *Tracker) servedElsewhere(ctx context.Context) (resource, groupVersion string, err error) {
 	if t.s.c.Discovery == nil {
-		return "", errors.New("Clients.Discovery isn't set")
+		return "", "", errors.New("Clients.Discovery isn't set")
 	}
 	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
 	var group metav1.APIGroup
-	err := t.discover(ctx, &group, t.gk.Group)
+	err = t.discover(ctx, &group, t.gk.Group)
 	if st, ok := statusOf(err); ok && st.Code == http.StatusNotFound {
-		return "", nil // the group isn't served
+		return "", "", nil // the group isn't served
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if group.Kind != "APIGroup" || group.Name != t.gk.Group || len(group.Versions) == 0 {
-		return "", fmt.Errorf("/apis/%s isn't the group's discovery: a %q named %q with %d versions", t.gk.Group, group.Kind, group.Name, len(group.Versions))
+		return "", "", fmt.Errorf("/apis/%s isn't the group's discovery: a %q named %q with %d versions", t.gk.Group, group.Kind, group.Name, len(group.Versions))
 	}
 	for _, v := range group.Versions {
 		var list metav1.APIResourceList
 		if err := t.discover(ctx, &list, t.gk.Group, v.Version); err != nil {
-			return "", err
+			return "", "", err
 		}
 		if list.Kind != "APIResourceList" || list.GroupVersion != v.GroupVersion {
-			return "", fmt.Errorf("/apis/%s isn't the version's discovery: a %q of %q", v.GroupVersion, list.Kind, list.GroupVersion)
+			return "", "", fmt.Errorf("/apis/%s isn't the version's discovery: a %q of %q", v.GroupVersion, list.Kind, list.GroupVersion)
 		}
 		for _, r := range list.APIResources {
+			if r.Group != "" && r.Group != t.gk.Group {
+				continue // another group's kind, as a CRD's scale subresource is
+			}
 			// The finalizer has the kind in lower case.
 			if strings.EqualFold(r.Kind, t.gk.Kind) {
-				return r.Name + " in " + v.GroupVersion, nil
+				return r.Name, v.GroupVersion, nil
 			}
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
 // discover reads /apis/<path> into out, as JSON: the form that has one group
