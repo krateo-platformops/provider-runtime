@@ -320,3 +320,81 @@ func TestAReleaseOfManyAmongManyHolders(t *testing.T) {
 		}
 	}
 }
+
+// Once the context has ended, a batch asks the API server for nothing, whether
+// it ends before the batch, in R0, or under R1, and what it didn't get to is
+// the rest: neither decided nor failed.
+func TestAnEndedContextReadsNothingMore(t *testing.T) {
+	ids := someIDs("ns", "s", 6)
+	for what, c := range map[string]struct {
+		before bool // it has ended before the batch
+		inR0   bool // it ends as R0 reads the first object
+		reads  int  // it ends as R1 makes this read
+		want   int  // the reads made
+		naming int  // the objects R0 read
+	}{
+		"before the batch": {before: true},
+		"in R0":            {inR0: true, naming: 1},
+		"in R1":            {reads: 3, want: 3, naming: 6},
+	} {
+		r := newRig(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		gets, naming := 0, 0
+		r.views = costViews{onNaming: func() {
+			naming++
+			if c.inR0 {
+				cancel()
+			}
+		}}
+		r.srv.before = func(op, _, _ string) error {
+			if op == "get" {
+				if gets++; gets == c.reads {
+					cancel()
+				}
+			}
+			return nil
+		}
+		if c.before {
+			cancel()
+		}
+		res, err := r.p.release(ctx, "ns", ids)
+		cancel()
+		if gets != c.want || naming != c.naming {
+			t.Errorf("%s: %d reads and %d objects in R0, want %d and %d", what, gets, naming, c.want, c.naming)
+		}
+		if err != nil || len(res.Failed) != 0 || len(res.Bare) != c.want {
+			t.Errorf("%s: %+v, %v; want %d found gone and none failed", what, res, err, c.want)
+		}
+		all := slices.Concat(res.Bare, res.Rest)
+		if len(all) != len(ids) || !slices.Equal(SortedIDs(all), SortedIDs(ids)) {
+			t.Errorf("%s: bare %v, rest %v; want every object in one of them, once", what, res.Bare, res.Rest)
+		}
+	}
+}
+
+// The write loops' stop under a batch: what it hadn't got to is in the next
+// ones' batch, with no failure counted, and nothing of what it had decided.
+func TestAStoppedBatchLeavesItsRest(t *testing.T) {
+	r, _, l := quiet(t)
+	k := batchKey{widgetGK, "out"}
+	ids := someIDs("out", "s", 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := 0
+	l.setBefore(func(_ context.Context, c Call) error {
+		if c.Op == "get" {
+			if n++; n == 10 {
+				cancel()
+			}
+		}
+		return nil
+	})
+	r.s.queue.Add(k, ids...)
+	r.turn(ctx)
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, ids[10:]) {
+		t.Errorf("%d objects are queued: %v; want the 90 not read", len(got), got)
+	}
+	if f, timers := failuresOf(r.s.queue, k), r.queueTimers(); len(f) != 0 || timers != 0 {
+		t.Errorf("failures %v and %d timers, want none", f, timers)
+	}
+}

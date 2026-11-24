@@ -1597,13 +1597,18 @@ func TestATimeIsItsObjects(t *testing.T) {
 // what failed, at once, and no more; and the backoff isn't counted.
 func TestAStoppedBatchLeavesWhatFailed(t *testing.T) {
 	r, k := outside(t, heldObject(secretGVK, "out", "free", "u1", widgetGK, "out"), heldObject(secretGVK, "out", "fails", "u2", widgetGK, "out"))
-	r.failWhile(func(name string) bool { return name == "fails" })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.failWhile(func(name string) bool {
+		if name == "fails" {
+			cancel() // the loops stop under this read
+		}
+		return name == "fails"
+	})
 	r.track(t, widgetGK)
 	r.run(t)
 	r.drain()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	r.s.releaseBatch(ctx, k, []ID{secretID("out", "fails"), secretID("out", "free")})
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "free"), secretID("out", "fails")})
 	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{secretID("out", "fails")}) {
 		t.Errorf("the next write loops' batch is %v, want what failed", got)
 	}
@@ -1648,15 +1653,17 @@ func TestAnErrorThatNamesNoObjectLosesNone(t *testing.T) {
 	a, b := secretID("out", "a"), secretID("out", "b")
 	for _, stopped := range []bool{false, true} {
 		r, k := outside(t, heldObject(secretGVK, "out", "a", "u1", widgetGK, "out"), heldObject(secretGVK, "out", "b", "u2", widgetGK, "out"))
+		ctx, cancel := context.WithCancel(context.Background())
 		r.failWhile(func(name string) bool { return name == "a" })
-		r.s.hooks.released = func(res *ReleaseResult) { res.Failed = nil }
+		r.s.hooks.released = func(res *ReleaseResult) {
+			res.Failed = nil
+			if stopped {
+				cancel()
+			}
+		}
 		r.track(t, widgetGK)
 		r.run(t)
 		r.drain()
-		ctx, cancel := context.WithCancel(context.Background())
-		if stopped {
-			cancel()
-		}
 		r.s.releaseBatch(ctx, k, []ID{a, b})
 		retry, n := timersOf(r.s.queue, k)
 		queued := r.queued(widgetGK, "out")
@@ -1691,7 +1698,13 @@ func TestWhatFailedWithoutAnErrorIsRetried(t *testing.T) {
 	a, b := secretID("out", "a"), secretID("out", "b")
 	for _, stopped := range []bool{false, true} {
 		r, k := outside(t)
-		r.s.hooks.released = func(res *ReleaseResult) { res.Failed = []ID{a} }
+		ctx, cancel := context.WithCancel(context.Background())
+		r.s.hooks.released = func(res *ReleaseResult) {
+			res.Failed = []ID{a}
+			if stopped {
+				cancel()
+			}
+		}
 		w := &warnings{}
 		o := r.options(widgetGK)
 		o.Logger = w
@@ -1700,10 +1713,6 @@ func TestWhatFailedWithoutAnErrorIsRetried(t *testing.T) {
 		}
 		r.run(t)
 		r.drain()
-		ctx, cancel := context.WithCancel(context.Background())
-		if stopped {
-			cancel()
-		}
 		r.s.releaseBatch(ctx, k, []ID{a, b})
 		retry, n := timersOf(r.s.queue, k)
 		queued := r.queued(widgetGK, "out")
