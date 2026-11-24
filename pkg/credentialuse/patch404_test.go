@@ -308,7 +308,7 @@ func TestDisownSaysItCantReadAnIndexedKind(t *testing.T) {
 				return true, nil, apierrors.NewServiceUnavailable(text)
 			})
 		}
-		tr.idx = testIndex(st, r.s.newServer())
+		tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 		if !tr.isPerName(secretGroupKind) || len(tr.disownPerName(parseDisown("all"))) != 1 {
 			t.Fatal("the rig's kind isn't PerName")
 		}

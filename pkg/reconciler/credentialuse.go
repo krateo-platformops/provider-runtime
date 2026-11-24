@@ -67,6 +67,9 @@ import (
 // Without the source the manager refuses to start (§7.5, M4). A connecter
 // that doesn't implement it changes nothing (§11.10): no informer, no
 // annotation, no write, and the source and the predicate are no-ops.
+//
+// Before implementing it: if mg's CRD, or a protected custom resource's, serves
+// several versions, check its conversions (§6.2).
 type CredentialRefsProvider interface {
 	CredentialRefs(mg resource.Managed) ([]credentialuse.Ref, error)
 }

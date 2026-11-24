@@ -27,7 +27,8 @@ import (
 // takes Options' default.
 type KindOptions struct {
 	// Protected are the kinds Refs may name; the default is Secret,
-	// LabelScoped.
+	// LabelScoped. A custom resource that serves several versions must
+	// convert without losing a field, a label or an annotation (§6.2).
 	Protected []ProtectedKind
 	// MaxDepth bounds the levels of Next followed (§9.1).
 	MaxDepth int

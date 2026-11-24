@@ -209,7 +209,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		ownerFinalizers: o.OwnerFinalizers,
 		grace:           o.DeletionGrace,
 		clock:           s.clock,
-		srv:             s.newServer(),
+		srv:             s.newServer(o.Holder),
 		views:           trackerViews{t},
 		ver:             t.ver,
 		seen:            s.seen,
