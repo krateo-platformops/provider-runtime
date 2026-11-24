@@ -29,7 +29,7 @@ MUTANTS = [
     ("a pass that names nothing doesn't gate", TR,
      [("\t\tif _, gerr := t.proto.gateRecorded(ctx, obj, &a); errors.Is(gerr, ErrHolderConflict) {", "\t\tif gerr := error(nil); errors.Is(gerr, ErrHolderConflict) {")]),
     ("a conflict of the gate's A1 isn't returned", AQ,
-     [("\tif errors.Is(err, ErrHolderConflict) {\n\t\treturn a, err\n\t}\n\tif err != nil {\n\t\treturn fail(err, \"Announce\")\n\t}\n\n\tbyID", "\tif err != nil {\n\t\treturn fail(err, \"Announce\")\n\t}\n\n\tbyID")]),
+     [("\trecorded, err := p.gateRecorded(ctx, obj, &a)\n\tif errors.Is(err, ErrHolderConflict) {\n\t\treturn a, err\n\t}\n", "\trecorded, err := p.gateRecorded(ctx, obj, &a)\n")]),
     ("the holder's own namespace is asked about", KE,
      [("id.Namespace == \"\" || id.Namespace == obj.GetNamespace() || ", "id.Namespace == \"\" || ")]),
     ("a cluster-scoped object is asked about", KE,

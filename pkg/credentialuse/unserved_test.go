@@ -433,12 +433,14 @@ func TestAnUnheldHopThatCantBeReadFailsThePass(t *testing.T) {
 	rigs := map[string]func() (*rig, Ref){
 		"without consent": func() (*rig, Ref) {
 			r, _ := consentRig(t, "")
+			r.p.followChains = true
 			must(r.m.Create(apimodel.Key{GK: targetGK, Namespace: "other", Name: "c"}, metav1.ObjectMeta{}))
 			return r, Ref{GroupKind: targetGK, Namespace: "other", Name: "c", Next: next}
 		},
 		"disowned": func() (*rig, Ref) {
 			r, set := disownRig(t)
 			*set = parseDisown("all")
+			r.p.followChains = true
 			must(r.m.Create(targetKey("c"), metav1.ObjectMeta{}))
 			return r, Ref{GroupKind: targetGK, Namespace: "ns", Name: "c", Next: next}
 		},

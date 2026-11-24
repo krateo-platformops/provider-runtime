@@ -165,7 +165,7 @@ MUTANTS = [
      [("\tcase a.MustNotConnect:\n\t\toutcome = tracing.CredentialUseMustNotConnect\n", "")]),
     # §8: a degraded pass is logged once per object.
     ("a degraded pass logs every time", C + "tracker.go",
-     [("\tif !t.degradedLogged.first(key) {\n\t\treturn\n\t}\n", "")]),
+     [("\tif !refused && !t.degradedLogged.first(key) {\n\t\treturn\n\t}\n", "")]),
     ("a pass that isn't degraded doesn't clear the log", C + "tracker.go",
      [("\t\tt.degradedLogged.clear(key)\n", "")]),
     ("Forget doesn't clear the log", C + "tracker.go",
