@@ -103,6 +103,36 @@ func TestALostIndexReportNamesTheCoveredKinds(t *testing.T) {
 	}
 }
 
+// A live check that fails makes the count of its own kind unknown, and not
+// that of the kinds the switch covers (§7.4).
+func TestAFailedCheckOfAnotherKind(t *testing.T) {
+	ctx := context.Background()
+	for value, want := range map[string]string{"Secret": "0", "ConfigMap": "unknown"} {
+		r := newFakeRig(t)
+		tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"`+value+`"}}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		// As PerName kinds, with an index of the test's own.
+		tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMapGVK, Watch: PerName}}
+		tr.idx = testIndex(&memStore{exists: true, rebuilt: true}, r.s.newServer())
+		tr.idx.kinds[configMapGroupKind] = true
+		tr.idx.queue([]ID{{Kind: "ConfigMap", Namespace: "ns", Name: "c"}}, false)
+		r.md.PrependReactor("get", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("down")
+		})
+		r.s.disownPass(ctx, tr, parseDisown(value))
+		crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+		if err != nil || crd.GetAnnotations()[AnnotationHeldCount] != want {
+			t.Errorf("the switch at %s: held-count %q, %v; want %s", value, crd.GetAnnotations()[AnnotationHeldCount], err, want)
+		}
+	}
+}
+
 // One holder's record that doesn't fit in the index keeps that record only: a
 // tenant may forge one of any names. The others are stripped, theirs among the
 // names included (§7.4).

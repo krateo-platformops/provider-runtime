@@ -390,10 +390,9 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	unstripped := map[ID]bool{} // objects that couldn't be read, or stripped
 	if len(perName) > 0 {
 		// The live checks due are made first, so that one a drop queued a
-		// moment ago doesn't make the count unknown.
-		if err := t.idx.recheckTick(ctx, s.clock.Now()); err != nil {
-			known = false
-		}
+		// moment ago doesn't make the count unknown. What fails stays pending,
+		// which makes the count of its own kind unsure, below.
+		_ = t.idx.recheckTick(ctx, s.clock.Now())
 		named := map[ID]bool{}
 		for i := range holders {
 			if r := ReadRecord(&holders[i]); !r.Unparseable {
