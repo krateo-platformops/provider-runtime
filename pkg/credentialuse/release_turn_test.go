@@ -86,9 +86,9 @@ func TestWhatIsAddedDoesntDelayWhatWaits(t *testing.T) {
 	}
 }
 
-// The caches first show those that are being deleted, in their grace and with a
-// user: each of their reads changes nothing, so the same 128 can be added before
-// every turn. shownRig is a rig whose caches show them, and nothing else.
+// shownRig is a rig whose caches show 128 Secrets that are being deleted, in their
+// grace and with a user: a read of one changes nothing, so the same 128 can be
+// added before every turn.
 func shownRig(t *testing.T, objs ...runtime.Object) (r *fakeRig, l *costLog, k batchKey, shown []ID) {
 	t.Helper()
 	shown = someIDs("ns", "held", 128)
@@ -120,10 +120,10 @@ func TestAHoldTheCachesDontShowIsReadInTime(t *testing.T) {
 	unseen := heldObject(secretGVK, "ns", "unseen", "u-unseen", widgetGK, "ns")
 	unseen.Labels = nil // the caches select by the label
 	r, l, k, shown := shownRig(t, unseen)
-	real := secretID("ns", "unseen")
+	hold := secretID("ns", "unseen")
 	r.s.queue.Add(k, someIDs("ns", "absent", 40)...)
-	r.s.queue.Add(k, real)
-	if got := readIn(r, l, real, 20, func(int) { r.s.queue.Add(k, shown...) }); got != 3 {
+	r.s.queue.Add(k, hold)
+	if got := readIn(r, l, hold, 20, func(int) { r.s.queue.Add(k, shown...) }); got != 3 {
 		t.Errorf("the hold the caches don't show was read in turn %d (0 is never), want 3", got)
 	}
 	if r.heldBy(t, widgetGK, "ns", "unseen") {
@@ -227,7 +227,8 @@ func TestTheRestIsNeitherDecidedNorFailed(t *testing.T) {
 }
 
 // A batch of a whole namespace lists it once, whatever the turns its objects
-// take, and they go behind what was queued before it.
+// take; they are known to carry the finalizer, so they are read before the others,
+// which have their part.
 func TestAWholeNamespacesTurns(t *testing.T) {
 	var objs []runtime.Object
 	ids := someIDs("out", "s", 70)
@@ -240,7 +241,7 @@ func TestAWholeNamespacesTurns(t *testing.T) {
 	r.s.queue.Add(k, first)
 	r.s.queue.Add(k)
 	r.s.queue.Add(k, last)
-	for _, want := range [][]ID{append([]ID{first}, ids[:63]...), append(slices.Clone(ids[63:]), last)} {
+	for _, want := range [][]ID{append(slices.Clone(ids[:62]), first, last), ids[62:]} {
 		r.turn(context.Background())
 		if got := l.take(); !slices.Equal(got, want) {
 			t.Errorf("a turn read %v\nwant %v", got, want)
