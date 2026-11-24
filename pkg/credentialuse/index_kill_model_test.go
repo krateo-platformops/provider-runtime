@@ -16,10 +16,17 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 )
 
-// One kill with both an A2 in flight and a prune of the same object's line
-// between its removal and its re-add, in one process (§7.4, §10.6.2), in the
-// model: whether Disown can settle with P held, what of it is needed, and
-// whether stripping no record until a prune's bound is over closes it.
+// A process killed inside a prune, between its removal of P's line and its
+// re-add, with the switch set and a Disown pass begun meanwhile, and P held
+// anew by a pass from before the switch (§7.4, §10.6.2), in the model: whether
+// Disown can settle with P held, what of it is needed, and whether stripping
+// no record until a prune's bound is over closes it.
+//
+// Two givens, as in TestModelIndexDisown: the landing margin, and a prune's
+// bound. What is cut, so that the searches finish: the switch is set by the
+// actor of the first Disown pass, and the process started after a death by the
+// one that died, so that other actors' steps in between cost a preemption; one
+// holder's pass, one batch, and one pass of the dying process's Disown.
 
 // errProcDead is every call of a process that was killed.
 var errProcDead = errors.New("the process was killed")
@@ -38,6 +45,10 @@ type killCase struct {
 	switchOutside, readOutside bool
 	// freshHolders: the prune's holder cache shows every record there is.
 	freshHolders bool
+	// senderLives: the holder's pass is another process's, which lives, and
+	// makes its check. landsFirst: no Disown pass starts before the A2 has
+	// landed, if one was sent.
+	senderLives, landsFirst bool
 	// b: no pass strips a record while a prune that began before its
 	// process's first pass under the switch may go on.
 	b bool
@@ -334,7 +345,8 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 			}
 		}
 
-		s.Go("operator", 0, func(a *apimodel.Actor) {
+		// operate sets the switch.
+		operate := func(a *apimodel.Actor) {
 			for !on {
 				if c.switchOutside && window {
 					a.Wait("outside the window", time.Time{}, func() bool { return !window })
@@ -348,10 +360,17 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 					return patchModelCRD(m, "", map[string]any{AnnotationDisown: "all"})
 				})
 			}
-		})
+			if c.landsFirst && !landed && !(acquired && sent == nil) {
+				a.Wait("landed", time.Time{}, func() bool { return landed || acquired && sent == nil })
+			}
+		}
+		sender := &dead
+		if c.senderLives {
+			sender = &alive
+		}
 		s.Go("holder", 0, func(a *apimodel.Actor) {
 			defer func() { acquired = true }()
-			srv := server(a, "acq", &dead)
+			srv := server(a, "acq", sender)
 			h, err := srv.Get(ctx, widgetGK, "ns", "h")
 			if err != nil {
 				return
@@ -359,7 +378,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 			at := 0
 			pr := newProtocol(inFlightServer{srv, &sent, &landed}, noViews{}, newVerified(widgetGK), newFirstSight(), a.Clock(), testGrace)
 			pr.disownLive = func(context.Context) (disownSet, error) {
-				if dead {
+				if *sender {
 					return disownSet{}, errProcDead
 				}
 				set := parseDisown(readCRD(a, "read the switch").Annotations[AnnotationDisown])
@@ -369,7 +388,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 				}
 				return set, nil
 			}
-			pr.lines = procIndex(a, "acq", &dead, nil, nil)
+			pr.lines = procIndex(a, "acq", sender, nil, nil)
 			_, _ = pr.acquire(ctx, h, []Ref{SecretRef("ns", "s")})
 			if sent == nil || landed {
 				delete(inFlight, at)
@@ -390,7 +409,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 		})
 		// The batch of P's earlier holder, and its prune, which the process
 		// may die in.
-		s.Go("pruner", 0, func(a *apimodel.Actor) {
+		prune := func(a *apimodel.Actor) {
 			defer func() { pruneDone, window = true, false }()
 			die := func() {
 				dead, window = true, false
@@ -437,26 +456,34 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 			if c.at == "end" {
 				die()
 			}
+		}
+		s.Go("pruner", 0, func(a *apimodel.Actor) {
+			prune(a)
+			if !dead || !c.same {
+				return
+			}
+			if !on {
+				a.Wait("restart", time.Time{}, func() bool { return on })
+			}
+			disown(a, "restarted", &alive, rounds)
 		})
 		if c.same {
 			s.Go("disown", 0, func(a *apimodel.Actor) {
-				a.Wait("switch", time.Time{}, func() bool { return on || dead })
+				operate(a)
 				n := rounds
 				if c.at != "" {
 					n = 1
 				}
 				disown(a, "disown", &dead, n)
 			})
-			s.Go("restarted", 0, func(a *apimodel.Actor) {
-				a.Wait("restart", time.Time{}, func() bool { return on && (dead || pruneDone) })
-				if dead {
-					disown(a, "restarted", &alive, rounds)
-				}
-			})
 		}
 		if c.other {
 			s.Go("other", 0, func(a *apimodel.Actor) {
-				a.Wait("switch", time.Time{}, func() bool { return on })
+				if c.same {
+					a.Wait("switch", time.Time{}, func() bool { return on })
+				} else {
+					operate(a)
+				}
 				disown(a, "other", &alive, rounds)
 			})
 		}
@@ -483,12 +510,14 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 }
 
 // TestModelKillInAPrune: a process killed between its prune's removal and
-// its re-add, with an A2 of its own in flight for the same object, the switch
-// set and the index read by a Disown pass between the prune's read of the
-// switch and its removal, leaves a hold that Disown settles over, whichever
-// process that pass was of: one schedule shows it. Without the kill there, or
-// the switch or the read there, it doesn't; nor, anywhere, if no pass strips a
-// record until every prune begun before its process's first pass has ended.
+// its re-add, the switch set and the index read by a Disown pass between the
+// prune's read of the switch and its removal, and an A2 landing after that
+// pass has read its object, leave a hold that Disown settles over, whichever
+// process that pass was of, and whether or not the sender lives: one schedule
+// shows it. Without the kill there, or the switch or the read there, or with
+// the A2 landing before the first pass, it doesn't; nor, anywhere, if no pass
+// strips a record until every prune begun before its process's first pass has
+// ended.
 //
 // With two Disown processes the searches are for one preemption, or for none
 // in CI's bound: what needs more there isn't covered.
@@ -537,6 +566,9 @@ func TestModelKillInAPrune(t *testing.T) {
 			fresh.freshHolders = true
 			reached(t, "reached/"+name+"/"+at, c)
 			reached(t, "reached/"+name+"/"+at+", holder cache fresh", fresh)
+			lives := c
+			lives.senderLives = true
+			reached(t, "reached/"+name+"/"+at+", sender lives", lives)
 			c.b = true
 			clean(t, "B/"+name+"/"+at, c)
 		}
@@ -546,6 +578,7 @@ func TestModelKillInAPrune(t *testing.T) {
 			"killed after the prune":    {at: "end"},
 			"switch outside":            {at: "read after", switchOutside: true},
 			"index read outside":        {at: "read after", readOutside: true},
+			"lands before the pass":     {at: "read after", landsFirst: true},
 		} {
 			off.same, off.other = w.same, w.other
 			clean(t, "one off/"+name+"/"+title, off)
