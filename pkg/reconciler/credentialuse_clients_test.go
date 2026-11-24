@@ -12,8 +12,10 @@ import (
 	"k8s.io/client-go/rest"
 	clientevents "k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/recorder"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
 )
 
 // configManager is a manager with a config and nothing else.
@@ -32,19 +34,28 @@ func (m configManager) GetEventRecorder(string) recorder.EventRecorder {
 // that is gone held stays (credentialuse design §6.4), and nothing else says
 // so.
 func TestTheDefaultSharedHasEveryClient(t *testing.T) {
-	c, err := credentialUseClients(configManager{cfg: &rest.Config{Host: "https://localhost"}})
+	s, err := newDefaultShared(configManager{cfg: &rest.Config{Host: "https://localhost"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every field, one added later too.
-	v := reflect.ValueOf(c)
+	// What the Shared has, whose field isn't exported: every client of it, one
+	// added later too.
+	var found bool
+	v := reflect.ValueOf(s).Elem()
 	for i := range v.NumField() {
-		if v.Field(i).IsZero() {
-			t.Errorf("the default Shared's Clients.%s isn't set", v.Type().Field(i).Name)
+		if v.Field(i).Type() != reflect.TypeFor[credentialuse.Clients]() {
+			continue
+		}
+		found = true
+		c := v.Field(i)
+		for j := range c.NumField() {
+			if c.Field(j).IsZero() {
+				t.Errorf("the default Shared's Clients.%s isn't set", c.Type().Field(j).Name)
+			}
 		}
 	}
-	if s, err := newDefaultShared(configManager{cfg: &rest.Config{Host: "https://localhost"}}); err != nil || s == nil {
-		t.Errorf("newDefaultShared = %v, %v", s, err)
+	if !found {
+		t.Error("the Shared has no field of type Clients")
 	}
 }
 

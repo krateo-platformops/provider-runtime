@@ -6,6 +6,7 @@ package credentialuse_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -575,7 +576,7 @@ func TestAnotherPluralsHoldsStay(t *testing.T) {
 	stopNew := func() { // and waits: none of its batches runs after it
 		once.Do(func() {
 			cancelNew()
-			if err := <-ended; err != nil {
+			if err := <-ended; err != nil && !errors.Is(err, context.Canceled) {
 				t.Errorf("the new process's Run: %v", err)
 			}
 		})
@@ -636,6 +637,12 @@ func TestAnotherPluralsHoldsStay(t *testing.T) {
 	}
 	removeOids()
 	gizmoReleased(t, 3*time.Minute, ns, "s")
+	cutest.Eventually(t, time.Minute, func() error { // after R3, whose answer it waits for
+		if len(old.logs.informed("the holder kind's CRD is gone")) == 0 {
+			return fmt.Errorf("the old process didn't release it: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
 }
 
 // What the evidence is, on the wire: a release of a kind that is gone reads its
