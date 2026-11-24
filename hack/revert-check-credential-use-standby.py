@@ -73,6 +73,8 @@ LIST = [
      [("\t\t\tif e.retry || e.at != 0 {\n", "\t\t\tif false && (e.retry || e.at != 0) {\n")], "TestTheLoopsEndLeavesNoRetries"),
     ("the loops' end stops the grace's timers", QU,
      [("\t\t\tif e.retry || e.at != 0 {\n", "\t\t\tif true || e.retry || e.at != 0 {\n")], "TestTheLoopsEndLeavesNoRetries"),
+    ("a timer that the loops' end took adds", QU,
+     [("\t\tif !q.timers[e] {\n", "\t\tif false && !q.timers[e] {\n")], "TestATimerTheLoopsEndTookAddsNothing"),
     ("the loops' end loses what failed", QU,
      [("\t\t\tq.addLocked(k, SortedIDs(keysOf(m)), func(id ID) bool { return m[id].held })\n", "\t\t\t_, _ = k, m\n")], "TestTheLoopsEndLeavesNoRetries"),
     ("the loops' end loses what asked for a time", QU,

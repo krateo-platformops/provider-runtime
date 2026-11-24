@@ -397,6 +397,33 @@ func TestTheLoopsEndLeavesNoRetries(t *testing.T) {
 	}
 }
 
+// A timer that the loops' end took, and that fires before it is stopped, adds nothing:
+// what it was for has been moved into the queue, and may have been decided since. (A
+// retry's adds nothing in any case: its failure is forgotten.)
+func TestATimerTheLoopsEndTookAddsNothing(t *testing.T) {
+	clk := testingclock.NewFakeClock(time.Now())
+	q := newBatchQueue(nil)
+	dc := &duringClock{FakeClock: clk}
+	q.clock = dc
+	k, id := batchKey{widgetGK, "ns"}, secretID("ns", "s")
+	q.setDraining(true)
+	dc.after = func(d time.Duration) {
+		// The clock has the timer, and the queue doesn't know it yet.
+		q.setDraining(false)
+		q.setDraining(true)
+		if _, ids, _ := q.Get(context.Background()); !slices.Equal(ids, []ID{id}) {
+			t.Errorf("the batch is %v, want what the timer was for", ids)
+		}
+		q.Settle(k, id)
+		q.Done(k)
+		clk.Step(d)
+	}
+	q.AddAt(k, clk.Now().Add(time.Second), id)
+	if q.Len() != 0 || len(q.pending) != 0 || len(q.timers) != 0 || len(q.asked) != 0 || clk.HasWaiters() {
+		t.Errorf("%d batches, %d keys pending, %d timers, %d times asked for, the clock's waiters %v; want none", q.Len(), len(q.pending), len(q.timers), len(q.asked), clk.HasWaiters())
+	}
+}
+
 // What a namespace's list, a kind's collapse and ShutDown do to the bound.
 func TestTheBoundsEdges(t *testing.T) {
 	q := newBatchQueue(testingclock.NewFakeClock(time.Now()))
