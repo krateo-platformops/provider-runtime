@@ -1781,6 +1781,75 @@ func TestARecordChangesReads(t *testing.T) {
 	}
 }
 
+// TestARecordsChangeIsOneBatch: what a holder's event queues is one batch,
+// however soon a worker takes it, so a name in both records is read once
+// (§10.2, §11.3).
+func TestARecordsChangeIsOneBatch(t *testing.T) {
+	const m = 4000
+	forged := manySecrets("other", m)
+	ids := func(n int, more ...ID) []ID { return SortedIDs(append(slices.Clone(forged[:n]), more...)) }
+	record := func(ids []ID) *metav1.PartialObjectMetadata { return holderObject("ns", "h", ids...) }
+	x, y := secretID("other", "x"), secretID("other", "y")
+	bad := func() *metav1.PartialObjectMetadata {
+		h := holderObject("ns", "h")
+		h.Annotations = map[string]string{AnnotationRefs: "oops"}
+		return h
+	}
+	for name, tc := range map[string]struct {
+		old, cur *metav1.PartialObjectMetadata
+		want     []ID // nil is no batch
+	}{
+		"a drop from 4,000":               {record(ids(m)), record(ids(m - 1)), ids(m)},
+		"another name, and the others":    {record(ids(3, x)), record(ids(3, y)), ids(3, x, y)},
+		"all the names replaced":          {record([]ID{x}), record([]ID{y}), []ID{x, y}},
+		"added":                           {nil, record([]ID{x}), []ID{x}},
+		"added without a record":          {nil, record(nil), nil},
+		"gone":                            {record([]ID{x}), nil, []ID{x}},
+		"gone without a record":           {record(nil), nil, nil},
+		"the first names":                 {record(nil), record([]ID{x}), []ID{x}},
+		"the last name dropped":           {record([]ID{x}), record(nil), []ID{x}},
+		"becomes unparseable":             {record([]ID{x}), bad(), []ID{x}},
+		"an unparseable one gets a name":  {bad(), record([]ID{x}), []ID{x}},
+		"an unparseable one, and no name": {bad(), record(nil), nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newFakeRig(t, namespaceObject("ns"))
+			tr := r.track(t, widgetGK)
+			var batches [][]ID
+			r.s.queue.afterAdd = func(k batchKey) {
+				got, ids, _ := r.s.queue.Get(context.Background())
+				if got != k {
+					t.Errorf("batch %v, want %v", got, k)
+				}
+				batches = append(batches, ids)
+				r.s.queue.Done(got)
+			}
+			h := holderHandler{tr}
+			switch {
+			case tc.old == nil:
+				h.OnAdd(tc.cur, false)
+			case tc.cur == nil:
+				h.OnDelete(tc.old)
+			default:
+				h.OnUpdate(tc.old, tc.cur)
+			}
+			names := 0
+			for _, b := range batches {
+				names += len(b)
+			}
+			if tc.want == nil {
+				if len(batches) != 0 {
+					t.Errorf("%d batches, want none: the first %v", len(batches), batches[0])
+				}
+				return
+			}
+			if len(batches) != 1 || !slices.Equal(batches[0], SortedIDs(tc.want)) {
+				t.Errorf("%d batches, of %d names, want one of the %d of both records", len(batches), names, len(tc.want))
+			}
+		})
+	}
+}
+
 // TestTheGatesDropsReads: each A1 of the gate that drops withdrawn refs is a
 // change of the record, and its batch reads all the names there were, outside
 // the caches. All the refs that the gate asks about share a pass's reads, so a

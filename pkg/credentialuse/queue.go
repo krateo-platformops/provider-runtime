@@ -50,6 +50,10 @@ type batchQueue struct {
 	asked   map[askedFor]bool                // what AddAt's timers wait for
 	backoff func(failures int) time.Duration // backoffAfter, but for tests
 	stopped bool
+
+	// afterAdd, if set, runs after each Add, outside mu: a test's, as of a
+	// worker that takes the batch at once.
+	afterAdd func(k batchKey)
 }
 
 func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
@@ -79,6 +83,9 @@ var fillAll = ID{Kind: "\x00all"}
 // With no ids it covers every held object of the namespace too (fillAll),
 // which the release loop lists itself. After ShutDown it does nothing.
 func (q *batchQueue) Add(k batchKey, ids ...ID) {
+	if q.afterAdd != nil {
+		defer q.afterAdd(k)
+	}
 	if len(ids) == 0 {
 		ids = []ID{fillAll}
 	}
