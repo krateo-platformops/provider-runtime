@@ -371,7 +371,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 					return patchModelCRD(m, "", map[string]any{AnnotationDisown: "all"})
 				})
 			}
-			if c.landsFirst && !landed && !(acquired && sent == nil) {
+			if c.landsFirst && !landed && (!acquired || sent != nil) {
 				a.Wait("landed", time.Time{}, func() bool { return landed || acquired && sent == nil })
 			}
 		}
