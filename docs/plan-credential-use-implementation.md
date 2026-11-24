@@ -375,7 +375,8 @@ unreleased and nothing imports it, so neither is visible to anyone.
   falls back to List (#52's review). It asserts that `lastList` is recorded
   before the handler sees any relisted version;
 - the write loops' `Start` rescans the protected stores and enqueues every
-  (K, N) batch; events seen before `Run` are buffered, deduplicated, and
+  (K, N) batch; events seen before `Run` are buffered, within a bound (design
+  §6.2, "Without the write loops"), deduplicated, and
   drained once it runs (M1 of #52's review);
 - an R3 that fails against an unchanged resourceVersion is reported with
   `CredentialReleaseRejected` and `credentialuse_release_rejected_total`, and
