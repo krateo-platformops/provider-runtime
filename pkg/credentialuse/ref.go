@@ -12,17 +12,23 @@ import (
 var secretGroupKind = schema.GroupKind{Group: "", Kind: "Secret"}
 
 // A Ref names an object a holder reads to reach its external system: a
-// Secret, or an intermediate object that leads to one (§9).
+// Secret, or an intermediate object that leads to one (§9). This release
+// holds the object a Ref names, and not what that object leads to: see Next.
 type Ref struct {
 	GroupKind schema.GroupKind // {"" "Secret"} for a Secret
 	Namespace string           // empty for a cluster-scoped object
 	Name      string
 
-	// Next, when set, names the refs found inside this object. The tracker
-	// calls it after the object is held, with the object it read (§9),
-	// without managedFields and status. A held ref with a Next must be of a
-	// protected kind with Content (§10.4): the content cache is how a
-	// re-point of it is seen.
+	// Next must be nil in this release, which holds only the objects the
+	// refs name themselves: Acquire refuses a list with a ref that has one,
+	// with ErrChainsNotSupported, before it reads or writes anything, and
+	// never calls it. A Guaranteed ref's is refused too.
+	//
+	// A later release follows it: Next names the refs found inside this
+	// object. The tracker calls it after the object is held, with the object
+	// it read (§9), without managedFields and status. A held ref with a Next
+	// must be of a protected kind with Content (§10.4): the content cache is
+	// how a re-point of it is seen.
 	//
 	// When the object lacks what Next reads, which may not be populated yet,
 	// or be lost in a restore, Next must return an error, never nil refs: an
@@ -37,9 +43,10 @@ type Ref struct {
 	Next func(obj *unstructured.Unstructured) ([]Ref, error)
 
 	// Guaranteed declares that the object's own controller already keeps it
-	// alive while the holder exists (§9.3). It is neither recorded nor held;
-	// its Next is still followed. No change to it enqueues a holder that
-	// names it only as Guaranteed, which sees the change on its next pass.
+	// alive while the holder exists (§9.3). It is neither recorded nor held.
+	// (Once chains are supported, its Next is still followed.) No change to it
+	// enqueues a holder that names it only as Guaranteed, which sees the
+	// change on its next pass.
 	Guaranteed bool
 }
 

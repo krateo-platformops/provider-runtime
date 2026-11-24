@@ -1004,34 +1004,117 @@ func TestCredentialUseStandaloneForgetOnTheOrphanPath(t *testing.T) {
 	})
 }
 
-// §9.2: Connect's context carries what Acquire read for a ref with a Next,
-// for credentialuse.Resolved; here a Guaranteed ConfigMap, read live.
-func TestCredentialUseResolvedOnConnectsContext(t *testing.T) {
-	w := newCUWorld(t, newWidget("w", nil))
-	config := credentialuse.Ref{GroupKind: schema.GroupKind{Kind: "ConfigMap"}, Namespace: "demo", Name: "config", Guaranteed: true,
-		Next: func(u *unstructured.Unstructured) ([]credentialuse.Ref, error) {
-			name, _, _ := unstructured.NestedString(u.Object, "data", "secret")
-			return []credentialuse.Ref{credentialuse.SecretRef("demo", name)}, nil
-		}}
-	var got string
-	p := &widgetProvider{ops: w.srv.ops}
-	r := w.reconciler(nil, p, func(resource.Managed) ([]credentialuse.Ref, error) { return []credentialuse.Ref{config}, nil })
-	startSource(t, r)
-	p.observeHook = func(context.Context, *Widget) {}
-	conn := r.external.ExternalConnectDisconnecter
-	r.external.ExternalConnectDisconnecter = ExternalConnectDisconnecterFns{
-		ConnectFn: func(ctx context.Context, mg resource.Managed) (ExternalClient, error) {
-			if u, ok := credentialuse.Resolved(ctx, config); ok {
-				got, _, _ = unstructured.NestedString(u.Object, "data", "secret")
+// §9, "Not in this release": a ref with a Next is refused before any write.
+// A new holder doesn't connect, and says why; an established one proceeds,
+// Degraded, with its record as it was; one being deleted runs its external
+// Delete, and the write that removes its finalizer removes its record. A
+// Guaranteed ref with a Next is refused as any other, and one without isn't.
+// (TestCredentialUseResolvedOnConnectsContext, in pkg/credentialuse, is the
+// chain itself, which only that package's tests can follow.)
+func TestCredentialUseRefusesAChain(t *testing.T) {
+	config := func(guaranteed bool, next func(*unstructured.Unstructured) ([]credentialuse.Ref, error)) credentialuse.Ref {
+		return credentialuse.Ref{GroupKind: schema.GroupKind{Kind: "ConfigMap"}, Namespace: "demo", Name: "config", Guaranteed: guaranteed, Next: next}
+	}
+	behind := func(*unstructured.Unstructured) ([]credentialuse.Ref, error) {
+		t.Error("a Next was called")
+		return []credentialuse.Ref{credentialuse.SecretRef("demo", "behind")}, nil
+	}
+	secret := credentialuse.SecretRef("demo", "creds")
+	refsOf := func(refs ...credentialuse.Ref) func(resource.Managed) ([]credentialuse.Ref, error) {
+		return func(resource.Managed) ([]credentialuse.Ref, error) { return refs, nil }
+	}
+	creds := func() client.Object {
+		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "demo"}}
+	}
+	const rec = `[{"group":"","kind":"Secret","namespace":"demo","name":"creds"}]`
+	wroteMetadata := func(op string) bool { return strings.HasPrefix(op, "md-patch") }
+
+	for name, refs := range map[string][]credentialuse.Ref{
+		"a chain after a direct ref":   {secret, config(false, behind)},
+		"a Guaranteed ref with a Next": {config(true, behind)},
+	} {
+		t.Run("new: "+name, func(t *testing.T) {
+			w := newCUWorld(t, newWidget("w", nil), creds())
+			r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops, exists: func(*Widget) bool { return false }}, refsOf(refs...))
+			startSource(t, r)
+			_, err := r.Reconcile(context.Background(), reqFor("w"))
+			if !errors.Is(err, credentialuse.ErrChainsNotSupported) {
+				t.Fatalf("Reconcile = %v, want ErrChainsNotSupported, so backoff applies", err)
 			}
-			return conn.Connect(ctx, mg)
-		},
-		DisconnectFn: conn.Disconnect,
+			if got := w.srv.ops.list(); !slices.Equal(got, []string{"status"}) {
+				t.Errorf("calls = %v, want the status alone: no record, no hold, no Connect", got)
+			}
+			got := w.srv.widget("w")
+			if s := got.GetCondition(prv1.TypeSynced); s.Reason != prv1.ReasonReconcileError || !strings.Contains(s.Message, "/ConfigMap/demo/config") || !strings.Contains(s.Message, "without a Next") {
+				t.Errorf("Synced = %+v, want ReconcileError naming the ref and what to do", s)
+			}
+			if c := got.GetCondition(prv1.TypeReady); c.Reason != prv1.ReasonNotObserved {
+				t.Errorf("Ready = %+v, want NotObserved", c)
+			}
+			if len(got.Finalizers) != 0 || got.Annotations[credentialuse.AnnotationRefs] != "" {
+				t.Errorf("finalizers %v, annotations %v; want neither", got.Finalizers, got.Annotations)
+			}
+		})
+		t.Run("established: "+name, func(t *testing.T) {
+			wd := initialized(newWidget("w", map[string]string{credentialuse.AnnotationRefs: rec}))
+			wd.Finalizers = []string{FinalizerName}
+			w := newCUWorld(t, wd, creds())
+			tp, spans := tracer(t)
+			r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, refsOf(refs...), WithTracerProvider(tp))
+			startSource(t, r)
+			mustReconcile(t, r, "w")
+			ops := w.srv.ops.list()
+			if !slices.Contains(ops, "connect") || slices.ContainsFunc(ops, wroteMetadata) {
+				t.Errorf("calls = %v; want the pass to connect, and write no record and no hold", ops)
+			}
+			got := w.srv.widget("w")
+			if s := got.GetCondition(prv1.TypeSynced); s.Status != metav1.ConditionTrue {
+				t.Errorf("Synced = %+v, want True: a degraded pass proceeds", s)
+			}
+			if got.Annotations[credentialuse.AnnotationRefs] != rec {
+				t.Errorf("record %q, want it as it was", got.Annotations[credentialuse.AnnotationRefs])
+			}
+			if v, ok := eventAttr(lastRoot(t, spans), tracing.EventCredentialUseAcquire, string(tracing.AttrCredentialUseOutcome)); !ok || v != tracing.CredentialUseDegraded {
+				t.Errorf("the acquire event's outcome = %q (%v), want %s", v, ok, tracing.CredentialUseDegraded)
+			}
+		})
+		t.Run("deleting: "+name, func(t *testing.T) {
+			wd := initialized(newWidget("w", map[string]string{credentialuse.AnnotationRefs: rec}))
+			wd.Finalizers = []string{"other", FinalizerName}
+			now := metav1.Now()
+			wd.DeletionTimestamp = &now
+			w := newCUWorld(t, wd, creds())
+			exists := true
+			r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops, exists: func(*Widget) bool { return exists }}, refsOf(refs...))
+			startSource(t, r)
+			mustReconcile(t, r, "w")
+			if ops := w.srv.ops.list(); !slices.Contains(ops, "act-delete") || slices.ContainsFunc(ops, wroteMetadata) {
+				t.Errorf("calls = %v; want the external Delete, and no record or hold", ops)
+			}
+			if got := w.srv.widget("w"); got.Annotations[credentialuse.AnnotationRefs] != rec || !pmeta.FinalizerExists(got, FinalizerName) {
+				t.Errorf("finalizers %v, annotations %v; want both as they were until the resource is gone", got.Finalizers, got.Annotations)
+			}
+			exists = false
+			mustReconcile(t, r, "w")
+			if n := w.srv.ops.count("update"); n != 1 {
+				t.Errorf("%d updates (%v), want the one that removes the finalizer and the record", n, w.srv.ops.list())
+			}
+			got := w.srv.widget("w")
+			if _, has := got.Annotations[credentialuse.AnnotationRefs]; has || pmeta.FinalizerExists(got, FinalizerName) {
+				t.Errorf("finalizers %v, annotations %v; want the owner finalizer and the record gone", got.Finalizers, got.Annotations)
+			}
+		})
 	}
-	mustReconcile(t, r, "w")
-	if got != "behind" {
-		t.Errorf("Resolved on Connect's context gave %q, want the ConfigMap Acquire read", got)
-	}
+	t.Run("new: a Guaranteed ref without a Next isn't refused", func(t *testing.T) {
+		w := newCUWorld(t, newWidget("w", nil), creds())
+		r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, refsOf(secret, config(true, nil)))
+		startSource(t, r)
+		mustReconcile(t, r, "w")
+		got := w.srv.widget("w")
+		if !slices.Contains(w.srv.ops.list(), "connect") || !pmeta.FinalizerExists(got, FinalizerName) || got.Annotations[credentialuse.AnnotationRefs] != rec {
+			t.Errorf("calls %v, finalizers %v, annotations %v; want an established widget whose record names the Secret alone", w.srv.ops.list(), got.Finalizers, got.Annotations)
+		}
+	})
 }
 
 // §8 step 8 and §6.7: a ref that was Missing for Acquire and appears before

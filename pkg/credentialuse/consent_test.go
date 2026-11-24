@@ -471,6 +471,7 @@ func TestConsentChains(t *testing.T) {
 	contentRig := func(t *testing.T) (*rig, *fakeContents) {
 		r, _ := consentRig(t, "")
 		fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+		r.p.followChains = true
 		r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
 		r.p.contents = fc
 		return r, fc
@@ -545,6 +546,7 @@ func TestAWithdrawnRefLeavesTheRecordEvenWithAHopUnfollowed(t *testing.T) {
 	ctx := context.Background()
 	r, _ := consentRig(t, "")
 	fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+	r.p.followChains = true
 	r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
 	r.p.contents = fc
 	r.target(fc, "kt", "Secret", "home")

@@ -2,7 +2,9 @@ package credentialuse_test
 
 // Chains against envtest (plan, PR 4; §9): a Widget names a Target, which
 // names a Secret, as core-provider's CompositionDefinition names a
-// KubernetesTarget, which names a kubeconfig Secret.
+// KubernetesTarget, which names a kubeconfig Secret. Production refuses a
+// chain in this release (chain_refused_test.go): FollowChains is the tests'
+// switch.
 
 import (
 	"context"
@@ -139,7 +141,7 @@ func TestChainTeardown(t *testing.T) {
 	}
 
 	t.Run("with the tracker", func(t *testing.T) {
-		r := newWriteRig(t, env.Config, cu.SharedOptions{}, chainOptions, nil)
+		r := newWriteRig(t, env.Config, cu.SharedOptions{}, chainOptions, (*cu.Shared).FollowChains)
 		ns := env.Namespace(t, "chain")
 		createSecret(t, ns, "kubeconfig")
 		createChainTarget(t, ns, "kt", "kubeconfig")
@@ -227,7 +229,7 @@ func TestChainTeardown(t *testing.T) {
 func TestARepointedTargetEnqueuesItsHolders(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
-	r := newWriteRig(t, env.Config, cu.SharedOptions{}, chainOptions, nil)
+	r := newWriteRig(t, env.Config, cu.SharedOptions{}, chainOptions, (*cu.Shared).FollowChains)
 	ns := env.Namespace(t, "repoint")
 	createSecret(t, ns, "old")
 	createSecret(t, ns, "new")
@@ -314,7 +316,7 @@ func TestARepointedConfigMapEnqueuesItsHolders(t *testing.T) {
 	r := newWriteRig(t, env.Config, cu.SharedOptions{}, func(o *cu.Options) {
 		o.Refs = configRefs
 		o.Protected = []cu.ProtectedKind{{GVK: secretGVK}, {GVK: corev1.SchemeGroupVersion.WithKind("ConfigMap"), Content: true}}
-	}, nil)
+	}, (*cu.Shared).FollowChains)
 	ns := env.Namespace(t, "repoint-cm")
 	createSecret(t, ns, "old")
 	createSecret(t, ns, "new")

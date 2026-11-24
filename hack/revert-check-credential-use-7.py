@@ -221,7 +221,7 @@ KILLERS = {
     "a new holder that must not connect connects": {R: "TestStatusConflictOnEveryPath", E: "TestNewHolderOnADeletingSecretDeletesFreely"},
     "no re-read after a webhook changed A1": {R: "TestCredentialUseRereadsAfterAWebhookChangedTheRecordWrite"},
     "the re-read ignores the live reader": {R: "TestCredentialUseRereadsAfterAWebhookChangedTheRecordWrite"},
-    "no resolved chain on Connect's context": {R: "TestCredentialUseResolvedOnConnectsContext"},
+    "no resolved chain on Connect's context": {C: "TestCredentialUseResolvedOnConnectsContext"},
     "no holder on Connect's context": {R: "TestCredentialUseCheckingReader"},
     "no BeforeEstablish": {R: "TestCredentialUseBeforeEstablishHoldsARefThatAppeared|TestStatusConflictOnEveryPath"},
     "RetryAfter is ignored": {R: "TestCredentialUseRetryAfter"},

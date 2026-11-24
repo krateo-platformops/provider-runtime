@@ -43,6 +43,13 @@ import (
 
 // A CredentialRefsProvider names what Connect reads to reach the external
 // system for mg: the Secrets, and the objects that lead to them (§7.5, §9).
+//
+// In this release no ref it returns may have a Next: name each object as a
+// ref of its own. A list with a Next is refused before anything is written,
+// with credentialuse.ErrChainsNotSupported, which is an error like any other
+// below: a new object doesn't connect, an established one proceeds and keeps
+// the holds it has (§9, "Not in this release").
+//
 // It is discovered on the connecter given to WithExternalConnecter or
 // WithExternalConnectDisconnecter, as the rate-limit keyers are. It lives on
 // the connecter because refs are needed before Connect, when there is no
@@ -50,9 +57,10 @@ import (
 //
 // It must make no API calls; it may use configuration held in memory. It is
 // called to acquire, never to release, and an error fails the pass closed for
-// a new object and open for an established one (§8). A ref with a Next is
-// followed after the object it names is held; Connect then reads that object
-// with credentialuse.Resolved, not from a cache (§9.2).
+// a new object and open for an established one (§8). (Once chains are
+// supported, a ref with a Next is followed after the object it names is held;
+// Connect then reads that object with credentialuse.Resolved, not from a
+// cache (§9.2).)
 //
 // A connecter that implements it also needs the controller's builder line:
 //

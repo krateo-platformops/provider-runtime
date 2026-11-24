@@ -287,6 +287,7 @@ func TestAssertCredentialRefsCoverRefsThatConflict(t *testing.T) {
 // Connect reads, a chain's end included, and fails one that reads an
 // unnamed Secret, and one whose ref resolves to nothing.
 func TestAssertCredentialRefsCover(t *testing.T) {
+	withChains(t)
 	cases := map[string]struct {
 		c    func(rd client.Reader) *refsConnecter
 		want string // a failure's text, or "" for none
@@ -318,6 +319,53 @@ func TestAssertCredentialRefsCover(t *testing.T) {
 				t.Errorf("failed a covering connecter: %s", got)
 			case tc.want != "" && !strings.Contains(got, tc.want):
 				t.Errorf("failures = %q, want one containing %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// withChains has AssertCredentialRefsCover follow chains until t ends, as it
+// will once the runtime does.
+func withChains(t *testing.T) {
+	t.Helper()
+	followChains = true
+	t.Cleanup(func() { followChains = false })
+}
+
+// §9, "Not in this release": AssertCredentialRefsCover fails a connecter one
+// of whose refs has a Next, as the runtime refuses it, before it reads
+// anything or connects. One without is checked as before, Guaranteed refs
+// included.
+func TestAssertCredentialRefsCoverRefusesAChain(t *testing.T) {
+	guaranteed := func(r credentialuse.Ref) credentialuse.Ref { r.Guaranteed = true; return r }
+	direct := credentialuse.SecretRef("ns", "creds")
+	for name, tc := range map[string]struct {
+		refs    []credentialuse.Ref
+		refused bool
+	}{
+		"a chain":                         {refs: []credentialuse.Ref{direct, configRef(secretFromConfig)}, refused: true},
+		"a Guaranteed ref with a Next":    {refs: []credentialuse.Ref{direct, guaranteed(configRef(secretFromConfig))}, refused: true},
+		"a Guaranteed ref without a Next": {refs: []credentialuse.Ref{direct, guaranteed(configRef(nil))}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec, _ := fixture(t)
+			tb := &fatalTB{recordingTB: recordingTB{TB: t}}
+			ec, err := AssertCredentialRefsCover(tb, context.Background(),
+				&refsConnecter{rd: rec, refs: tc.refs, reads: []string{"creds"}}, &fake.Managed{}, rec, schema.GroupKind{Kind: "ConfigMap"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.refused {
+				if ec == nil || len(tb.failures) != 0 {
+					t.Errorf("client %v, failures %q; want it connected and passed", ec, tb.failures)
+				}
+				return
+			}
+			if len(tb.failures) != 1 || !strings.Contains(tb.failures[0], credentialuse.ErrChainsNotSupported.Error()) || !strings.Contains(tb.failures[0], "/ConfigMap/ns/config") {
+				t.Errorf("failures = %q, want one saying chains aren't supported and naming the ref", tb.failures)
+			}
+			if ec != nil || len(rec.Reads()) != 0 {
+				t.Errorf("client %v, reads %v; want it not connected", ec, rec.Reads())
 			}
 		})
 	}

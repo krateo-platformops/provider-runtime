@@ -221,6 +221,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		a2Bound:         o.TimeoutBound,
 		heldDeleting:    t.heldDeleting,
 		mustWait:        func(n string, o Waiting) bool { return s.mustWait(batchKey{gk, n}, o) },
+		followChains:    s.hooks.followChains,
 		maxDepth:        o.MaxDepth,
 		contentKinds:    map[schema.GroupKind]bool{},
 		contentCache:    trackerViews{t},
@@ -410,7 +411,8 @@ func (t *Tracker) dropHeld() {
 // (§7.2 item 2, §6.2 A1 and A2). It returns ErrHolderConflict when the
 // record write conflicts: the caller requeues. Every other failure is in the
 // Acquired: MustNotConnect for a holder that isn't established, Degraded for
-// one that is.
+// one that is. In this release, a ref with a Next is such a failure
+// (ErrChainsNotSupported).
 func (t *Tracker) Acquire(ctx context.Context, obj metav1.Object) (Acquired, error) {
 	// failed is a pass that ends before it names its refs. The gate of what
 	// the record names runs first in every pass (§11.3), in these as in

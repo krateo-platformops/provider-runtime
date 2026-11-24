@@ -609,6 +609,7 @@ func TestAcquireWhileDisowned(t *testing.T) {
 	t.Run("one kind: the others stay held, and a disowned hop is followed", func(t *testing.T) {
 		r, set := disownRig(t)
 		fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+		r.p.followChains = true
 		r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
 		r.p.contents = fc
 		must(r.m.Create(targetKey("c"), metav1.ObjectMeta{}))

@@ -77,7 +77,7 @@ type Acquired struct {
 
 	// resolved are the objects read for each ref with a Next that was
 	// followed: held, unheld, or Guaranteed (§9.2). WithResolved hands them
-	// on.
+	// on. Production follows none in this release (ErrChainsNotSupported).
 	resolved map[ID]*unstructured.Unstructured
 }
 
@@ -118,6 +118,9 @@ type protocol struct {
 	// response shows being deleted, with the holder namespace.
 	heldDeleting func(id ID, namespace string)
 
+	// followChains has acquire follow a Next, which it refuses otherwise
+	// (refuseChains). Only the tests set it.
+	followChains bool
 	// Chains (§9): maxDepth bounds the levels; contentKinds are the
 	// protected kinds with Content, read from contentCache or, live, through
 	// contents, which also reads Guaranteed refs without a lister in
@@ -374,8 +377,9 @@ func isBuiltin(gk schema.GroupKind) bool { return gk.Group == "" }
 
 // acquire runs A1 and A2 for holder obj, which the caller has just read, and
 // refs, which RefsFunc returned for it (§6.2), and follows their chains
-// (§9.1). It runs on every pass, deletion passes included, before anything
-// reads a protected object.
+// (§9.1). Production refuses a list with a chain in it, whole, before
+// anything else (refuseChains); only tests set followChains. It runs on every
+// pass, deletion passes included, before anything reads a protected object.
 //
 // The chain is followed level by level, and each hop is held before it is
 // read: A1 for the level, A2 for each of its refs, then a read of each held
@@ -404,6 +408,13 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			a.MustNotConnect = true
 		}
 		return a, nil
+	}
+	// Chains are refused first (§9, "Not in this release"): the pass reads
+	// and writes nothing, so an established holder's record, and its holds
+	// with it, stay as they are. Refs are found inside another only by its
+	// Next, so a list that passes is the whole chain: one level, all direct.
+	if err := p.refuseChains(refs); err != nil {
+		return fail(err, "Refs")
 	}
 	maxDepth := p.maxDepth
 	if maxDepth == 0 {
@@ -1072,6 +1083,17 @@ func (p *protocol) wroteDeleting(id ID, namespace string, out *metav1.PartialObj
 // Missing live, and holds any that now exists. On an error, the caller
 // doesn't add its finalizer this pass.
 func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acquired) error {
+	// A pass refused for a chain held nothing, so it never establishes: a
+	// Degraded one gets here if its holder lost its finalizer meanwhile. And
+	// no ref with a Next is held here either, in an Acquired built by hand.
+	if errors.Is(a.Err, ErrChainsNotSupported) {
+		return a.Err
+	}
+	for _, u := range a.Unheld {
+		if err := p.refuseChains([]Ref{u.Ref}); err != nil {
+			return err
+		}
+	}
 	cc := p.detach(ctx)
 	defer cc.stop()
 	liveDisowned := p.liveDisown(ctx)

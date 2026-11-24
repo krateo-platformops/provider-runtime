@@ -70,6 +70,7 @@ func startStressProcess(t *testing.T, so cu.SharedOptions, mode stressMode) *str
 		o.ProbeInterval = time.Second
 		switch mode {
 		case stressChained:
+			p.s.FollowChains()
 			chainOptions(&o)
 		case stressCross:
 			o.Refs = crossRefs

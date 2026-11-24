@@ -56,10 +56,12 @@ func targetKey(name string) apimodel.Key {
 	return apimodel.Key{GK: targetGK, Namespace: "ns", Name: name}
 }
 
-// chainRig is a rig whose protocol treats Target as a content kind.
+// chainRig is a rig whose protocol follows chains, which production refuses
+// (chain_refused_test.go), and treats Target as a content kind.
 func chainRig(t *testing.T) (*rig, *fakeContents) {
 	r := newRig(t)
 	fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+	r.p.followChains = true
 	r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
 	r.p.contents = fc
 	return r, fc

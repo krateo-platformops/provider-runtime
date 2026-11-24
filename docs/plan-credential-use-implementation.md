@@ -16,6 +16,11 @@ merged at `cfd9b0f` (PR #47, 15 revisions). Section numbers (§) are the
 design's. The work ships as **v1.13.0**, and nothing is tagged until the whole
 stack has merged.
 
+**The first tag refuses chains** (the user's decision, 2026-11-24): it
+supports direct refs only, and a ref with a `Next` gets a clear error.
+Chains (PR 4) stay built and tested, and ship in the next release. See "The
+first tag refuses chains" after PR 8, and design §9.
+
 `pkg/reconciler/reconciler.go` hasn't changed since `77cce67`, so the design's
 line references (`:806`, `:821`, `:870`, `:879-885`, `:1089`, `:1125`, `:1152`)
 are still correct at `cfd9b0f`.
@@ -469,6 +474,9 @@ covers what the queue didn't (M1 of #52's review).
 2,500 of tests, driver included.
 
 ### PR 4: Chains
+
+**Not in the first tag**: production refuses a ref with a `Next` (see "The
+first tag refuses chains", after PR 8).
 
 **Scope.** Following a chain level by level, with each hop held before it is
 read, A1 again with the union, and `MaxDepth` (§9.1); `WithResolved` and
@@ -1252,6 +1260,43 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   scope. The envtest asserts that a CRD patch is allowed while the policy is
   in force.
 
+### The first tag refuses chains
+
+**Scope** (the user's decision, 2026-11-24). Reviews found defects that only
+chains reach, so the first tag supports direct refs only, and chains come in
+the next release. All chain code and its tests stay, and keep working under
+test; only production use is refused. `Guaranteed` refs without a `Next` are
+unchanged.
+
+- `ErrChainsNotSupported`, exported, which a caller matches with
+  `errors.Is` on `Acquired.Err`. It says what to do, and the error that
+  wraps it names the ref's kind, namespace and name.
+- **Refused in the protocol's `acquire`, first of all**, before the first
+  read and so before A1 and A2: `refuseChains` over the whole list
+  `RefsFunc` returned. That is the only function that follows a `Next`, and
+  every runtime's pass goes through it. It isn't in `Track`, which sees a
+  function, not refs; nor only in the reconciler's adapter, which outside
+  runtimes don't use; nor in `Tracker.Acquire`, whose failures leave the
+  missing-ref prober with refs that no refused pass could hold, and so would
+  enqueue the holder every 15s.
+- `BeforeEstablish` refuses the same, so nothing reaches A2 through an
+  `Acquired` built by hand, and a refused holder that lost its finalizer
+  mid-pass isn't established again.
+- `AssertCredentialRefsCover` fails on a ref with a `Next`, or a provider's
+  test would pass and its holders then not connect.
+- **The switch** is the protocol's unexported `followChains`, copied from the
+  Shared's test hooks, whose zero value refuses. `export_test.go` sets it.
+  `reconcilertest` has its own unexported `followChains`. A test checks that
+  no production file sets either. `pkg/reconciler`'s tests can't set it, so
+  `TestCredentialUseResolvedOnConnectsContext` moved to
+  `pkg/credentialuse`'s external tests, with the real reconciler.
+
+**Design sections:** §9, "Not in this release"; §13's adopters' text.
+
+**The next release** removes `refuseChains`, its two calls, the two
+`followChains` and the hook, after the defects the reviews found are fixed.
+Whether the sentinel stays, unused and deprecated, is decided there.
+
 ### PR 9: PerNamePoll mode and the provisioner
 
 **Scope.**
@@ -1373,6 +1418,7 @@ tests.
   an outside `MetricsRecorder`, core-provider's adapter among them, embeds
   `NopMetrics`, since the interface grows;
 - `docs/usage.md`:
+  - first, the limit: direct refs only in this release (§13's text, §9);
   - adopting the feature: `CredentialRefs`, the builder line, the predicate;
   - §13's RBAC text, and the consent text;
   - §5.2's remedy, and uninstalling (§11.5);
@@ -1419,6 +1465,7 @@ tests.
 | A cross-namespace user keeps a Secret whose namespace is terminating | 5 |
 | A Secret already being deleted: `MustNotConnect`, deletes freely | 3 (core), 7 |
 | Chain Widget → Target → Secret; re-pointed Target | 4 |
+| A chain is refused as production builds a tracker | the first tag refuses chains |
 | `kubectl replace` stripping | 3 |
 | A label-scoped watch delivers label loss as a deletion | 1 (premise), 3 |
 | R3's failed `test`: the exact code | 1 |
@@ -1785,6 +1832,10 @@ as IP1 to IP5:
    `WithHeld` and `WithHeldIndex`; `Reconcile` calls it with no options.
    `ExistsWithOptions` is added the same way, with `WithRESTMapper`, for
    owners that check outside a reconcile.
+
+On 2026-11-24 the user decided that **the first tag supports direct refs
+only**: a ref that uses a chain gets a clear error, and chains come in the
+next release.
 
 Every other item in §5 is an implementation choice within the design. All of
 them are recorded in the design doc's §17, "Revision 16".
