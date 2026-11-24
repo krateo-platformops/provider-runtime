@@ -285,6 +285,7 @@ func newProtocol(srv server, v views, ver *verified, seen *firstSight, c clock.P
 		ver:             ver,
 		seen:            seen,
 		reports:         nopReports{},
+		conflicts:       newConflictSet(),
 		newEpoch:        testEpoch,
 	}
 }

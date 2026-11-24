@@ -5,7 +5,9 @@ package credentialuse
 // implements it with OpenTelemetry (plan, PR 7); NopMetrics records nothing.
 // Implementations must be safe for concurrent use, and must not block. The
 // interface grows with the metrics: an implementation outside this module
-// embeds NopMetrics.
+// embeds NopMetrics, or *telemetry.Metrics, not both. One that embeds both has
+// each method twice, and so implements none of them, which compiles; a type
+// asserts itself: var _ credentialuse.MetricsRecorder = (*T)(nil).
 type MetricsRecorder interface {
 	// HeldObjects sets credentialuse_held_objects: the (protected object,
 	// finalizer) pairs with the kind's prefix in this process's cache.
@@ -25,8 +27,9 @@ type MetricsRecorder interface {
 	ConsentWithdrawn(holderKind string)
 	// RefsConflicting counts credentialuse_refs_conflicting_total{asked}:
 	// refs skipped though they asked for more than the first ref of the same
-	// object (§9.1), once per holder, object and thing asked for. asked is
-	// "hold" or "next", and a ref that asked for both counts in both.
+	// object (§9.1), once per holder, object and thing asked for, while the
+	// conflict lasts. asked is "hold" or "next", and a ref that asked for both
+	// counts in both. A hold counts only when it could have been made.
 	RefsConflicting(holderKind, asked string)
 	// RefsReadDenied counts credentialuse_refs_read_denied_total (§11.3).
 	RefsReadDenied(holderKind string)

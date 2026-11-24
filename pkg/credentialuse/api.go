@@ -68,7 +68,7 @@ type reports interface {
 	// RefsConflicting reports that a ref of holder h was skipped for an earlier
 	// one of the same object, ref, and asked for more: to hold it, or to
 	// follow a Next (§9.1). It is called once per holder, object and thing
-	// asked for.
+	// asked for, while the conflict lasts.
 	RefsConflicting(holder schema.GroupKind, h metav1.Object, ref ID, hold, next bool)
 }
 

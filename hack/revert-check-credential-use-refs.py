@@ -33,12 +33,15 @@ H = "pkg/reconciler/reconcilertest/"
 AQ = C + "acquire.go"
 RF = C + "ref.go"
 CH = C + "chain.go"
-CO = C + "consent.go"
+CF = C + "conflicts.go"
+IN = C + "informers.go"
 EV = C + "events.go"
 TR = C + "tracker.go"
 TE = T + "credentialuse.go"
+R = "pkg/reconciler/"
+RC = R + "credentialuse.go"
 HE = H + "credentialuse.go"
-FILES = [AQ, RF, CH, CO, EV, TR, TE, HE]
+FILES = [AQ, RF, CH, CF, IN, EV, TR, TE, RC, HE]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -59,7 +62,7 @@ MUTANTS = [
     ("the last ref wins", AQ,
      [("\t\t\tif met(r) {\n\t\t\t\tcontinue\n\t\t\t}\n", "\t\t\tmet(r)\n")]),
     ("a ref is compared with the last, not the first", AQ,
-     [("\t\tif hold || next {\n\t\t\tp.reports", "\t\tseen[id] = r\n\t\tif hold || next {\n\t\t\tp.reports")]),
+     [("\t\tif hold || next {\n\t\t\tp.conflicts.tell", "\t\tseen[id] = r\n\t\tif hold || next {\n\t\t\tp.conflicts.tell")]),
     ("a conflict at one level isn't reported", AQ,
      [("\t\t\tif met(r) {\n", "\t\t\tif _, ok := seen[id]; ok {\n")]),
     ("a conflict behind a Next isn't reported", AQ,
@@ -69,19 +72,69 @@ MUTANTS = [
     ("every ref met again is reported", AQ,
      [("\t\tif hold || next {\n", "\t\tif true || hold || next {\n")]),
     ("a hold is reported on every pass", AQ,
-     [("hold && p.holdConflicts.first(k)", "hold && (p.holdConflicts.first(k) || true)")]),
+     [("hold && !before.hold && !told.hold &&", "hold && !before.hold &&")]),
     ("a Next is reported on every pass", AQ,
-     [("next && p.nextConflicts.first(k)", "next && (p.nextConflicts.first(k) || true)")]),
+     [("next = next && !told.next", "next = next && (true || !told.next)")]),
     ("a Next's report is a hold's", AQ,
-     [("next && p.nextConflicts.first(k)", "next && p.holdConflicts.first(k)")]),
+     [("next = next && !told.next", "next = next && !told.hold")]),
+    ("a hold's report forgets the Next's", CF,
+     [("asks{t.hold || a.hold, t.next || a.next}", "asks{a.hold || false && t.hold, a.next}")]),
     ("a report is once for all holders", AQ,
-     [("\t\tk := consentKey{obj.GetUID(), id}\n\t\thold, next =", "\t\tk := consentKey{\"\", id}\n\t\thold, next =")]),
+     [("p.conflicts.told(obj.GetUID(), id)", "p.conflicts.told(\"\", id)"),
+      ("p.conflicts.tell(obj.GetUID(), id,", "p.conflicts.tell(\"\", id,")]),
     ("a report is once for all objects", AQ,
-     [("\t\tk := consentKey{obj.GetUID(), id}\n\t\thold, next =", "\t\tk := consentKey{obj.GetUID(), ID{}}\n\t\thold, next =")]),
-    ("a forgotten holder's hold stays reported", AQ,
-     [("\tp.holdConflicts.forget(obj.GetUID())\n", "")]),
-    ("a forgotten holder's Next stays reported", AQ,
-     [("\tp.nextConflicts.forget(obj.GetUID())\n", "")]),
+     [("p.conflicts.told(obj.GetUID(), id)", "p.conflicts.told(obj.GetUID(), ID{})"),
+      ("p.conflicts.tell(obj.GetUID(), id,", "p.conflicts.tell(obj.GetUID(), ID{},"),
+      ("\t\tif !unfollowed {\n\t\t\tp.conflicts.keep", "\t\tif false && !unfollowed {\n\t\t\tp.conflicts.keep")]),
+    # What was reported is forgotten (§9.1).
+    ("a forgotten holder's conflicts stay reported", AQ,
+     [("\tp.conflicts.forget(obj.GetUID())\n", "")]),
+    ("a holder with no record isn't forgotten", AQ,
+     [("\tp.conflicts.forget(obj.GetUID())\n", ""),
+      ("\tp.reported.forget(obj.GetUID())\n", "\tp.reported.forget(obj.GetUID())\n\tp.conflicts.forget(obj.GetUID())\n")]),
+    ("a deleted holder's conflicts stay reported", IN,
+     [("\th.t.proto.conflicts.forget(m.UID)\n", "")]),
+    ("a conflict that is gone stays reported", CF,
+     [("\t\t\tdelete(c.m[holder], id)\n", "\t\t\t_ = id\n")]),
+    ("what is no longer asked for stays reported", CF,
+     [("asks{t.hold && a.hold, t.next && a.next}", "t")]),
+    ("one thing no longer asked for stays reported", CF,
+     [("\t\t\tc.m[holder][id] = a\n\t\t}\n\t}\n\tif len", "\t\t\t_ = a\n\t\t}\n\t}\n\tif len")]),
+    ("a holder with nothing reported is kept", CF,
+     [("\tif len(c.m[holder]) == 0 {\n\t\tdelete(c.m, holder)\n\t}\n", "")]),
+    ("only a pass that ends forgets", AQ,
+     [("\t\t\tmetAll()\n\t\t\tu := p.unheldEntries", "\t\t\tu := p.unheldEntries")]),
+    ("only a pass whose last level leads nowhere forgets", AQ,
+     [("\t\tlevel = slices.DeleteFunc(next, met)\n\t}\n\tmetAll()\n", "\t\tlevel = slices.DeleteFunc(next, met)\n\t}\n")]),
+    ("a pass that couldn't follow a hop forgets", AQ,
+     [("\t\tif !unfollowed {\n\t\t\tp.conflicts.keep", "\t\tif true || !unfollowed {\n\t\t\tp.conflicts.keep")]),
+    ("every pass forgets as it ends", AQ,
+     [("\tlevel := refs\n\tfor depth := 1;", "\tdefer metAll()\n\tlevel := refs\n\tfor depth := 1;")]),
+    # Who could hold (§9.1).
+    ("a Disowned kind's hold is reported", CF,
+     [("\tif p.isDisowned(id.GroupKind()) {\n", "\tif false && p.isDisowned(id.GroupKind()) {\n")]),
+    ("a Disowned kind's Next isn't reported", AQ,
+     [("next = next && !told.next", "next = next && !told.next && !p.isDisowned(id.GroupKind())")]),
+    ("a hold without consent is reported", CF,
+     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldLive || g == gateHoldCached || g == gateNotHeld\n")]),
+    ("a hold with consent unknown is reported", CF,
+     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldLive || g == gateHoldCached || g == gateUnknown\n")]),
+    ("a hold of a target that is gone is reported", CF,
+     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldLive || g == gateHoldCached || g == gateMissing\n")]),
+    ("a hold with consent isn't reported", CF,
+     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldCached\n")]),
+    ("a hold in the holder's namespace needs consent", CF,
+     [("\tif id.Namespace == obj.GetNamespace() {\n", "\tif false && id.Namespace == obj.GetNamespace() {\n")]),
+    ("consent is read for each ref of one object", AQ,
+     [("hold && !before.hold && !told.hold &&", "hold && !told.hold &&")]),
+    ("consent is read once it was reported", AQ,
+     [("hold = hold && !before.hold && !told.hold && p.couldHold(ctx, obj, id)",
+       "hold = hold && !before.hold && p.couldHold(ctx, obj, id) && !told.hold")]),
+    # The recorder (§12).
+    ("a recorder that is none isn't logged", RC,
+     [("\t} else if r.metrics != nil {\n", "\t} else if false && r.metrics != nil {\n")]),
+    ("no recorder is logged", RC,
+     [("\t} else if r.metrics != nil {\n", "\t} else {\n")]),
     # The log and the metric (§12).
     ("a hold isn't counted", EV,
      [("\tif hold {\n\t\tasked", "\tif false && hold {\n\t\tasked")]),
@@ -95,6 +148,8 @@ MUTANTS = [
      [("h.GetNamespace()+\"/\"+h.GetName(), \"object\"", "\"\", \"object\"")]),
     ("the log doesn't name the object", EV,
      [("\"object\", ref.String()", "\"object\", \"\"")]),
+    ("a tracker remembers no conflict", TR,
+     [("\t\tconflicts:       newConflictSet(),\n", "")]),
     ("a tracker's conflicts aren't logged", TR,
      [(", warn: t.warn}", "}")]),
     ("a tracker's conflicts aren't counted", TR,
@@ -145,6 +200,8 @@ MUTANTS = [
 ]
 
 CONFLICT = "TestRefsConflicting"
+FORGOT = "TestRefsConflictingForgotten"
+COULD = "TestRefsConflictingThatCouldNotBeHeld"
 COVER = "TestAssertCredentialRefsCoverRefsThatConflict"
 RULES = "TestAssertCredentialRefsCoverEnforcesTheRuntimesRules"
 SHAPE = "TestAssertCredentialRefsCoverGivesNextTheRuntimesObject"
@@ -167,14 +224,36 @@ KILLERS = {
     "a Next's report is a hold's": {C: CONFLICT},
     "a report is once for all holders": {C: CONFLICT},
     "a report is once for all objects": {C: CONFLICT},
-    "a forgotten holder's hold stays reported": {C: CONFLICT},
-    "a forgotten holder's Next stays reported": {C: CONFLICT},
+    "a hold's report forgets the Next's": {C: "TestConflictSet"},
+    "a forgotten holder's conflicts stay reported": {C: CONFLICT},
+    "a holder with no record isn't forgotten": {C: CONFLICT},
+    "a deleted holder's conflicts stay reported": {C: FORGOT},
+    "a conflict that is gone stays reported": {C: FORGOT},
+    "what is no longer asked for stays reported": {C: FORGOT},
+    "one thing no longer asked for stays reported": {C: FORGOT},
+    "a holder with nothing reported is kept": {C: "TestConflictSet"},
+    "only a pass that ends forgets": {C: FORGOT},
+    "only a pass whose last level leads nowhere forgets": {C: FORGOT},
+    "a pass that couldn't follow a hop forgets": {C: FORGOT},
+    "every pass forgets as it ends": {C: FORGOT},
+    "a Disowned kind's hold is reported": {C: COULD},
+    "a Disowned kind's Next isn't reported": {C: COULD},
+    "a hold without consent is reported": {C: COULD},
+    "a hold with consent unknown is reported": {C: COULD},
+    "a hold of a target that is gone is reported": {C: COULD},
+    "a hold with consent isn't reported": {C: COULD},
+    "a hold in the holder's namespace needs consent": {C: CONFLICT},
+    "consent is read for each ref of one object": {C: COULD},
+    "consent is read once it was reported": {C: COULD},
+    "a recorder that is none isn't logged": {R: "TestCredentialUseMetricsRecorderThatIsNone"},
+    "no recorder is logged": {R: "TestCredentialUseMetricsRecorderThatIsNone"},
     "a hold isn't counted": {C: "TestRefsConflictingReport"},
     "a Next isn't counted": {C: "TestRefsConflictingReport"},
     "what is asked for is mislabelled": {C: "TestRefsConflictingReport"},
     "a conflict isn't logged": {C: "TestRefsConflictingReport"},
     "the log doesn't name the holder": {C: "TestRefsConflictingReport"},
     "the log doesn't name the object": {C: "TestRefsConflictingReport"},
+    "a tracker remembers no conflict": {C: "TestRefsConflictingOfATracker"},
     "a tracker's conflicts aren't logged": {C: "TestRefsConflictingOfATracker"},
     "a tracker's conflicts aren't counted": {C: "TestRefsConflictingOfATracker"},
     "the metric isn't labelled with what was asked": {T: "TestCredentialUseMetrics"},

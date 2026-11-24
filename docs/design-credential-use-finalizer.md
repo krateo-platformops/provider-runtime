@@ -1825,9 +1825,24 @@ error: a `Next` names objects from data a tenant may write, and an error would
 let that data stop the holder. Each conflict is a warning in the log, naming
 the holder, the object and what was asked, and counts in
 `credentialuse_refs_conflicting_total{asked}`, `asked` being `hold` or `next`
-(§12). It is reported once per holder, object and thing asked for, until the
-holder's `Forget`, or the process's restart. **In a provider's tests it is
-refused**: `AssertCredentialRefsCover` fails on a conflict (§11.9).
+(§12). **In a provider's tests it is refused**: `AssertCredentialRefsCover`
+fails on a conflict (§11.9).
+
+**A hold that couldn't have been made is not reported**: one of a kind the
+Disown switch covers (§7.4), or in another namespace without its target's
+consent (§11.3). Consent is learned as for a ref that isn't held: from the
+caches, or with live reads on each pass, until the conflict is reported, and
+then no more. An unknown consent, or a target that is gone, reports nothing.
+
+**A conflict is reported once while it lasts**, per holder, object and thing
+asked for. What was reported is forgotten when the holder's refs no longer
+conflict so, at its `Forget`, and when it is deleted, so a holder keeps no
+more than its refs ask for. Refs behind a hop the pass can't follow are
+unknown, so only a pass that met all the holder's refs forgets. One of direct
+refs meets them all before it writes anything. A chain that is never
+whole keeps what was reported of it until the holder goes. The log has one
+line for each conflict of each holder after each restart of the process, and
+one each time an edit brings a conflict about.
 
 The first is first in the order the pass meets refs: by level, and at the
 first level in the order `CredentialRefs` returned them, so a conflict among
@@ -3276,7 +3291,8 @@ These are the cases the bookkeeping misses, and how each is handled:
      `status` (`credentialuse.NextObject`). It fails on what would stop a
      holder, a chain that is too deep, a held ref with a `Next` of a kind
      without `Content`, or a `Next`'s error; and on refs of one object that
-     conflict (§9.1), which would not;
+     conflict (§9.1), which would not. (TODO, for the release with chains:
+     the helper takes a `Next`'s version from `o.Protected`);
    - **at run time:** `reconciler.CredentialUseCheckingReader(reader, ...)`
      wraps the provider's controller-runtime client. A read of a protected
      kind absent from the object's record logs once per object and counts in

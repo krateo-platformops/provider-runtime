@@ -47,7 +47,7 @@ type Ref struct {
 // object, doesn't: to hold the object, where first is Guaranteed; and to follow
 // a Next, where first has none. Two different Nexts can't be told apart. An
 // Acquire takes the first ref it meets of an object, and reports a later one
-// that asks for more (§9.1).
+// that asks for more, for a hold only when it could have been made (§9.1).
 func (r Ref) AsksMoreThan(first Ref) (hold, next bool) {
 	return first.Guaranteed && !r.Guaranteed, first.Next == nil && r.Next != nil
 }

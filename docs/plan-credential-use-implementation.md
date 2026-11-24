@@ -510,7 +510,8 @@ of tests.
   counted against `MaxDepth`. The first ref met of an object wins; a later one
   that asks for more, a hold or a `Next`, is a warning and a metric, and a
   failure of `AssertCredentialRefsCover` only (2026-11-24, after the build;
-  §9.1). Before, it was skipped in silence.
+  §9.1). Before, it was skipped in silence. What was reported is kept by
+  holder, and only while the conflict lasts.
 - **A `Next` returns an error, never nil refs,** when the object lacks what
   it reads, and puts none of its values in the error (§9.1, 2026-11-24).
 - **A lister that returns neither an object nor an error is an Acquire

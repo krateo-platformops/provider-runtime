@@ -224,6 +224,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		namespaceViews:  trackerViews{t},
 		backoff:         newConsentBackoff(o.PollInterval),
 		reported:        newReportedSet(),
+		conflicts:       newConflictSet(),
 		written:         newRecordWrites(),
 		unheldReads:     s.unheldReads,
 		enqueueBatch: func(id ID, ns string) {

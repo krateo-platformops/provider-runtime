@@ -130,10 +130,9 @@ type protocol struct {
 	unheldReads    *sharedReads
 	enqueueBatch   func(id ID, holderNamespace string)
 
-	// holdConflicts and nextConflicts are the refs already reported as asking
-	// for a hold, or a Next, that the first ref of the same object doesn't
-	// (§9.1).
-	holdConflicts, nextConflicts reportedSet
+	// conflicts remembers which refs were reported as conflicting (§9.1); nil
+	// remembers nothing.
+	conflicts *conflictSet
 
 	// written remembers what each holder's last A1 left, for the holder
 	// event filter (IsOwnRecordWrite, §7.5); nil remembers nothing.
@@ -292,9 +291,11 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 
 	byID := map[ID]Ref{} // every held ref of the chain so far
 	seen := map[ID]Ref{} // the first ref met of each object, which wins (§9.1)
+	// asked is what later refs of an object asked for that the first doesn't.
+	asked := map[ID]asks{}
 	// met reports whether r's object was met. It reports what r asks for that
 	// the first ref of the object doesn't, once per holder, object and thing
-	// asked for.
+	// asked for, and a hold only when it could have been made (§9.1).
 	met := func(r Ref) bool {
 		id := r.ID()
 		first, ok := seen[id]
@@ -302,9 +303,12 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			return false
 		}
 		hold, next := r.AsksMoreThan(first)
-		k := consentKey{obj.GetUID(), id}
-		hold, next = hold && p.holdConflicts.first(k), next && p.nextConflicts.first(k)
+		before, told := asked[id], p.conflicts.told(obj.GetUID(), id)
+		asked[id] = asks{before.hold || hold, before.next || next}
+		hold = hold && !before.hold && !told.hold && p.couldHold(ctx, obj, id)
+		next = next && !told.next
 		if hold || next {
+			p.conflicts.tell(obj.GetUID(), id, asks{hold, next})
 			p.reports.RefsConflicting(p.holder, obj, id, hold, next)
 		}
 		return true
@@ -317,6 +321,14 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// holder stopped naming for another reason is kept too, until a pass
 	// follows the whole chain again: a longer hold, which §5 bounds.
 	unfollowed := false
+	// metAll forgets the conflicts that are no more, once the pass has met all
+	// the holder's refs. A pass that can't, such as one behind a Missing hop,
+	// forgets none.
+	metAll := func() {
+		if !unfollowed {
+			p.conflicts.keep(obj.GetUID(), asked)
+		}
+	}
 	rec0 := ReadRecord(obj)                   // the record as the pass found it
 	found := ReadUnheld(obj.GetAnnotations()) // the unheld list as the pass found it
 	listed := map[string]bool{}
@@ -512,6 +524,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		want := exact()
 		var unheldNow *[]UnheldEntry
 		if last := !chained && len(next) == 0; last {
+			metAll()
 			u := p.unheldEntries(found, notHeld, keepEntry, &passNow)
 			unheldNow = &u
 		} else if rec := ReadRecord(obj); !rec.Unparseable {
@@ -671,6 +684,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		// against MaxDepth.
 		level = slices.DeleteFunc(next, met)
 	}
+	metAll()
 	for id := range readOK {
 		if readOK[id] {
 			p.backoff.succeed(consentKey{obj.GetUID(), id})
@@ -934,9 +948,8 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 // the caller's owner-finalizer removal writes it in the same write (§8). It
 // reports whether anything changed.
 func (p *protocol) forget(obj metav1.Object) bool {
-	// These first: a holder whose refs are all Guaranteed may have no record.
-	p.holdConflicts.forget(obj.GetUID())
-	p.nextConflicts.forget(obj.GetUID())
+	// First: a holder whose refs are all Guaranteed may have no record.
+	p.conflicts.forget(obj.GetUID())
 	an := obj.GetAnnotations()
 	_, hasRefs := an[AnnotationRefs]
 	_, hasUnheld := an[AnnotationUnheld]

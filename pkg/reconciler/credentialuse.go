@@ -206,6 +206,10 @@ func (r *Reconciler) setupCredentialUse(m manager.Manager, gvk schema.GroupVersi
 	metrics := credentialuse.MetricsRecorder(credentialuse.NopMetrics{})
 	if mr, ok := r.metrics.(credentialuse.MetricsRecorder); ok {
 		metrics = mr
+	} else if r.metrics != nil {
+		// It may lack a method the interface grew, or embed two recorders.
+		r.log.Warn("credential-use: the recorder given to WithMetrics isn't a credentialuse.MetricsRecorder, so no credentialuse_ metric is recorded: "+
+			"embed credentialuse.NopMetrics, or *telemetry.Metrics, not both", "kind", r.kind, "recorder", fmt.Sprintf("%T", r.metrics))
 	}
 	refs := c.refs
 	o := credentialuse.Options{

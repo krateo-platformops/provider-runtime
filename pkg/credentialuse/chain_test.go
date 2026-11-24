@@ -565,6 +565,35 @@ func TestRefsConflictingForgotten(t *testing.T) {
 	})
 }
 
+// A set keeps nothing of a holder that asks for nothing, so it doesn't grow
+// with the holders ever seen.
+func TestConflictSet(t *testing.T) {
+	c := newConflictSet()
+	cd := targetID("cd")
+	c.tell("u1", cd, asks{hold: true})
+	c.tell("u2", cd, asks{next: true})
+	c.tell("u1", cd, asks{next: true})
+	if got := c.told("u1", cd); got != (asks{hold: true, next: true}) {
+		t.Errorf("told of u1 = %+v, want both", got)
+	}
+	c.keep("u1", map[ID]asks{cd: {}})
+	c.forget("u2")
+	if len(c.m) != 0 {
+		t.Errorf("kept %v", c.m)
+	}
+	c.keep("u3", map[ID]asks{cd: {hold: true}})
+	if len(c.m) != 0 {
+		t.Errorf("keep added %v", c.m)
+	}
+	var none *conflictSet // remembers nothing
+	none.tell("u1", cd, asks{hold: true})
+	none.keep("u1", nil)
+	none.forget("u1")
+	if got := none.told("u1", cd); got != (asks{}) {
+		t.Errorf("a nil set remembers %+v", got)
+	}
+}
+
 // A hold that couldn't have been made isn't reported (§9.1): of a kind the
 // Disown switch covers, or in another namespace without its target's consent.
 // Consent is read until the conflict is reported, once a pass, and not after.
@@ -686,13 +715,16 @@ func TestRefsConflictingReport(t *testing.T) {
 }
 
 // A tracker's conflicts go to its own sinks: the metric of its recorder, and
-// its logger.
+// its logger; and it remembers them.
 func TestRefsConflictingOfATracker(t *testing.T) {
 	r := newFakeRig(t)
 	tr := r.track(t, widgetGK)
 	rep, ok := tr.proto.reports.(coreReports)
 	if !ok || rep.warn == nil {
 		t.Fatalf("the tracker's reports = %+v; want coreReports that log", tr.proto.reports)
+	}
+	if tr.proto.conflicts == nil {
+		t.Error("the tracker remembers no conflict, so it reports each on every pass")
 	}
 	rep.RefsConflicting(widgetGK, &metav1.PartialObjectMetadata{}, targetID("cd"), true, false)
 	if n := r.metrics.count("refs_conflicting " + kindLabel(widgetGK) + " hold"); n != 1 {
