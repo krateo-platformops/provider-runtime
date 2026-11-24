@@ -239,6 +239,9 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 					if !ok {
 						return
 					}
+					if len(ids) == 0 {
+						t.Errorf("a batch of %v with no objects, which asks for the whole namespace", k)
+					}
 					mu.Lock()
 					for _, id := range ids {
 						delete(owed[k], id)
@@ -431,7 +434,7 @@ func TestARetryThatFailsIsTakenAgain(t *testing.T) {
 }
 
 // Every schedule of one thing that happens while Fail is between its two
-// steps: the object is retried once, at its time, or decided; never lost, and
+// steps, and of some that happen one after the other: the object is retried once, at its time, or decided; never lost, and
 // nothing is left.
 func TestFailBetweenItsTwoSteps(t *testing.T) {
 	ctx := context.Background()
@@ -464,6 +467,12 @@ func TestFailBetweenItsTwoSteps(t *testing.T) {
 			clk.Step(d)
 			q.Settle(k, id)
 		}, early: true, now: true},
+		// The clock has the timer and Settle doesn't: it fires once nothing
+		// waits for it.
+		"it is settled, and the timer fires": {during: func(_ *testing.T, q *batchQueue, clk *testingclock.FakeClock, d time.Duration) {
+			q.Settle(k, id)
+			clk.Step(d)
+		}, early: true},
 		"it is settled, and fails again": {during: func(t *testing.T, q *batchQueue, _ *testingclock.FakeClock, _ time.Duration) {
 			q.Settle(k, id)
 			if d := q.Fail(k, id); d != time.Second {
@@ -505,7 +514,10 @@ func TestFailBetweenItsTwoSteps(t *testing.T) {
 					}
 					got, ids, _ := q.Get(ctx)
 					q.Done(got)
-					return got == k && slices.Equal(ids, []ID{id})
+					if got != k || !slices.Equal(ids, []ID{id}) {
+						t.Errorf("the batch of %v is %v, want the object alone: none asks for the whole namespace", got, ids)
+					}
+					return true
 				}
 				if got := taken(); got != c.now {
 					t.Errorf("taken at once: %v, want %v", got, c.now)

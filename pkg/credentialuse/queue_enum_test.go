@@ -203,6 +203,9 @@ func (s *enumState) apply(o enumOp) {
 				s.fail("worker %d took %v, which worker %d holds", o.worker, k, w)
 			}
 		}
+		if len(ids) == 0 {
+			s.fail("the batch of %v has no objects, which asks for the whole namespace", k)
+		}
 		for _, id := range ids {
 			if !s.since[k][id] {
 				s.fail("the batch of %v has %s, not added since its last take", k, id)
