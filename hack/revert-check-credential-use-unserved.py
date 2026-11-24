@@ -91,7 +91,7 @@ MUTANTS = [
     ("a disowned hop that is gone fails the pass", AQ,
      [("\t\tif Classify(err) == ClassNotFound {\n\t\t\treturn nil, nil\n\t\t}\n\t\tif err != nil {\n\t\t\treturn nil, fmt.Errorf(\"credential-use: reading the disowned", "\t\tif err != nil {\n\t\t\treturn nil, fmt.Errorf(\"credential-use: reading the disowned")]),
     ("a batch stops at an object it can't read", RL,
-     [("\t\t\t\terrs = append(errs, fmt.Errorf(\"credential-use: reading %s: %w\", id, err))\n\t\t\t\tcontinue\n", "\t\t\t\treturn res, fmt.Errorf(\"credential-use: reading %s: %w\", id, err)\n")]),
+     [("\t\t\t\tfail(fmt.Errorf(\"credential-use: reading %s: %w\", id, err), id)\n\t\t\t\tcontinue\n", "\t\t\t\treturn res, fmt.Errorf(\"credential-use: reading %s: %w\", id, err)\n")]),
     ("no event names the kind Disown can't list", DS,
      [("\tt.s.events.record(crd, \"Warning\", EventDisownUnreadable, \"Disown can't \"+what+", "\t(*eventSink)(nil).record(crd, \"Warning\", EventDisownUnreadable, \"Disown can't \"+what+")]),
     # Only a read's 404 says gone.

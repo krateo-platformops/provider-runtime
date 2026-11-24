@@ -15,6 +15,8 @@ package credentialuse
 //     previous batch was taken;
 //   - a key is never queued twice: Len never exceeds the keys waiting;
 //   - a timer adds nothing before its time, and nothing after ShutDown;
+//   - a key has one pending retry, which adds every object given to it, at
+//     the soonest of their times;
 //   - after ShutDown, Get takes nothing and Add queues nothing.
 //
 // The goroutine races are the D1 probes' (shared_unit_test.go), and the
@@ -33,7 +35,7 @@ import (
 
 // An enumOp is one operation of a scenario.
 type enumOp struct {
-	kind   string // add, after, step, get, done, rescan, shutdown
+	kind   string // add, after, retry, soon, step, get, done, rescan, shutdown
 	key    string // A or B
 	id     string
 	worker int
@@ -41,7 +43,7 @@ type enumOp struct {
 
 func (o enumOp) String() string {
 	switch o.kind {
-	case "add", "after":
+	case "add", "after", "retry", "soon":
 		return o.kind + "(" + o.key + o.id + ")"
 	case "get", "done":
 		return fmt.Sprintf("%s%d", o.kind, o.worker)
@@ -67,6 +69,13 @@ type enumState struct {
 	since map[batchKey]map[ID]bool
 	// timers are the AddAfters not yet fired: when, and what.
 	timers []enumTimer
+	// retries are each key's pending retry: when, and what.
+	retries map[batchKey]*enumRetry
+}
+
+type enumRetry struct {
+	at  time.Time
+	ids map[ID]bool
 }
 
 type enumTimer struct {
@@ -83,7 +92,7 @@ const enumDelay = time.Second
 func newEnumState(t *testing.T, order string) *enumState {
 	clk := testingclock.NewFakeClock(time.Unix(0, 0))
 	return &enumState{t: t, order: order, clk: clk, q: newBatchQueue(clk), start: clk.Now(),
-		held: map[int]batchKey{}, owed: map[batchKey]map[ID]bool{}, since: map[batchKey]map[ID]bool{}}
+		held: map[int]batchKey{}, owed: map[batchKey]map[ID]bool{}, since: map[batchKey]map[ID]bool{}, retries: map[batchKey]*enumRetry{}}
 }
 
 func (s *enumState) fail(format string, args ...any) {
@@ -119,6 +128,25 @@ func (s *enumState) apply(o enumOp) {
 		s.q.AddAfter(enumKey(o.key), enumDelay, enumID(o.id))
 		if !s.stopped {
 			s.timers = append(s.timers, enumTimer{s.clk.Now().Add(enumDelay), enumKey(o.key), enumID(o.id)})
+		}
+	case "retry", "soon":
+		d := enumDelay // or sooner than the step
+		if o.kind == "soon" {
+			d /= 2
+		}
+		k := enumKey(o.key)
+		s.q.Retry(k, d, enumID(o.id))
+		if s.stopped {
+			break
+		}
+		rt := s.retries[k]
+		if rt == nil {
+			rt = &enumRetry{at: s.clk.Now().Add(d), ids: map[ID]bool{}}
+			s.retries[k] = rt
+		}
+		rt.ids[enumID(o.id)] = true
+		if at := s.clk.Now().Add(d); at.Before(rt.at) {
+			rt.at = at
 		}
 	case "step":
 		s.step(enumDelay / 2)
@@ -163,6 +191,7 @@ func (s *enumState) apply(o enumOp) {
 		s.q.ShutDown()
 		s.stopped = true
 		s.timers = nil
+		clear(s.retries)
 	}
 	s.check()
 }
@@ -180,6 +209,14 @@ func (s *enumState) step(d time.Duration) {
 		}
 	}
 	s.timers = left
+	for k, rt := range s.retries {
+		if !now.Before(rt.at) {
+			for id := range rt.ids {
+				s.added(k, id)
+			}
+			delete(s.retries, k)
+		}
+	}
 }
 
 // check holds after every step.
@@ -203,6 +240,12 @@ func (s *enumState) check() {
 	}
 	if s.q.Len() > waiting {
 		s.fail("Len is %d with %d keys waiting: a key is queued twice", s.q.Len(), waiting)
+	}
+	s.q.mu.Lock()
+	timers, retries := len(s.q.timers), len(s.q.retries)
+	s.q.mu.Unlock()
+	if timers != len(s.timers)+len(s.retries) || retries != len(s.retries) {
+		s.fail("%d timers, %d of them retries; want %d and %d", timers, retries, len(s.timers)+len(s.retries), len(s.retries))
 	}
 	// Nothing is pending that the model hasn't added: a timer not yet due
 	// has added nothing (the review of #114).
@@ -300,7 +343,7 @@ func ops(spec string) []enumOp {
 	var out []enumOp
 	for _, f := range strings.Fields(spec) {
 		switch {
-		case strings.HasPrefix(f, "add") || strings.HasPrefix(f, "after"):
+		case strings.Contains(f, ":"):
 			kind, rest, _ := strings.Cut(f, ":")
 			out = append(out, enumOp{kind: kind, key: rest[:1], id: rest[1:]})
 		case strings.HasPrefix(f, "get") || strings.HasPrefix(f, "done"):
@@ -328,6 +371,9 @@ func TestBatchQueueEveryOrdering(t *testing.T) {
 		"two workers, one key":        "add:A1 add:A2 get1 get2 done1 done2 add:A1",
 		"work, then more for the key": "add:A1 get1 add:A2 add:B1 done1 get2 done2",
 		"timers":                      "after:A1 add:A2 after:B2 step step get1 done1",
+		"one pending retry":           "retry:A1 retry:A2 soon:A3 retry:B1 step step get1 done1",
+		"a retry and a grace":         "retry:A1 after:A2 add:A1 step step get1 done1",
+		"stop with retries":           "retry:A1 soon:A2 step get1 shutdown done1 retry:A3",
 		"the rescan":                  "rescan add:A2 after:B1 step get1 get2 done1 done2",
 		"stop":                        "add:A1 after:B2 get1 step shutdown done1 add:A2",
 		"stop with both held":         "add:A1 add:B2 get1 get2 after:A2 shutdown done1 done2",

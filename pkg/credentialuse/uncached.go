@@ -72,32 +72,33 @@ func (s *Shared) computeUncachedKinds(t *Tracker) []schema.GroupKind {
 	return out
 }
 
-// sweepMarkers queues for the janitor every object of ts's protected kinds,
-// in every namespace, that carries one of their marker labels but not the
-// held label. A PerName kind is left out: the list would be forbidden under
-// resourceNames RBAC, and its per-name watches show the janitor every object
-// its index names, labelled or not (§13 shape 1).
-func (s *Shared) sweepMarkers(ctx context.Context, ts []*Tracker) error {
-	for _, t := range ts {
-		var kinds []schema.GroupKind
-		for _, pk := range t.o.Protected {
-			if pk.Watch == PerName {
-				continue
-			}
-			if gk := pk.GVK.GroupKind(); !slices.Contains(kinds, gk) {
-				kinds = append(kinds, gk)
-			}
+// sweepKinds returns t's protected kinds that sweepMarkers lists. A PerName
+// kind is left out: the list would be forbidden under resourceNames RBAC, and
+// its per-name watches show the janitor every object its index names, labelled
+// or not (§13 shape 1).
+func sweepKinds(t *Tracker) []schema.GroupKind {
+	var kinds []schema.GroupKind
+	for _, pk := range t.o.Protected {
+		if pk.Watch == PerName {
+			continue
 		}
-		for _, gk := range kinds {
-			items, err := s.liveList(ctx, gk, "", MarkerLabel(t.gk)+",!"+LabelHeld)
-			if err != nil {
-				return err
-			}
-			for i := range items {
-				if m := &items[i]; s.needsJanitor(m) {
-					s.janitor.Add(ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name})
-				}
-			}
+		if gk := pk.GVK.GroupKind(); !slices.Contains(kinds, gk) {
+			kinds = append(kinds, gk)
+		}
+	}
+	return kinds
+}
+
+// sweepMarkers queues for the janitor every object of gk, in every namespace,
+// that carries t's marker label but not the held label.
+func (s *Shared) sweepMarkers(ctx context.Context, t *Tracker, gk schema.GroupKind) error {
+	items, err := s.liveList(ctx, gk, "", MarkerLabel(t.gk)+",!"+LabelHeld)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		if m := &items[i]; s.needsJanitor(m) {
+			s.janitor.Add(ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name})
 		}
 	}
 	return nil
@@ -158,13 +159,16 @@ func listResource(ctx context.Context, cl Clients, gk schema.GroupKind, gvr sche
 
 // liveHeldIn returns the objects outside the caches that carry t's
 // finalizer for holder namespace n, read live: what a batch added with no
-// objects covers in a namespace the caches don't.
+// objects covers in a namespace the caches don't. A kind it can't list doesn't
+// stop the others: it returns theirs, with the error.
 func (s *Shared) liveHeldIn(ctx context.Context, t *Tracker, n string) ([]ID, error) {
 	var out []ID
+	var errs []error
 	for _, gk := range s.uncachedKinds(t) {
 		items, err := s.liveHeld(ctx, gk, n)
 		if err != nil {
-			return nil, err
+			errs = append(errs, err)
+			continue
 		}
 		for i := range items {
 			m := &items[i]
@@ -173,7 +177,7 @@ func (s *Shared) liveHeldIn(ctx context.Context, t *Tracker, n string) ([]ID, er
 			}
 		}
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 // recheckUncached is the write loops' recheck of what the caches can't
@@ -191,20 +195,30 @@ func (s *Shared) liveHeldIn(ctx context.Context, t *Tracker, n string) ([]ID, er
 //     so a third party that strips it and leaves a marker leaves an object
 //     no informer delivers, and scaletozero selects on the marker (§11.6).
 //
-// It retries a failed list with the release loop's backoff until it
-// succeeds or ctx ends: a recheck that is skipped can strand a hold for
-// good.
+// It retries what failed of it, and only that, with the release loop's backoff
+// until it succeeds or ctx ends: a recheck that is skipped can strand a hold
+// for good.
 func (s *Shared) recheckUncached(ctx context.Context, ts []*Tracker) {
+	left := s.recheckParts(ts)
 	for attempt := 0; ; attempt++ {
-		err := s.recheckUncachedOnce(ctx, ts)
-		if err == nil || ctx.Err() != nil {
-			return
+		d := min(releaseBackoffBase<<min(attempt, 8), releaseBackoffMax)
+		var failed []recheckPart
+		for _, p := range left {
+			err := p.run(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err == nil {
+				continue
+			}
+			failed = append(failed, p)
+			for _, t := range p.ts {
+				t.warn("credential-use: the recheck of the held objects outside the caches failed; it is retried",
+					"kind", t.gk.String(), "retryIn", d.String(), "error", err.Error())
+			}
 		}
-		d := releaseBackoffBase << min(attempt, 8)
-		d = min(d, releaseBackoffMax)
-		for _, t := range ts {
-			t.warn("credential-use: the recheck of the held objects outside the caches failed; it is retried",
-				"kind", t.gk.String(), "retryIn", d.String(), "error", err.Error())
+		if left = failed; len(left) == 0 {
+			return
 		}
 		select {
 		case <-ctx.Done():
@@ -214,20 +228,26 @@ func (s *Shared) recheckUncached(ctx context.Context, ts []*Tracker) {
 	}
 }
 
-// recheckUncachedOnce is one try of recheckUncached. Every part runs,
-// whatever fails before it, and their errors are joined: an
-// object one tracker can't read must not stop another's recheck, nor §10.5's
-// lists.
-func (s *Shared) recheckUncachedOnce(ctx context.Context, ts []*Tracker) error {
-	var errs []error
-	if err := s.sweepMarkers(ctx, ts); err != nil {
-		errs = append(errs, err)
+// A recheckPart is one part of recheckUncached, for trackers ts. Each runs
+// whatever fails before it, and is retried alone: an object, or a kind, one
+// tracker can't read must stop neither another's recheck nor §10.5's lists,
+// and must not repeat them.
+type recheckPart struct {
+	ts  []*Tracker
+	run func(context.Context) error
+}
+
+func (s *Shared) recheckParts(ts []*Tracker) []recheckPart {
+	var parts []recheckPart
+	for _, t := range ts {
+		for _, gk := range sweepKinds(t) {
+			parts = append(parts, recheckPart{[]*Tracker{t}, func(ctx context.Context) error { return s.sweepMarkers(ctx, t, gk) }})
+		}
 	}
 	for _, t := range ts {
 		if t.idx != nil {
-			if err := s.recheckIndex(ctx, t); err != nil {
-				errs = append(errs, err)
-			}
+			done := map[ID]bool{}
+			parts = append(parts, recheckPart{[]*Tracker{t}, func(ctx context.Context) error { return s.recheckIndex(ctx, t, done) }})
 		}
 	}
 	byKind := map[schema.GroupKind][]*Tracker{}
@@ -241,25 +261,31 @@ func (s *Shared) recheckUncachedOnce(ctx context.Context, ts []*Tracker) error {
 		}
 	}
 	for _, gk := range kinds {
-		items, err := s.liveHeld(ctx, gk, "")
-		if err != nil {
-			errs = append(errs, err)
+		parts = append(parts, recheckPart{byKind[gk], func(ctx context.Context) error { return s.recheckHeld(ctx, gk, byKind[gk]) }})
+	}
+	return parts
+}
+
+// recheckHeld enqueues the batch of every (K, N) finalizer of ts on every held
+// object of gk outside the caches (§10.5).
+func (s *Shared) recheckHeld(ctx context.Context, gk schema.GroupKind, ts []*Tracker) error {
+	items, err := s.liveHeld(ctx, gk, "")
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		m := &items[i]
+		if s.namespaceCached(m.Namespace) {
 			continue
 		}
-		for i := range items {
-			m := &items[i]
-			if s.namespaceCached(m.Namespace) {
-				continue
-			}
-			id := ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name}
-			for _, t := range byKind[gk] {
-				for n := range holds(t, m) {
-					s.queue.Add(batchKey{t.gk, n}, id)
-				}
+		id := ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name}
+		for _, t := range ts {
+			for n := range holds(t, m) {
+				s.queue.Add(batchKey{t.gk, n}, id)
 			}
 		}
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // uncachedDeleting enqueues, for a namespace outside the caches that starts

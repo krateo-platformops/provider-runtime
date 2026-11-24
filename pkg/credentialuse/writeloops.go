@@ -173,10 +173,11 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 	}
 }
 
-// releaseBatch runs one batch (§6.2 R0 to R3), and requeues it as its
-// result says: at the time it asks for, as at a grace's end; with backoff
-// after an error; at once, for the next write loops, when ctx ended under
-// it. A batch that fillAll marks, from an Add with no objects, also covers
+// releaseBatch runs one batch (§6.2 R0 to R3), and requeues its objects as its
+// result says: what it decided at the time it asks for, as at a grace's end;
+// what it couldn't, and only that, with backoff, or at once, for the next
+// write loops, when ctx ended under it. A namespace's list that fails is
+// retried so too, and doesn't hold up what there is. A batch that fillAll marks, from an Add with no objects, also covers
 // every object of its namespace that holds K's finalizer for N, which
 // heldIn lists, beside the objects added to it since. A batch for a kind
 // that a Track is adding waits for that Track: it
@@ -191,64 +192,74 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		return
 	}
 	fill := len(ids) == 0 || slices.Contains(ids, fillAll)
+	failed := map[ID]bool{} // what is retried with backoff
+	var errs []error
 	if fill {
 		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return id == fillAll })
 		held, err := s.heldIn(ctx, t, k.Namespace)
 		if err != nil {
-			s.retryBatch(ctx, t, k, append(ids, fillAll), err)
-			return
+			errs = append(errs, err)
+			failed[fillAll] = true
 		}
 		ids = SortedIDs(append(ids, held...))
 		ids = slices.Compact(ids)
 	}
-	if len(ids) == 0 {
-		return
-	}
 	res, err := t.proto.release(ctx, k.Namespace, ids)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, id := range res.Failed {
+		failed[id] = true
+	}
 	s.reportKept(t, k, res.Kept)
 	if t.idx != nil {
 		// The prune after R3, in one write per batch (§10.6.2, L1). One that
-		// fails retries the batch, whose R1 finds the objects bare again.
-		if perr := t.idx.prune(ctx, t.idx.prunable(res.Bare)); perr != nil {
-			err = errors.Join(err, perr)
+		// fails retries its objects, which R1 finds bare again.
+		bare := t.idx.prunable(res.Bare)
+		if err := t.idx.prune(ctx, bare); err != nil {
+			errs = append(errs, err)
+			for _, id := range bare {
+				failed[id] = true
+			}
 		}
 	}
-	if err != nil {
-		s.retryBatch(ctx, t, k, ids, err)
-		return
+	decided := slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return failed[id] })
+	t.keptUncached(decided, res.Kept)
+	if fill && !failed[fillAll] {
+		s.backoff.settle(k, fillAll)
 	}
-	t.keptUncached(ids, res.Kept)
-	s.backoff.reset(k)
-	if !res.RequeueAt.IsZero() {
-		s.queue.AddAfter(k, res.RequeueAt.Sub(s.clock.Now()), ids...)
+	s.backoff.settle(k, decided...)
+	if !res.RequeueAt.IsZero() { // which an object it decided asked for
+		s.queue.AddAfter(k, res.RequeueAt.Sub(s.clock.Now()), decided...)
+	}
+	if len(errs) > 0 {
+		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), errors.Join(errs...))
 	}
 }
 
-// retryBatch requeues batch (k, ids) after err: at once, for the next write
-// loops, when ctx ended under it; otherwise with backoff.
+// retryBatch requeues objects ids of batch k after err: at once, for the next
+// write loops, when ctx ended under it; otherwise with backoff, in k's one
+// pending retry.
 func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []ID, err error) {
 	if ctx.Err() != nil {
 		s.queue.Add(k, ids...)
 		return
 	}
-	d := s.backoff.fail(k)
-	t.warn("credential-use: a release batch failed; it is retried with backoff",
-		"kind", t.gk.String(), "namespace", k.Namespace, "retryIn", d.String(), "error", err.Error())
-	s.queue.AddAfter(k, d, ids...)
+	d := s.backoff.fail(k, ids...)
+	t.warn("credential-use: a release batch failed; what failed of it is retried with backoff",
+		"kind", t.gk.String(), "namespace", k.Namespace, "objects", len(ids), "retryIn", d.String(), "error", err.Error())
+	s.queue.Retry(k, d, ids...)
 }
 
 // heldIn returns the protected objects that carry t's finalizer for holder
 // namespace n: what a batch added with no objects covers. They are read
 // from the caches, the per-name ones included, and live in a namespace the
-// caches don't cover (§10.5).
+// caches don't cover (§10.5). On an error it still returns what it could read.
 func (s *Shared) heldIn(ctx context.Context, t *Tracker, n string) ([]ID, error) {
 	var out []ID
+	var err error
 	if !s.namespaceCached(n) {
-		live, err := s.liveHeldIn(ctx, t, n)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, live...)
+		out, err = s.liveHeldIn(ctx, t, n)
 	}
 	for _, p := range s.allProtected() {
 		for _, obj := range p.inf.GetStore().List() {
@@ -261,23 +272,43 @@ func (s *Shared) heldIn(ctx context.Context, t *Tracker, n string) ([]ID, error)
 			}
 		}
 	}
-	return SortedIDs(out), nil
+	return SortedIDs(out), err
 }
 
-// batchBackoff is the release loop's per-(K, N) failure backoff.
+// batchBackoff is the release loop's per-(K, N) failure backoff. It starts
+// again once every object that failed has been decided, so batches of a
+// namespace's other objects, which succeed, don't keep one that always fails
+// at the base delay.
 type batchBackoff struct {
 	mu       sync.Mutex
-	failures map[batchKey]int
+	failures map[batchKey]*batchFailures
 }
 
-func (b *batchBackoff) fail(k batchKey) time.Duration {
+// batchFailures are one key's failures in a row, and the objects of them not
+// decided since: fillAll stands for the namespace's list.
+type batchFailures struct {
+	n   int
+	ids map[ID]bool
+}
+
+// fail counts one failure of k's batch, at objects ids, and returns the delay
+// of its retry.
+func (b *batchBackoff) fail(k batchKey, ids ...ID) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.failures == nil {
-		b.failures = map[batchKey]int{}
+		b.failures = map[batchKey]*batchFailures{}
 	}
-	n := b.failures[k]
-	b.failures[k] = n + 1
+	f := b.failures[k]
+	if f == nil {
+		f = &batchFailures{ids: map[ID]bool{}}
+		b.failures[k] = f
+	}
+	for _, id := range ids {
+		f.ids[id] = true
+	}
+	n := f.n
+	f.n++
 	d := releaseBackoffBase
 	for range n {
 		d *= 2
@@ -288,10 +319,20 @@ func (b *batchBackoff) fail(k batchKey) time.Duration {
 	return d
 }
 
-func (b *batchBackoff) reset(k batchKey) {
+// settle records that ids of k's batch were decided.
+func (b *batchBackoff) settle(k batchKey, ids ...ID) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.failures, k)
+	f := b.failures[k]
+	if f == nil {
+		return
+	}
+	for _, id := range ids {
+		delete(f.ids, id)
+	}
+	if len(f.ids) == 0 {
+		delete(b.failures, k)
+	}
 }
 
 // The events of §12 that the release loop records: WaitingForCredentialUsers

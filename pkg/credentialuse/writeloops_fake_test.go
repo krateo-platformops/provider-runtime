@@ -288,9 +288,9 @@ func TestReleaseLoopBacksOff(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("backoff = %v, want %v", got, want)
 	}
-	b.reset(k)
+	b.settle(k)
 	if d := b.fail(k); d != time.Second {
-		t.Errorf("after a reset, backoff = %s, want 1s", d)
+		t.Errorf("after a success, backoff = %s, want 1s", d)
 	}
 
 	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))

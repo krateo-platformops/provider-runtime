@@ -45,7 +45,8 @@ type batchQueue struct {
 	ready   []batchKey               // keys waiting to be taken, in order
 	queued  map[batchKey]bool        // in ready
 	working map[batchKey]bool        // taken, not yet done
-	timers  map[*queueTimer]bool     // AddAfter timers neither fired nor stopped
+	timers  map[*queueTimer]bool     // AddAfter's and Retry's timers neither fired nor stopped
+	retries map[batchKey]*queueTimer // each key's pending retry, in timers too
 	stopped bool
 }
 
@@ -56,6 +57,7 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 		queued:  map[batchKey]bool{},
 		working: map[batchKey]bool{},
 		timers:  map[*queueTimer]bool{},
+		retries: map[batchKey]*queueTimer{},
 	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
@@ -78,6 +80,10 @@ func (q *batchQueue) Add(k batchKey, ids ...ID) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.addLocked(k, ids)
+}
+
+func (q *batchQueue) addLocked(k batchKey, ids []ID) {
 	if q.stopped {
 		return
 	}
@@ -96,11 +102,14 @@ func (q *batchQueue) Add(k batchKey, ids ...ID) {
 	}
 }
 
-// A queueTimer is one AddAfter. It is in the queue's timers from before the
-// clock is asked for a timer until the timer fires or ShutDown takes it; t is
-// set once the clock has returned it.
+// A queueTimer is one AddAfter, or a key's pending retry. It is in the queue's
+// timers from before the clock is asked for a timer until the timer fires, or
+// ShutDown or a sooner retry takes it; t is set once the clock has returned
+// it.
 type queueTimer struct {
-	t clock.Timer
+	t   clock.Timer
+	ids []ID
+	at  time.Time // a retry's: when it is due
 }
 
 // AddAfter adds k's batch, covering ids, once d has passed on the queue's
@@ -111,11 +120,10 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 		q.Add(k, ids...)
 		return
 	}
-	ids = slices.Clone(ids)
+	e := &queueTimer{ids: slices.Clone(ids)}
 	if len(ids) == 0 {
-		ids = []ID{fillAll}
+		e.ids = []ID{fillAll}
 	}
-	e := &queueTimer{}
 	q.mu.Lock()
 	if q.stopped {
 		q.mu.Unlock()
@@ -123,15 +131,62 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 	}
 	q.timers[e] = true
 	q.mu.Unlock()
+	q.arm(k, d, e)
+}
 
+// Retry adds k's batch, covering ids, once d has passed, as AddAfter does,
+// except that a key has one pending retry: ids join the one it has, which
+// keeps the sooner of the two times. So a key whose batches keep failing,
+// however often events queue them, is retried once per backoff. A pending
+// retry isn't AddAfter's: a grace's end is its own. A d of zero or less adds
+// at once.
+func (q *batchQueue) Retry(k batchKey, d time.Duration, ids ...ID) {
+	if d <= 0 {
+		q.Add(k, ids...)
+		return
+	}
+	if len(ids) == 0 {
+		ids = []ID{fillAll}
+	}
+	e := &queueTimer{ids: slices.Clone(ids), at: q.clock.Now().Add(d)}
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return
+	}
+	var later clock.Timer
+	if old := q.retries[k]; old != nil {
+		e.ids = slices.Compact(SortedIDs(append(e.ids, old.ids...)))
+		if !e.at.Before(old.at) {
+			old.ids = e.ids
+			q.mu.Unlock()
+			return
+		}
+		delete(q.timers, old)
+		later = old.t
+	}
+	q.timers[e] = true
+	q.retries[k] = e
+	q.mu.Unlock()
+	if later != nil {
+		later.Stop()
+	}
+	q.arm(k, d, e)
+}
+
+// arm asks the clock for e's timer, which adds k's batch. e is in timers.
+func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 	t := q.clock.AfterFunc(d, func() {
 		q.mu.Lock()
-		live := q.timers[e]
-		delete(q.timers, e)
-		q.mu.Unlock()
-		if live {
-			q.Add(k, ids...)
+		defer q.mu.Unlock()
+		if !q.timers[e] {
+			return
 		}
+		delete(q.timers, e)
+		if q.retries[k] == e {
+			delete(q.retries, k)
+		}
+		q.addLocked(k, e.ids)
 	})
 
 	q.mu.Lock()
@@ -141,9 +196,9 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 	}
 	q.mu.Unlock()
 	if !live {
-		// It fired already, or ShutDown took it before it had a timer to
-		// stop: either way it is no longer the queue's, and stopping it is
-		// harmless if it fired.
+		// It fired already, or ShutDown or a sooner retry took it before it
+		// had a timer to stop: either way it is no longer the queue's, and
+		// stopping it is harmless if it fired.
 		t.Stop()
 	}
 }
@@ -207,6 +262,7 @@ func (q *batchQueue) ShutDown() {
 		}
 	}
 	clear(q.timers)
+	clear(q.retries)
 	q.ready, q.pending = nil, map[batchKey]map[ID]bool{}
 	clear(q.queued)
 	q.cond.Broadcast()
