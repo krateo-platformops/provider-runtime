@@ -3344,7 +3344,9 @@ and 15s at most; and the kill must come in the same 15s.
   pruner's holder cache behind or fresh, and with the sender alive. It
   doesn't reach it with no kill, or one before the removal or after the
   prune; with the switch set outside that gap, or the index read outside it;
-  or with the A2 landing before the pass.
+  or, with one Disown process, with the A2 landing before the pass. **With
+  both, the last isn't searched yet**: the case holds only one of the two
+  processes' passes until the A2 has landed.
 - **Its bound:** with one Disown process, every schedule with at most two
   preemptions; with both, at most one. **It takes two things as given**, as
   §14 states them: the landing margin, and a prune's bound. The dying
@@ -4463,9 +4465,11 @@ on krateo-057:
   prune, 2 for the wait that isn't built and 1 for the other clean cases (DEEP
   2), and with two Disown processes 1 for the wait, the rest under DEEP only,
   at 1. A search that reaches 1,000,000 schedules stops, and says that it
-  isn't exhaustive: in the DEEP run of Disown over the index, which hasn't
-  ended, two cases so far are at 2, "lost, holder gone" with the switch set,
-  and off and on (every schedule with 1, and the first 1,000,000 with 2).
+  isn't exhaustive: under DEEP, two cases of Disown over the index are at 2,
+  "lost, holder gone" with the switch set, and "lost, holder gone" with it
+  off and on (every schedule with 1, and the first 1,000,000 with 2). The
+  kill's case with two Disown processes and the A2 landing before the pass
+  isn't searched yet (§10.6.3); the other five clean ones with two were, at 1.
   **A search with one
   preemption is no evidence for a case that needs two**: in "off and on" and
   "narrowed and widened", and in the controls "a run over a changed CRD" and
@@ -4478,8 +4482,8 @@ on krateo-057:
   13; the older ones alone, main's at 2beee26, took 3,144s there, 52 minutes.
   In CI's last green runs, without the new ones, the model step took 2,134s to
   2,320s; its time with them is not measured yet. Under DEEP on that VM size:
-  the late hold 1,000s, the flag 509s, and the kill's clean cases with one
-  Disown process 626s.
+  the late hold 1,000s, the flag 509s, Disown over the index 5,716s, and the
+  kill's clean cases with one Disown process 626s.
 - **The flag** (§7.4): a switch turned off and on again while nothing runs
   isn't settled by the old flag; no A2 under a stale flag, its removal
   refused included; a run starts over when the CRD changes between its
