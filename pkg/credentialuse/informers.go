@@ -260,16 +260,20 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)
 }
 
-// enqueue adds the batch of every ID in old's and cur's records.
+// enqueue adds one batch, of every ID in old's and cur's records.
 func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata) {
+	// In one Add: a worker may take what one queues before the next, and a
+	// batch of its own would read the names in both records again.
+	var k batchKey
+	var ids []ID
 	for _, m := range []*metav1.PartialObjectMetadata{old, cur} {
-		if m == nil {
-			continue
+		if m != nil {
+			k = batchKey{h.t.gk, m.Namespace}
+			ids = append(ids, ReadRecord(m).IDs...)
 		}
-		r := ReadRecord(m)
-		if len(r.IDs) > 0 {
-			h.t.s.queue.Add(batchKey{h.t.gk, m.Namespace}, r.IDs...)
-		}
+	}
+	if len(ids) > 0 { // with none, an Add is of the whole namespace
+		h.t.s.queue.Add(k, ids...)
 	}
 }
 

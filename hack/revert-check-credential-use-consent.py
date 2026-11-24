@@ -152,6 +152,15 @@ MUTANTS = [
      [("\t\t\te.unmet = true\n", "")]),
     ("More doesn't carry what is unmet", UN,
      [("\t\tunmet += e.Unmet\n", "")]),
+    # A change's one batch (§10.2).
+    ("the old record's names aren't queued", IN,
+     [("\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil {\n\t\t\tk =", "\t_ = old\n\tfor _, m := range []*metav1.PartialObjectMetadata{cur} {\n\t\tif m != nil {\n\t\t\tk =")]),
+    ("the new record's names aren't queued", IN,
+     [("\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil {\n\t\t\tk =", "\t_ = cur\n\tfor _, m := range []*metav1.PartialObjectMetadata{old} {\n\t\tif m != nil {\n\t\t\tk =")]),
+    ("a batch for each record", IN,
+     [("\t\t\tids = append(ids, ReadRecord(m).IDs...)\n", "\t\t\tif ids = append(ids, ReadRecord(m).IDs...); m == old && len(ids) > 0 {\n\t\t\t\th.t.s.queue.Add(k, ids...)\n\t\t\t}\n")]),
+    ("no names queue the namespace", IN,
+     [("\tif len(ids) > 0 { // with none", "\tif true || len(ids) > 0 { // with none")]),
     # What is forgotten.
     ("a holder that is gone keeps its turns", IN,
      [("\th.t.proto.gateTurns.forget(m.UID)\n", "")]),
@@ -173,6 +182,7 @@ BACKOFF = {C: "TestTheBackoffOfForgedRefs|TestTheGateOfKeptRefs"}
 LACKS = {C: "TestCacheLacks|TestCacheLacksPerName"}
 LIST = {C: "TestTheUnheldListOfKeptRefs"}
 COUNT = {C: "TestTheCountOfKeptReleases"}
+BATCH = {C: "TestARecordsChangeIsOneBatch"}
 GONE = {C: "TestAHolderGoneWithoutAForgetLeavesNothing|TestCacheLacks"}
 KILLERS = {
     "a pass doesn't gate what the record names": GATED,
@@ -235,6 +245,10 @@ KILLERS = {
     "a folded entry of the gate's isn't counted": COUNT,
     "a folded entry of the last A1's isn't counted": COUNT,
     "More doesn't carry what is unmet": COUNT,
+    "the old record's names aren't queued": BATCH,
+    "the new record's names aren't queued": BATCH,
+    "a batch for each record": BATCH,
+    "no names queue the namespace": BATCH,
     "a holder that is gone keeps its turns": GONE,
     "a holder that is gone keeps its backoff": GONE,
     "a holder that is gone keeps its reported refs": GONE,
