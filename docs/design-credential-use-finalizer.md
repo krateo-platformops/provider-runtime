@@ -3340,11 +3340,29 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
 - another holder's pass costs what it did. The reads of one holder's record
   use the same client as the others', though, and at its rate.
 
+**The release loop reads the names too, and those bounds aren't its.** A change
+of a record queues the batch of every name in the old and the new one (§10.2),
+in every watch mode, and R0 settles only names that the caches have. So the
+process that runs the write loops makes a GET of each of the others, one after
+the other, where the caches cover them too: it grows with the record, 4,000 for
+a change that puts 4,000 such names there, and 8,000 for one that replaces them
+all. The changes that come while a batch waits cost one batch together, of
+every name of all of them. It was so before the gate, and what is to bound it is
+the release loop's own: a batch in bounded turns, apart from this.
+
+**The gate adds to it:** an A1 that drops refs is a change of the record. Its
+batch has the names of the one holder's record as it was, which the new one's
+are among, and whatever else waits for that (K, N). So dropping one ref of m
+costs up to m GETs, which any drop did, and w withdrawn refs that a pass doesn't
+name, dropped 16 a pass, cost up to ⌈w/16⌉ such batches. Each of the w is an
+object that exists, and that a cache has without consent, or that no cache
+covers.
+
 **What remains.** Where no cache covers the target (outside
 `SharedOptions.Namespaces`, §10.5), there is no cached yes, so an honest
 holder's recorded refs there cost up to those GETs on every pass. They are the
 reads that it makes anyway for the refs it names. A ref that is gone costs
-none where a cache covers it, and one GET a pass, with its Namespace's, where
+the gate none where a cache covers it, and one GET a pass, with its Namespace's, where
 none does, until a pass that follows the whole chain drops it from the record.
 And a forged record still tells its author whether a target exists where no
 cache covers it, or is held where one does: the ref of one that exists without
