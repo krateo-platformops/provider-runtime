@@ -82,6 +82,56 @@ func TestTwoProcessesDisownAnUnreadableHold(t *testing.T) {
 	}
 }
 
+// A record that names a Secret the process can't read, so can't strip, stays,
+// with the Secret's line, until the Secret can be read or an operator vouches
+// for it (§7.4).
+func TestDisownKeepsTheRecordOfAnUnreadableSecret(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-unreadable-record")
+	const sa = "cu-unreadable-record"
+	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch", "list", "watch"})
+	cfg := env.AsServiceAccount("default", sa)
+	stripUnreadableRecords(t, kubeAs(t, cfg))
+	createSecret(t, ns, "nogrant")
+	createWidget(t, ns, "w", "nogrant")
+	line := secretLine(ns, "nogrant")
+	createIndex(t, idx)
+	r := newWriteRig(t, cfg, cu.SharedOptions{IndexNamespace: idx}, func(o *cu.Options) {
+		perName(o)
+		disownOptions(o)
+	}, nil)
+	r.c.stop() // no pass holds the Secret
+	rec, err := cu.EncodeRecord([]cu.ID{cu.SecretRef(ns, "nogrant").ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Patch(ctx, "w", types.MergePatchType,
+		[]byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, cu.AnnotationRefs, rec)), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	set("all")
+	staysUnknown(t)
+	lined(t, idx, line, true)
+	w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(ctx, "w", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cu.ReadRecord(w).Present {
+		t.Error("the record of a Secret that couldn't be read was stripped")
+	}
+	editIndex(t, idx, func(cm *corev1.ConfigMap) {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		cm.Annotations[cu.AnnotationVouched] = ns + "/Secret/nogrant"
+	})
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	unrecorded(t, ns, "w")
+	lined(t, idx, line, false)
+}
+
 // Two processes settle at different times: one can't read the index for a
 // while, so its count is unknown, and neither settles; once it can, both do,
 // the index is emptied, and nothing writes it again: the one that settles

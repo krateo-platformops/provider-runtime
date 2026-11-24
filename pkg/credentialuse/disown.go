@@ -386,7 +386,8 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	var unreadable []string // the objects of those that couldn't be read, with why
 	var texts []string      // and the errors
 	var vouched map[ID]bool
-	unlined := map[ID]bool{} // recorded objects whose line couldn't be added
+	unlined := map[ID]bool{}    // recorded objects whose line couldn't be added
+	unstripped := map[ID]bool{} // objects that couldn't be read, or stripped
 	if len(perName) > 0 {
 		// The live checks due are made first, so that one a drop queued a
 		// moment ago doesn't make the count unknown.
@@ -444,6 +445,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				}
 				// It may carry the kind's finalizer: the count is unknown,
 				// never zero, until it can be read (§7.4).
+				unstripped[id] = true
 				known = false
 				unreadable = append(unreadable, unheldRef(id)+": "+shortError(err))
 				texts = append(texts, err.Error())
@@ -478,7 +480,6 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	// it, so that a pass cut short between the two, in which a prune may have
 	// taken its line meanwhile, leaves it to the next (§7.4).
 	srv := s.newServer(t.o.Holder)
-	unstripped := map[ID]bool{}
 	for _, o := range objs {
 		_, removed, err := stripDisowned(ctx, srv, o.gk, t.gk, o.m)
 		count += max(0, removed-o.listed)

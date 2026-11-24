@@ -1873,8 +1873,8 @@ in every process:
   removes K's marker label, and the held label where that was the last
   `credential-use.` finalizer.
 - **Then** it strips the record from every holder of K, with a merge patch
-  guarded by resourceVersion. A holder that names an object whose strip
-  failed keeps its record, and is counted, until the next pass. **The order
+  guarded by resourceVersion. A holder that names an object whose read or
+  strip failed keeps its record, and is counted, until the next pass. **The order
   matters in PerName mode**: Disown finds an object by its line or by a
   record, so while one may be held, a record names it. With the records
   first, a process killed between the two strips, with a prune of the same
@@ -2004,9 +2004,9 @@ else changed in between.
   alone does nothing: the tamper check restores the line of an object it
   can't read (§10.6.6). The vouch, the user's decision of
   2026-11-22, is described in §10.6.6. An object that only a record names
-  gets a line before its record is stripped (below), so one that can't be
-  read keeps the count `"unknown"` after its holder's record is gone too,
-  until it can be read or is vouched for.
+  gets a line before its record is stripped (below), and one that can't be
+  read, so can't be stripped, keeps its holder's record too, and the count
+  `"unknown"`, until it can be read or is vouched for.
 - **A line this process may still owe** keeps the count `"unknown"`: while a
   live check or a re-add of a covered kind's line is pending, the landing
   margin of an A2 of unknown outcome is running (§10.6.2), or a rebuild is
