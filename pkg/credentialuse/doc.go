@@ -45,7 +45,8 @@
 // provider-runtime's reconciler is its first user (plan, PR 7): see
 // reconciler.CredentialRefsProvider. For a runtime's adapter the package
 // adds KindOptions, Tracker.HasSynced, IsOwnRecordWrite, CheckRead,
-// SummarizeUnheld and WithResolvedObjects (§7.5, §11.9, §12).
+// SummarizeUnheld, WithResolvedObjects, NextObject and Ref.AsksMoreThan
+// (§7.5, §9.1, §11.9, §12).
 //
 // # Dependencies
 //

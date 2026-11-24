@@ -1109,7 +1109,9 @@ type Ref struct {
 	Name      string
 
 	// Next, when set, names the refs found inside this object. The tracker
-	// calls it after the object is held, with the object it read (§9).
+	// calls it after the object is held, with the object it read (§9),
+	// without managedFields and status (§10.4). It returns an error when the
+	// object lacks what it reads, never nil refs (§9.1).
 	Next func(obj *unstructured.Unstructured) ([]Ref, error)
 
 	// Guaranteed declares that the object's own controller already keeps it
@@ -1757,7 +1759,7 @@ func (c *connector) CredentialRefs(mg resource.Managed) ([]credentialuse.Ref, er
 		Next: func(kt *unstructured.Unstructured) ([]credentialuse.Ref, error) {
 			name, _, err := unstructured.NestedString(kt.Object, "spec", "kubeconfigRef", "name")
 			if err != nil || name == "" {
-				return nil, fmt.Errorf("KubernetesTarget %s has no kubeconfigRef: %v", kt.GetName(), err)
+				return nil, fmt.Errorf("KubernetesTarget %s has no spec.kubeconfigRef.name", kt.GetName())
 			}
 			return []credentialuse.Ref{credentialuse.SecretRef(kt.GetNamespace(), name)}, nil
 		},
@@ -1792,6 +1794,51 @@ established one fails open with its record as it was (§8). **A hop with a
 lies behind it is unknown: that pass's record keeps every ref the record
 already named, which stay held while the holder may still read through the
 hop (found in the review of PR 4).
+
+**A `Next` must return an error, never nil refs, when the object lacks what
+it reads.** The object may not be populated yet, or may have lost it in a
+restore. An error keeps the holder's record, and so its holds. Nil refs say
+that nothing lies behind the object, so the last A1 drops the Secret from
+the record while the holder still uses it. Missing is not none. And a `Next`
+must not put the object's values in its error, which becomes an event and a
+log: the example above doesn't wrap `err`, because `NestedString`'s error
+prints the value it found.
+
+**Refs of one object.** Of the refs of one object that a pass meets, at any
+level, the first wins: a later one ends there, whatever it asks for, so a
+cycle ends. That is right when the later one asks for no more than the first,
+and silently not what it asked for when it asks for more. A later ref **asks
+for more** than the first in two ways:
+
+- **a hold:** it isn't `Guaranteed` (§9.3), and the first is. The object is
+  neither recorded nor held;
+- **a `Next`:** it has one, and the first has none. What lies behind the
+  object is neither found nor held.
+
+A `Guaranteed` ref after a held one, or a ref without a `Next` after one with
+one, asks for no more. Nor does a second, different `Next`: two functions
+can't be told apart, so the first is followed and the other never called.
+Each later ref is compared with the first, which wins, and with no other.
+
+The pass goes on as if the later ref weren't there. It is not an Acquire
+error: a `Next` names objects from data a tenant may write, and an error would
+let that data stop the holder. Each conflict is a warning in the log, naming
+the holder, the object and what was asked, and counts in
+`credentialuse_refs_conflicting_total{asked}`, `asked` being `hold` or `next`
+(§12). It is reported once per holder, object and thing asked for, until the
+holder's `Forget`, or the process's restart. **In a provider's tests it is
+refused**: `AssertCredentialRefsCover` fails on a conflict (§11.9).
+
+The first is first in the order the pass meets refs: by level, and at the
+first level in the order `CredentialRefs` returned them, so a conflict among
+those is the same on every pass. Below it, the refs come behind the hops of
+the level above: first behind the hops found unheld before the level's A2s,
+for want of consent or Disowned, in their level's order; then behind those
+to hold, by ID; then behind the `Guaranteed` ones, in their level's order;
+and each `Next`'s refs in the order it returned them. So which of two refs
+found through two hops is first can change with consent, and with it, if they
+conflict, whether the object is held. A provider that names one object
+through two hops gives both refs the same `Next` and the same `Guaranteed`.
 
 **A Secret that names a Secret** is in scope the same way: the first
 Secret's `Ref` has a `Next`. It needs that Secret's data, which is §10.4's
@@ -1862,6 +1909,9 @@ provider declares this with `Ref.Guaranteed: true`. A guaranteed ref:
   still held;
 - is read through a lister the caller supplies for that kind
   (`SharedOptions.Listers`), or with a live GET if there is none;
+- enqueues no holder that names it only as `Guaranteed`, whatever changes in
+  it, even when its kind is protected and watched because another holder
+  holds the object: such a holder sees a change on its next pass;
 - counts as covered for `AssertCredentialRefsCover` (§11.9).
 
 **The fallback is flagged as unverified.** The guarantee depends on the
@@ -3219,7 +3269,14 @@ These are the cases the bookkeeping misses, and how each is handled:
      against a recording client. It fails when Connect reads a Secret, or a
      `Protected` kind, that isn't in the object's refs after `Next`. It also
      fails when a path resolves to nothing, so a mistyped path doesn't
-     silently protect nothing (§16.2);
+     silently protect nothing (§16.2). Given the kind's `KindOptions`, it
+     follows refs as the tracker does when it holds them all: to the kind's
+     `MaxDepth`, in the tracker's order, and with the object as the tracker
+     gives it to a `Next` and to `Resolved`, without `managedFields` and
+     `status` (`credentialuse.NextObject`). It fails on what would stop a
+     holder, a chain that is too deep, a held ref with a `Next` of a kind
+     without `Content`, or a `Next`'s error; and on refs of one object that
+     conflict (§9.1), which would not;
    - **at run time:** `reconciler.CredentialUseCheckingReader(reader, ...)`
      wraps the provider's controller-runtime client. A read of a protected
      kind absent from the object's record logs once per object and counts in
@@ -3299,6 +3356,8 @@ separate, and is written on the CRD (§7.4).
 `credentialuse_index_fill_ratio` (gauge, PerName and PerNamePoll),
 `credentialuse_degraded_total{reason}` (every fail-open of §8, which earlier
 revisions counted without naming), `credentialuse_refs_not_held_total`,
+`credentialuse_refs_conflicting_total{asked}` (refs that asked for more than
+the first ref of the same object, which wins, §9.1),
 `credentialuse_consent_withdrawn_total`, `credentialuse_refs_read_denied_total`,
 `credentialuse_index_tampered_total`,
 `credentialuse_unrecorded_reads_total` (§11.9),

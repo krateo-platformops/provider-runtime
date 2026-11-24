@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -321,8 +322,8 @@ func TestChainGuaranteedRefs(t *testing.T) {
 
 // TestRefsConflicting: the first ref met of an object wins, and a later one
 // that asks for more, a hold where the first is Guaranteed, or a Next where
-// the first has none, is reported once per holder and object, at the same
-// level or behind a Next (§9.1). One that asks for no more isn't.
+// the first has none, is reported once per holder, object and thing asked for,
+// at the same level or behind a Next (§9.1). One that asks for no more isn't.
 func TestRefsConflicting(t *testing.T) {
 	ctx := context.Background()
 	held := targetRef("cd")
@@ -357,6 +358,7 @@ func TestRefsConflicting(t *testing.T) {
 		"twice the same":                         {refs: []Ref{held, held}, held: true, behind: true},
 		"two Nexts, which can't be told apart":   {refs: []Ref{held, other}, held: true, behind: true},
 		"three, two of which ask for more":       {refs: []Ref{guaranteed, held, held}, want: "hold=true next=false", behind: true},
+		"held, Guaranteed, held":                 {refs: []Ref{held, guaranteed, held}, held: true, behind: true},
 		"Guaranteed, then held behind a Next":    {refs: []Ref{guaranteed, via(held)}, want: "hold=true next=false", behind: true},
 		"no Next, then one behind a Next":        {refs: []Ref{plain, via(held)}, want: "hold=false next=true", held: true},
 		"held, then Guaranteed behind a Next":    {refs: []Ref{held, via(guaranteed)}, held: true, behind: true},
@@ -390,6 +392,43 @@ func TestRefsConflicting(t *testing.T) {
 			}
 		})
 	}
+	t.Run("one asks for a hold, and another for a Next too", func(t *testing.T) {
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Secret", "password")
+		if _, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{plainGuaranteed, plain, held}); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"h " + targetGK.Group + cd + " hold=true next=false", "h " + targetGK.Group + cd + " hold=false next=true"}
+		if !slices.Equal(r.rep.conflicting, want) {
+			t.Errorf("reported %q, want %q", r.rep.conflicting, want)
+		}
+	})
+	t.Run("once for each object", func(t *testing.T) {
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Secret", "password")
+		r.target(fc, "cd2", "Secret", "password")
+		plainGuaranteed2, held2 := plainGuaranteed, held
+		plainGuaranteed2.Name, held2.Name = "cd2", "cd2"
+		if _, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{plainGuaranteed, held, plainGuaranteed2, held2}); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"h " + targetGK.Group + cd + " hold=true next=true", "h " + targetGK.Group + cd + "2 hold=true next=true"}
+		if !slices.Equal(r.rep.conflicting, want) {
+			t.Errorf("reported %q, want %q", r.rep.conflicting, want)
+		}
+	})
+	t.Run("a holder that records nothing is forgotten too", func(t *testing.T) {
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Secret", "password")
+		h := r.holder(t, "h", false)
+		h.SetAnnotations(nil)
+		for _, set := range []*reportedSet{&r.p.holdConflicts, &r.p.nextConflicts} {
+			set.first(consentKey{h.GetUID(), targetID("cd")})
+			if r.p.forget(h) || len(set.m) != 0 {
+				t.Errorf("forget of a holder with no record kept %v", set.m)
+			}
+		}
+	})
 	t.Run("once per holder, and again after its Forget", func(t *testing.T) {
 		r, fc := chainRig(t)
 		r.target(fc, "cd", "Secret", "password")
@@ -414,6 +453,49 @@ func TestRefsConflicting(t *testing.T) {
 			t.Errorf("reported %q, want one more after the Forget", r.rep.conflicting)
 		}
 	})
+}
+
+// A conflict counts each thing asked for, and is one log line that names the
+// holder, the object and what was asked.
+func TestRefsConflictingReport(t *testing.T) {
+	for name, tc := range map[string]struct {
+		hold, next bool
+		asked      string
+	}{
+		"a hold": {hold: true, asked: "hold"},
+		"a Next": {next: true, asked: "next"},
+		"both":   {hold: true, next: true, asked: "hold,next"},
+	} {
+		m := &countingMetrics{}
+		var logged []string
+		r := coreReports{metrics: m, warn: func(_ string, kv ...any) { logged = append(logged, fmt.Sprintf("%q", kv)) }}
+		h := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "h"}}
+		r.RefsConflicting(widgetGK, h, targetID("cd"), tc.hold, tc.next)
+		for asked, want := range map[string]bool{"hold": tc.hold, "next": tc.next} {
+			if got := m.count("refs_conflicting "+kindLabel(widgetGK)+" "+asked) == 1; got != want {
+				t.Errorf("%s: counted for %s: %v, want %v", name, asked, got, want)
+			}
+		}
+		want := fmt.Sprintf("%q", []any{"kind", widgetGK.String(), "holder", "ns/h", "object", targetID("cd").String(), "asked", tc.asked})
+		if len(logged) != 1 || logged[0] != want {
+			t.Errorf("%s: logged %s, want once %s", name, logged, want)
+		}
+	}
+}
+
+// A tracker's conflicts go to its own sinks: the metric of its recorder, and
+// its logger.
+func TestRefsConflictingOfATracker(t *testing.T) {
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	rep, ok := tr.proto.reports.(coreReports)
+	if !ok || rep.warn == nil {
+		t.Fatalf("the tracker's reports = %+v; want coreReports that log", tr.proto.reports)
+	}
+	rep.RefsConflicting(widgetGK, &metav1.PartialObjectMetadata{}, targetID("cd"), true, false)
+	if n := r.metrics.count("refs_conflicting " + kindLabel(widgetGK) + " hold"); n != 1 {
+		t.Errorf("counted %d, want 1", n)
+	}
 }
 
 // TestChainNextCannotChangeTheListersObject: a Next may change the object it

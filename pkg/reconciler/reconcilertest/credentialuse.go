@@ -1,6 +1,7 @@
 package reconcilertest
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -105,14 +106,21 @@ func (r *RecordingReader) Reset() {
 // them to the reconciler.
 //
 // It calls c.CredentialRefs(mg), and follows each ref's Next, as the runtime
-// does after holding the object: it reads each object a ref names through
-// rec's own reader, without recording it. A ref whose object isn't there
-// fails t, since a mistyped or unmatched path resolves to nothing and so
-// silently protects nothing (§16.2): the fixture must hold every object the
-// refs name. It then calls c.Connect(ctx, mg), with the objects it followed
-// on ctx for credentialuse.Resolved, and fails t for each read Connect made
-// through rec, a Get or a List, of a Secret or of a protected kind, that the
-// refs, after Next, don't name. Guaranteed refs count as named.
+// does after holding the object: to o.MaxDepth, in its order for refs that are
+// all held or Guaranteed, and with the object as it gives it to a Next and to
+// Resolved, without managedFields and status. It reads each object a ref names
+// through rec's own reader, without recording it. What would stop a holder
+// fails t: a chain that is too deep, a held ref with a Next of a kind without
+// Content, and a Next's error. Two things that stop none fail it too. One is
+// refs of one object that conflict: the runtime takes the first it meets, as
+// this does, and only reports a later one that asks for more, a hold or a
+// Next (§9.1). The other is a ref whose object isn't there, since a mistyped
+// or unmatched path resolves to nothing and so silently protects nothing
+// (§16.2): the fixture must hold every object the refs name. It then calls
+// c.Connect(ctx, mg), with the objects it followed on ctx for
+// credentialuse.Resolved, and fails t for each read Connect made through rec,
+// a Get or a List, of a Secret or of a protected kind, that the refs, after
+// Next, don't name. Guaranteed refs count as named.
 //
 // rec must be the reader the connecter reads Secrets and protected objects
 // with; build the connecter with it. The connecter must implement
@@ -132,26 +140,53 @@ func AssertCredentialRefsCover(t testing.TB, ctx context.Context, c reconciler.E
 		return nil, nil
 	}
 	kinds := map[schema.GroupKind]bool{secretGroupKind: true}
+	content := map[schema.GroupKind]bool{}
 	for _, pk := range o.Protected {
 		kinds[pk.GVK.GroupKind()] = true
+		content[pk.GVK.GroupKind()] = pk.Content
 	}
-	named := map[credentialuse.ID]bool{}
+	maxDepth := o.MaxDepth
+	if maxDepth == 0 {
+		maxDepth = credentialuse.DefaultMaxDepth
+	}
 	resolved := map[credentialuse.ID]*unstructured.Unstructured{}
-	seen := map[credentialuse.ID]bool{}
+	named := map[credentialuse.ID]credentialuse.Ref{} // the first ref met of each object
+	met := func(r credentialuse.Ref) bool {
+		first, ok := named[r.ID()]
+		if !ok {
+			return false
+		}
+		hold, next := r.AsksMoreThan(first)
+		if hold {
+			t.Errorf("the refs of %s conflict: a later one asks for a hold, which the first, Guaranteed, doesn't ask for, and the first wins: nothing would hold it", r.ID())
+		}
+		if next {
+			t.Errorf("the refs of %s conflict: a later one asks for a Next, which the first doesn't have, and the first wins: nothing would hold what lies behind it", r.ID())
+		}
+		return true
+	}
 	level := refs
-	for depth := 0; len(level) > 0; depth++ {
-		if depth > 16 {
-			t.Errorf("the refs' Next go deeper than 16 levels")
+	for depth := 1; len(level) > 0; depth++ {
+		if depth > maxDepth {
+			t.Errorf("the refs' Next go deeper than MaxDepth (%d)", maxDepth)
 			break
 		}
-		var next []credentialuse.Ref
+		// The runtime's order: the held refs by ID, then the Guaranteed ones.
+		var held, guaranteed, next []credentialuse.Ref
 		for _, r := range level {
-			id := r.ID()
-			if seen[id] {
+			if met(r) {
 				continue
 			}
-			seen[id] = true
-			named[id] = true
+			named[r.ID()] = r
+			if r.Guaranteed {
+				guaranteed = append(guaranteed, r)
+				continue
+			}
+			held = append(held, r)
+		}
+		slices.SortFunc(held, func(a, b credentialuse.Ref) int { return compareIDs(a.ID(), b.ID()) })
+		for _, r := range append(held, guaranteed...) {
+			id := r.ID()
 			obj, err := readRef(ctx, rec, r)
 			if kerrors.IsNotFound(err) {
 				t.Errorf("ref %s resolves to nothing: no such object in the fixture, so a holder would silently protect nothing", id)
@@ -164,15 +199,20 @@ func AssertCredentialRefsCover(t testing.TB, ctx context.Context, c reconciler.E
 			if r.Next == nil {
 				continue
 			}
-			resolved[id] = obj
-			more, err := r.Next(obj.DeepCopy())
+			if !r.Guaranteed && !content[r.GroupKind] {
+				t.Errorf("a held ref with a Next must be of a protected kind with Content: %s", id)
+				continue
+			}
+			resolved[id] = credentialuse.NextObject(obj)
+			more, err := r.Next(credentialuse.NextObject(obj))
 			if err != nil {
 				t.Errorf("following ref %s: %v", id, err)
 				continue
 			}
 			next = append(next, more...)
 		}
-		level = next
+		// Refs already met end there, and aren't counted against MaxDepth.
+		level = slices.DeleteFunc(next, met)
 	}
 
 	rec.Reset()
@@ -186,11 +226,16 @@ func AssertCredentialRefsCover(t testing.TB, ctx context.Context, c reconciler.E
 			continue
 		}
 		id := credentialuse.ID{Group: rd.GroupKind.Group, Kind: rd.GroupKind.Kind, Namespace: rd.Namespace, Name: rd.Name}
-		if !named[id] {
+		if _, ok := named[id]; !ok {
 			t.Errorf("Connect read %s, which CredentialRefs doesn't name (after Next): nothing would hold it", rd)
 		}
 	}
 	return ec, cerr
+}
+
+// compareIDs orders IDs as the runtime holds them.
+func compareIDs(a, b credentialuse.ID) int {
+	return cmp.Or(cmp.Compare(a.Group, b.Group), cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Namespace, b.Namespace), cmp.Compare(a.Name, b.Name))
 }
 
 // readRef reads the object r names, whole, through rec's own reader.

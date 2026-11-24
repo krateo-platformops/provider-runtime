@@ -130,6 +130,11 @@ type protocol struct {
 	unheldReads    *sharedReads
 	enqueueBatch   func(id ID, holderNamespace string)
 
+	// holdConflicts and nextConflicts are the refs already reported as asking
+	// for a hold, or a Next, that the first ref of the same object doesn't
+	// (§9.1).
+	holdConflicts, nextConflicts reportedSet
+
 	// written remembers what each holder's last A1 left, for the holder
 	// event filter (IsOwnRecordWrite, §7.5); nil remembers nothing.
 	written *recordWrites
@@ -286,7 +291,24 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	}
 
 	byID := map[ID]Ref{} // every held ref of the chain so far
-	seen := map[ID]bool{}
+	seen := map[ID]Ref{} // the first ref met of each object, which wins (§9.1)
+	// met reports whether r's object was met. It reports what r asks for that
+	// the first ref of the object doesn't, once per holder, object and thing
+	// asked for.
+	met := func(r Ref) bool {
+		id := r.ID()
+		first, ok := seen[id]
+		if !ok {
+			return false
+		}
+		hold, next := r.AsksMoreThan(first)
+		k := consentKey{obj.GetUID(), id}
+		hold, next = hold && p.holdConflicts.first(k), next && p.nextConflicts.first(k)
+		if hold || next {
+			p.reports.RefsConflicting(p.holder, obj, id, hold, next)
+		}
+		return true
+	}
 	// unfollowed: a hop with a Next wasn't held this pass (Missing or
 	// Deleting), so what lies behind it is unknown. The record then keeps
 	// every ref it names: a ref behind that hop must stay held, as the
@@ -410,10 +432,10 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				return fail(fmt.Errorf("credential-use: ref %s has no kind or no name", r.ID()), "Refs")
 			}
 			id := r.ID()
-			if seen[id] {
+			if met(r) {
 				continue
 			}
-			seen[id] = true
+			seen[id] = r
 			if r.Next != nil {
 				chained = true
 			}
@@ -647,7 +669,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		}
 		// Refs already met end there, so a cycle ends, and isn't counted
 		// against MaxDepth.
-		level = slices.DeleteFunc(next, func(r Ref) bool { return seen[r.ID()] })
+		level = slices.DeleteFunc(next, met)
 	}
 	for id := range readOK {
 		if readOK[id] {
@@ -912,6 +934,9 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 // the caller's owner-finalizer removal writes it in the same write (§8). It
 // reports whether anything changed.
 func (p *protocol) forget(obj metav1.Object) bool {
+	// These first: a holder whose refs are all Guaranteed may have no record.
+	p.holdConflicts.forget(obj.GetUID())
+	p.nextConflicts.forget(obj.GetUID())
 	an := obj.GetAnnotations()
 	_, hasRefs := an[AnnotationRefs]
 	_, hasUnheld := an[AnnotationUnheld]

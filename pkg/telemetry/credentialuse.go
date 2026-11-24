@@ -22,6 +22,10 @@ const AttrHolderKind = attribute.Key("holder_kind")
 // the fail-open (§8).
 const AttrDegradedReason = attribute.Key("reason")
 
+// AttrAsked labels credentialuse_refs_conflicting_total with what the skipped
+// ref asked for: "hold" or "next" (§9.1).
+const AttrAsked = attribute.Key("asked")
+
 var _ credentialuse.MetricsRecorder = (*Metrics)(nil)
 
 type credentialUseMetrics struct {
@@ -31,6 +35,7 @@ type credentialUseMetrics struct {
 	disownUnreadable metric.Int64Gauge
 	degraded         metric.Int64Counter
 	refsNotHeld      metric.Int64Counter
+	refsConflicting  metric.Int64Counter
 	consentWithdrawn metric.Int64Counter
 	refsReadDenied   metric.Int64Counter
 	indexTampered    metric.Int64Counter
@@ -67,6 +72,7 @@ func newCredentialUseMetrics(meter metric.Meter) (credentialUseMetrics, error) {
 	}{
 		{&m.degraded, "credentialuse.degraded", "Acquires that failed for an established holder, which proceeded (fail open), by reason."},
 		{&m.refsNotHeld, "credentialuse.refs_not_held", "Cross-namespace refs not held for want of consent, counted when each first goes unheld."},
+		{&m.refsConflicting, "credentialuse.refs_conflicting", "Refs skipped though they asked for more than the first ref of the same object, by what they asked for, once per holder, object and thing asked for."},
 		{&m.consentWithdrawn, "credentialuse.consent_withdrawn", "Holds released because their target withdrew consent."},
 		{&m.refsReadDenied, "credentialuse.refs_read_denied", "Holds released after a persistent 403 on the consent read (PerNamePoll)."},
 		{&m.indexTampered, "credentialuse.index_tampered", "Index ConfigMaps found changed by someone else, and rebuilt."},
@@ -111,6 +117,11 @@ func (m *Metrics) Degraded(holderKindLabel, reason string) {
 // RefsNotHeld implements credentialuse.MetricsRecorder.
 func (m *Metrics) RefsNotHeld(holderKindLabel string) {
 	m.cu.refsNotHeld.Add(context.Background(), 1, holderKind(holderKindLabel))
+}
+
+// RefsConflicting implements credentialuse.MetricsRecorder.
+func (m *Metrics) RefsConflicting(holderKindLabel, asked string) {
+	m.cu.refsConflicting.Add(context.Background(), 1, metric.WithAttributes(AttrHolderKind.String(holderKindLabel), AttrAsked.String(asked)))
 }
 
 // ConsentWithdrawn implements credentialuse.MetricsRecorder.

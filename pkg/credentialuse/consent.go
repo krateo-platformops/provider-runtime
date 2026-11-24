@@ -209,8 +209,9 @@ func (p *protocol) unheldEntries(found []UnheldEntry, notHeld map[ID]string, kee
 }
 
 // reportedSet remembers, in memory, which (holder, ref) pairs have been
-// reported not held, so CredentialRefNotHeld goes once per ref even when the
-// unheld list is trimmed past maxUnheld (§11.3). A nil set remembers nothing.
+// reported: not held, so CredentialRefNotHeld goes once per ref even when the
+// unheld list is trimmed past maxUnheld (§11.3), or conflicting (§9.1). A nil
+// set remembers nothing; the zero one is ready.
 type reportedSet struct {
 	mu sync.Mutex
 	m  map[consentKey]bool
@@ -227,6 +228,9 @@ func (r *reportedSet) first(k consentKey) bool {
 	defer r.mu.Unlock()
 	if r.m[k] {
 		return false
+	}
+	if r.m == nil {
+		r.m = map[consentKey]bool{}
 	}
 	r.m[k] = true
 	return true

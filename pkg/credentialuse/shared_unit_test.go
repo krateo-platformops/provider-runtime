@@ -216,6 +216,9 @@ func (m *countingMetrics) Degraded(kind, reason string) {
 	m.reasons = append(m.reasons, reason)
 	m.mu.Unlock()
 }
+func (m *countingMetrics) RefsConflicting(kind, asked string) {
+	m.inc("refs_conflicting " + kind + " " + asked)
+}
 func (m *countingMetrics) AdmissionDenied(kind string) { m.inc("admission_denied " + kind) }
 func (m *countingMetrics) ReleaseRejected(kind string) { m.inc("release_rejected " + kind) }
 func (m *countingMetrics) CRDWriteStarved(kind string) { m.inc("crd_write_starved " + kind) }

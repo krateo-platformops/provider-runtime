@@ -17,7 +17,10 @@ import (
 )
 
 // A Lister reads one object of a kind from the caller's cache, for a
-// Guaranteed ref (§9.3). A missing object is a NotFound error.
+// Guaranteed ref (§9.3). A missing object is a NotFound error. The object must
+// hold JSON types only, as an unstructured one read from the API server does:
+// a DeepCopy of any other, such as an int32 or a []string, panics. The tracker
+// doesn't change it.
 type Lister func(namespace, name string) (*unstructured.Unstructured, error)
 
 // contentReader reads one object whole, live (§9.1 step 2, §9.3). It is apart
@@ -76,9 +79,12 @@ func WithResolved(ctx context.Context, a Acquired) context.Context {
 }
 
 // Resolved returns the object ref named, exactly as this pass's Acquire read
-// it after holding it (§9.2): not a newer cached copy, which could name an
-// object this pass never held. It has one for each ref with a Next that was
-// held, or Guaranteed, and was followed. The object is the caller's to keep.
+// it (§9.2), after holding it if it holds it: not a newer cached copy, which
+// could name an object this pass never held. It has one for each ref with a
+// Next that the pass followed: held, Guaranteed, or unheld for want of
+// consent or Disowned, which may be the shared read of up to 10s ago. Each is
+// as its Next saw it, without managedFields and status. The object is the
+// caller's to keep.
 func Resolved(ctx context.Context, ref Ref) (*unstructured.Unstructured, bool) {
 	m, _ := ctx.Value(resolvedKey{}).(map[ID]*unstructured.Unstructured)
 	u, ok := m[ref.ID()]
@@ -111,6 +117,14 @@ func asCached(u *unstructured.Unstructured) *unstructured.Unstructured {
 	return out.(*unstructured.Unstructured)
 }
 
+// NextObject is u, an object read from the API server, as an Acquire gives it
+// to a Next and to Resolved: without managedFields and status (§10.4). It is
+// for a test, or a runtime, that calls a Next itself. u isn't changed, and
+// doesn't change with it.
+func NextObject(u *unstructured.Unstructured) *unstructured.Unstructured {
+	return asCached(u.DeepCopy())
+}
+
 // readGuaranteed reads Guaranteed ref r (§9.3): through the caller's lister
 // for its kind, or live.
 func (p *protocol) readGuaranteed(ctx context.Context, r Ref) (*unstructured.Unstructured, error) {
@@ -118,6 +132,9 @@ func (p *protocol) readGuaranteed(ctx context.Context, r Ref) (*unstructured.Uns
 		u, err := l(r.Namespace, r.Name)
 		if err != nil {
 			return nil, err
+		}
+		if u == nil {
+			return nil, fmt.Errorf("credential-use: the lister for %s returned neither an object nor an error", r.GroupKind)
 		}
 		return asCached(u), nil
 	}

@@ -23,12 +23,33 @@ type Ref struct {
 	// without managedFields and status. A held ref with a Next must be of a
 	// protected kind with Content (§10.4): the content cache is how a
 	// re-point of it is seen.
+	//
+	// When the object lacks what Next reads, which may not be populated yet,
+	// or be lost in a restore, Next must return an error, never nil refs: an
+	// error keeps the record, and so the holds, while nil refs say nothing
+	// lies behind the object, and drop what the holder still uses. The error
+	// must not contain the object's values: it becomes an event and a log.
+	// The errors of unstructured.NestedString and its like do contain them,
+	// so don't wrap those.
+	//
+	// Of the refs of one object that a pass meets, the first wins: a later one
+	// ends there, whatever it asks for (§9.1, AsksMoreThan).
 	Next func(obj *unstructured.Unstructured) ([]Ref, error)
 
 	// Guaranteed declares that the object's own controller already keeps it
 	// alive while the holder exists (§9.3). It is neither recorded nor held;
-	// its Next is still followed.
+	// its Next is still followed. No change to it enqueues a holder that
+	// names it only as Guaranteed, which sees the change on its next pass.
 	Guaranteed bool
+}
+
+// AsksMoreThan reports what r asks for that first, another ref of the same
+// object, doesn't: to hold the object, where first is Guaranteed; and to follow
+// a Next, where first has none. Two different Nexts can't be told apart. An
+// Acquire takes the first ref it meets of an object, and reports a later one
+// that asks for more (§9.1).
+func (r Ref) AsksMoreThan(first Ref) (hold, next bool) {
+	return first.Guaranteed && !r.Guaranteed, first.Next == nil && r.Next != nil
 }
 
 // SecretRef returns a Ref to the Secret namespace/name.

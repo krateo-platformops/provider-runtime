@@ -26,6 +26,7 @@ func TestCredentialUseMetrics(t *testing.T) {
 	m.IndexFillRatio(kind, 0.5)
 	m.DisownUnreadable(kind, 1)
 	m.Degraded(kind, "Deleting")
+	m.RefsConflicting(kind, "hold")
 	for _, f := range []func(string){m.RefsNotHeld, m.ConsentWithdrawn, m.RefsReadDenied, m.IndexTampered,
 		m.UnrecordedReads, m.AdmissionDenied, m.ReleaseRejected, m.CRDWriteStarved, m.IndexReadDenied} {
 		f(kind)
@@ -48,7 +49,7 @@ func TestCredentialUseMetrics(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"credentialuse.held_objects", "credentialuse.waiting_objects", "credentialuse.index_fill_ratio",
-		"credentialuse.degraded", "credentialuse.refs_not_held", "credentialuse.consent_withdrawn", "credentialuse.refs_read_denied",
+		"credentialuse.degraded", "credentialuse.refs_conflicting", "credentialuse.refs_not_held", "credentialuse.consent_withdrawn", "credentialuse.refs_read_denied",
 		"credentialuse.index_tampered", "credentialuse.unrecorded_reads", "credentialuse.admission_denied",
 		"credentialuse.release_rejected", "credentialuse.crd_write_starved",
 		"credentialuse.disown_unreadable", "credentialuse.index_read_denied"} {
@@ -60,6 +61,10 @@ func TestCredentialUseMetrics(t *testing.T) {
 		if v, ok := attrs.Value(AttrHolderKind); !ok || v.AsString() != kind {
 			t.Errorf("%s: holder_kind = %v, want %s", name, v, kind)
 		}
+	}
+	conflicting := got["credentialuse.refs_conflicting"]
+	if v, ok := conflicting.Value(AttrAsked); !ok || v.AsString() != "hold" {
+		t.Errorf("credentialuse.refs_conflicting: asked = %v, want hold", v)
 	}
 	degraded := got["credentialuse.degraded"]
 	if v, ok := degraded.Value(AttrDegradedReason); !ok || v.AsString() != "Deleting" {
