@@ -830,21 +830,28 @@ func (h *stHistory) auditFinalizers(r *stReport) {
 	}
 }
 
-// firstHeld is the first version of incarnation uid with a credential-use
-// finalizer.
-func (h *stHistory) firstHeld(o stObj, uid string) (stVersion, bool) {
-	for _, v := range h.objs[o] {
-		if v.uid == uid && len(credentialUse(v.fins)) > 0 {
-			return v, true
+// heldSince is the first version of the unbroken run, up to removal d, of
+// versions of that incarnation with a credential-use finalizer.
+func (h *stHistory) heldSince(d stVersion) (stVersion, bool) {
+	first, ok := stVersion{}, false
+	vs := h.objs[d.stObj]
+	for i := len(vs) - 1; i >= 0; i-- {
+		v := vs[i]
+		if v.gone || v.uid != d.uid || v.rv > d.rv {
+			continue
 		}
+		if len(credentialUse(v.fins)) == 0 {
+			break
+		}
+		first, ok = v, true
 	}
-	return stVersion{}, false
+	return first, ok
 }
 
 // removedByDELETE reports whether a DELETE of the test's removed incarnation
 // d of an object, and if not, why not: the API server's answer to it names
-// that uid, the incarnation was never marked as being deleted, and, if it was
-// held, the DELETE began before the first hold could be seen. (A DELETE that
+// that uid, the incarnation was never marked as being deleted, and, if it
+// went held, the DELETE began before that hold could be seen. (A DELETE that
 // begins later reads the finalizer, and marks the object: H3 is a DELETE that
 // read it without one.)
 func (h *stHistory) removedByDELETE(d stVersion) (bool, string) {
@@ -854,7 +861,7 @@ func (h *stHistory) removedByDELETE(d stVersion) (bool, string) {
 		}
 	}
 	var seen time.Time
-	if f, held := h.firstHeld(d.stObj, d.uid); held {
+	if f, held := h.heldSince(d); held {
 		seen = f.at
 		for _, a := range h.callsOn(d.stObj, func(a stCall) bool { return a.op == "a2" && a.ok() && a.rv == f.rv }) {
 			if a.end.Before(seen) {
@@ -1126,8 +1133,8 @@ func (h *stHistory) refusedConsent(holder stObj, v stVersion, p stObj) bool {
 //   - a DELETE of the test's was answered with the very incarnation this
 //     pass's A2 held (removedByDELETE), which carried the finalizer when it
 //     went, and was never marked as being deleted;
-//   - and no release of the name that succeeded, or whose outcome isn't
-//     known, overlaps that incarnation's life.
+//   - and no release of the name that succeeded overlaps that hold, and none
+//     before the read has an outcome that isn't known.
 //
 // Nothing else is exempt: not by the error's text, and not by how the holder
 // is when it is read again. Whether the holder still existed is the watch's
@@ -1186,12 +1193,21 @@ func (h *stHistory) exempt(f stRead, d stVersion, fin string) (bool, string) {
 	if ok, why := h.removedByDELETE(d); !ok {
 		return false, why
 	}
+	// The window is from the A2 that began the hold it went with, to the read.
+	// The API server answers a release only once it has done with it, so one
+	// answered before that A2 began touched nothing since. One whose outcome
+	// isn't known may still have been at work, however early it began.
 	began := h.createBegan(d.stObj, d.uid)
+	if v, held := h.heldSince(d); held {
+		for _, a := range h.callsOn(d.stObj, func(a stCall) bool { return a.op == "a2" && a.ok() && a.rv == v.rv }) {
+			began = a.start
+		}
+	}
 	rs := h.callsOn(d.stObj, func(c stCall) bool {
-		return c.op == "r3" && (c.ok() || c.unknown) && !c.start.After(f.end) && !c.end.Before(began)
+		return c.op == "r3" && !c.start.After(f.end) && (c.unknown || c.ok() && !c.end.Before(began))
 	})
 	if len(rs) > 0 {
-		return false, fmt.Sprintf("a release of the name overlaps its life: %s", rs[0])
+		return false, fmt.Sprintf("a release of the name overlaps the hold: %s", rs[0])
 	}
 	return true, ""
 }

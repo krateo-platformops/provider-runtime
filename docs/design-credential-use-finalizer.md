@@ -6000,8 +6000,8 @@ failure that the API server had caused (H3 below). Now:
   only as H3, on proof: a DELETE of the test's was answered with a Status that
   names the very incarnation this pass's A2 held; that incarnation carried the
   finalizer when it went, and was never marked as being deleted; the DELETE
-  began before its first hold could be seen; and no release of that name that
-  succeeded, or whose outcome isn't known, overlaps its life. Nothing is
+  began before the hold it went with could be seen; no release of that name
+  that succeeded overlaps that hold, and none has an unknown outcome. Nothing is
   exempt by the error's text, or by how the holder is when it is read again.
   A DELETE whose answer is lost names no incarnation, so it exempts nothing,
   and fails the run by itself.
