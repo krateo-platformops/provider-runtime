@@ -186,7 +186,7 @@ func (s *Shared) runDisown(ctx context.Context) {
 func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	known := true
 	count := 0
-	holders, err := s.liveList(ctx, t.gk, "", "")
+	holders, err := s.listHolders(ctx, t)
 	if err != nil {
 		known = false
 		t.reportDisownFailed(ctx, "list the holders, "+kindLabel(t.gk), err, "grant list on it, in every namespace",
@@ -253,7 +253,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				lined = append(lined, id)
 			}
 		}
-		live := s.newServer()
+		live := s.newServer(t.o.Holder)
 		for _, id := range SortedIDs(keysOf(named)) {
 			m, err := live.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 			switch Classify(err) {
@@ -283,7 +283,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		}
 	}
 
-	srv := s.newServer()
+	srv := s.newServer(t.o.Holder)
 	for i := range holders {
 		h := &holders[i]
 		patch, ok := disownHolderPatch(h, set)

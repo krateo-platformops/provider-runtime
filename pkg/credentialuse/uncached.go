@@ -117,15 +117,26 @@ func (s *Shared) liveList(ctx context.Context, gk schema.GroupKind, namespace, s
 	return listLive(ctx, s.c, gk, namespace, selector)
 }
 
+// listHolders lists, live and page by page, the metadata of t's holders in
+// every namespace, at their declared version (§6.2).
+func (s *Shared) listHolders(ctx context.Context, t *Tracker) ([]metav1.PartialObjectMetadata, error) {
+	return listResource(ctx, s.c, t.gk, t.gvr, "", "")
+}
+
 // listLive is liveList on clients cl, for DisownPrefix, which has no Shared.
 func listLive(ctx context.Context, cl Clients, gk schema.GroupKind, namespace, selector string) ([]metav1.PartialObjectMetadata, error) {
 	m, err := cl.Mapper.RESTMapping(gk)
 	if err != nil {
 		return nil, fmt.Errorf("credential-use: mapping %s: %w", gk, err)
 	}
-	var c metadata.ResourceInterface = cl.Metadata.Resource(m.Resource)
+	return listResource(ctx, cl, gk, m.Resource, namespace, selector)
+}
+
+// listResource is listLive of gvr, gk's resource.
+func listResource(ctx context.Context, cl Clients, gk schema.GroupKind, gvr schema.GroupVersionResource, namespace, selector string) ([]metav1.PartialObjectMetadata, error) {
+	var c metadata.ResourceInterface = cl.Metadata.Resource(gvr)
 	if namespace != "" {
-		c = cl.Metadata.Resource(m.Resource).Namespace(namespace)
+		c = cl.Metadata.Resource(gvr).Namespace(namespace)
 	}
 	var out []metav1.PartialObjectMetadata
 	opts := metav1.ListOptions{LabelSelector: selector, Limit: listPageSize}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -120,7 +121,7 @@ func (s *Shared) runJanitor(ctx context.Context) {
 // resourceVersion it was built from is a defect, reported, and not retried
 // as contention (§6.2 L1).
 func (s *Shared) clean(ctx context.Context, id ID) error {
-	srv := s.newServer()
+	srv := s.newServer(schema.GroupVersionKind{})
 	for range maxReleaseRounds {
 		m, err := srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 		switch Classify(err) {

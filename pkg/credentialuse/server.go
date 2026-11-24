@@ -23,13 +23,21 @@ const listPageSize = 500
 type clientServer struct {
 	md     metadata.Interface
 	mapper meta.RESTMapper
+	// holder is a tracker's holder kind, at its declared version (§6.2).
+	holder schema.GroupVersionKind
 }
 
 var _ server = clientServer{}
 
-// resource returns gk's resource, and whether it is namespaced.
+// resource returns gk's resource, and whether it is namespaced: the holder
+// kind's at its declared version, and any other's at the mapper's version for
+// the kind alone (§6.2).
 func (s clientServer) resource(gk schema.GroupKind) (schema.GroupVersionResource, bool, error) {
-	m, err := s.mapper.RESTMapping(gk)
+	var versions []string
+	if gk == s.holder.GroupKind() && s.holder.Version != "" {
+		versions = []string{s.holder.Version}
+	}
+	m, err := s.mapper.RESTMapping(gk, versions...)
 	if err != nil {
 		return schema.GroupVersionResource{}, false, fmt.Errorf("credential-use: mapping %s: %w", gk, err)
 	}

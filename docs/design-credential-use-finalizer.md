@@ -571,10 +571,10 @@ finalizers left on objects that a CRD installed again would serve.
 - **The mapping isn't refreshed while the process lives.** The resource, the
   version and the scope a kind maps to are the ones the RESTMapper gave at
   first, and a mapper that finds new kinds by itself doesn't look again at one
-  it knows. A change of any of them, the scope too, needs a restart. The version
-  is the mapper's, not `Protected`'s: the reads by name, the writes and the live
-  lists map a GroupKind, to the version the API server prefers; only the
-  informers are of the version `Protected` names.
+  it knows. A change of any of them, the scope too, needs a restart. A protected
+  kind's version is the mapper's, not `Protected`'s: the reads by name, the writes
+  and the live lists map a GroupKind (below); only the informers are of the
+  version `Protected` names. The holder kind's is `Holder`'s, for every call.
 - **Restore the CRD**, at that version, whose objects are then served as they
   were. Everything goes on by itself. Only serving the kind again lets a
   finalizer an object still has be stripped, since nothing can write it
@@ -623,6 +623,109 @@ kind is served, is taken for done too, so every pass logs that the holder was
 deleted, with no backoff, while it stays. Its record and its holds stay with
 it. Every consumer of the reconciler has it, with credential use or without, and
 its fix is its own.
+
+**The version a custom resource is written through.** Every call on the
+**holder kind** goes through `Options.Holder`'s version, the one the holder's
+own controller reads and writes: A1, R2's list and `Users`, the index's list of
+the holders (§10.6.6), Disown's list and its strip of records, and the holder
+informer. `Forget` makes no call: it changes the object that the runtime then
+writes itself, in provider-runtime's reconciler with the typed client, whose
+version is the one it passes to `Track`. So A1 loses nothing that the
+controller's own writes don't lose. An empty version is the one `Track` maps the
+kind at.
+
+A **protected kind** is addressed by its group and kind, at the **mapper's
+version**, the one the RESTMapper answers with for the kind alone: A2, R1, R3,
+the gate, the prober, the janitor, Disown's strips of the objects, and
+`DisownPrefix`. (In the calls of a tracker whose holder kind protects itself,
+that kind is a holder kind.) All of these calls read and write metadata only.
+
+The mapper's version is the one the API server prefers, or not.
+controller-runtime's lazy mapper fetches only the version it is asked for, of a
+group that its first discovery didn't have, and then answers with that one:
+`Track` asks for the declared version, so in such a process the mapper's version
+is the declared one (controller-runtime v0.25.2
+`pkg/client/apiutil/restmapper.go:160-215`). Two processes can then use two
+versions of one kind. Nothing here needs them to agree: they write the same
+metadata, if the conversions keep it.
+
+A patch of metadata can still change the rest of the object. The API server
+decodes the stored object at the request's version, and encodes it back at the
+storage version, and at each it prunes the fields that version's schema lacks
+(apiextensions-apiserver v0.37.2 `pkg/apiserver/customresource_handler.go:874`,
+`:1272-1380`). And after a conversion it puts back all of an object's metadata
+but the labels and the annotations, which are as the webhook answers
+(`pkg/apiserver/conversion/webhook_converter.go:407-448`). So **the conversions
+of a protected kind must keep every field, and every label and annotation**:
+either every version's schema has every field, or a conversion webhook keeps what
+a version lacks. With the conversion strategy `None`, that means equal schemas.
+
+- **A field a version lacks** is dropped from the object by A2 and R3, though its
+  writer never used the version we patch through. This is true of **any client's
+  write** through such a version, a `kubectl label` included. The CRD types say
+  that `None` "only change the apiVersion and would not touch any other field",
+  and that a version's schema is the one used for its "validation, pruning, and
+  defaulting" (apiextensions-apiserver v0.37.2
+  `pkg/apis/apiextensions/v1/types.go:78`, `:190`). They don't say that the
+  schemas must then be equal: that follows from the two, and we read and tested
+  it (P21, envtest 1.37.0 and 1.36.2, `TestPremisePatchThroughAnotherVersion`
+  and `TestPremisePatchAfterTheStorageVersionMoved`).
+- **A webhook that builds its own ObjectMeta**, instead of copying the object's,
+  keeps our finalizer, and drops the epoch, the marker and the held label
+  (`TestPremiseConversionThatDropsMetadata`). Where the mapper's version isn't
+  the storage version, **the finalizer is then never released**: R1 reads it
+  without its epoch and restores that, the write drops it again, and a second
+  later R1 is back, for good, with one patch each time. If the object is deleted,
+  it stays, and so does its namespace
+  (`TestAnEpochTheConversionDropsIsNeverReleased`). A2, R1 and R3 have always
+  worked so.
+  - *For the operator:* mend the webhook; the loop then releases at its next
+    look. Or switch Disown on: its strip tests the object's resourceVersion, not
+    the epoch. Where the label is dropped too, a LabelScoped kind's list at the
+    mapper's version doesn't find the object, and Disown neither strips nor
+    counts it: remove the finalizer by hand.
+- **On the holder kind**, only the declared version matters, as it does for the
+  controller's own writes. If that isn't the storage version, and the conversion
+  drops annotations, A1's record isn't stored: the pass goes on to A2 and reports
+  its refs held, the release loop finds no record that names them, and releases.
+  The protection is undone, silently (`TestARecordAConversionDrops`). Such a
+  webhook drops every other annotation of the holder at each of its controller's
+  writes, too.
+- **Our code could tell,** cheaply: a write's response is the object as stored
+  and converted back. An A2's or a restore's without the epoch just written, or
+  an A1's without the record, names the conversion (or a mutating webhook) at
+  once. Not built.
+
+| Conversion | Patched through | A field only the storage version has |
+|---|---|---|
+| None | the storage version | kept |
+| None | another version | pruned |
+| None, and the storage version has moved since the object was stored | any version | pruned |
+| a webhook that round-trips | any version | kept |
+
+For a protected kind, only the storage version loses nothing, until it moves, and
+it is in the CRD, which the tracker may not read for a protected kind.
+
+Of the holder kind's version:
+
+- **Several processes of one kind, each at its own version**, as one controller
+  per version (§3), share the finalizers and the records (§6.8). A1 is written by
+  the process whose pass it is, at its version, which is its runtime's, so each
+  controller's holders go through their own. R2 in any of them lists every
+  holder of the kind, whatever its version: the record and the finalizers are
+  metadata. One `Shared` tracks a holder kind at one version.
+- **Disown's strip is the exception.** Any process strips every holder's record,
+  another version's too, through its own version. Where the versions don't
+  round-trip, that drops fields, and no version is known to be the holder's.
+- **A holder that can't be converted** to the list's version, by a webhook that
+  fails, isn't left out of R2's list: the list fails as a whole, the batch is
+  retried, and nothing is released (P22, `TestPremiseListWithAnUnconvertibleObject`).
+- **A declared version that isn't served** is refused by `Track` (§7.3). One that
+  stops being served is as a holder kind that isn't (above), though others are:
+  A1 fails, so a new holder doesn't connect and an established one is Degraded;
+  R2's list fails, which is never "no users", so holds are kept; Disown's count
+  stays unknown. The process must restart with a version that is served, as its
+  runtime must anyway.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an
@@ -3407,7 +3510,11 @@ remove the finalizers it holds there. That is a new wedge.
 | events | `create`, `patch` | §12 |
 
 `update`, `create` and `delete` on protected kinds are not needed: every
-write is a patch.
+write is a patch. The grants are by resource, not by version. A patch of a
+protected kind goes through the mapper's version, and a write of a holder through
+its declared one. **Before adopting, check the conversions of each custom
+resource they patch** (§6.2): through one that loses something, a metadata patch
+drops fields, and a hold may be undone, or never released.
 
 **A new privilege for providers with static CRDs** (L6). git-provider ships
 its CRDs in its chart, and has never needed to write them. It now needs
@@ -3946,6 +4053,10 @@ It has the same deadlock (§1, and core-provider#402 for the chart
 core as §7.2 says, using `Track` after start for kinds discovered at
 runtime (§7.3).
 
+**Its holder kind is the CompositionDefinition** (the user's decision,
+2026-11-23). Compositions aren't its holders: what follows about them as holders
+is kept for a later adoption, and isn't planned.
+
 - A remote CompositionDefinition names its KubernetesTarget with a `Next`
   to the kubeconfig Secret (§9.1).
 - Compositions name their CompositionDefinition as `Guaranteed`, with a
@@ -3954,7 +4065,11 @@ runtime (§7.3).
 - RBAC is by name where generated (§13), and **its lifetime must outlast
   the holds** (see below).
 - With per-version controllers, the release list covers the whole
-  GroupKind (§3).
+  GroupKind (§3), and each controller's A1 goes through its own version.
+- **The conversions** of its CRDs, if they serve several versions, must keep
+  what §6.2 says: a protected kind's every field, label and annotation; the
+  holder kind's labels and annotations, and its fields for Disown's strip.
+  Whether they do is for core-provider to check.
 - **Its composition delete is a Helm uninstall**, which deletes Secrets, and
   a chart's own Namespace, before custom resources. It doesn't wait for one
   kind to be gone before deleting the next (§5.1, verified), so the grace

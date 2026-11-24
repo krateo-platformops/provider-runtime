@@ -91,6 +91,10 @@ const (
 
 // A ProtectedKind is a kind that Refs may name (§7.1).
 type ProtectedKind struct {
+	// GVK is the kind. The tracker writes its metadata through the mapper's
+	// version for the kind alone, not GVK's: so a custom resource that serves
+	// several versions must convert without losing a field, a label or an
+	// annotation, or a hold drops fields, or is never released (§6.2).
 	GVK   schema.GroupVersionKind
 	Watch WatchMode
 	// Content keeps whole objects, for refs with a Next (§10.4).
@@ -99,7 +103,11 @@ type ProtectedKind struct {
 
 // Options configure one holder kind's tracker (§7.1).
 type Options struct {
-	// Holder is the kind the caller reconciles.
+	// Holder is the kind the caller reconciles, at the version it reads and
+	// writes it at: the tracker writes the record through that version too;
+	// empty, the one the mapper answers with at Track. If the CRD serves
+	// several versions, its conversions must keep every label and annotation,
+	// and every field for Disown's strip (§6.2).
 	Holder schema.GroupVersionKind
 	// OwnerFinalizers are the accepted owner finalizers on holders: a holder
 	// carrying any of them is established (§6.1). Two during a rename.
@@ -322,9 +330,10 @@ func (s *Shared) protectedFor(id ID) *protectedInformer {
 }
 
 // newServer is the server the protocol and the janitor call the API
-// server through.
-func (s *Shared) newServer() server {
-	var srv server = clientServer{md: s.c.Metadata, mapper: s.c.Mapper}
+// server through, for a tracker of holder; the janitor, which calls it for
+// protected objects of every tracker, has none.
+func (s *Shared) newServer(holder schema.GroupVersionKind) server {
+	var srv server = clientServer{md: s.c.Metadata, mapper: s.c.Mapper, holder: holder}
 	if f := s.hooks.wrapServer; f != nil {
 		srv = f(srv)
 	}
@@ -1069,9 +1078,13 @@ func (s *Shared) validate(o Options) (Options, error) {
 	if s.c.Mapper == nil || s.c.Metadata == nil || s.c.Dynamic == nil {
 		return o, errors.New("credential-use: Clients.Metadata, Clients.Dynamic and Clients.Mapper are required")
 	}
-	if _, err := s.c.Mapper.RESTMapping(gk, o.Holder.Version); err != nil {
+	m, err := s.c.Mapper.RESTMapping(gk, o.Holder.Version)
+	if err != nil {
 		return o, fmt.Errorf("credential-use: the holder kind %s can't be mapped: %w", o.Holder, err)
 	}
+	// The declared version is the one mapped here (§6.2): an empty one becomes
+	// the mapper's answer, now, for the tracker's life.
+	o.Holder = m.GroupVersionKind
 	if len(o.OwnerFinalizers) == 0 {
 		return o, fmt.Errorf("credential-use: %s: OwnerFinalizers is empty", gk)
 	}

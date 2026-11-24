@@ -159,6 +159,41 @@ func TestHolderInformerUsesTheDeclaredVersion(t *testing.T) {
 	eventually(t, "the holder to be cached", func() bool { return len(tr.holders.GetStore().List()) == 1 })
 }
 
+// Only the holder kind has a declared version in a tracker's calls: a
+// protected kind's are at the mapper's version for the kind (§6.2), unless it is
+// the holder kind itself.
+func TestHolderCallsVersions(t *testing.T) {
+	r := holderVersionRig(t)
+	o := r.options(widgetGK, ProtectedKind{GVK: secretGVK, Watch: PerName})
+	o.Holder = widgetDeclared
+	r.s.o.IndexNamespace = "index"
+	o, err := r.s.validate(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := r.s.newTracker(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		srv  server
+		gk   schema.GroupKind
+		want string
+	}{
+		{"the tracker's, its holder kind", tr.proto.srv, widgetGK, "v1beta1"},
+		{"the index's, its holder kind", tr.idx.srv, widgetGK, "v1beta1"},
+		{"the tracker's, a protected kind", tr.proto.srv, secretGroupKind, "v1"},
+		{"another tracker's, a kind that is a holder kind too", r.s.newServer(gadgetGK.WithVersion("v1beta1")), widgetGK, "v1"},
+		{"the janitor's, a kind that is a holder kind too", r.s.newServer(schema.GroupVersionKind{}), widgetGK, "v1"},
+	} {
+		m, _, err := c.srv.(clientServer).resource(c.gk)
+		if err != nil || m.Version != c.want {
+			t.Errorf("%s: %v, %v; want %s", c.name, m, err, c.want)
+		}
+	}
+}
+
 // A Holder without a version declares the one Track maps its kind at.
 func TestAnEmptyHolderVersionIsTheOneTrackMaps(t *testing.T) {
 	r := holderVersionRig(t)
