@@ -421,12 +421,16 @@ func TestRefsConflicting(t *testing.T) {
 		r, fc := chainRig(t)
 		r.target(fc, "cd", "Secret", "password")
 		h := r.holder(t, "h", false)
-		h.SetAnnotations(nil)
-		for _, set := range []*reportedSet{&r.p.holdConflicts, &r.p.nextConflicts} {
-			set.first(consentKey{h.GetUID(), targetID("cd")})
-			if r.p.forget(h) || len(set.m) != 0 {
-				t.Errorf("forget of a holder with no record kept %v", set.m)
+		for range 2 {
+			if _, err := r.p.acquire(ctx, h, []Ref{plainGuaranteed, held}); err != nil {
+				t.Fatal(err)
 			}
+			if r.p.forget(h) {
+				t.Fatal("the holder has a record")
+			}
+		}
+		if len(r.rep.conflicting) != 2 {
+			t.Errorf("reported %q, want one more after the Forget", r.rep.conflicting)
 		}
 	})
 	t.Run("once per holder, and again after its Forget", func(t *testing.T) {
@@ -451,6 +455,204 @@ func TestRefsConflicting(t *testing.T) {
 		}
 		if len(r.rep.conflicting) != 3 {
 			t.Errorf("reported %q, want one more after the Forget", r.rep.conflicting)
+		}
+	})
+}
+
+// What was reported of a holder is forgotten when the conflict, or the holder,
+// is gone, so a holder whose refs keep changing doesn't add to it for life
+// (§9.1): by a pass that met all the holder's refs, though it then fails, and
+// not by one that may not have.
+func TestRefsConflictingForgotten(t *testing.T) {
+	ctx := context.Background()
+	guaranteed := targetRef("cd")
+	guaranteed.Guaranteed, guaranteed.Next = true, nil
+	plain := targetRef("cd")
+	plain.Next = nil
+	conflict := []Ref{guaranteed, plain}
+	other := []Ref{SecretRef("ns", "other")}
+	acquire := func(t *testing.T, r *rig, h metav1.Object, refs []Ref) Acquired {
+		t.Helper()
+		a, err := r.p.acquire(ctx, h, refs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	start := func(t *testing.T) (*rig, *fakeContents, *metav1.PartialObjectMetadata) {
+		t.Helper()
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Target", "cd")
+		must(r.m.Create(secretKey("ns", "other"), metav1.ObjectMeta{}))
+		h := r.holder(t, "h", false)
+		acquire(t, r, h, conflict)
+		acquire(t, r, h, conflict)
+		if len(r.rep.conflicting) != 1 {
+			t.Fatalf("reported %q, want one", r.rep.conflicting)
+		}
+		return r, fc, h
+	}
+	want := func(t *testing.T, r *rig, n int) {
+		t.Helper()
+		if len(r.rep.conflicting) != n {
+			t.Errorf("reported %q, want %d", r.rep.conflicting, n)
+		}
+	}
+	t.Run("when the refs no longer conflict", func(t *testing.T) {
+		r, _, h := start(t)
+		acquire(t, r, h, other)
+		acquire(t, r, h, conflict)
+		want(t, r, 2)
+	})
+	t.Run("each thing asked for on its own", func(t *testing.T) {
+		r, _, h := start(t)
+		// A hold and a Next, then the Next alone, then both again.
+		followed := targetRef("cd")
+		acquire(t, r, h, []Ref{guaranteed, followed})
+		acquire(t, r, h, []Ref{plain, followed})
+		acquire(t, r, h, []Ref{guaranteed, followed})
+		group := "h " + targetGK.Group + "/Target/ns/cd "
+		if got := r.rep.conflicting; !slices.Equal(got, []string{group + "hold=true next=false", group + "hold=false next=true", group + "hold=true next=false"}) {
+			t.Errorf("reported %q", got)
+		}
+	})
+	t.Run("by a pass whose last level leads back", func(t *testing.T) {
+		r, _, h := start(t)
+		acquire(t, r, h, []Ref{targetRef("cd")})
+		acquire(t, r, h, conflict)
+		want(t, r, 2)
+	})
+	t.Run("by a pass that then fails", func(t *testing.T) {
+		r, _, h := start(t)
+		r.srv.before = func(op, kind, _ string) error {
+			if op == "patch" && kind == "Secret" {
+				return errors.New("refused")
+			}
+			return nil
+		}
+		if a := acquire(t, r, h, other); !a.MustNotConnect {
+			t.Fatalf("acquire = %+v; want a pass that fails", a)
+		}
+		r.srv.before = nil
+		acquire(t, r, h, conflict)
+		want(t, r, 2)
+	})
+	t.Run("not by a pass that couldn't follow a hop", func(t *testing.T) {
+		r, fc, h := start(t)
+		r.target(fc, "via", "Secret", "other")
+		if a := acquire(t, r, h, []Ref{targetRef("absent"), targetRef("via")}); a.MustNotConnect || len(a.Unheld) != 1 {
+			t.Fatalf("acquire = %+v; want one Missing hop", a)
+		}
+		acquire(t, r, h, conflict)
+		want(t, r, 1)
+	})
+	t.Run("not by a pass whose Next fails", func(t *testing.T) {
+		r, fc, h := start(t)
+		r.target(fc, "via", "Secret", "")
+		if a := acquire(t, r, h, []Ref{targetRef("via")}); !a.MustNotConnect {
+			t.Fatalf("acquire = %+v; want a pass that fails", a)
+		}
+		acquire(t, r, h, conflict)
+		want(t, r, 1)
+	})
+	t.Run("when the holder is deleted without a Forget", func(t *testing.T) {
+		r, _, h := start(t)
+		tr := newFakeRig(t).track(t, widgetGK)
+		tr.proto = r.p
+		holderHandler{tr}.OnDelete(h)
+		acquire(t, r, h, conflict)
+		want(t, r, 2)
+	})
+}
+
+// A hold that couldn't have been made isn't reported (§9.1): of a kind the
+// Disown switch covers, or in another namespace without its target's consent.
+// Consent is read until the conflict is reported, once a pass, and not after.
+func TestRefsConflictingThatCouldNotBeHeld(t *testing.T) {
+	ctx := context.Background()
+	t.Run("a Disowned kind's hold isn't, and its Next is", func(t *testing.T) {
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Secret", "password")
+		disowned := true
+		r.p.disowned = func(gk schema.GroupKind) bool { return disowned && gk == targetGK }
+		guaranteed := targetRef("cd")
+		guaranteed.Guaranteed, guaranteed.Next = true, nil
+		h := r.holder(t, "h", false)
+		pass := func(want ...string) {
+			t.Helper()
+			if _, err := r.p.acquire(ctx, h, []Ref{guaranteed, targetRef("cd")}); err != nil {
+				t.Fatal(err)
+			}
+			for i := range want {
+				want[i] = "h " + targetGK.Group + "/Target/ns/cd " + want[i]
+			}
+			if !slices.Equal(r.rep.conflicting, want) {
+				t.Errorf("reported %q, want %q", r.rep.conflicting, want)
+			}
+		}
+		pass("hold=false next=true")
+		// Back on, the hold is reported too.
+		disowned = false
+		pass("hold=false next=true", "hold=true next=false")
+	})
+	t.Run("without consent", func(t *testing.T) {
+		r, _ := consentRig(t, "")
+		must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{}))
+		g := otherSecret()
+		g.Guaranteed = true
+		h := r.holder(t, "h", false)
+		// pass returns how often the Secret was read.
+		pass := func() int {
+			t.Helper()
+			r.srv.calls = nil
+			if a, err := r.p.acquire(ctx, h, []Ref{g, otherSecret(), otherSecret()}); err != nil || a.MustNotConnect || a.RetryAfter != 0 || len(a.Unheld) != 0 {
+				t.Fatalf("acquire = %+v, %v", a, err)
+			}
+			n := 0
+			for _, c := range r.srv.calls {
+				if c == "get Secret/s" {
+					n++
+				}
+			}
+			return n
+		}
+		for range 2 {
+			if n := pass(); n != 1 || len(r.rep.conflicting) != 0 {
+				t.Errorf("without consent: %d reads, reported %q; want one, and nothing", n, r.rep.conflicting)
+			}
+		}
+		setConsent(t, r, secretKey("other", "s"), "ns")
+		r.srv.before = func(op, kind, _ string) error {
+			if op == "get" && kind == "Secret" {
+				return errors.New("unreachable")
+			}
+			return nil
+		}
+		if pass(); len(r.rep.conflicting) != 0 {
+			t.Errorf("with consent unreadable: reported %q", r.rep.conflicting)
+		}
+		r.srv.before = nil
+		if n := pass(); n != 1 || !slices.Equal(r.rep.conflicting, []string{"h /Secret/other/s hold=true next=false"}) {
+			t.Errorf("with consent: %d reads, reported %q; want one, and the hold", n, r.rep.conflicting)
+		}
+		if n := pass(); n != 0 || len(r.rep.conflicting) != 1 {
+			t.Errorf("once reported: %d reads, reported %q; want none, and no more", n, r.rep.conflicting)
+		}
+		// Withdrawn, the conflict is still met, so it stays reported.
+		setConsent(t, r, secretKey("other", "s"), "")
+		if n := pass(); n != 0 || len(r.rep.conflicting) != 1 {
+			t.Errorf("withdrawn: %d reads, reported %q", n, r.rep.conflicting)
+		}
+		if held(r, t) {
+			t.Error("held: the first ref wins")
+		}
+	})
+	t.Run("of a target that is gone", func(t *testing.T) {
+		r, _ := consentRig(t, "ns")
+		g := otherSecret()
+		g.Guaranteed = true
+		if _, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{g, otherSecret()}); err != nil || len(r.rep.conflicting) != 0 {
+			t.Errorf("acquire: %v, reported %q; want nothing", err, r.rep.conflicting)
 		}
 	})
 }

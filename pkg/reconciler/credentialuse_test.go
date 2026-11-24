@@ -39,6 +39,7 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/ratelimit"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource"
 	"github.com/krateo-platformops/provider-runtime/pkg/resource/fake"
+	"github.com/krateo-platformops/provider-runtime/pkg/telemetry"
 	"github.com/krateo-platformops/provider-runtime/pkg/tracing"
 )
 
@@ -802,6 +803,39 @@ func TestCredentialUseCheckingReader(t *testing.T) {
 	got := log.matching("that the holder's refs don't name")
 	if len(got) != 1 || !strings.Contains(got[0], "/v1/Secret/demo/unnamed") && !strings.Contains(got[0], "Secret/demo/unnamed") {
 		t.Errorf("unrecorded-read warnings = %v; want one, for demo/unnamed", got)
+	}
+}
+
+// A recorder set with WithMetrics that isn't a credentialuse.MetricsRecorder
+// records none of credential-use's metrics, and is logged, once a kind: one
+// with no such methods, and one that embeds both a *telemetry.Metrics and a
+// credentialuse.NopMetrics, and so has each of them twice, and none.
+func TestCredentialUseMetricsRecorderThatIsNone(t *testing.T) {
+	type both struct {
+		*telemetry.Metrics
+		credentialuse.NopMetrics
+	}
+	type embeds struct {
+		MetricsRecorder
+		credentialuse.NopMetrics
+	}
+	for name, tc := range map[string]struct {
+		m    MetricsRecorder
+		want int
+	}{
+		"none set":                  {},
+		"no such methods":           {m: struct{ MetricsRecorder }{}, want: 1},
+		"each method twice":         {m: both{}, want: 1},
+		"a NopMetrics with its own": {m: embeds{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newCUWorld(t)
+			log := &warnLog{}
+			w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, secretRef("creds"), WithLogger(log), WithMetrics(tc.m))
+			if got := log.matching("isn't a credentialuse.MetricsRecorder"); len(got) != tc.want {
+				t.Errorf("warnings = %q, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
