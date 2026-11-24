@@ -1736,9 +1736,10 @@ then know:
   context ended, its last A2 and the line checks after it included, however
   many refs it holds. While the context lives, one line check takes at most
   15s.
-- **A prune, once begun, runs to its end**, within 15s, its check and its
-  re-add included. So `RunWriteLoops` returns up to about 15s after its
-  context ended.
+- **A write of a prune, once begun, runs to its end**, within 15s, its check
+  and its re-add included (§10.6.2); a prune whose context has ended begins
+  no other. So `RunWriteLoops` returns up to about 15s after its context
+  ended.
 
 controller-runtime's manager waits for a stopping controller's workers, and
 for the write loops, within its `GracefulShutdownTimeout`, 30s by default
@@ -2055,12 +2056,13 @@ count to find it by. So:
   when that read fails. A switch set after that read found it off has its
   first Disown pass after the removal, and E2 adds the lines then.
 
-  So a removal under the switch began, with its first live read, before the
-  switch was set, and the prune's 15s run from then: they cover **both reads,
-  the removal with its retries, the reads of the objects and the re-add, as
-  calls**. The line is back within 15s of the switch, and the last pass of a
-  run starts at least `TimeoutBound` + 60s after it. The 15s don't cover two
-  things. A removal cut short at their end may still land later, as any write
+  So a removal under the switch began, with its write's first live read,
+  before the switch was set, and that write's 15s run from then: they cover
+  **both reads, the removal with its retries, the reads of its objects, at
+  most 50, and the re-add, as calls**, however many lines the prune has
+  (§10.6.2). The line is back within 15s of the switch, and the last pass of
+  a run starts at least `TimeoutBound` + 60s after it. The 15s don't cover
+  two things. A removal cut short may still land later, as any write
   may (the landing margin): 75s after the switch at the latest, which the
   last pass is past with a `TimeoutBound` of 15s or more, and the drop is
   then found and checked as anyone's is (§10.6.6). And a re-add that fails is
@@ -3194,16 +3196,23 @@ another writer's change.
      deduplicated per (P, K, N), and another such A2 starts the margin over.
      §7.2 says how long a stop lets an A2, and its check, go on.
 - **The pruner removes after R3, then checks after.**
-  1. After a release batch's R3s, it removes, **in one write per batch**
-     (L1), the lines of the objects whose K's marker label R3 removed.
+  1. After a release batch's R3s, it removes, **up to 50 in one write**
+     (L1), the lines of the objects whose K's marker label R3 removed. Each
+     write has the two steps below to itself, before the next.
   2. After that write, it **live-GETs each P whose line any attempt of it
      tried to remove**. If P carries a finalizer with K's prefix again (a
      concurrent A2 re-added it), it adds the line back. That covers the
      attempts that conflicted, whose line someone else may have removed
      meanwhile, and a removal whose response was lost.
-  3. **Once begun, steps 1 and 2 run to their end**, within 15s, whatever
-     the context does: what is queued dies with the process, so a stop
-     between the removal and the re-add would lose the line.
+  3. **Once begun, a write's steps 1 and 2 run to their end**, within 15s,
+     whatever the context does: what is queued dies with the process, so a
+     stop between the removal and the re-add would lose the line. The reads
+     of step 2 are one GET a line, so 50 lines make 2.5s of a client's 20
+     calls a second, where a teardown's 1,000 would make 50s. They end 10s
+     after the write began, and the lines of the objects they didn't come to
+     are put back in the 5s that are left, which fails the prune: its batch
+     is retried. A write that fails ends the prune, and the lines after it
+     stay.
 - **Lines for Missing refs** (revision 16). The line is added before A2,
   so a ref whose A2 finds NotFound has a line but no hold. It is kept while
   some holder's record names the ref: PerNamePoll needs its grant for the
@@ -5152,7 +5161,7 @@ were not retried.
 |---|---|
 | M1 The index is a true superset: Dekker on both sides with consistent reads, the startup prune included, proved on the reviewer's interleaving | §10.6.2, §10.6.3 |
 | M2 The tracker owns the index and creates it; `create` can't be scoped by name; tampering detected, merged back, with an event and a metric; an Argo CD `ignoreDifferences` note | §10.6.1, §10.6.6, §10.6.7, §13 |
-| L1 Prunes coalesced to one write per batch; a default cap of 2,000 lines; 17,000 only as the hard ceiling | §10.6.2, §10.6.4 |
+| L1 Prunes coalesced, up to 50 lines in one write; a default cap of 2,000 lines; 17,000 only as the hard ceiling | §10.6.2, §10.6.4 |
 | L2 A warning at 80%; at full, fail closed or Degraded; the remedy | §10.6.4 |
 | L3 `DisownPasses` 5; the validated span; `disown-settled` tests `held-count`; the zero counter resets on another's non-zero count | §7.4, §7.3 |
 | L4 A missing or unreadable index is an error, never "no holds" | §10.6.5, §7.4 |

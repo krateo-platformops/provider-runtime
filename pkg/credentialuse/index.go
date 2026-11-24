@@ -31,7 +31,7 @@ import (
 //
 //   - the acquirer adds the line before A2, and live-reads the index after a
 //     successful A2, adding the line again if a concurrent prune removed it;
-//   - a pruner removes lines only after R3, in one write per batch, and then
+//   - a pruner removes lines only after R3, pruneChunk in one write, and then
 //     live-reads each object it pruned, adding the line back if a concurrent
 //     A2 put a finalizer of the kind on it again.
 //
@@ -333,6 +333,8 @@ type index struct {
 	// may land (LandingMargin).
 	now    func() time.Time
 	margin time.Duration
+	// bound and checkBound are pruneBound and pruneCheckBound.
+	bound, checkBound time.Duration
 	// onLines sees every version of the index this process reads or
 	// writes, with its lines: the fill gauge and event (§10.6.4).
 	onLines func(lines []string)
@@ -427,13 +429,20 @@ const (
 	// maxOwnRemovals bounds index.own. A removal it forgets costs a live
 	// check of each of its lines.
 	maxOwnRemovals = 64
-	// pruneBound bounds a prune's calls, from its live read of the Disown
-	// switch to its check and its re-add, once it has begun, whatever its
-	// context does: below the 30s a manager gives its runnables to stop by
-	// default, so that a graceful stop doesn't come between a removal and its
-	// re-add. A removal cut short by it may land after it, as any write may
-	// (LandingMargin).
+	// pruneChunk is how many lines a prune removes in one write. Each is read
+	// after it, one GET a line, which a client's 20 calls a second make 2.5s
+	// of.
+	pruneChunk = 50
+	// pruneBound bounds the calls of one write of a prune, from its live read
+	// of the Disown switch to its check and its re-add, once it has begun,
+	// whatever its context does: below the 30s a manager gives its runnables
+	// to stop by default, so that a graceful stop doesn't come between a
+	// removal and its re-add. A removal cut short by it may land after it, as
+	// any write may (LandingMargin).
 	pruneBound = 15 * time.Second
+	// pruneCheckBound bounds those before the re-add: a check it cuts short
+	// leaves the rest of pruneBound to put back every line it didn't come to.
+	pruneCheckBound = 10 * time.Second
 )
 
 func newIndex(holder schema.GroupKind, prefix, namespace string, maxLines int, kinds map[schema.GroupKind]bool, store indexStore, srv server) *index {
@@ -443,6 +452,7 @@ func newIndex(holder schema.GroupKind, prefix, namespace string, maxLines int, k
 		pending: map[ID]*recheck{},
 		late:    map[lateHold]time.Time{},
 		now:     time.Now, margin: LandingMargin,
+		bound: pruneBound, checkBound: pruneCheckBound,
 	}
 }
 
@@ -642,16 +652,19 @@ func (ix *index) removed(rv string, lines []string) {
 	}
 }
 
-// prune removes ids' lines in one write, then reads every object whose line
-// an attempt tried to remove live, and adds back the line of any that
-// carries the kind's prefix again, or can't be read (§10.6.2): an A2 that
+// prune removes ids' lines, pruneChunk in one write, then reads every object
+// whose line an attempt tried to remove live, and adds back the line of any
+// that carries the kind's prefix again, or can't be read (§10.6.2): an A2 that
 // raced the prune, or a line someone else removed while this write
 // conflicted. A re-add that fails is queued for the write loops, which retry
-// it until it lands, and the error is returned.
+// it until it lands, and the error is returned. It stops at a write that
+// fails, and the lines after it stay.
 //
-// Once begun it runs to its end, within pruneBound, whatever ctx does: the
-// queue dies with the process, so a stop between the removal and the re-add
-// would lose the line.
+// A write once begun runs to its end, with its check and its re-add, within
+// pruneBound, whatever ctx does: the queue dies with the process, so a stop
+// between the removal and the re-add would lose the line. A check that is cut
+// short there puts back what it didn't come to, and is an error. A prune whose
+// ctx ends begins no other write.
 //
 // While Disown covers a kind and hasn't settled, its lines stay: a hold that
 // lands late has only its line for Disown's count to find it by (§7.4). The
@@ -675,14 +688,23 @@ func (ix *index) empty(ctx context.Context, ids []ID) error {
 }
 
 func (ix *index) removeAndCheck(ctx context.Context, ids []ID, disown bool) error {
-	if len(ids) == 0 {
-		return nil
+	for chunk := range slices.Chunk(ids, pruneChunk) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := ix.removeChunk(ctx, chunk, disown); err != nil {
+			return err
+		}
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pruneBound)
+	return nil
+}
+
+// removeChunk is removeAndCheck of one write.
+func (ix *index) removeChunk(parent context.Context, ids []ID, disown bool) error {
+	whole, cancel := context.WithTimeout(context.WithoutCancel(parent), ix.bound)
 	defer cancel()
+	ctx, cancelCheck := context.WithTimeout(whole, ix.checkBound)
+	defer cancelCheck()
 	if ix.keptLive != nil && disown {
 		set, err := ix.keptLive(ctx)
 		if err != nil {
@@ -706,12 +728,14 @@ func (ix *index) removeAndCheck(ctx context.Context, ids []ID, disown bool) erro
 			err = errors.Join(err, fmt.Errorf("credential-use: reading the Disown switch after pruning the index %s: %w", ix.ref(), kerr))
 		}
 	}
-	return errors.Join(err, ix.checkRemoved(ctx, tried, kept))
+	return errors.Join(err, ix.checkRemoved(ctx, whole, tried, kept))
 }
 
 // checkRemoved is the check after a removal of lines tried: it adds back the
-// lines that must stay, those of the kinds kept among them.
-func (ix *index) checkRemoved(ctx context.Context, tried []string, kept func(schema.GroupKind) bool) error {
+// lines that must stay, those of the kinds kept among them. It reads the
+// objects within check, and once that has ended puts back the lines of those
+// it didn't come to, within ctx, which outlives it.
+func (ix *index) checkRemoved(check, ctx context.Context, tried []string, kept func(schema.GroupKind) bool) error {
 	var back, carry, unread []ID
 	for _, l := range tried {
 		id, ok := parseIndexLine(l)
@@ -722,7 +746,7 @@ func (ix *index) checkRemoved(ctx context.Context, tried []string, kept func(sch
 			back = append(back, id)
 			continue
 		}
-		switch ix.carries(ctx, id) {
+		switch ix.carries(check, id) {
 		case carriesNot:
 		case carriesYes:
 			carry = append(carry, id)
@@ -730,8 +754,12 @@ func (ix *index) checkRemoved(ctx context.Context, tried []string, kept func(sch
 			unread = append(unread, id)
 		}
 	}
+	var cut error
+	if err := check.Err(); err != nil {
+		cut = fmt.Errorf("credential-use: the check after a removal from the index %s was cut short, and the lines it didn't come to are put back: %w", ix.ref(), err)
+	}
 	if len(back)+len(carry)+len(unread) == 0 {
-		return nil
+		return cut
 	}
 	back = append(back, carry...)
 	// What can't be read may carry the prefix, unless an operator vouched
@@ -752,13 +780,13 @@ func (ix *index) checkRemoved(ctx context.Context, tried []string, kept func(sch
 		}
 	}
 	if len(back) == 0 {
-		return nil
+		return cut
 	}
 	if err := ix.add(ctx, back); err != nil {
 		ix.queue(back, false)
-		return err
+		return errors.Join(cut, err)
 	}
-	return nil
+	return cut
 }
 
 // What a live read found of an object's holds.

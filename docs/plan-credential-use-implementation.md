@@ -1066,7 +1066,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   whose line any attempt of it tried to remove, and adds back any that
   carries the kind's prefix, or can't be read. A re-add that fails is queued
   for the write loops, which retry it with backoff until it lands. Since
-  2026-11-23 a prune, once begun, runs to its end within 15s, whatever its
+  2026-11-23 a prune's write, once begun, runs to its end within 15s (up to
+  50 lines in one, since 2026-11-24), whatever its
   context does; and an A2 whose outcome is unknown gets its line checked at
   once, and again after `LandingMargin`, with its release batch (F).
 - **What fails is retried by the write loops** (the review of the PR 8
@@ -1132,7 +1133,7 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   remedy.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
-  after R3, in one write per batch. A prune that fails retries the batch.
+  after R3, up to 50 in one write. A prune that fails retries the batch.
 - **The acquirer keeps the line on every pass.** It adds the line before
   each A2, `BeforeEstablish`'s included, unless the index informer's view
   shows it. It checks the line live after each successful A2. A pass that

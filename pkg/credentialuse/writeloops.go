@@ -242,7 +242,7 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	s.waits.settle(k, slices.DeleteFunc(slices.Clone(ids), undecided)...)
 	s.reportKept(t, k, res.Kept)
 	if t.idx != nil {
-		// The prune after R3, in one write per batch (§10.6.2, L1). One that
+		// The prune after R3, many lines in one write (§10.6.2, L1). One that
 		// fails retries its objects, which R1 finds bare again.
 		bare := t.idx.prunable(res.Bare)
 		if err := t.idx.prune(ctx, bare); err != nil {

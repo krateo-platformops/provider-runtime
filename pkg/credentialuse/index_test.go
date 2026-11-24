@@ -560,6 +560,124 @@ func (s stopServer) Get(ctx context.Context, gk schema.GroupKind, ns, name strin
 	return s.objServer.Get(ctx, gk, ns, name)
 }
 
+// pause waits d, or until ctx ends.
+func pause(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// slowServer is an objServer whose reads take d, and slowStore a memStore.
+type slowServer struct {
+	*objServer
+	d time.Duration
+}
+
+func (s slowServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if err := pause(ctx, s.d); err != nil {
+		return nil, err
+	}
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
+type slowStore struct {
+	*memStore
+	d time.Duration
+}
+
+func (s slowStore) get(ctx context.Context) (indexVersion, error) {
+	if err := pause(ctx, s.d); err != nil {
+		return indexVersion{}, err
+	}
+	return s.memStore.get(ctx)
+}
+
+func (s slowStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+	if err := pause(ctx, s.d); err != nil {
+		return indexVersion{}, err
+	}
+	return s.memStore.update(ctx, cur, lines, rebuilt)
+}
+
+// A prune of more lines than one check can read within its bound, as after a
+// namespace's teardown, removes them all but the held ones, in as many writes
+// as it takes, with none left to the queue (§10.6.2). 400 reads of 5ms don't
+// fit in the bound here, and 50 do.
+func TestAPruneOfManyLines(t *testing.T) {
+	const n, d = 400, 5 * time.Millisecond
+	srv := slowServer{&objServer{objs: map[ID]*metav1.PartialObjectMetadata{}}, d}
+	var ids, held []ID
+	for i := range n {
+		id := SecretRef("ns", fmt.Sprintf("s%03d", i)).ID()
+		ids = append(ids, id)
+		if i%40 == 0 {
+			held = append(held, id)
+			srv.objs[id] = heldObj(id.Name)
+		}
+	}
+	for name, empty := range map[string]bool{"a prune": false, "Disown's emptying": true} {
+		st := &memStore{exists: true, rebuilt: true, lines: linesOf(ids), rv: 1}
+		ix := testIndex(slowStore{st, d}, srv)
+		ix.maxLines = n
+		ix.bound, ix.checkBound = 2250*time.Millisecond, 1500*time.Millisecond
+		remove := ix.prune
+		if empty {
+			remove = ix.empty
+		}
+		if err := remove(context.Background(), ids); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if want := linesOf(held); !slices.Equal(st.lines, want) || len(ix.pending) != 0 {
+			t.Errorf("%s: %d lines left, %d pending; want the %d held ones, and none", name, len(st.lines), len(ix.pending), len(want))
+		}
+	}
+}
+
+// A prune whose check is cut short by its bound puts the lines back it didn't
+// come to, in the index itself and not in the queue, which dies with the
+// process; and says so, so that its batch is retried (§10.6.2).
+func TestAPruneCutShort(t *testing.T) {
+	bare, stuck, held := SecretRef("ns", "bare").ID(), SecretRef("ns", "c-stuck").ID(), SecretRef("ns", "d-held").ID()
+	objs := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("d-held")}}
+	st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare, stuck, held}), rv: 1}}
+	ix := testIndex(st, stuckServer{stopServer{objs}, stuck})
+	ix.bound, ix.checkBound = time.Minute, 50*time.Millisecond
+	if err := ix.prune(context.Background(), []ID{bare, stuck, held}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("prune = %v, want that its check was cut short", err)
+	}
+	if want := linesOf([]ID{stuck, held}); !slices.Equal(st.lines, want) || len(ix.pending) != 0 {
+		t.Errorf("lines %q, pending %v; want %q, and none", st.lines, ix.pending, want)
+	}
+	// One whose context ends begins no other write.
+	var many []ID
+	for i := range 2 * pruneChunk {
+		many = append(many, SecretRef("ns", fmt.Sprintf("s%03d", i)).ID())
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	st.lines, st.beforeUpdate = linesOf(many), func(*memStore) { stop() }
+	ix.maxLines, ix.checkBound = len(many), time.Minute
+	if err := ix.prune(ctx, many); !errors.Is(err, context.Canceled) || len(st.lines) != pruneChunk {
+		t.Errorf("a prune stopped in its first write = %v, with %d lines left, want %d", err, len(st.lines), pruneChunk)
+	}
+}
+
+// stuckServer's read of one object doesn't answer.
+type stuckServer struct {
+	stopServer
+	id ID
+}
+
+func (s stuckServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if name == s.id.Name {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.stopServer.Get(ctx, gk, ns, name)
+}
+
 // A graceful stop ends ctx in the middle of a prune: the write isn't
 // aborted, and the check after it and the re-add run to their end, within
 // pruneBound (§10.6.2). A prune that hasn't begun doesn't.
