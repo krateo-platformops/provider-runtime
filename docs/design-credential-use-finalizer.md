@@ -3180,9 +3180,13 @@ its Namespace's `allow-holders-from` names a holder's namespace any longer
 **How long that takes.** The change enqueues the target's holders where a cache
 or the Namespace informer delivers it, and otherwise each holder's next poll
 sees it. One that records more than 16 refs outside the caches
-(`SharedOptions.Namespaces`, §10.5) reads 16 of those it doesn't name a pass,
-so a withdrawal may take it up to ⌈n/16⌉ poll intervals for n such refs, and
-then §5's grace. A holder that names the ref reads it on every pass.
+(`SharedOptions.Namespaces`, §10.5) reads 16 of them a pass, those it names and
+those it doesn't alike, so a withdrawal of one it doesn't name may take it up to
+⌈m/16⌉ poll intervals for m of them, and then §5's grace. A holder that names
+the ref reads it on every pass. Whoever edits the holder sets m: 4,000 forged
+refs that were there first make it about 250 poll intervals, over four hours at
+one minute. A holder whose passes fail is paced by its controller's error
+backoff instead.
 
 **The gate runs on every pass** (M1), for every held cross-namespace ref,
 not only before A2:
@@ -3298,22 +3302,31 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
   - **a kind no longer in `Protected`** while records still name it: it isn't
     asked about at all. Disown it first (§7.4), or protect it again;
 - the rest are read live, **at most 16 a pass**, so at most 16 GETs of objects
-  and 16 of Namespaces, each Namespace once. Those that have waited the longest
-  go first, in memory: a ref starts to wait when a pass first asks about it, and
-  again when it is read. So a ref is read **within ⌈m/16⌉ passes**, where m is
-  how many refs, itself included, that first pass asks about, whatever is added
-  to the record later: fresh refs, or ones that leave it and return, go behind
-  it. The others are kept, and `RetryAfter` asks for the next pass, with the
-  backoff of a failed read: 1s, doubling up to the poll interval. A read that
-  fails there has no backoff of its own, since it comes back at its turn. A
-  restart, or a new leader, forgets how long each has waited, so the wait
-  starts over there: with m of 17 to 32 it costs one more pass. A read counts
-  once it is answered, a failure included. One that the end of the pass's
-  context cuts keeps its place, unless it took the context alone; a withdrawn
-  ref whose A1 wasn't written is first again. A pass that names more than 16
-  reads them too, as it always did;
+  and 16 of Namespaces, each Namespace once, **and within 5s together**, a
+  deadline of the gate's own: a read that hangs, as of a kind whose conversion
+  webhook does, takes neither the pass nor the A1 of what the others found.
+  Those that have waited the longest go first, always, in memory: a ref starts
+  to wait when a pass first asks about it, and again when it is read. So a ref
+  is read **within ⌈m/16⌉ passes**, where m is how many refs, itself included,
+  that first pass asks about, whatever is added to the record later: fresh refs,
+  or ones that leave it and return, go behind it. A restart, or a new leader,
+  forgets how long each has waited, so the wait starts over there: with m of 17
+  to 32 it costs one more pass. A read counts once it is answered, a failure
+  included. One that the deadline cuts keeps its place, so it is first in the
+  next pass, with the whole deadline; if that isn't enough for it, it goes
+  behind the others. So each ref whose read hangs costs about two passes a
+  rotation. A withdrawn ref whose A1 wasn't written is first again. A pass reads
+  the refs it names itself where the gate didn't, as it always did, under its
+  own context: one of them that hangs takes the pass, as on any pass;
+- **for what a pass asked about and doesn't know**, refs it couldn't read or
+  didn't get to, `RetryAfter` asks for the next, with one backoff a holder, the
+  gate's own: 1s, doubling up to the poll interval, back to 1s once a pass knows
+  all. So one ref that never can be read keeps the others' retry at the poll
+  interval. The refs that the pass names keep their own, per (holder, ref); one
+  that a holder stops naming while it fails stays in memory until the holder
+  goes;
 - **what it remembers** of a holder is of the refs that its record names now,
-  the backoff of failed reads included, and goes with the holder;
+  and goes with the holder;
 - another holder's pass costs what it did. The reads of one holder's record
   use the same client as the others', though, and at its rate.
 
@@ -3331,12 +3344,22 @@ the gate answers it for no more than 16 refs a pass.
 
 **A paused holder keeps its holds, whatever the target's owner does.** The gate
 is part of a pass, and a paused holder has none (§9.2): its recorded refs stay
-held, with their consent withdrawn, until it is unpaused or deleted and
-unpaused. So are those of a holder that no controller reconciles. Whether the
-owner should have a way out then is open. Nor is anything dropped while a
-holder is edited faster than a pass takes, since every A1 then conflicts, or
-while the API server refuses the A1 for a cause other than its size (a 422 from
-a schema or a webhook), or while every pass's context ends before its A1.
+held, with their consent withdrawn. So are those of a holder that no controller
+reconciles. That is a limit (the user's decision, 2026-11-24). **The way out:**
+
+- **unpause the holder.** Its next pass drops the ref. Deleting it isn't enough
+  while it is paused: its pass returns before its deletion, so it stays until it
+  is unpaused, unless it has no owner finalizer;
+- **or remove the finalizer by hand**, `credential-use.<kind>.<group>/<holder
+  namespace>` (§3), from the target. Nothing puts it back while its consent is
+  withdrawn;
+- **or the Disown switch** (§7.4), for the whole holder kind; or, once the kind's
+  CRD is deleted, `DisownPrefix` with `Names`, which refuses while it exists.
+
+Nor is anything dropped while a holder is edited faster than a pass takes, since
+every A1 then conflicts, or while the API server refuses the A1 for a cause other
+than its size (a 422 from a schema or a webhook), or while every pass's context
+ends before its A1, which comes within 5s of the pass's start.
 
 **A ref that only the record keeps, recreated without the annotation, is
 dropped.** A two-step apply (the object, then its annotation) of a target that
@@ -3819,8 +3842,8 @@ Doc text for consumers:
 > later releases those holders' holds through the normal protocol, with a
 > `CredentialConsentWithdrawn` event. It needs a pass of each holder, so not
 > of a paused one. With restricted caches (`SharedOptions.Namespaces`), a
-> holder that still records more than 16 refs outside them, n of them, may
-> take up to n/16 poll intervals, rounded up.
+> holder that records more than 16 refs outside them, m of them, may take up
+> to m/16 poll intervals, rounded up, for one it no longer names.
 
 ## 14. Tests, and what the reviewer should attack
 
