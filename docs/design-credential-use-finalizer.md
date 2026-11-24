@@ -3225,6 +3225,39 @@ not only before A2:
   On a pass that runs A2 the consent read is live already, so that read
   serves.
 
+**Every recorded ref is gated, and first** (found in a review of the chain
+code, 2026-11-24). A record keeps refs that its pass doesn't name: behind
+a hop it can't follow (§9.1), and when the pass fails (§8). The gate of the
+refs that a pass names never reaches those, so a withdrawal didn't release
+them, for as long as the holder stayed so; and with the target's namespace
+being deleted, its teardown waited on a holder that no longer named the
+target, and the owner's recovery, withdrawing consent, did nothing. So every
+pass **begins** by gating each ref in another namespace that the record names,
+before its refs are named and whatever it then comes to, a `Refs` error and a
+holder in the index namespace included:
+
+- **a cached yes serves**, so it costs no call in the steady state. That holds
+  on a deleting pass too, for the refs the pass doesn't name: their withdrawal
+  is then seen once the informer delivers it, as on any pass that skips its
+  A2. Those it names are still read live before their A2. Anything but a
+  cached yes is read live, and the pass uses that answer for a ref it then
+  names, rather than read again: it is the live read of the same pass that
+  the A2 needs;
+- **what it drops goes in one A1** at once, which a pass that fails afterwards
+  has then written. It conflicts as any A1 does, and the pass that wrote it
+  skips no A2 (§6.3): the holder's version is new. A withdrawal is reported
+  once that A1 is written. A pass with nothing to drop writes nothing;
+- **an unreadable consent keeps the ref**, with `RetryAfter` on a failing pass
+  too, and one that is gone stays, as any Missing ref;
+- **it asks nothing** about refs in the holder's own namespace, which need no
+  consent; about kinds that the Disown switch covers, by the informer, with no
+  read of the CRD (§7.4); or for a record it can't parse, which names nothing.
+  Only a target's owner can make a holder lose a hold by it, on that owner's
+  object, after a live read.
+
+`BeforeEstablish` and the prober don't change: a ref the gate dropped isn't
+Missing, and one it kept is neither probed for nor held by them, as before.
+
 **Why a drop needs that confirmation.** Releasing a hold is the direction
 that can expose a holder. A stale or unsynced cache is most likely exactly
 when it matters most: just after a restart during a namespace teardown, or
@@ -3285,7 +3318,11 @@ credential-use.krateo.io/unheld: [{"ref":"team-b/Secret/db-creds","reason":"Cons
   is `{"ref":"…","reason":"More","count":<n>}`. With refs of at most about 350
   characters, it stays under 6 KB.
 - **An entry goes** when the ref is held again, or when the holder no longer
-  names it.
+  names it. A released hold's entry, `ConsentWithdrawn` or `ReadDenied`, stays
+  while the holder's passes can't follow its whole chain, or fail, though none
+  names the ref: the holder may still read through to it, and the entry
+  explains what it then finds. It goes with the first pass that follows the
+  whole chain and doesn't name it.
 - **It is the runtime's.** Like the record, it shouldn't be edited. An edit
   is overwritten by the next A1.
 
