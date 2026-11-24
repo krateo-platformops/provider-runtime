@@ -5,8 +5,7 @@ A mutant counts as killed only if it compiled, the tests ran, and one failed by
 assertion. BUILD (didn't compile), PANIC (a test panicked) and TIMEOUT (go
 test's own deadline) are not kills. The baseline must pass, or the run is
 invalid. Each source file is restored after its mutant, and the end checks the
-tree is as it started. No test here is an envtest, but KUBEBUILDER_ASSETS is
-asked for as in the others.
+tree is as it started. One test here is an envtest, TestAForgedRecordsReads.
 
 Usage:
   python3 hack/revert-check-credential-use-consent.py > hack/revert-check-credential-use-consent.txt
@@ -84,6 +83,8 @@ MUTANTS = [
     # The bounds, and the waiting order.
     ("no bound on the reads", KE,
      [("p.gateTurns.next(uid, ask, maxGateReads)", "p.gateTurns.next(uid, ask, len(ask))")]),
+    ("17 reads a pass", KE,
+     [("const maxGateReads = 16\n", "const maxGateReads = 17\n")]),
     ("a Namespace is read for each ref", CO,
      [("\t\tnamespaces[id.Namespace] = ns\n", "")]),
     ("a new ref goes ahead of those that wait", KE,
@@ -193,7 +194,8 @@ KILLERS = {
     "any refused A1 is written again": ONE,
     "a 413 isn't for the size": ONE,
     "a 422 isn't for the size": ONE,
-    "no bound on the reads": COSTS,
+    "no bound on the reads": {C: "TestAForgedRecordCostsABoundedNumberOfReads|TestAForgedRecordsReads"},
+    "17 reads a pass": {C: "TestCacheLacks|TestAForgedRecordsReads"},
     "a Namespace is read for each ref": COSTS,
     "a new ref goes ahead of those that wait": STARVE,
     "no order": STARVE,

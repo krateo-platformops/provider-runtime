@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,9 +69,83 @@ type keptWorld struct {
 	home, other string
 	// failA2 names the Target in home whose A2 fails, if any.
 	failA2 atomic.Pointer[string]
-	// invalid counts the record writes refused as invalid, and forgedGets
-	// the GETs of other's Secrets named forged-….
-	invalid, forgedGets atomic.Int64
+	// invalid counts the record writes refused as invalid.
+	invalid atomic.Int64
+	forged  forgedReads
+}
+
+// forgedReads counts the GETs of other's Secrets named forged-…, by who makes
+// them.
+type forgedReads struct {
+	passes atomic.Pointer[atomic.Int64] // the controller's
+	mu     sync.Mutex
+	// gate are the GETs of the gate, by the pass that makes them: the
+	// controller counts a pass before it runs it, one at a time.
+	gate map[int64]int
+	// release are the GETs of the release loop, by name, and others those of
+	// anything else, by caller.
+	release, others map[string]int
+}
+
+func (f *forgedReads) count(name string) {
+	who, passes := readerOf(), f.passes.Load()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.gate == nil {
+		f.gate, f.release, f.others = map[int64]int{}, map[string]int{}, map[string]int{}
+	}
+	switch {
+	case who == readerGate && passes != nil:
+		f.gate[passes.Load()]++
+	case who == readerRelease:
+		f.release[name]++
+	default:
+		f.others[who]++
+	}
+}
+
+// most is the most GETs that the gate made in one pass, and passes how many
+// passes of it made any; releases is how many the release loop made, of names
+// names, and others who else made how many.
+func (f *forgedReads) most() (most, passes, releases, names int, others map[string]int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, n := range f.gate {
+		most = max(most, n)
+	}
+	for _, n := range f.release {
+		releases += n
+	}
+	return most, len(f.gate), releases, len(f.release), maps.Clone(f.others)
+}
+
+// The callers that readerOf tells apart.
+const (
+	readerGate    = "the gate of recorded refs"
+	readerRelease = "the release loop"
+)
+
+// readerOf is who makes the API call that a hook sees, which runs in the
+// goroutine that makes it: one of the two above, or else the functions it
+// comes from.
+func readerOf() string {
+	pcs := make([]uintptr, 64)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	var chain []string
+	for {
+		f, more := frames.Next()
+		fn := f.Function[strings.LastIndex(f.Function, "/")+1:]
+		switch fn {
+		case "credentialuse.(*protocol).gateRecorded":
+			return readerGate
+		case "credentialuse.(*Shared).releaseBatch":
+			return readerRelease
+		}
+		chain = append(chain, fn)
+		if !more {
+			return strings.Join(chain, " < ")
+		}
+	}
 }
 
 func newKeptWorld(t *testing.T) *keptWorld {
@@ -107,7 +184,7 @@ func newKeptWorldWith(t *testing.T, so cu.SharedOptions, change func(o *cu.Optio
 				return apierrors.NewServiceUnavailable("injected")
 			}
 			if c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == k.other && strings.HasPrefix(c.Name, "forged-") {
-				k.forgedGets.Add(1)
+				k.forged.count(c.Name)
 			}
 			return nil
 		}, func(c cu.Call, err error) {
@@ -337,17 +414,19 @@ func TestAWithdrawalReleasesAKeptRefOfAHolderWithFullAnnotations(t *testing.T) {
 	}
 }
 
-// Whoever can edit a holder writes its record. One that names many Secrets
-// costs no GETs where the caches cover them, and at most 16 a pass where they
-// don't; and a real ref among them is still released once its consent is
-// withdrawn (§11.3).
+// Whoever can edit a holder writes its record. The gate makes no GETs of the
+// many Secrets that one names where the caches cover them, and at most 16 a
+// pass where they don't; and a real ref among them is still released once its
+// consent is withdrawn (§11.3). The release loop makes one of each name for
+// each change of the record, whether the caches cover them or not (§10.2): the
+// cost of a batch, and not the gate's.
 func TestAForgedRecordsReads(t *testing.T) {
 	cutest.Require(t, env)
 	for name, tc := range map[string]struct {
 		so      func(t *testing.T) cu.SharedOptions
 		change  func(o *cu.Options)
 		forged  int
-		perPass int64
+		perPass int
 	}{
 		"every namespace cached, 20":  {so: func(*testing.T) cu.SharedOptions { return cu.SharedOptions{} }, forged: 20},
 		"every namespace cached, 400": {so: func(*testing.T) cu.SharedOptions { return cu.SharedOptions{} }, forged: 400},
@@ -370,16 +449,36 @@ func TestAForgedRecordsReads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			k.forged.passes.Store(&k.c.passes)
 			k.annotate(t, cu.AnnotationRefs, v)
-			k.passes(t, 2)
-			passes, gets := k.c.passes.Load(), k.forgedGets.Load()
-			k.passes(t, 5)
-			// A pass may be under way at either reading.
-			passes, gets = k.c.passes.Load()-passes+1, k.forgedGets.Load()-gets
-			if gets > tc.perPass*passes {
-				t.Errorf("%d GETs of forged refs in %d passes, want at most %d a pass", gets, passes, tc.perPass)
+			// The release loop reads every name of a record's change, once.
+			released := func(changes int) {
+				t.Helper()
+				cutest.Eventually(t, time.Minute, func() error {
+					if _, _, n, _, _ := k.forged.most(); n < changes*tc.forged {
+						return fmt.Errorf("the release loop has made %d GETs of %d names for %d changes of the record: %w", n, tc.forged, changes, cutest.ErrNotYet)
+					}
+					return nil
+				})
 			}
-			if tc.perPass > 0 && gets == 0 {
+			check := func(changes int) {
+				t.Helper()
+				most, passes, releases, names, others := k.forged.most()
+				t.Logf("the gate: at most %d GETs of forged refs a pass, in %d passes; the release loop: %d, of %d names, for %d changes of the record", most, passes, releases, names, changes)
+				if most > tc.perPass {
+					t.Errorf("the gate made %d GETs of forged refs in one pass, want at most %d", most, tc.perPass)
+				}
+				if releases > changes*tc.forged {
+					t.Errorf("the release loop made %d GETs of %d forged refs, want at most one of each for each of %d changes of the record", releases, tc.forged, changes)
+				}
+				if len(others) > 0 {
+					t.Errorf("GETs of forged refs by others: %v", others)
+				}
+			}
+			released(1)
+			k.passes(t, 7)
+			check(1)
+			if most, _, _, _, _ := k.forged.most(); tc.perPass > 0 && most == 0 {
 				t.Error("no GETs where no cache covers them: the case reads nothing")
 			}
 			if !k.recorded(t) {
@@ -387,6 +486,9 @@ func TestAForgedRecordsReads(t *testing.T) {
 			}
 			setSecretConsent(t, k.other, "x", "")
 			k.releasedAmong(t, tc.forged)
+			// The A1 that drops x is a change too.
+			released(2)
+			check(2)
 		})
 	}
 }
