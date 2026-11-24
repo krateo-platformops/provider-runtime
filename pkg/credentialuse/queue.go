@@ -556,7 +556,8 @@ func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 
 // PutBack adds to k's next batch what its worker didn't get to, each object at
 // the place it had, so before whatever was added since, and known to carry the
-// finalizer if it was; one that a whole namespace's list found, at the list's. One
+// finalizer if it was (what is put back later is taken before what was before it, so
+// among more than lineWindow of them the order is of when, not of the places); one that a whole namespace's list found, at the list's. One
 // added again meanwhile has the earlier of its two places. With no ids it does
 // nothing. It is for the worker of k's batch, before Done. After ShutDown it does
 // nothing.

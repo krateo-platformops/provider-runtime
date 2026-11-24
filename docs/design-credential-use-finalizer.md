@@ -892,8 +892,9 @@ releases wait. So:
   and a namespace's list (§10.5). An object whose release meets a change is read
   again in its own turn, past the 64 and its time, at most 4 times: put back, it
   would lose which resourceVersion its patch was built from.
-- **What a turn doesn't get to goes back where it was**, and the key behind the
-  other keys. It is neither decided nor failed: its failures, its pending retry and
+- **What a turn doesn't get to goes back where it was**, before what was added since
+  (and, past 1,024 that were put back, before what was put back before it), and the key
+  behind the other keys. It is neither decided nor failed: its failures, its pending retry and
   what is counted for it stay as they were.
 - **The queue is first in, first out**, and adding an object again doesn't move it.
   A key has two lines: of what is known to carry K's finalizer for N, as what the
@@ -915,17 +916,24 @@ releases wait. So:
   it, and its failure is one for all of them; a page of R2's list, or of any live list,
   a minute, not the list. So an object whose reads are slow is released late, not
   never. The time starts when the call is sent, or a connection for it is asked for
-  (`answered`): **what the client's own rate limiter makes it wait isn't limited**, and
-  makes it late, as it always did. A deadline would be refused by that limiter at once,
+  (`answered`), and again at each attempt that client-go makes by itself, as after a
+  429: **what the client's own rate limiter makes it wait isn't limited**, before the
+  first or, for 5 minutes, before another, and makes it late, as it always did; a body
+  has those 5 minutes too. (But an attempt that ends in a reset gives no sign: what
+  client-go waits before its next counts in the time of the one that was reset.) A deadline would be refused by that limiter at once,
   unsent, whenever its wait passes it (`TestPremiseAClientRefusesAReadItCantWaitFor`),
   so behind a standing backlog of calls nothing would ever be released; and a time that
   a turn's reads shared would leave R2 none. A transport that gives no sign of what is
   sent, as one that isn't built on net/http's, has no such time, as before.
 - **How long one turn can hold a worker**, with nothing that is sent answered, beside
   the limiter's wait: R1 30s for names that are new, 130s if two that failed three times
-  or more are among them; the Namespaces twice the longest of their objects' times; the
-  list a minute a page, and before it a minute for each protected kind when the batch is
-  a namespace's outside the caches. Not limited here, and not more than before: the
+  or more are among them; the Namespaces 10s and twice the longest of their objects'
+  times; the list a minute a page, and before it a minute for each protected kind when
+  the batch is a namespace's outside the caches; in PerName mode, a minute for each line
+  a prune took. **Behind a backlog B of calls in the limiter**, whose wait counts in R1's
+  10s, a turn makes a read of each sort, a Namespace's, a page and a patch, B each: with
+  B over 10s about 4 to 5 B of a worker for the release of one known object, and B for
+  a made-up name, as each read of every name cost before. Not limited here, and not more than before: the
   mapper, which takes no context, and whose discovery client-go gives up after 32s (a
   turn's window lets one or two of them begin); the epoch's repair in R1, R3's patches,
   at most 64 and a conflict's, and the index's writes, each of which the API server

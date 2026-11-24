@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -142,6 +143,39 @@ func TestAnsweredTimesEachAttempt(t *testing.T) {
 	})
 	if Classify(err) != ClassNotFound || asked.Load() != 2 {
 		t.Errorf("%v after %d attempts; want the second's answer, that it is missing", err, asked.Load())
+	}
+}
+
+// What follows an answer's first byte has a time too: a body that stalls is cut.
+func TestAnsweredCutsABodyThatStalls(t *testing.T) {
+	was := answerRest
+	answerRest = 200 * time.Millisecond
+	defer func() { answerRest = was }()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, _ = io.WriteString(w, "some")
+		_ = http.NewResponseController(w).Flush()
+		select {
+		case <-time.After(20 * time.Second):
+		case <-req.Context().Done():
+		}
+	}))
+	defer api.Close()
+	began := time.Now()
+	_, err := answered(context.Background(), 10*time.Second, func(ctx context.Context) (int, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, api.URL, nil)
+		if err != nil {
+			return 0, err
+		}
+		resp, err := api.Client().Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		return len(body), err
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(began) > 8*time.Second {
+		t.Errorf("%v after %s; want the body cut in its own time", err, time.Since(began))
 	}
 }
 
