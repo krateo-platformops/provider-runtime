@@ -196,12 +196,22 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	fill := len(ids) == 0 || slices.Contains(ids, fillAll)
 	failed := map[ID]bool{} // what is retried with backoff
 	var errs []error
+	// fail notes err, and what it left undecided: of, or, if err comes with no
+	// object, all there are, so that one that forgets to say loses none.
+	fail := func(err error, of ...ID) {
+		errs = append(errs, err)
+		if len(of) == 0 {
+			of = ids
+		}
+		for _, id := range of {
+			failed[id] = true
+		}
+	}
 	if fill {
 		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return id == fillAll })
 		held, err := s.heldIn(ctx, t, k.Namespace)
 		if err != nil {
-			errs = append(errs, err)
-			failed[fillAll] = true
+			fail(err, fillAll)
 		}
 		ids = SortedIDs(append(ids, held...))
 		ids = slices.Compact(ids)
@@ -211,10 +221,7 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		f(&res)
 	}
 	if err != nil {
-		errs = append(errs, err)
-	}
-	for _, id := range res.Failed {
-		failed[id] = true
+		fail(err, res.Failed...)
 	}
 	s.reportKept(t, k, res.Kept)
 	if t.idx != nil {
@@ -222,10 +229,7 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		// fails retries its objects, which R1 finds bare again.
 		bare := t.idx.prunable(res.Bare)
 		if err := t.idx.prune(ctx, bare); err != nil {
-			errs = append(errs, err)
-			for _, id := range bare {
-				failed[id] = true
-			}
+			fail(err, bare...)
 		}
 	}
 	decided := slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return failed[id] })
@@ -248,8 +252,8 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 
 // retryBatch requeues objects ids of batch k after err: at once, for the next
 // write loops, when ctx ended under it; otherwise each with its own backoff. A
-// failure of none, as of a holder namespace that can't be one, is only said: an
-// Add of none would ask for the whole namespace.
+// failed batch of none, as of a holder namespace that can't be one, is only
+// said: an Add of none would ask for the whole namespace.
 func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []ID, err error) {
 	if ctx.Err() != nil {
 		if len(ids) > 0 {
