@@ -423,6 +423,16 @@ For Krateo, that's core-provider#310.
     0 on an error.
   - *RBAC.* list on the watched resource cluster-wide; get and patch on
     `deployments/scale`.
+- **A name that comes from data**, as a `secretRef` in a spec. Check it, and the
+  namespace, where the API's schema doesn't: with
+  `rest.IsValidPathSegmentName`, or as the DNS names they are. A typed or a
+  dynamic client refuses one that isn't a path segment; a metadata client
+  (`client-go/metadata`, or `PartialObjectMetadata` through controller-runtime)
+  doesn't, nor does a cached reader (`resource.GetSecret` and
+  `GetConfigMapValue` read through the client you give them). It matters where
+  you restrict the namespace and not the name. An object of a cluster-scoped kind
+  is named without a namespace: a `credentialuse` ref that fills one in names no
+  object, and is Missing.
 
 ## Developing this library
 

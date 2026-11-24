@@ -321,13 +321,23 @@ func (p *protectedInformer) snapshot() []*Tracker {
 	return slices.Clone(p.trackers)
 }
 
-func (p *protectedInformer) get(namespace, name string) (*metav1.PartialObjectMetadata, bool) {
+// cached returns the cached object namespace/name, if there is one: only a name
+// that is a single path segment is a part of a key as it is.
+func (p *protectedInformer) cached(namespace, name string) (any, bool) {
+	if !pathSegment(namespace) || !pathSegment(name) {
+		return nil, false
+	}
 	key := name
 	if namespace != "" {
 		key = namespace + "/" + name
 	}
 	obj, ok, err := p.inf.GetStore().GetByKey(key)
-	if err != nil || !ok {
+	return obj, ok && err == nil
+}
+
+func (p *protectedInformer) get(namespace, name string) (*metav1.PartialObjectMetadata, bool) {
+	obj, ok := p.cached(namespace, name)
+	if !ok {
 		return nil, false
 	}
 	return metadataOf(obj)
@@ -339,12 +349,8 @@ func (p *protectedInformer) getContent(namespace, name string) (*unstructured.Un
 	if !p.content {
 		return nil, false
 	}
-	key := name
-	if namespace != "" {
-		key = namespace + "/" + name
-	}
-	obj, ok, err := p.inf.GetStore().GetByKey(key)
-	if err != nil || !ok {
+	obj, ok := p.cached(namespace, name)
+	if !ok {
 		return nil, false
 	}
 	u, ok := obj.(*unstructured.Unstructured)

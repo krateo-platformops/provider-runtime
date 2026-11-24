@@ -568,7 +568,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				// A skip still checks the line (§10.6.2): one a prune lost
 				// while this process's write was the last comes back.
 				if err := p.lines.ensure(ctx, id); err != nil {
-					return fail(fmt.Errorf("credential-use: keeping the index line of %s: %w", id, err), "Index")
+					return fail(fmt.Errorf("credential-use: keeping the index line of %s: %w", quotedLine(id), err), "Index")
 				}
 			}
 			if !held && cross[id] && !liveOK[id] {
@@ -618,7 +618,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 					// The line before A2 (§10.6.2): an add that fails, as on
 					// a full index, stops before A2.
 					if err := p.lines.ensure(ctx, id); err != nil {
-						return fail(fmt.Errorf("credential-use: adding the index line of %s: %w", id, err), "Index")
+						return fail(fmt.Errorf("credential-use: adding the index line of %s: %w", quotedLine(id), err), "Index")
 					}
 				}
 				switch class, uid, err := p.write(ctx, id, namespace); class {
@@ -921,7 +921,7 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 		}
 		if p.keepsLine(id.GroupKind()) {
 			if err := p.lines.ensure(ctx, id); err != nil {
-				return fmt.Errorf("credential-use: adding the index line of %s before establishing: %w", id, err)
+				return fmt.Errorf("credential-use: adding the index line of %s before establishing: %w", quotedLine(id), err)
 			}
 		}
 		class, uid, err := p.write(ctx, id, obj.GetNamespace())

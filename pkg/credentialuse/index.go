@@ -138,6 +138,34 @@ func encodeIndex(lines []string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// readsBack reports whether id's line, written to the index, is read as that
+// one line, and as id.
+func readsBack(id ID) bool {
+	line := id.String()
+	got, ok := parseIndexLine(line)
+	return ok && got == id && slices.Equal(decodeIndex(encodeIndex([]string{line})), []string{line})
+}
+
+// maxLineName is the longest name, or namespace, a line may have: that of a DNS
+// subdomain, which the names of most kinds are. Without it a few refs would
+// fill the ConfigMap.
+const maxLineName = 253
+
+// lineErr returns why id can't be a line of an index, or nil (§10.6).
+func lineErr(id ID) error {
+	if len(id.Name) > maxLineName || len(id.Namespace) > maxLineName {
+		return fmt.Errorf("its name, or its namespace, is longer than %d bytes", maxLineName)
+	}
+	if !readsBack(id) {
+		return errors.New("it would be read as another, or as more than one: correct the reference, as a line break or a blank at its end")
+	}
+	return nil
+}
+
+// quotedLine is id's line as an error of the index quotes it: cut, after the
+// quoting, so that an event's note, of 1,024 bytes, holds it twice.
+func quotedLine(id ID) string { return fmt.Sprintf("%.300s", fmt.Sprintf("%+.300q", id.String())) }
+
 // linesOf returns ids' lines, sorted and without repeats.
 func linesOf(ids []ID) []string {
 	out := make([]string, 0, len(ids))
@@ -433,14 +461,15 @@ func policyParamsMissing(err error) bool {
 // re-reads and re-applies them on a conflict. An index that is gone is
 // created with them, without AnnotationRebuilt, and marked for the rebuild
 // from the records (§10.6.6). It fails with errIndexFull past the cap or the
-// size.
+// size. It adds no line that can't be one (lineErr): nothing of such a name is
+// held (ensure).
 func (ix *index) add(ctx context.Context, ids []ID) error { return ix.merge(ctx, ids, false) }
 
 // merge is add; with rebuilt, it is a rebuild's last merge, and sets
 // AnnotationRebuilt in the same guarded write (§10.6.6), writing even when
 // no line is new.
 func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
-	lines := linesOf(ids)
+	lines := linesOf(slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return lineErr(id) != nil }))
 	var last error
 	for range maxIndexWriteAttempts {
 		cur, err := ix.store.get(ctx)
@@ -740,6 +769,9 @@ func (ix *index) denied(id ID, err error) {
 // unless the view shows it. A stale view that shows a line a prune has
 // removed is caught by postCheck.
 func (ix *index) ensure(ctx context.Context, id ID) error {
+	if err := lineErr(id); err != nil {
+		return fmt.Errorf("credential-use: %s can't be a line of the index %s: %w (§10.6)", quotedLine(id), ix.ref(), err)
+	}
 	if ix.has(ctx, id.String()) {
 		return nil
 	}

@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 )
 
 // listPageSize bounds each page of a consistent list (R2, the prober).
@@ -44,17 +45,27 @@ func (s clientServer) resource(gk schema.GroupKind) (schema.GroupVersionResource
 	return m.Resource, m.Scope.Name() == meta.RESTScopeNameNamespace, nil
 }
 
-// object returns the client for object namespace/name of gk. An object of a
-// namespaced kind named without a namespace, as a cluster-scoped holder's data
-// may, can't exist: it is NotFound, without a call, whose 404 would name
-// nothing (Classify). A list without a namespace is of every one, and isn't
-// this.
+// pathSegment reports whether an object, or a namespace, may have name: the
+// API server's own registry admits none that isn't a single path segment.
+func pathSegment(name string) bool { return len(rest.IsValidPathSegmentName(name)) == 0 }
+
+// mayExist reports whether there may be an object namespace/name of a kind,
+// namespaced or not: a namespaced kind's has a namespace, a cluster-scoped
+// kind's none, and each is a single path segment.
+func mayExist(namespaced bool, namespace, name string) bool {
+	return (namespace != "") == namespaced && pathSegment(namespace) && pathSegment(name)
+}
+
+// object returns the client for object namespace/name of gk. One that can't
+// exist (mayExist), as a holder's data may name one, names no object: it is
+// NotFound, without a call, whose 404 would name nothing (Classify). A list
+// without a namespace is of every one, and isn't this.
 func (s clientServer) object(gk schema.GroupKind, namespace, name string) (metadata.ResourceInterface, error) {
 	gvr, namespaced, err := s.resource(gk)
 	if err != nil {
 		return nil, err
 	}
-	if namespaced && namespace == "" {
+	if !mayExist(namespaced, namespace, name) {
 		return nil, apierrors.NewNotFound(gvr.GroupResource(), name)
 	}
 	return s.client(gk, namespace)
@@ -116,7 +127,12 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 // List reads every object of gk in namespace, page by page, with no label
 // selector and no resourceVersion: each page is a consistent read, and the
 // continue token keeps the pages at the first page's revision.
+// A namespace that can't exist has none, and any namespace none of a
+// cluster-scoped kind.
 func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace string) ([]metav1.PartialObjectMetadata, error) {
+	if _, namespaced, err := s.resource(gk); err == nil && namespace != "" && (!namespaced || !pathSegment(namespace)) {
+		return nil, nil
+	}
 	c, err := s.client(gk, namespace)
 	if err != nil {
 		return nil, err
