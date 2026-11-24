@@ -4,9 +4,14 @@ package credentialuse_test
 // a made-up history.
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	cu "github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
 )
@@ -732,18 +737,25 @@ func TestAuditGapLag(t *testing.T) {
 // Contexts that end aren't the API server's answers; and a process's own
 // release drops what it wrote once it has returned.
 func TestAuditGapThirdReview(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
 	for _, c := range []struct {
-		err  string
+		ctx  context.Context
+		err  error
 		want []string
 	}{
-		{"connect: connection refused", nil},
-		{"context canceled", []string{"ACQUIRE-FAILED"}},
-		{"context deadline exceeded", []string{"ACQUIRE-FAILED"}},
+		{context.Background(), errors.New("connect: connection refused"), nil},
+		{context.Background(), fmt.Errorf("patching: %w", context.Canceled), []string{"ACQUIRE-FAILED"}},
+		{context.Background(), fmt.Errorf("patching: %w", context.DeadlineExceeded), []string{"ACQUIRE-FAILED"}},
+		{context.Background(), errors.New("client rate limiter Wait returned an error: rate: Wait(n=1) would exceed context deadline"), []string{"ACQUIRE-FAILED"}},
+		{ended, errors.New("connect: operation was canceled"), []string{"ACQUIRE-FAILED"}},
+		{context.Background(), apierrors.NewTimeoutError("context deadline exceeded", 1), nil}, // the API server's 504
+		{ended, apierrors.NewInternalError(errors.New("etcd")), nil},                           // it answered, whatever became of the context
 	} {
 		b := newAuditRun(stressPlain).acquired()
 		p := b.pass()
-		b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, unknown: true, err: c.err})
-		p.degraded, p.acqErr = true, c.err
+		b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, unknown: !answered(c.err), ours: endedByUs(c.ctx, c.err), err: c.err.Error()})
+		p.degraded, p.acqErr = true, c.err.Error()
 		b.end(p)
 		b.want(t, c.want...)
 	}
@@ -771,6 +783,42 @@ func TestAuditGapThirdReview(t *testing.T) {
 	own(func(b *auditRun) {
 		b.call(stCall{proc: 1, g: "9", op: "get", obj: auditS2, err: "not found", notFound: true}, func(*stCall) {})
 	}).want(t, "HELD-WITHOUT-A2") // it has made its next call
+}
+
+// A batch met the canary's deleting user only if it listed it after the grace
+// that its own process counts, in a live namespace.
+func TestAuditGapKept(t *testing.T) {
+	canary := stObj{"Widget", "ns", canaryHolder}
+	for _, c := range []struct {
+		name      string
+		wait      time.Duration
+		seen      bool
+		torn, del bool
+		want      int
+	}{
+		{"after the grace", testGrace, true, false, true, 1},
+		{"before it", testGrace - 100*time.Millisecond, true, false, true, 0},
+		{"its process hasn't seen the deletion", testGrace, false, false, true, 0},
+		{"its namespace is being deleted", testGrace, true, true, true, 0},
+		{"the user isn't being deleted", testGrace, true, false, false, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newAuditRun(stressPlain)
+			b.put(canary, "uc", func(v *stVersion) { v.spec, v.rec, v.fins = "s", []stObj{auditS}, []string{ownerFinalizer} })
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e1") })
+			b.mark(auditS)
+			if c.seen {
+				b.deliver(2, auditS)
+			}
+			b.wait(c.wait)
+			if c.torn {
+				b.put(nsObj("ns"), "uns", func(v *stVersion) { v.deleting = true })
+			}
+			b.put(canary, "uc", func(v *stVersion) { v.deleting = c.del })
+			b.batch()
+			wantCount(t, b.want(t), countKept, c.want)
+		})
+	}
 }
 
 // A read that answers less than the watch had delivered before it began isn't

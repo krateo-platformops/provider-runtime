@@ -239,6 +239,9 @@ type stCall struct {
 	// finalizer (§6.2, class (a)).
 	refused bool
 	unknown bool // the call failed without an answer, or with a 5xx: it may have landed
+	// ours: it failed without an answer, and its own context had ended, or
+	// would have: that isn't the API server's doing.
+	ours bool
 	// items are the holders a list answered; continued and more: it is a
 	// page after the first, and isn't the last.
 	items           []stItem
@@ -276,12 +279,15 @@ func (c stCall) ok() bool { return c.err == "" }
 func (c stCall) removal() bool { return c.op == "r3" && c.ok() && c.deleting && len(c.fins) == 0 }
 
 // revision is the revision c was made at, if its answer has it: a write's, or
-// a consistent list's. A GET's is of the version it answered, and an R3's that
-// removes the object of the version its tests ran on.
+// a consistent list's. A GET's is of the version it answered, an R3's that
+// removes the object of the version its tests ran on, and a list's page after
+// the first of its first page's.
 func (c stCall) revision() (uint64, bool) {
 	switch c.op {
-	case "a1", "a2", "list":
+	case "a1", "a2":
 		return c.rv, true
+	case "list":
+		return c.rv, !c.continued
 	case "r3":
 		return c.rv, !c.removal()
 	}
@@ -461,9 +467,12 @@ const (
 	// the next one (§14, H1's other half); findLostA2: a release took an
 	// object over an A2 that had succeeded, whose deletion pass then failed to
 	// read it (H1). They fail the run, under their own names: they aren't the
-	// package's.
-	findRecreate = "H1-RECREATE"
-	findLostA2   = "H1-LOST-A2"
+	// package's. findUnbounded is the recreate's shape, where nothing bounds
+	// when the object went: something else may have taken it later, so it
+	// isn't excused.
+	findRecreate  = "H1-RECREATE"
+	findUnbounded = "H1-RECREATE-UNBOUNDED"
+	findLostA2    = "H1-LOST-A2"
 	// findTwice: two goroutines of one process worked on one key of the
 	// release queue at once (§10.2).
 	findTwice = "RELEASED-TWICE"
@@ -541,7 +550,6 @@ const (
 	countH3             = "H3: held objects a DELETE removed"
 	countH3Reads        = "H3: failed reads exempt"
 	countLostA2         = "H1: lost A2s"
-	countUnbounded      = "H1: recreates unbounded"
 	countLiveReads      = "failed reads of passes that began live"
 	countHolderGone     = "failed reads after the holder was gone"
 	countDrops          = "chained: record drops behind a Target"
@@ -552,6 +560,7 @@ const (
 	countEstablished    = "establishments checked"
 	countDegraded       = "deletion passes Degraded, on an object being deleted without their finalizer"
 	countAPIErrors      = "acquires stopped by a 429, a 5xx or a lost answer"
+	countKept           = "batches that met the canary's deleting user after the grace"
 )
 
 // A stFloor is the least a run must have of a count.
@@ -563,12 +572,12 @@ type stFloor struct {
 // floors are a run's, of so many passes: a bug that means "never" shows in
 // nothing else. What the canaries make happen must; the rest goes by the
 // passes, which a starved machine makes fewer of, at a fifth or less of what
-// the runs on file have.
+// the runs on file have. So a defect that makes fewer passes lowers them too.
 func (h *stHistory) floors(passes int64) []stFloor {
 	per := func(thousand int64) int { return max(1, int(passes*thousand/1000)) }
 	fs := []stFloor{{countReleases, 3}, {countReleasesLive, 1}, {countReleasesUsers, 1}, {countRemovals, 2}, {countHeldByA2, per(5)}, {countEstablished, per(2)}}
 	if !h.outside {
-		fs = append(fs, stFloor{countSkips, per(8)})
+		fs = append(fs, stFloor{countSkips, per(8)}, stFloor{countKept, 1})
 	}
 	if h.mode != stressChained {
 		fs = append(fs, stFloor{countRecords, per(50)})
@@ -611,6 +620,7 @@ type stHistory struct {
 	gaps     []string
 	synced   map[int]time.Time
 	stopped  time.Time
+	frozen   time.Duration
 	outside  bool
 	// explained are the releases of unknown outcome that explain a loss
 	// already, by index in calls.
@@ -634,6 +644,9 @@ type stRecording struct {
 	// first told to stop.
 	synced  map[int]time.Time
 	stopped time.Time
+	// frozen is the longest gap between two beats of the test's own
+	// heartbeat: what the machine stood still for, at most.
+	frozen time.Duration
 	// outside: every hold is outside the caches (§10.5), so no pass skips, and
 	// no informer delivers a protected object.
 	outside bool
@@ -642,7 +655,7 @@ type stRecording struct {
 func newStHistory(rec stRecording) *stHistory {
 	h := &stHistory{mode: rec.mode, grace: rec.grace, objs: map[stObj][]stVersion{}, holders: map[string][]stObj{}, byObj: map[stObj][]int{},
 		byPass: map[int64][]int{}, passes: map[int64]*stPass{}, reads: rec.reads, writes: map[stObj][]stWrite{},
-		events: map[stFeed][]stEvent{}, eventsOn: map[stFeedObj][]stEvent{}, gaps: rec.gaps, synced: rec.synced, stopped: rec.stopped, outside: rec.outside, explained: map[int]bool{}}
+		events: map[stFeed][]stEvent{}, eventsOn: map[stFeedObj][]stEvent{}, gaps: rec.gaps, synced: rec.synced, stopped: rec.stopped, frozen: rec.frozen, outside: rec.outside, explained: map[int]bool{}}
 	for _, v := range rec.versions {
 		if _, ok := h.objs[v.stObj]; !ok && h.holderKind(v.kind) {
 			k := holderKey(v.kind, v.ns)
@@ -789,6 +802,7 @@ func (h *stHistory) audit() *stReport {
 	h.auditCompleteness(r)
 	h.auditGets(r)
 	h.auditFeeds(r)
+	h.auditKept(r)
 	h.auditWorkers(r)
 	h.auditReleases(r)
 	h.auditFinalizers(r)
@@ -854,9 +868,10 @@ func (h *stHistory) auditCompleteness(r *stReport) {
 }
 
 // auditGets: a GET answers no less than the watch had delivered before it
-// began. Of an object that isn't found, that it can't have been gone: the
-// watch had it before, and its next version is the same incarnation, or it
-// has none.
+// began. One that answers NotFound of an object the watch had delivered by
+// then must come after its removal. The watch delivers that late, and other
+// versions before it, so the answer is right if the incarnation went at all,
+// unless something shows that it went after the answer (since).
 func (h *stHistory) auditGets(r *stReport) {
 	for _, c := range h.calls {
 		vs := h.objs[c.obj]
@@ -872,17 +887,42 @@ func (h *stHistory) auditGets(r *stReport) {
 		if i < 0 {
 			continue
 		}
-		v, stale := vs[i], false
-		if c.ok() {
-			stale = c.rv < v.rv
-		} else {
-			stale = !v.gone && (i+1 == len(vs) || !vs[i+1].gone && vs[i+1].uid == v.uid)
+		v, why := vs[i], ""
+		switch d, gone := h.removal(c.obj, v.uid); {
+		case c.ok() && c.rv < v.rv:
+			why = "it answers an older one"
+		case c.ok() || v.gone:
+		case !gone:
+			why = "which never went"
+		default:
+			if s := h.since(c.end, d.rv); s != "" {
+				why = "which went after it answered, and after this, which began after that: " + s
+			}
 		}
-		if stale {
-			r.find(stFinding{class: findStaleRead, text: fmt.Sprintf("%s: the watch had delivered %s before it began", c, v), obj: c.obj,
+		if why != "" {
+			r.find(stFinding{class: findStaleRead, text: fmt.Sprintf("%s: the watch had delivered %s before it began: %s", c, v, why), obj: c.obj,
 				from: c.start.Add(-5 * time.Second), to: c.end.Add(time.Second), zero: c.end, calls: []stCall{c}})
 		}
 	}
+}
+
+// since is something that began after t, and was made at a revision below rv:
+// a write, or a whole consistent list. So what was made at rv came after t.
+// Or "". Nothing else says so: a watch's time is only when it delivered.
+func (h *stHistory) since(t time.Time, rv uint64) string {
+	for _, c := range h.calls {
+		if at, ok := c.revision(); ok && c.ok() && c.start.After(t) && at < rv {
+			return c.String()
+		}
+	}
+	for _, ws := range h.writes {
+		for _, w := range ws {
+			if w.answer == answerCreated && w.start.After(t) && w.rv < rv {
+				return w.String()
+			}
+		}
+	}
+	return ""
 }
 
 // feedLag is how far behind the test's watch a process's informer may be.
@@ -891,9 +931,15 @@ const feedLag = 5 * time.Second
 // auditFeeds: each version of a holder reaches every process's feed of its
 // kind within feedLag of the test's watch, or a later one does; and so does,
 // to every tracker's feed, each version of a protected object that is held, or
-// was until then, where the caches cover it. A holder's feed has no removals.
-// From when the process had synced, and to feedLag before it was stopped. What
-// the skip audit takes from the feeds says nothing if a feed has stopped.
+// was until then, where the caches cover it. From when the process had synced,
+// and to feedLag before it was stopped. What the skip audit takes from the
+// feeds says nothing if a feed has stopped.
+//
+// A relist skips what is between, and tells of a removal by the last version
+// the informer had, again. So an incarnation's end covers what came before it:
+// a holder's, whose removals the hook doesn't see, by the watch's word; a
+// protected object's, by a version that its feed delivers a second time, which
+// nothing else does: no informer here resyncs.
 func (h *stHistory) auditFeeds(r *stReport) {
 	trackers := []string{"Widget"}
 	if h.mode == stressPlain {
@@ -918,17 +964,101 @@ func (h *stHistory) auditFeeds(r *stReport) {
 				if held && len(credentialUse(v.fins)) == 0 && (i == 0 || vs[i-1].uid != v.uid || len(credentialUse(vs[i-1].fins)) == 0) {
 					continue
 				}
+				by := v.at.Add(feedLag)
+				d, gone := h.removal(o, v.uid)
+				if !held && gone && !d.at.After(by) {
+					continue
+				}
 				for _, f := range feeds {
-					if !slices.ContainsFunc(h.eventsOn[stFeedObj{f, o}], func(e stEvent) bool {
-						return e.rv >= v.rv && !e.at.After(v.at.Add(feedLag))
-					}) {
-						r.find(stFinding{class: findLag, text: fmt.Sprintf("p%d's %s %s feed hadn't delivered %s, or a later one, %s after the test's watch", f.proc, f.kind, f.what, v, feedLag),
+					es := h.eventsOn[stFeedObj{f, o}]
+					if !slices.ContainsFunc(es, func(e stEvent) bool { return !e.at.After(by) && (e.rv >= v.rv || gone && h.tombstone(es, e, v.uid)) }) {
+						r.find(stFinding{class: findLag, text: fmt.Sprintf("p%d's %s %s feed hadn't delivered %s, or a later one, %s after the test's watch; the test itself stood still for %s at most",
+							f.proc, f.kind, f.what, v, feedLag, h.frozen.Round(time.Millisecond)),
 							obj: o, from: v.at.Add(-time.Second), to: v.at.Add(feedLag + time.Second), zero: v.at})
 					}
 				}
 			}
 		}
 	}
+}
+
+// tombstone: e, of a feed's events es on one object, is the second delivery of
+// a version of incarnation uid, and the incarnation's last: its removal, as a
+// relist found it.
+func (h *stHistory) tombstone(es []stEvent, e stEvent, uid string) bool {
+	before := false
+	for _, x := range es {
+		switch {
+		case x.uid != uid:
+		case x.at.After(e.at):
+			return false
+		case x.at.Before(e.at) && x.rv == e.rv:
+			before = true
+		}
+	}
+	return before && e.uid == uid
+}
+
+// auditKept counts the batches that meet §5's last row as the canary makes it:
+// their list has the canary being deleted, a user of an object that R1 read as
+// being deleted, in a Namespace that R2 read as not, after the grace by when
+// this process first saw the object being deleted.
+func (h *stHistory) auditKept(r *stReport) {
+	for i, l := range h.calls {
+		if l.op != "list" || !l.ok() || l.pass != 0 || l.continued || l.more || !h.holderKind(l.obj.kind) {
+			continue
+		}
+		for _, it := range l.items {
+			if it.name != canaryHolder || !it.deleting || !it.owner {
+				continue
+			}
+			for _, o := range it.rec {
+				if h.metAfterGrace(i, o) {
+					r.counts[countKept]++
+				}
+			}
+		}
+	}
+}
+
+// metAfterGrace: the last reads of o and of its Namespace that the goroutine of
+// the list at index i made before it, and after its last release, are of an
+// object being deleted, in a Namespace that isn't, and the latter began after
+// the grace's end in that process.
+func (h *stHistory) metAfterGrace(i int, o stObj) bool {
+	l := h.calls[i]
+	var r1, ns stCall
+	for j := i - 1; j >= 0; j-- {
+		c := h.calls[j]
+		if c.proc != l.proc || c.g != l.g || c.pass != 0 || c.end.After(l.start) {
+			continue
+		}
+		if c.op == "list" || c.op == "r3" {
+			break
+		}
+		switch {
+		case c.op != "get" || !c.ok():
+		case c.obj == o && r1.op == "":
+			r1 = c
+		case c.obj == nsObj(o.ns) && ns.op == "":
+			ns = c
+		}
+	}
+	if !r1.deleting || ns.op == "" || ns.deleting {
+		return false
+	}
+	var first time.Time // when the process's informers first delivered it being deleted
+	for f, es := range h.eventsOn {
+		if f.proc != l.proc || f.obj != o || f.what != protectedFeed(o.kind) || f.kind != l.obj.kind {
+			continue
+		}
+		for _, e := range es {
+			if v, ok := h.entry(o, e.rv); ok && v.uid == r1.uid && v.deleting && (first.IsZero() || e.at.Before(first)) {
+				first = e.at
+			}
+		}
+	}
+	return !first.IsZero() && !ns.start.Before(first.Add(h.grace))
 }
 
 // auditWorkers: one key of the release queue is one worker's at a time, so
@@ -1346,10 +1476,11 @@ func (h *stHistory) auditRemovals(r *stReport) {
 			held := credentialUse(d.fins)
 			unexplained := func(f string, a ...any) {
 				if why, cs := h.recreate(d); why == "" {
+					class := findRecreate
 					if !h.bounded(d, cs[1]) {
-						r.counts[countUnbounded]++
+						class = findUnbounded
 					}
-					r.find(stFinding{class: findRecreate, text: fmt.Sprintf("%s: two processes released the incarnation before it, and one of the releases was in flight still: %s; %s", d, cs[0], cs[1]),
+					r.find(stFinding{class: class, text: fmt.Sprintf("%s: two processes released the incarnation before it, and one of the releases was in flight still: %s; %s", d, cs[0], cs[1]),
 						obj: o, from: d.at.Add(-2 * time.Second), to: d.at.Add(500 * time.Millisecond), zero: d.at, calls: cs})
 				} else {
 					find("%s; it isn't H1's recreate: %s", fmt.Sprintf(f, a...), why)
@@ -1390,7 +1521,9 @@ func (h *stHistory) auditRemovals(r *stReport) {
 // recreate is why removal d isn't H1's recreate, or "" and the two releases:
 // of two processes, each answered as the removal of the incarnation just
 // before this one. One of them took that incarnation, since it went. The
-// other, the late one, took this one, so it ended after this one was created.
+// other, the late one, could have taken this one: it ended after this one's
+// create began. Each pair is tried, one that bounds the removal first; the
+// last's reason is returned if none holds.
 //
 // The bound is when the test began that create: the latest moment before
 // which a release that ended can't have met this incarnation, whatever the
@@ -1398,18 +1531,21 @@ func (h *stHistory) auditRemovals(r *stReport) {
 // come within a fraction of a millisecond of each other, in either order.
 //
 // So that nothing of ours can wear the shape, nothing else of ours may overlap
-// this one's life, from that moment to its removal's delivery: no other
-// release of the name that was answered, or may have landed; and no DELETE of
-// the test's that may have. Nothing is asked of what happened to it meanwhile:
-// it may have been held, or marked.
+// this one's life, from that moment to its removal's delivery: no other write
+// of ours on the name that was answered, and none, nor a DELETE of the test's,
+// that may have landed, however early its client gave it up. But an A2 whose
+// answer has its finalizer took nothing; and a release that was, too, answered
+// as the removal of the incarnation before, by a process of its own, is
+// another candidate for the late one. Nothing is asked of what happened to
+// this one meanwhile: it may have been held, or marked.
 func (h *stHistory) recreate(d stVersion) (string, []stCall) {
 	created := h.createBegan(d.stObj, d.uid)
 	if created.IsZero() {
 		return "its create isn't the test's", nil
 	}
 	for _, w := range h.writes[d.stObj] {
-		if w.op == "DELETE" && w.answer == answerUnknown && w.start.Before(d.at) && w.end.After(created) {
-			return fmt.Sprintf("a DELETE of unknown outcome overlaps its life: %s", w), nil
+		if w.op == "DELETE" && w.answer == answerUnknown && w.start.Before(d.at) {
+			return fmt.Sprintf("a DELETE of unknown outcome may overlap its life: %s", w), nil
 		}
 	}
 	before := stVersion{} // the removal before d
@@ -1423,72 +1559,83 @@ func (h *stHistory) recreate(d stVersion) (string, []stCall) {
 		return fmt.Sprintf("%d releases of the incarnation before it answered", len(rs)), nil
 	}
 	same := func(a, b stCall) bool { return a.proc == b.proc && a.g == b.g && a.start.Equal(b.start) }
+	why := "no two processes released the incarnation before it, one of them until after its create began"
+	var pair []stCall
 	for _, late := range rs {
 		for _, taker := range rs {
 			if taker.proc == late.proc || !late.end.After(created) {
 				continue
 			}
+			procs := map[int]bool{taker.proc: true, late.proc: true}
 			others := h.callsOn(d.stObj, func(c stCall) bool {
-				return c.op == "r3" && (c.ok() || c.unknown) && c.start.Before(d.at) && c.end.After(created) && !same(c, taker) && !same(c, late)
+				switch {
+				case c.op == "list" || strings.HasPrefix(c.op, "get") || !c.ok() && !c.unknown || same(c, taker) || same(c, late):
+					return false
+				case !c.start.Before(d.at) || c.ok() && !c.end.After(created):
+					return false
+				case c.op == "a2" && c.ok() && slices.Contains(c.fins, c.fin):
+					return false
+				case c.removal() && c.uid == before.uid && !procs[c.proc]:
+					procs[c.proc] = true
+					return false
+				}
+				return true
 			})
 			if len(others) > 0 {
-				return fmt.Sprintf("another release overlaps its life: %s", others[0]), nil
+				why = fmt.Sprintf("another write of ours overlaps its life: %s", others[0])
+				continue
 			}
-			if why := h.outlived(d, late); why != "" {
-				return "it outlived the late release: " + why, nil
+			if o := h.outlived(d, late); o != "" {
+				why = "it outlived the late release: " + o
+				continue
 			}
-			return "", []stCall{taker, late}
+			if h.bounded(d, late) {
+				return "", []stCall{taker, late}
+			}
+			if pair == nil {
+				pair = []stCall{taker, late}
+			}
 		}
 	}
-	return "no two processes released the incarnation before it, one of them until after its create began", nil
+	if pair != nil {
+		return "", pair
+	}
+	return why, nil
 }
 
 // outlived is what shows that removal d came after release late had ended, so
-// that late didn't make it, or "": a write, or a whole consistent list, that
-// began after late ended and was answered with a revision below d's; or a live
-// GET that began after it and answered this incarnation. It can't red a true
-// recreate: what begins after the release has ended has a later revision than
-// its removal.
+// that late didn't make it, or "": something that began after late ended and
+// was made below d's revision (since); or a live GET that began after it and
+// answered this incarnation. It can't red a true recreate: what begins after
+// the release has ended has a later revision than its removal.
 func (h *stHistory) outlived(d stVersion, late stCall) string {
-	for _, c := range h.calls {
-		if !c.ok() || !c.start.After(late.end) {
-			continue
-		}
-		if rv, writes := c.revision(); writes && rv < d.rv {
-			return c.String()
-		}
-		if c.op == "get" && c.obj == d.stObj && c.uid == d.uid {
-			return c.String()
-		}
+	if s := h.since(late.end, d.rv); s != "" {
+		return s
 	}
-	for _, ws := range h.writes {
-		for _, w := range ws {
-			if w.answer == answerCreated && w.start.After(late.end) && w.rv < d.rv {
-				return w.String()
-			}
-		}
+	for _, c := range h.callsOn(d.stObj, func(c stCall) bool { return c.op == "get" && c.ok() && c.uid == d.uid && c.start.After(late.end) }) {
+		return c.String()
 	}
 	return ""
 }
 
 // recreateBound is how soon after the late release ended a write, or a list,
-// must have begun for its revision to bound the removal.
+// must have been answered for its revision to bound the removal.
 const recreateBound = 200 * time.Millisecond
 
-// bounded reports whether something that began within recreateBound of the
-// late release's end has a later revision than removal d: so d came no later
-// than that. In a quiet moment nothing does, and a removal long after would
-// look the same.
+// bounded reports whether something that was answered within recreateBound of
+// the late release's end has a later revision than removal d: so d came no
+// later than that. In a quiet moment nothing does, and a removal long after
+// would look the same.
 func (h *stHistory) bounded(d stVersion, late stCall) bool {
-	near := func(t time.Time) bool { return t.After(late.end) && t.Sub(late.end) <= recreateBound }
+	near := func(t time.Time) bool { return t.Sub(late.end) <= recreateBound }
 	for _, c := range h.calls {
-		if rv, writes := c.revision(); c.ok() && writes && near(c.start) && rv > d.rv {
+		if rv, ok := c.revision(); ok && c.ok() && near(c.end) && rv > d.rv {
 			return true
 		}
 	}
 	for _, ws := range h.writes {
 		for _, w := range ws {
-			if w.answer == answerCreated && near(w.start) && w.rv > d.rv {
+			if w.answer == answerCreated && near(w.end) && w.rv > d.rv {
 				return true
 			}
 		}
@@ -1659,7 +1806,7 @@ func (h *stHistory) checkStopped(r *stReport, p *stPass, find func(class string,
 		last = before
 	}
 	// A context that ends isn't the API server's doing: the pass isn't cut.
-	api := last.unknown && !strings.Contains(last.err, "context canceled") && !strings.Contains(last.err, "context deadline exceeded") || last.code == 429
+	api := last.unknown && !last.ours || last.code == 429
 	explained := false
 	switch {
 	case p.conflict:
@@ -2090,10 +2237,14 @@ func (h *stHistory) auditReads(r *stReport) {
 }
 
 // lostToRelease reports whether removal d took A2 a2 with it, on proof: d was
-// being deleted, a2 made its last version, and every release that answered as
-// its removal ran its tests on an older one. Whether those releases were
-// right is auditReleases' to say.
+// being deleted, a2 made its last version, every release that answered as its
+// removal ran its tests on an older one, and none of it has an outcome that
+// isn't known: that one may not have tested the epoch. Whether those releases
+// were right is auditReleases' to say.
 func (h *stHistory) lostToRelease(d stVersion, a2 stCall) ([]stCall, bool) {
+	if len(h.callsOn(d.stObj, func(c stCall) bool { return c.op == "r3" && c.unknown && (c.testedUID == d.uid || c.testedUID == "") })) > 0 {
+		return nil, false
+	}
 	last, ok := h.last(d.stObj, d.uid)
 	rs := h.callsOn(d.stObj, func(c stCall) bool { return c.removal() && c.uid == d.uid })
 	if !ok || !d.deleting || a2.rv != last.rv || len(rs) == 0 {

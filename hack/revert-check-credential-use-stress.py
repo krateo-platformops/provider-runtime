@@ -14,13 +14,14 @@ A mutant counts as found only if an audit found one of the classes it names: a
 line AUDIT <class>. OTHER is a red without one, as when a namespace doesn't
 empty, or when the only classes are others; its output is printed. BUILD,
 PANIC and TIMEOUT aren't finds either. An unmutated run may go red on the API
-server's own H1 (H1_CLASSES). A run whose every error line is of those is
-excused, and the iterations left go on; one other error line, and it isn't.
-The rates of the excused are printed beside the baseline's and the stated ones
+server's own H1 (H1_CLASSES). A run whose every error line is of those, two
+at most, is set aside, and the iterations left go on, whether or not a rate is
+stated for the class: it is no find of a mutant's. One other error line, and it
+isn't. The rates of those are printed beside the baseline's and the stated ones
 (count-credential-use-stress.py), and RAISES-H1 marks a mutant that only raises
-one of them above its ceiling. The baseline must pass REVERT_BASELINE iterations (default 3), so excused, or
-the run is invalid. Each source file is restored after its mutant, and the end
-checks the tree is as it started.
+one of them above its stated rate. The baseline must pass REVERT_BASELINE
+iterations (default 3), so set aside, or the run is invalid. Each source file
+is restored after its mutant, and the end checks the tree is as it started.
 
 Two kinds of mutant: as a defect would be, and, where its window is a few
 milliseconds, the same with 200ms slept inside it. The second says the audit
@@ -166,8 +167,8 @@ MUTANTS = [
     ("an informer's handler drops the version in which an object begins to be deleted",
      [(IN, "\th.observe(n)\n\tt := h.t\n\tid := h.id(n)\n", "\tif o.DeletionTimestamp == nil && n.DeletionTimestamp != nil {\n\t\treturn\n\t}\n\th.observe(n)\n\tt := h.t\n\tid := h.id(n)\n")],
      ["LAG", "CANARY-NOT-RELEASED", "TOO-LITTLE"], CACHED),
-    ("a holder's handler stops after a thousand versions",
-     [(IN, "func (h holderHandler) OnUpdate(oldObj, newObj any) {\n", "var holderVersions atomic.Int64\n\nfunc (h holderHandler) OnUpdate(oldObj, newObj any) {\n\tif holderVersions.Add(1) > 1000 {\n\t\treturn\n\t}\n"),
+    ("a holder's handler stops after three hundred versions",
+     [(IN, "func (h holderHandler) OnUpdate(oldObj, newObj any) {\n", "var holderVersions atomic.Int64\n\nfunc (h holderHandler) OnUpdate(oldObj, newObj any) {\n\tif holderVersions.Add(1) > 300 {\n\t\treturn\n\t}\n"),
       (IN, "\t\"sync\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n")], ["LAG"]),
     ("a ref that a record drops queues no release",
      [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil {\n", "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil || m == old && cur != nil {\n")],
@@ -200,9 +201,9 @@ def errors(out):
 
 
 def h1_alone(out):
-    """Every error line is an audit's, of the API server's H1, and there is one."""
-    es = errors(out)
-    return bool(es) and all(e.startswith(tuple("AUDIT " + c + ":" for c in H1_CLASSES)) for e in es)
+    """Every error line is an audit's, of the API server's H1, and there are
+    some, but not more than one iteration has."""
+    return counts.h1_alone(errors(out))
 
 
 class Run:
@@ -354,7 +355,7 @@ for name, edits, classes in chosen:
     totals[state] = totals.get(state, 0) + 1
     print(f"{state:9} {name} (by {' or '.join(classes)})")
     for s, r in zip(states, runs):
-        print(f"          {s} at iteration {r.iterations} of {ITERATIONS}, {r.seconds:.0f}s: {' '.join(r.classes) or 'no audit'}" + (f"; {r.excused} excused before, red on H1 alone" if r.excused else ""))
+        print(f"          {s} at iteration {r.iterations} of {ITERATIONS}, {r.seconds:.0f}s: {' '.join(r.classes) or 'no audit'}" + (f"; {r.excused} set aside before, red on H1 alone" if r.excused else ""))
         if s in ("OTHER", "PANIC", "BUILD", "TIMEOUT"):
             print("          " + "\n          ".join(errors(r.out)[:6] or [r.out[-1500:]]))
     # A mutant that only raises the API server's own rates is found by that.
@@ -362,7 +363,7 @@ for name, edits, classes in chosen:
         n = sum(r.h1.count(c) for r in runs)
         raised, what = counts.over(SUBTEST.strip("^$"), c, n, ran) if ran else (False, "")
         if n:
-            print(f"          {c}, excused: {counts.rate(n, ran)}; the baseline's {base.h1.count(c)} in {base.iterations}; {what}")
+            print(f"          {c}, set aside: {counts.rate(n, ran)}; the baseline's {base.h1.count(c)} in {base.iterations}; {what}")
         if raised and state != "FOUND":
             totals["RAISES-H1"] = totals.get("RAISES-H1", 0) + 1
             print(f"RAISES-H1 {name}")

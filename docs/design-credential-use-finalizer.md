@@ -5996,12 +5996,18 @@ failure that the API server had caused (H3 below). Now:
   last; an A2 of its process that began after the first delivery of a record
   that names the ref; and nothing since that drops it, delivered before the
   pass began. That the informers deliver, within 5s of the test's watch, is an
-  audit of its own (`LAG`), which may also say that the machine is starved. No A2 comes before the record names its object. Each reason why
-  a ref isn't held, and each acquire that stops or leaves the holder Degraded,
-  has an answer of the API server's behind it, the last one the pass had.
+  audit of its own (`LAG`), which may also say that the machine is starved: it
+  prints the longest that the test itself stood still. No A2 comes before the
+  record names its object. Each reason why a ref isn't held, and each acquire
+  that stops or leaves the holder Degraded, has an answer of the API server's
+  behind it, the last one the pass had: a call that its own context ended has
+  none.
 - **Reads that must be live are:** a GET with a resourceVersion is no R1, and
   no read of a Namespace or a consent. And none answers less than the watch
-  had delivered before it began.
+  had delivered before it began. A NotFound of what the watch had delivered is
+  right if the incarnation went, and nothing that began after the answer was
+  made at a revision below its removal's: the watch may deliver the removal, and
+  an A2 before it, after the answer.
 - **Consent** (§11.3): an A2 of another namespace's object follows, in its
   pass, live reads of the Namespace and of the object, the last of which
   consent; and a skip, a consent its caches may have had.
@@ -6018,9 +6024,13 @@ failure that the API server had caused (H3 below). Now:
   and goes after its grace. One in a namespace that was deleted first is kept
   past it, until its user goes; and so is another namespace's. One whose user
   begins to be deleted just before R2's list, after the grace, with R0 past, is
-  kept until the user goes. And a hold of another namespace's object goes with
-  its consent, though its holder still names it. And a run with too few
-  releases, holds, skips, establishments, or consenting reads, fails.
+  kept until the user goes; and that a batch did list that user after the grace,
+  by its own process's first sight of the deletion, is a floor. A hold goes when
+  its holder names another object. And a hold of another namespace's object goes
+  with its consent, though its holder still names it. And a run with too few
+  releases, holds, skips, establishments, or consenting reads, fails. Those
+  that go by the number of passes fall with it, so a defect that makes fewer
+  passes lowers them too.
 - **A deletion pass reads what it has just held** (I1). It is a deletion pass
   if the holder was being deleted when the pass read it. One that began live
   isn't counted there, and is in every other audit. A failed read is exempt
@@ -6040,11 +6050,14 @@ Each audit is tested on made-up histories, without an API server, and against
 mutants of the protocol by `hack/revert-check-credential-use-stress.py`, which
 counts the iterations each takes to be found, by the classes it names. Before
 the canaries, at 79c6868, in the plain sub-test of 8s on 4 CPUs, 13 of 16
-mutants were found in the first or second iteration every time. The others:
-after the grace, deleting users not counted, 3 reds in 9 iterations; the same
-in R2 alone, 2 in 21; R3 without the epoch test, 3 in 4; and **a release that
-ignores a terminating namespace, §1's own teardown, 0 in 30.** Two canaries
-make the first two and the last happen in every run.
+mutants were found in the first or second iteration every time (R3 without the
+epoch test, for one, in 3 of 4 iterations). The three others: after the grace,
+deleting users not counted, 3 reds in 9 iterations; the same in R2 alone, 2 in
+21; and **a release that ignores a terminating namespace, §1's own teardown, 0
+in 30.** Two canaries make the three happen in every run. The mutants of today
+are to run in the plain sub-test, in the cross one, and once each
+(`REVERT_REPEATS=1`) with every hold outside the caches; no output of theirs is
+on file yet.
 
 **What a green run of 300 iterations says**, as
 `hack/count-credential-use-stress.py` counts one: a defect that these audits
@@ -6053,18 +6066,30 @@ says no more. It says nothing about stale holders (the driver reads them live);
 more than one ref per holder; lost responses, 5xx, restarts, failover, clock
 skew, or two API servers; a holder recreated under its name; liveness beyond the
 canaries; chains, PerName, Disown, or cluster-scoped kinds; events, or the
-unheld annotation; or a real cluster's rates of H1 and H3. An iteration is
-excused only if every error line of it is an audit's of the API server's own
-H1. Those are reported as rates, and each has a ceiling, by sub-test: a run
-whose interval for a class lies above the stated rate is red. The rate stated
-for `H1-RECREATE` is 5 of 207 iterations, 2.4% [0.8, 5.6], in the plain
-sub-test at 79c6868, on 4 CPUs, unloaded, before H1's wait: each was read by
-hand, and each has two processes' releases of one incarnation answered within
-5ms of each other, the test's create between, and the recreated Secret gone one
-or two revisions after it was created. `H1-LOST-A2` wasn't seen in them: under
-1.5%. Neither is measured in the other sub-tests, which so have no ceiling. They
-depend on the machine and on H1's wait, and are to be measured again with
-either. A run too short to lie above a ceiling can't show it.
+unheld annotation; or a real cluster's rates of H1 and H3. Of the target's
+namespaces of cross-namespace holds, only the canary's is deleted.
+
+An iteration is excused only if every error line of it is an audit's of the API
+server's own H1, two findings at most, of a class whose rate is **stated** for
+its sub-test, with the commit it was measured at. **None is stated now, so an
+iteration with H1 is red.** H1's wait changes the rates: one measured before
+it would hide a defect that loses the wait, which brings the old rate back. They
+are to be measured on top of it, every one read by hand, and again when the wait,
+the audits or the machine change. A stated rate is itself a count, and is
+compared as one: a run is over it if, were the rates the same, so many of the two
+runs' total would fall in it with a probability under 2.5%. Short runs of one
+sub-test are added up first. What that can't see is a defect of H1's shape that
+adds less: were 5 in 207 stated, up to 19 in 300 would pass, and were 0 in 207,
+up to 7; and one that loses the wait is seen only if it raises the rate by more.
+
+Before the wait, at 79c6868, in the plain sub-test on 4 CPUs, unloaded, the
+recreate was seen in 5 of 207 iterations, 2.4% [0.8, 5.6], and the lost A2 in
+none, under 1.5%. The audits of that commit had no class for it, and called all
+five `UNEXPLAINED-REMOVAL`. Each was read by hand: two processes' releases of one
+incarnation answered within 5ms of each other, the test's create between, and
+the recreated Secret gone one or two revisions after it was created. They
+haven't been judged again by today's rule, whose near end is when the create
+began, and whose far end is bounded. So they state nothing.
 
 **What it can't show:**
 
@@ -6082,19 +6107,23 @@ either. A run too short to lie above a ceiling can't show it.
   failed read. The stress counts it, by the version that R3's answer says its
   tests ran on; a deletion pass's read that fails for it fails the run, under
   its own name (`H1-LOST-A2`), on proof: the pass's A2 made the last version,
-  and every release that took it had tested an older one. The
+  every release that took it had tested an older one, and no release of that
+  incarnation has an unknown outcome. The
   other half of H1, where a second release of one incarnation removes the
   next, wasn't seen there. The stress has seen it: two processes' releases of a
   Secret answered, one removed it, the test's recreate landed, and the other's
   removed the recreated one at the next revision. It fails the run, under its
   own name (`H1-RECREATE`), only where both releases answered, of two
-  processes, one of them after the create began; no other release overlaps
-  the recreated Secret's life, nor a DELETE that may have landed; and nothing
-  that began after the late release had ended was answered as of before the
-  removal. Where nothing of the kind began within 200ms, the removal isn't
-  bounded so, and is counted apart. One process's two releases are a defect of
-  ours (`RELEASED-TWICE`). With three processes, a third release may well
-  overlap, and the removal is then unexplained.
+  processes, one of them after the create began; no other write of ours on the
+  name overlaps the recreated Secret's life, and none, nor a DELETE, may have
+  landed; and nothing that began after the late release had ended was answered
+  as of before the removal. An A2 whose answer has its finalizer may overlap;
+  and so may a third process's release that, too, was answered as the removal
+  of the incarnation before: it is another candidate for the late one. Where
+  nothing was answered, within 200ms of the late release's end, as of after the
+  removal, it isn't bounded: it fails the run as `H1-RECREATE-UNBOUNDED`, which
+  nothing excuses. One process's two releases are a defect of ours
+  (`RELEASED-TWICE`).
 - **The chained case.** A pass that followed an older version of a Target may
   drop from the record a Secret that the holder now needs (H2, open). The
   stress counts such drops and doesn't fail on them: every release after one
@@ -6106,9 +6135,14 @@ either. A run too short to lie above a ceiling can't show it.
   404 is confirmed by the read that §6.7 asks for.
 - **A deleting user outside the caches:** that canary doesn't run there, where
   only a pass of its holder would see the object being deleted.
-- **What the mutants weren't run on.** They run in the plain and the cross
-  sub-test. With three processes, outside the caches, and chained, the same
-  audits run, and what they would miss there isn't measured.
+- **What the mutants weren't run on.** With three processes, and chained, the
+  same audits run, and what they would miss there isn't measured.
+- **`LAG`'s blind spots:** a run's last 5s; the Namespaces' feed; a handler that
+  returns just after the test's hook; a holder's versions within 5s of its end;
+  and, of a protected object that a relist found gone, its versions before that.
+  A machine that stands still for 5s fails it, and it can't tell.
+- **A stale NotFound** of an incarnation that did go soon after, in a moment when
+  nothing else was written between.
 - **The index** (§10.6), Disown, a restart and a lost response: other tests',
   and the model's.
 - **A real cluster's rates.** envtest has one etcd, which doesn't sync its

@@ -73,6 +73,7 @@ type stressRecorder struct {
 	gaps     []string
 	synced   map[int]time.Time
 	stopped  time.Time
+	frozen   time.Duration
 	outside  bool
 	ended    map[string]bool // by kind and namespace: its watch has delivered the recording's last object
 }
@@ -113,7 +114,28 @@ func startRecorder(t *testing.T, mode stressMode) *stressRecorder {
 			r.watch(ctx, kind, w)
 		}()
 	}
+	r.wg.Go(func() { r.beat(ctx) })
 	return r
+}
+
+// beat keeps the longest gap between two beats of 100ms, less those: how long
+// the machine, or this process, stood still.
+func (r *stressRecorder) beat(ctx context.Context) {
+	const every = 100 * time.Millisecond
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for last := time.Now(); ; {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		now := time.Now()
+		r.mu.Lock()
+		r.frozen = max(r.frozen, now.Sub(last)-every)
+		r.mu.Unlock()
+		last = now
+	}
 }
 
 func (r *stressRecorder) watch(ctx context.Context, kind string, w watch.Interface) {
@@ -201,7 +223,14 @@ func (r *stressRecorder) finish(t *testing.T) *stHistory {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return newStHistory(stRecording{mode: r.mode, grace: testGrace, versions: r.versions, calls: r.calls, passes: r.passes, reads: r.reads, writes: r.writes, events: r.events,
-		gaps: r.gaps, synced: r.synced, stopped: r.stopped, outside: r.outside})
+		gaps: r.gaps, synced: r.synced, stopped: r.stopped, frozen: r.frozen, outside: r.outside})
+}
+
+// running reports whether a pass of holder o has begun and hasn't ended.
+func (r *stressRecorder) running(o stObj) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.ContainsFunc(r.passes, func(p *stPass) bool { return p.holder == o && p.done.IsZero() })
 }
 
 func parseRV(s string) uint64 {
@@ -379,6 +408,7 @@ func (c recordingResource) call(ctx context.Context, sc stCall, name string, f f
 	sc.end = time.Now()
 	if err != nil {
 		sc.err, sc.notFound, sc.unknown, sc.code = err.Error(), apierrors.IsNotFound(err), !answered(err), codeOf(err)
+		sc.ours = endedByUs(ctx, err)
 		sc.refused = sc.op == "a2" && sc.code == http.StatusUnprocessableEntity && strings.Contains(sc.err, "no new finalizers can be added if the object is being deleted")
 	} else {
 		sc.rv, sc.uid, sc.deleting, sc.fins = parseRV(out.ResourceVersion), string(out.UID), out.DeletionTimestamp != nil, slices.Clone(out.Finalizers)
@@ -392,6 +422,17 @@ func (r *stressRecorder) add(c stCall) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, c)
+}
+
+// endedByUs reports whether err, a call's with ctx, isn't the API server's
+// answer, and comes of the call's own context: it has ended, or, by the
+// client's rate limiter, would have. A 504 whose text speaks of a deadline has
+// a code, and is the API server's.
+func endedByUs(ctx context.Context, err error) bool {
+	if codeOf(err) != 0 {
+		return false
+	}
+	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "would exceed context deadline")
 }
 
 // answered reports whether err is the API server's refusal: the call did
@@ -439,7 +480,7 @@ func (c recordingResource) List(ctx context.Context, o metav1.ListOptions) (*met
 	out, err := c.ResourceInterface.List(ctx, o)
 	sc.end = time.Now()
 	if err != nil {
-		sc.err, sc.unknown, sc.code = err.Error(), !answered(err), codeOf(err)
+		sc.err, sc.unknown, sc.code, sc.ours = err.Error(), !answered(err), codeOf(err), endedByUs(ctx, err)
 	} else {
 		sc.rv, sc.more = parseRV(out.ResourceVersion), out.Continue != ""
 		if c.obj.ns != "" && (c.obj.kind == "Widget" || c.obj.kind == "Target") {

@@ -472,6 +472,12 @@ func (w *stressWorld) canaryTorn(ctx context.Context, ns string, o stObj, uid st
 // namespace, and its one user begins to be deleted just before R2's list at
 // the grace's end, whose R0 has read a cache that doesn't show it. It is kept,
 // for as long as the user is there, though the grace is over.
+//
+// Only a list made after the grace counts: one before it would keep the object
+// in any case, and show the caches the deleting user, so that R0 keeps it from
+// then on. No grace has ended before testGrace after the DELETE began, so the
+// user's deletion waits until then; and that a batch did list it after the
+// grace by its own process's first sight is a floor (countKept).
 func (w *stressWorld) canaryDeletingUser(ctx context.Context) {
 	ns := w.canaryNamespace()
 	o, field := w.canaryObject(ns)
@@ -479,14 +485,23 @@ func (w *stressWorld) canaryDeletingUser(ctx context.Context) {
 	if !ok {
 		return
 	}
-	// A slow holder: no pass of it runs. And no list of the batch begins
-	// before its deletion is done, in any process: one that did would rightly
-	// release.
+	// A slow holder: no pass of it runs, nor does one that had begun. And no
+	// list of the batch begins before its deletion is done, in any process: one
+	// that did would rightly release.
 	w.pause(ns, true)
 	defer w.pause(ns, false)
+	if !w.canaryUntil(ctx, ns, o, findNotHeld, "no pass of its holder runs any more", func() (bool, string) {
+		return !w.rec.running(stObj{"Widget", ns, canaryHolder}), "one does"
+	}) {
+		return
+	}
 	var once sync.Once
 	var deleted atomic.Bool
+	from := time.Now().Add(testGrace)
 	w.rec.beforeList.Store(ns, func() {
+		if time.Now().Before(from) {
+			return
+		}
 		once.Do(func() {
 			if err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Delete(ctx, canaryHolder, metav1.DeleteOptions{}); err != nil {
 				w.t.Errorf("deleting the canary in %s: %v", ns, err)
@@ -504,6 +519,35 @@ func (w *stressWorld) canaryDeletingUser(ctx context.Context) {
 	w.canaryKept(ctx, ns, o, uid, time.Second, "its user began to be deleted just before R2's list, after the grace")
 	w.pause(ns, false)
 	w.canaryEnds(ctx, ns, o)
+}
+
+// canaryRepoint is §6.1: a hold goes when its holder names another object, and
+// the record with it, though the object is there and nothing is being deleted.
+func (w *stressWorld) canaryRepoint(ctx context.Context) {
+	ns := w.canaryNamespace()
+	o, field := w.canaryObject(ns)
+	uid, ok := w.canaryHeld(ctx, ns, field, o.name, o)
+	if !ok {
+		return
+	}
+	next := stObj{o.kind, ns, o.name[:1] + "1"}
+	data, _ := json.Marshal(map[string]any{"spec": map[string]any{field: next.name}})
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Patch(ctx, canaryHolder, types.MergePatchType, data, metav1.PatchOptions{}); err != nil {
+		w.t.Errorf("re-pointing the canary in %s: %v", ns, err)
+		return
+	}
+	fin, _ := cu.FinalizerName(widgetGK, ns)
+	w.canaryUntil(ctx, ns, next, findNotHeld, "its holder names it now", func() (bool, string) {
+		u, err := w.get(ctx, next)
+		return err == nil && slices.Contains(u.GetFinalizers(), fin), fmt.Sprintf("%v", err)
+	})
+	w.canaryUntil(ctx, ns, o, findNotReleased, "its holder names another object: its hold must go, and it must stay", func() (bool, string) {
+		u, err := w.get(ctx, o)
+		if err != nil {
+			return false, err.Error()
+		}
+		return string(u.GetUID()) == uid && !slices.Contains(u.GetFinalizers(), fin), fmt.Sprintf("uid %s, finalizers %v", u.GetUID(), u.GetFinalizers())
+	})
 }
 
 // canaryObject is the object a canary in ns names, and the field that names
@@ -737,6 +781,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	var wg sync.WaitGroup
 	wg.Go(func() { w.canaryGrace(ctx) })
 	wg.Go(func() { w.canaryTeardown(ctx) })
+	wg.Go(func() { w.canaryRepoint(ctx) })
 	if !w.outside {
 		// Outside the caches, only a pass of the holder sees its object being
 		// deleted (§10.5), and this one's is paused.
