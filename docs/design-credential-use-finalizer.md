@@ -3182,8 +3182,8 @@ or the Namespace informer delivers it, and otherwise each holder's next poll
 sees it. One that records more than 16 refs outside the caches
 (`SharedOptions.Namespaces`, §10.5) reads 16 of them a pass, those it names and
 those it doesn't alike, so a withdrawal of one it doesn't name may take it up to
-⌈m/16⌉ poll intervals for m of them, and then §5's grace. A holder that names
-the ref reads it on every pass. Whoever edits the holder sets m: 4,000 forged
+⌈m/16⌉ poll intervals for m of them, and longer where passes read fewer, and
+then §5's grace. A holder that names the ref reads it on every pass. Whoever edits the holder sets m: 4,000 forged
 refs that were there first make it about 250 poll intervals, over four hours at
 one minute; and at most about 4,000, under three days, if they are of a
 protected kind that no cache covers and whose reads hang. A holder whose passes
@@ -3305,17 +3305,20 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
 - the rest are read live, **at most 16 a pass**, so at most 16 GETs of objects
   and 16 of Namespaces, each Namespace once, **and within 5s together**, or half
   of what the pass's context has left, if that is sooner: a deadline of the
-  gate's own. A read that hangs, as of a kind whose conversion webhook does,
-  takes neither the pass nor the A1 of what the others found. **But it takes up
-  to those 5s of the passes of that holder that meet it**, of every one with 16
-  refs to read or fewer, for as long as it hangs and the record names it.
+  gate's own, which a client's rate limit isn't told: a read that has no turn
+  yet waits for it, and the deadline cuts the wait, where client-go's limiter
+  would refuse it at once. So a pass whose client is short of turns takes its
+  worker up to those 5s. A read that hangs, as of a kind whose conversion webhook
+  does, takes neither the pass nor the A1 of what the others found. **But it
+  takes up to those 5s of the passes of that holder that meet it**, of every one
+  with 16 refs to read or fewer, for as long as it hangs and the record names it.
   Whoever can edit a holder can have it so, where reads of a protected kind
   hang: with many made-up names, if no cache covers the kind there; or with one
   existing object that a cache has without consent, which is read live too, and
   costs the 5s as well. They can't make one hang;
 - those that have waited the longest go first, always, in memory: a ref starts
   to wait when a pass first asks about it, and again when it is read. So a ref
-  is read **within ⌈m/16⌉ passes that aren't cut**, where m is how many refs,
+  is read **within ⌈m/16⌉ passes that read their 16**, where m is how many refs,
   itself included, that first pass asks about, whatever is added to the record
   later: fresh refs, or ones that leave it and return, go behind it. A restart,
   or a new leader, forgets how long each has waited, so the wait starts over
@@ -3328,6 +3331,16 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
   whose A1 wasn't written is first again. A pass reads the refs it names itself
   where the gate didn't, as it always did, under its own context: one of them
   that hangs takes the pass, as on any pass;
+- **a client short of turns**, as under a rate limit with busy workers, cuts the
+  pass: one that answers k of its refs moves those k, and the next goes on from
+  there. A ref takes two turns, or one if its Namespace was read in that pass.
+  **What remains:** while a turn takes more than about 2.5s, no ref is read, and
+  a withdrawn one stays held. From the context, a read that waits for a turn
+  looks like one that hangs, so the first in line goes behind the others when the
+  deadline cuts it: under a load that keeps time with the passes, with every
+  other one ending before its first answer, some refs may be so moved each time,
+  and never read. And what a client's own limiter or transport, other than
+  client-go's, refuses at once, by its place in the pass, counts as read;
 - **for what a pass asked about and doesn't know**, refs it couldn't read or
   didn't get to, `RetryAfter` asks for the next, with one backoff a holder, the
   gate's own: 1s, doubling up to the poll interval, back to 1s once a pass knows
@@ -3341,7 +3354,7 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
   use the same client as the others', though, and at its rate.
 
 **The release loop reads the names too, and those bounds aren't its.** A change
-of a record queues the batch of every name in the old and the new one (§10.2),
+of a record queues one batch, of every name in the old and the new one (§10.2),
 in every watch mode, and R0 settles only names that the caches have. So the
 process that runs the write loops makes a GET of each of the others, one after
 the other, where the caches cover them too: it grows with the record, 4,000 for
@@ -3352,14 +3365,21 @@ envtest, 2026-11-24), hold one of the two workers for 8s, and for longer where
 the client's rate limit is lower; beside R0's own work, which grows with the
 square of the names.
 
-**That is once only where each GET is answered, and nothing asks for the batch
-again.** A batch that fails at one object is retried whole, after 1s, doubling
-up to 5 minutes, for as long as it fails, and whatever the record says by then;
-a restart forgets it, and reads the names that the records have then. Whoever
-writes the record can name what always fails: a kind that can't be mapped, or an
-object outside a `resourceNames` grant. A batch that waits for the grace of one of its objects,
-or that restored an epoch, runs whole again too. So a change may cost m GETs
-every 5 minutes.
+**That is once only where each GET finds its object, or that there is none, and
+nothing asks for the batch again.** A batch that fails is retried whole, after
+1s, doubling up to 5 minutes, for as long as it fails, and whatever the record
+says by then. It fails at a GET, and whoever writes the record can name what
+always does: a kind that can't be mapped, or an object outside a `resourceNames`
+grant. It fails too at the holders' list, the Namespace of an object that is
+being deleted, an epoch's restore, R3, the index's prune, or, of a whole
+namespace, the list of what is held. One that waits for the grace of one of its
+objects, or that restored an epoch, runs whole again as well. So each change may
+cost m GETs every 5 minutes: a run that fails arms a timer of its own, and joins
+none, so c changes whose batches ran apart are c of them, until two fire
+together. And the backoff counts runs: ten in a short outage put the next retry
+at 5 minutes. A restart forgets them, and reads the names that the records have
+then. A standby's queue, though, keeps every name of every change until it is
+elected.
 
 It was so before the gate, and it is the release loop's to bound, in changes
 apart from this: a retry of what failed or asked for it, and no more, and
@@ -3372,9 +3392,16 @@ costs up to m GETs, which any drop did, and the gate may drop them over many
 passes. All the refs that it asks about share a pass's 16 reads, those that the
 pass names and those it doesn't, withdrawn or not: of m, w of them withdrawn, the
 drops cost at most w such batches, as each drops one or more, and in passes that
-aren't cut at most ⌈m/16⌉, and one for what a pass drops among the refs it names
-itself. Each of the w is an object that exists, and that a cache has without
-consent, or that no cache covers.
+read their 16 at most ⌈m/16⌉, and one for what a pass drops among the refs it
+names itself. Each of the w is an object that exists, and that a cache has
+without consent, or that no cache covers. Outside the caches, 4,000 names of
+which one in each 16 that a pass reads is an existing Secret without consent cost
+up to 250 batches and 970,000 GETs, over at least 250 passes that don't follow
+the whole chain; and more batches, of one drop each, where passes read fewer.
+Where a cache has the objects, R0 settles those still in the record that aren't
+being deleted, and a batch reads those dropped since the last one, and the
+made-up names, which no cache has: 250 cached without consent and 3,750 made-up
+cost up to 16 batches of about 3,766.
 
 **What remains.** Where no cache covers the target (outside
 `SharedOptions.Namespaces`, §10.5), there is no cached yes, so an honest
