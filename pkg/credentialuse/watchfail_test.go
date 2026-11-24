@@ -187,7 +187,9 @@ func (r *fakeRig) runLogged(t *testing.T, l *klogLines) {
 	go func() { done <- r.s.RunInformers(ctx) }()
 	t.Cleanup(func() {
 		cancel()
-		<-done
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("RunInformers: %v", err)
+		}
 	})
 	slowly(t, "RunInformers to sync", r.s.HasSynced)
 }
@@ -521,7 +523,9 @@ func TestWhatAFailureLogs(t *testing.T) {
 		t.Errorf("warned %d times, want 5: %q", n, sink.warns)
 	}
 
-	for _, err := range []error{apierrors.NewResourceExpired("test"), apierrors.NewGone("test"), io.EOF, io.ErrUnexpectedEOF} {
+	// The API server's 410 has the reason Expired; an older one's, Gone.
+	gone := &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonGone}}
+	for _, err := range []error{apierrors.NewResourceExpired("test"), gone, io.EOF, io.ErrUnexpectedEOF} {
 		if !routineWatchEnd(err) {
 			t.Errorf("%v isn't routine", err)
 		}
