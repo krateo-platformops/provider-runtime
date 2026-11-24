@@ -546,7 +546,9 @@ cluster-scoped kind in any, but the holder kind's: `spec.scope` can't change on
 an established CRD, so a kind that returns with another scope is a new CRD,
 which a process that mapped the old one still lists as it was (below); R2 and
 `Users` therefore list a holder kind mapped cluster-scoped in every namespace,
-and keep the holders in theirs. No cache has such an object, and no per-name
+and keep the holders in theirs. (Disown's strip of such a holder's record finds
+the holder gone without a call, and says nothing; its count is of the list, which
+still has the record, so it doesn't settle.) No cache has such an object, and no per-name
 watch is made of it (§13 shape 1), nor of a namespaced kind's named without its
 namespace. *Before this,* such a ref could fail its holder's passes, keep its
 index line and the startup recheck from being done, and Disown from settling, or
@@ -556,6 +558,14 @@ with the kind's marker label, and add the line
 `<group>/<kind>/<namespace>/<name>` of any that has the kind's finalizer and no
 line. Its watch, or the next startup recheck, then releases it, unless a holder's
 record names it.
+
+**A limit the user accepted (2026-11-24): a protected kind that returns with
+another scope.** Until a process that mapped the old CRD restarts, a ref with a
+namespace, of a kind it still maps cluster-scoped, or the reverse, is Missing
+without a call: a new holder connects without its hold, and, in PerName, a
+hold's index line may be pruned, and Disown counts the hold as gone. (In
+LabelScoped Disown counts it from its list, can't strip it, and doesn't settle.)
+Restart the providers that track the kind (§13). A discovery check on a mismatch is for the next release.
 
 **A limit:** a namespaced holder can't hold a cluster-scoped object. Named
 without a namespace, as it must be, it is a ref to another namespace, whose
@@ -3579,6 +3589,11 @@ protected kind goes through the mapper's version, and a write of a holder throug
 its declared one. **Before adopting, check the conversions of each custom
 resource they patch** (§6.2): through one that loses something, a metadata patch
 drops fields, and a hold may be undone, or never released.
+
+**After a protected kind's CRD is created again with another scope**, restart the
+providers that track it. Until then their new holders of its objects may connect
+without a hold, and in PerName holds may be counted as gone (§6.2: a limit the
+user accepted, 2026-11-24).
 
 **A new privilege for providers with static CRDs** (L6). git-provider ships
 its CRDs in its chart, and has never needed to write them. It now needs

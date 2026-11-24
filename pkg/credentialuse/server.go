@@ -132,7 +132,9 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 // for: the mapping is kept while the process lives, so a kind it has as
 // cluster-scoped may be namespaced by now, with holders in namespace, and R2
 // releases what has none (§6.2). Its list is then of every one, of which those
-// in namespace are kept.
+// in namespace are kept. That is exact: a kind that is namespaced has them all
+// on that path, each with its namespace, and one that is cluster-scoped has
+// none with any, its holders' holds being of another finalizer (FinalizerName).
 func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace string) ([]metav1.PartialObjectMetadata, error) {
 	filter := false
 	if _, namespaced, err := s.resource(gk); err == nil && namespace != "" {
