@@ -532,9 +532,19 @@ func TestDisownHolderPatch(t *testing.T) {
 			t.Errorf("patch %s, want none", data)
 		}
 	})
-	t.Run("one kind, an unparseable record goes", func(t *testing.T) {
-		data, ok := disownHolderPatch(h(map[string]string{AnnotationRefs: "{"}), parseDisown("Secret"))
-		if ann := decode(t, data); !ok || ann[AnnotationRefs] != nil {
+	t.Run("one kind, an unparseable record is left to its holder's pass", func(t *testing.T) {
+		u := h(map[string]string{AnnotationRefs: "{", AnnotationUnheld: "[]"})
+		if data, ok := disownHolderPatch(u, parseDisown("Secret")); ok {
+			t.Errorf("patch %s, want none", data)
+		}
+		if recordsDisowned(u, parseDisown("Secret")) {
+			t.Error("it counts, so a paused holder's would keep the switch from settling")
+		}
+	})
+	t.Run("all, an unparseable record goes, and counts", func(t *testing.T) {
+		u := h(map[string]string{AnnotationRefs: "{"})
+		data, ok := disownHolderPatch(u, parseDisown("all"))
+		if ann := decode(t, data); !ok || ann[AnnotationRefs] != nil || len(ann) != 1 || !recordsDisowned(u, parseDisown("all")) {
 			t.Errorf("patch %s", data)
 		}
 	})

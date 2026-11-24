@@ -25,10 +25,13 @@ func IsEstablished(holder metav1.Object, ownerFinalizers []string) bool {
 // way a stale record is left behind, and breaks foreground-deletion cycles
 // (§11.8).
 func IsUser(holder metav1.Object, p ID, ownerFinalizers []string) bool {
-	if holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers) {
-		return false
-	}
-	return ReadRecord(holder).Names(p)
+	return !notAUser(holder, ownerFinalizers) && ReadRecord(holder).Names(p)
+}
+
+// notAUser reports whether holder uses nothing, whatever its record says: it
+// is being deleted without an owner finalizer.
+func notAUser(holder metav1.Object, ownerFinalizers []string) bool {
+	return holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers)
 }
 
 // IsDeletingUser reports whether holder is a user of p that is being deleted:

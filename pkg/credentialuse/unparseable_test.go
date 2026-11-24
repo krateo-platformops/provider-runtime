@@ -2,15 +2,22 @@ package credentialuse
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 // A holder whose record can't be parsed counts as a user of every object held
@@ -202,6 +209,7 @@ func TestWhatAnUnparseableRecordsEventQueues(t *testing.T) {
 		want     []ID
 	}{
 		"added":                              {nil, bad(), nil},
+		"a parseable one, gone":              {holderObject("ns", "h", named), nil, []ID{named}},
 		"gone":                               {bad(), nil, []ID{fillAll}},
 		"gone, deleting with its finalizer":  {deleting(bad(), gone), nil, []ID{fillAll}},
 		"gone, which wasn't a user any more": {noOwner(deleting(bad(), gone)), nil, nil},
@@ -212,7 +220,8 @@ func TestWhatAnUnparseableRecordsEventQueues(t *testing.T) {
 		"starts to delete, without one":                           {noOwner(bad()), noOwner(deleting(bad(), gone)), []ID{fillAll}},
 		"loses its owner finalizer, deleting":                     {deleting(bad(), gone), noOwner(deleting(bad(), gone)), []ID{fillAll}},
 		"loses its owner finalizer, not deleting":                 {bad(), noOwner(bad()), nil},
-		"recreated, unparseable":                                  {bad(), recreated(bad()), nil},
+		"replaced in one event, unparseable":                      {bad(), recreated(bad()), []ID{fillAll}},
+		"replaced in one event, both parseable":                   {holderObject("ns", "h", named), recreated(holderObject("ns", "h")), []ID{fillAll, named}},
 		"recreated, without a record":                             {bad(), recreated(holderObject("ns", "h")), []ID{fillAll}},
 		"recreated, deleting, unparseable, without its finalizer": {bad(), recreated(noOwner(deleting(bad(), gone))), []ID{fillAll}},
 	} {
@@ -223,7 +232,7 @@ func TestWhatAnUnparseableRecordsEventQueues(t *testing.T) {
 			case tc.old == nil:
 				h.OnAdd(tc.cur, false)
 			case tc.cur == nil:
-				h.OnDelete(cache.DeletedFinalStateUnknown{Key: "ns/h", Obj: tc.old})
+				h.OnDelete(tc.old)
 			default:
 				h.OnUpdate(tc.old, tc.cur)
 			}
@@ -232,6 +241,15 @@ func TestWhatAnUnparseableRecordsEventQueues(t *testing.T) {
 			}
 		})
 	}
+	t.Run("found gone by a relist, whatever its last version", func(t *testing.T) {
+		for _, old := range []*metav1.PartialObjectMetadata{holderObject("ns", "h", named), holderObject("ns", "h"), bad(), noOwner(deleting(bad(), gone))} {
+			r := newFakeRig(t)
+			holderHandler{r.track(t, widgetGK)}.OnDelete(cache.DeletedFinalStateUnknown{Key: "ns/h", Obj: old})
+			if got := r.queued(widgetGK, "ns"); !slices.Contains(got, fillAll) {
+				t.Errorf("queued %q, want the whole namespace", got)
+			}
+		}
+	})
 	t.Run("a cluster-scoped holder", func(t *testing.T) {
 		r := newFakeRig(t)
 		tr := r.track(t, widgetGK)
@@ -297,6 +315,281 @@ func TestAnUnparseableHoldersHoldsInOtherNamespaces(t *testing.T) {
 			eventually(t, "the next start's recheck to release it", func() bool { return !held() })
 		})
 	}
+}
+
+// The batch of the namespace releases by §5 and nothing else: what has a user
+// that counts stays.
+func TestWhatTheBatchOfTheNamespaceKeeps(t *testing.T) {
+	id := secretID("ns", "s")
+	held := func(r *fakeRig) bool { return hasFinalizer(r.secretMetaOf("ns", "s"), mustFinalizer(widgetGK, "ns")) }
+	t.Run("a deleting object with a live user, in a live namespace, for its grace", func(t *testing.T) {
+		s := deleting(heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns"), time.Now())
+		r := newFakeRig(t, namespaceObject("ns"), s, unparseable(holderObject("ns", "h")), holderObject("ns", "h2", id))
+		r.track(t, widgetGK)
+		r.run(t)
+		r.runWrites(t)
+		time.Sleep(100 * time.Millisecond)
+		r.deleteHolder(t, "ns", "h")
+		for range 5 {
+			time.Sleep(50 * time.Millisecond)
+			r.clk.Step(5 * time.Second)
+		}
+		if !held(r) {
+			t.Fatal("released inside its grace, with a live user")
+		}
+		r.clk.Step(10 * time.Minute)
+		eventually(t, "§5's last row to release it", func() bool { return !held(r) })
+	})
+	t.Run("a pass's own repair", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns"), unparseable(holderObject("ns", "h")))
+		r.setRefs("h", SecretRef("ns", "s"))
+		tr := r.track(t, widgetGK)
+		r.run(t)
+		r.runWrites(t)
+		r.settled()
+		obj, err := r.md.Tracker().Get(widgetsGVR, "ns", "h")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a, err := tr.Acquire(context.Background(), obj.(*metav1.PartialObjectMetadata).DeepCopy()); err != nil || len(a.Held) != 1 {
+			t.Fatalf("Acquire = %+v, %v", a, err)
+		}
+		r.settled()
+		if !held(r) {
+			t.Error("the pass that repaired the record lost its own ref")
+		}
+	})
+	t.Run("a switch for one kind leaves the record to its holder's pass", func(t *testing.T) {
+		// Were it stripped, the batch would release the other kinds' objects.
+		u := unparseable(holderObject("ns", "h"))
+		if data, ok := disownHolderPatch(u, parseDisown("ConfigMap")); ok {
+			t.Errorf("patch %s, want none", data)
+		}
+	})
+	t.Run("toggles while its batch works", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns"), heldObject(secretGVK, "ns", "b", "u-b", widgetGK, "ns"),
+			unparseable(holderObject("ns", "h")))
+		entered, release := make(chan struct{}), make(chan struct{})
+		var gets atomic.Int64
+		r.md.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			if a.(clienttesting.GetAction).GetName() == "b" && gets.Add(1) == 1 {
+				close(entered)
+				<-release
+			}
+			return false, nil, nil
+		})
+		tr := r.track(t, widgetGK)
+		r.run(t)
+		stop := r.runWrites(t)
+		r.settled() // kept by the unparseable holder, from the cache
+		h, bad, good := holderHandler{tr}, unparseable(holderObject("ns", "h")), holderObject("ns", "h")
+		r.updateHolder(t, good)
+		<-entered
+		k := batchKey{widgetGK, "ns"}
+		for range 100 {
+			h.OnUpdate(bad, good)
+			h.OnUpdate(good, bad)
+		}
+		if n := r.s.queue.Len(); n != 0 || !r.working(k) {
+			t.Errorf("%d batches ready while the namespace's works (%v)", n, r.working(k))
+		}
+		close(release)
+		eventually(t, "the holds to be released", func() bool { return !held(r) })
+		eventually(t, "the queue to be empty", func() bool { return r.s.queue.Len() == 0 && !r.working(k) })
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+		// One more batch for all the toggles: b is read once more at most, and
+		// again after a release that found it changed.
+		if n := gets.Load(); n > 3 {
+			t.Errorf("b was read %d times for 200 changes", n)
+		}
+	})
+	t.Run("a PerName name whose watch has nothing: a limit", func(t *testing.T) {
+		r := newFakeRig(t, namespaceObject("ns"))
+		tr := r.track(t, widgetGK)
+		tr.idx, tr.names = testIndex(&memStore{}, nil), newPerNames(tr)
+		p := &protectedInformer{gk: secretGroupKind, ns: "ns", name: "s", inf: syncedInformer(t, make(chan struct{}))}
+		tr.names.by[id] = &nameWatch{p: p, stop: func() {}}
+		if got, err := r.s.heldIn(context.Background(), tr, "ns"); err != nil || len(got) != 0 {
+			t.Errorf("heldIn = %v, %v: the limit that §10.2 documents is gone", got, err)
+		}
+		if err := p.inf.GetStore().Add(heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := r.s.heldIn(context.Background(), tr, "ns"); err != nil || !slices.Equal(got, []ID{id}) {
+			t.Errorf("heldIn = %v, %v once its watch delivered it", got, err)
+		}
+	})
+}
+
+// A holder that another replaces in one event leaves nothing behind: its UID
+// never comes back.
+func TestAHolderReplacedInOneEventLeavesNothing(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"))
+	tr := r.track(t, widgetGK)
+	old, again := holderObject("ns", "h"), holderObject("ns", "h")
+	again.UID = "w-again"
+	key := consentKey{old.UID, secretID("other", "s")}
+	tr.proto.written.set(old.UID, map[string]string{AnnotationRefs: "[]"})
+	tr.proto.backoff.fail(key)
+	for _, s := range []*reportedSet{tr.proto.reported, tr.unrecorded, tr.degradedLogged, tr.misplaced, tr.unparseable} {
+		s.first(key)
+		s.first(consentKey{again.UID, key.ref})
+	}
+	tr.proto.backoff.fail(consentKey{again.UID, key.ref})
+	for _, uid := range []types.UID{old.UID, again.UID} {
+		tr.proto.gateTurns.next(uid, []ID{key.ref}, 1)
+		tr.proto.conflicts.tell(uid, key.ref, asks{hold: true})
+	}
+	holderHandler{tr}.OnUpdate(old, again)
+	if _, ok := tr.proto.gateTurns.at[again.UID]; !ok || len(tr.proto.gateTurns.at) != 1 {
+		t.Errorf("turns kept: %v, want the new one's", tr.proto.gateTurns.at)
+	}
+	if tr.proto.conflicts.told(again.UID, key.ref) != (asks{hold: true}) || len(tr.proto.conflicts.m) != 1 {
+		t.Errorf("conflicts kept: %v, want the new one's", tr.proto.conflicts.m)
+	}
+	if n := len(tr.proto.backoff.at); n != 1 {
+		t.Errorf("%d backoffs kept, want the new one's", n)
+	}
+	for i, s := range []*reportedSet{tr.proto.reported, tr.unrecorded, tr.degradedLogged, tr.misplaced, tr.unparseable} {
+		if s.m[key] || len(s.m) != 1 {
+			t.Errorf("set %d keeps %v, want the new one's", i, s.m)
+		}
+	}
+	if _, ok := tr.proto.written.get(old.UID); ok {
+		t.Error("its last record write is kept")
+	}
+}
+
+// secretMetaOf reads Secret ns/name from the fake API server, or nothing.
+func (r *fakeRig) secretMetaOf(ns, name string) *metav1.PartialObjectMetadata {
+	obj, err := r.md.Tracker().Get(secretsGVR, ns, name)
+	if err != nil {
+		return &metav1.PartialObjectMetadata{}
+	}
+	return obj.(*metav1.PartialObjectMetadata)
+}
+
+// warnings records a logger's Warn calls.
+type warnings struct {
+	logging.Logger
+	mu sync.Mutex
+	w  []string
+}
+
+func (l *warnings) Warn(msg string, kv ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.w = append(l.w, fmt.Sprint(msg, kv))
+}
+
+func (l *warnings) take() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := l.w
+	l.w = nil
+	return w
+}
+
+// An unparseable record is logged once per holder, however often it changes,
+// with the holder's namespace, name and kind, and never what it says; and
+// nothing is kept of a holder that is forgotten, or gone (§4).
+func TestAnUnparseableRecordIsLoggedOnce(t *testing.T) {
+	const spoiled = "spoiled-by-someone"
+	record := func(v string) *metav1.PartialObjectMetadata {
+		h := holderObject("ns", "h")
+		h.Annotations = map[string]string{AnnotationRefs: v}
+		return h
+	}
+	world := func(t *testing.T) (*fakeRig, *Tracker, *warnings) {
+		t.Helper()
+		r := newFakeRig(t, namespaceObject("ns"))
+		log := &warnings{Logger: logging.NewNopLogger()}
+		o := r.options(widgetGK)
+		o.Logger = log
+		tr, err := r.s.Track(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r, tr, log
+	}
+	logged := func(t *testing.T, what string, log *warnings, want int) {
+		t.Helper()
+		w := log.take()
+		if len(w) != want {
+			t.Errorf("%s: %d warnings, want %d: %q", what, len(w), want, w)
+		}
+		for _, s := range w {
+			if !strings.Contains(s, "ns/h") || !strings.Contains(s, widgetGK.String()) || strings.Contains(s, spoiled) {
+				t.Errorf("%s: warning %q; want the holder and its kind, and nothing of the record", what, s)
+			}
+		}
+	}
+	t.Run("its events", func(t *testing.T) {
+		_, tr, log := world(t)
+		h := holderHandler{tr}
+		one, two, good := record(spoiled), record(spoiled+" 2"), holderObject("ns", "h", secretID("ns", "s"))
+		h.OnAdd(good, true)
+		logged(t, "a good record", log, 0)
+		h.OnUpdate(good, one)
+		logged(t, "spoiled", log, 1)
+		relabelled := one.DeepCopy()
+		relabelled.ResourceVersion, relabelled.Generation = "8", 8
+		h.OnUpdate(one, relabelled)
+		h.OnUpdate(relabelled, relabelled)
+		h.OnAdd(relabelled, true)
+		logged(t, "changed otherwise, resynced, and replayed", log, 0)
+		h.OnUpdate(relabelled, good)
+		h.OnUpdate(good, one)
+		logged(t, "repaired, and spoiled the same way", log, 0)
+		h.OnUpdate(one, two)
+		logged(t, "spoiled another way", log, 0)
+		h.OnDelete(two)
+		if len(tr.unparseable.m) != 0 {
+			t.Errorf("%d holders kept once it is gone", len(tr.unparseable.m))
+		}
+		again := record(spoiled)
+		again.UID = "w-again"
+		h.OnAdd(again, false)
+		logged(t, "gone, and recreated", log, 1)
+		h.OnUpdate(again, one) // delivered as one event, after a gap
+		logged(t, "replaced, in one event", log, 1)
+		if len(tr.unparseable.m) != 1 {
+			t.Errorf("%d holders kept, want the one there is", len(tr.unparseable.m))
+		}
+	})
+	t.Run("through the informer, and what is kept", func(t *testing.T) {
+		r, tr, log := world(t)
+		if err := r.md.Tracker().Add(record(spoiled)); err != nil {
+			t.Fatal(err)
+		}
+		r.run(t)
+		kept := func() int {
+			tr.unparseable.mu.Lock()
+			defer tr.unparseable.mu.Unlock()
+			return len(tr.unparseable.m)
+		}
+		eventually(t, "the record to be logged", func() bool { return kept() == 1 })
+		logged(t, "its first list", log, 1)
+		for i := range 5 {
+			r.updateHolder(t, record(spoiled+strconv.Itoa(i)))
+		}
+		eventually(t, "the last of 5 other records", func() bool {
+			o, ok, err := tr.holders.GetIndexer().GetByKey("ns/h")
+			return err == nil && ok && o.(*metav1.PartialObjectMetadata).Annotations[AnnotationRefs] == spoiled+"4"
+		})
+		time.Sleep(50 * time.Millisecond)
+		logged(t, "5 other records", log, 0)
+		tr.Forget(record(spoiled))
+		if n := kept(); n != 0 {
+			t.Errorf("%d holders kept after Forget", n)
+		}
+		r.updateHolder(t, record(spoiled))
+		eventually(t, "the record to be logged again", func() bool { return kept() == 1 })
+		r.deleteHolder(t, "ns", "h")
+		eventually(t, "nothing to be kept of a holder that is gone", func() bool { return kept() == 0 })
+	})
 }
 
 // What such an event costs, however big the record and however often it

@@ -138,9 +138,9 @@ MUTANTS = [
 
     # decide.go: §5's table and §6.1.
     ("a deleting holder without the owner finalizer counts", "decide.go", [
-        ("\tif holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers) {\n\t\treturn false\n\t}\n", "")]),
+        ("\treturn holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers)\n", "\treturn false\n")]),
     ("every deleting holder is excluded", "decide.go", [
-        ("\tif holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers) {\n", "\tif holder.GetDeletionTimestamp() != nil {\n")]),
+        ("\treturn holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers)\n", "\treturn holder.GetDeletionTimestamp() != nil\n")]),
     ("a deleting user needn't use P", "decide.go", [
         ("\treturn holder.GetDeletionTimestamp() != nil && IsUser(holder, p, ownerFinalizers)\n", "\treturn holder.GetDeletionTimestamp() != nil\n")]),
     ("only the first owner finalizer counts", "decide.go", [

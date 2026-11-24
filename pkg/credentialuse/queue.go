@@ -253,8 +253,8 @@ func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
 // Settle records that ids of k's batch were decided: what they waited for, and
 // how often they had failed, is forgotten. R0's keep, from the caches alone,
 // decides too (§6.2): the user it saw is in the way of any release, and its own
-// event runs the batch again when it goes, but for a user whose record can't be
-// parsed, and one of a kind whose CRD is gone (§6.2).
+// event runs the batch again when it goes, but for one of a kind whose CRD is
+// gone (§6.2).
 func (q *batchQueue) Settle(k batchKey, ids ...ID) {
 	var stop []clock.Timer
 	q.mu.Lock()
