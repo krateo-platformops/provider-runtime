@@ -45,11 +45,11 @@ MUTANTS = [
     ("RequeueAt isn't honoured", "writeloops.go",
      [("\tfor _, a := range res.Asked {\n", "\tfor _, a := range res.Asked[:0] {\n")]),
     ("a failed batch isn't retried", "writeloops.go",
-     [("\tif d := s.queue.Fail(k, ids...); d > 0 {\n", "\tif d := time.Duration(0); d > 0 {\n")]),
+     [("\t} else if d := s.queue.Fail(k, ids...); d > 0 {\n", "\t} else if d := time.Duration(0); d > 0 {\n")]),
     ("the backoff doesn't double", "queue.go",
      [("\t\td := q.backoff(f.n)\n", "\t\td := q.backoff(0)\n")]),
     ("an interrupted batch waits a backoff", "writeloops.go",
-     [("\tif ctx.Err() != nil {\n\t\ts.queue.Add(k, ids...)\n\t\treturn\n\t}\n\tretryIn := ", "\tretryIn := ")]),
+     [("\tif ctx.Err() != nil {\n\t\tif len(ids) > 0 {\n\t\t\ts.queue.Add(k, ids...)\n\t\t}\n\t\treturn\n\t}\n\tretryIn := ", "\tretryIn := ")]),
     # writeloops.go: §12's events.
     ("no WaitingForCredentialUsers", "writeloops.go",
      [("\t\ts.events.record(s.events.regarding(kp.P), \"Normal\", EventWaitingForUsers, note)\n", "\t\t_ = note\n")]),

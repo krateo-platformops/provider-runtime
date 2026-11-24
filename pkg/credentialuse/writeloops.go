@@ -244,14 +244,20 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 }
 
 // retryBatch requeues objects ids of batch k after err: at once, for the next
-// write loops, when ctx ended under it; otherwise each with its own backoff.
+// write loops, when ctx ended under it; otherwise each with its own backoff. A
+// failure of none, as of a holder namespace that can't be one, is only said: an
+// Add of none would ask for the whole namespace.
 func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []ID, err error) {
 	if ctx.Err() != nil {
-		s.queue.Add(k, ids...)
+		if len(ids) > 0 {
+			s.queue.Add(k, ids...)
+		}
 		return
 	}
 	retryIn := "as scheduled before"
-	if d := s.queue.Fail(k, ids...); d > 0 {
+	if len(ids) == 0 {
+		retryIn = "never"
+	} else if d := s.queue.Fail(k, ids...); d > 0 {
 		retryIn = d.String()
 	}
 	t.warn("credential-use: a release batch failed; what failed of it is retried with backoff",

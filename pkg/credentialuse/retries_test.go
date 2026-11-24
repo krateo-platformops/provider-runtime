@@ -1282,6 +1282,33 @@ func TestAStoppedBatchLeavesWhatFailed(t *testing.T) {
 	}
 }
 
+// A batch that fails at no object, for a namespace that can't be one, queues
+// nothing: not its whole namespace.
+func TestABatchThatFailsAtNothing(t *testing.T) {
+	r := newFakeRig(t)
+	w := &warnings{}
+	o := r.options(widgetGK)
+	o.Logger = w
+	if _, err := r.s.Track(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	r.drain()
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, ctx := range []context.Context{context.Background(), stopped} {
+		r.s.releaseBatch(ctx, batchKey{widgetGK, "Not A Namespace"}, nil)
+		if r.s.queue.Len() != 0 || r.queueTimers() != 0 || len(r.s.queue.failing) != 0 {
+			t.Errorf("stopped %v: %d batches, %d timers, %d keys with failures; want none", ctx.Err() != nil, r.s.queue.Len(), r.queueTimers(), len(r.s.queue.failing))
+		}
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.got) != 1 || !strings.Contains(w.got[0], "never") {
+		t.Errorf("warnings %q; want one, that says it isn't retried", w.got)
+	}
+}
+
 // A batch that fails at many objects says how many, and why the first few did.
 func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	ctx := context.Background()
