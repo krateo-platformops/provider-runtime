@@ -231,7 +231,7 @@ KILLERS = {
     "the reads under the pass's context": STARVE,
     "all that the pass has left": STARVE,
     "no 5s under the pass's deadline": LACKS,
-    "a limiter sees the gate's deadline": {C: "TestTheGatesDeadlineLetsALimiterWait|TestTheGateOnAClientShortOfTokens|TestADeletionPassWhoseGateIsShortOfTokens"},
+    "a limiter sees the gate's deadline": {C: "TestTheGatesDeadlineLetsALimiterWait|TestTheGateOnAClientShortOfTurns|TestADeletionPassWhoseGateIsShortOfTurns"},
     "a limiter sees the pass's deadline": {C: "TestTheGatesDeadlineLetsALimiterWait"},
     "the gate's reads don't end": {C: "TestTheGatesDeadlineLetsALimiterWait"},
     "half of 5s at most": LACKS,
