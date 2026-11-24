@@ -186,7 +186,11 @@ func TestPremiseListWithAnUnconvertibleObject(t *testing.T) {
 		answer := strings.Join(names, " ")
 		if err != nil {
 			answer = "error: " + err.Error()
-			if strings.Contains(answer, unconvertible) { // not a timeout, which shows nothing
+			// The webhook's own text ends the error on both versions: 1.36.2's is
+			// the conversion's, and 1.37.0's is the storage's ("failed to read
+			// one or more ... corrupt object"), with it inside. A timeout, which
+			// has no such text, shows nothing.
+			if strings.Contains(answer, unconvertible) {
 				failed++
 			}
 		}
