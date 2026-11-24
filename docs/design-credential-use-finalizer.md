@@ -2645,7 +2645,9 @@ let that data stop the holder. Each conflict is a warning in the log, naming
 the holder, the object and what was asked, and counts in
 `credentialuse_refs_conflicting_total{asked}`, `asked` being `hold` or `next`
 (§12). **In a provider's tests it is refused**: `AssertCredentialRefsCover`
-fails on a conflict (§11.9).
+fails on a conflict (§11.9). While chains are refused (§9, above), only a hold
+can conflict: a list with a `Next` is refused before any ref is met, and that
+pass reports no conflict, though its list may have one.
 
 A hold of a kind the Disown switch covers is not reported, since no ref of it
 is held (§7.4). Any other hold asked for is, even without its target's consent

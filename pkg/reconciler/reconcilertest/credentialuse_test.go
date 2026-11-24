@@ -120,6 +120,7 @@ func (c *resolvingConnecter) Connect(ctx context.Context, mg resource.Managed) (
 // that names its Secret from an object's status, which nothing would hold in
 // production, fails here.
 func TestAssertCredentialRefsCoverGivesNextTheRuntimesObject(t *testing.T) {
+	withChains(t)
 	for name, guaranteed := range map[string]bool{"held": false, "Guaranteed": true} {
 		t.Run(name, func(t *testing.T) {
 			s := runtime.NewScheme()
@@ -174,6 +175,7 @@ func TestAssertCredentialRefsCoverGivesNextTheRuntimesObject(t *testing.T) {
 // without Content. The order the refs are met in, and so which of one object
 // is first, is the runtime's.
 func TestAssertCredentialRefsCoverEnforcesTheRuntimesRules(t *testing.T) {
+	withChains(t)
 	secretTo := func(name string, next credentialuse.Ref) credentialuse.Ref {
 		s := credentialuse.SecretRef("ns", name)
 		s.Next = func(*unstructured.Unstructured) ([]credentialuse.Ref, error) { return []credentialuse.Ref{next}, nil }
@@ -240,6 +242,7 @@ func TestAssertCredentialRefsCoverEnforcesTheRuntimesRules(t *testing.T) {
 // asks for more than the first, a hold or a Next, wherever it is named: the
 // runtime takes the first and reports the rest (§9.1).
 func TestAssertCredentialRefsCoverRefsThatConflict(t *testing.T) {
+	withChains(t)
 	held := configRef(secretFromConfig)
 	plain := configRef(nil)
 	guaranteed := held
@@ -351,7 +354,7 @@ func TestAssertCredentialRefsCoverRefusesAChain(t *testing.T) {
 			rec, _ := fixture(t)
 			tb := &fatalTB{recordingTB: recordingTB{TB: t}}
 			ec, err := AssertCredentialRefsCover(tb, context.Background(),
-				&refsConnecter{rd: rec, refs: tc.refs, reads: []string{"creds"}}, &fake.Managed{}, rec, schema.GroupKind{Kind: "ConfigMap"})
+				&refsConnecter{rd: rec, refs: tc.refs, reads: []string{"creds"}}, &fake.Managed{}, rec, withContent(corev1.SchemeGroupVersion.WithKind("ConfigMap")))
 			if err != nil {
 				t.Fatal(err)
 			}

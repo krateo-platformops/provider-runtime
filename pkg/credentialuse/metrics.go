@@ -29,7 +29,8 @@ type MetricsRecorder interface {
 	// refs skipped though they asked for more than the first ref of the same
 	// object (§9.1), once per holder, object and thing asked for, while the
 	// conflict lasts. asked is "hold" or "next", and a ref that asked for both
-	// counts in both. A hold of a Disowned kind doesn't count.
+	// counts in both. A hold of a Disowned kind doesn't count. "next" can't
+	// occur while chains are refused (ErrChainsNotSupported).
 	RefsConflicting(holderKind, asked string)
 	// RefsReadDenied counts credentialuse_refs_read_denied_total (§11.3).
 	RefsReadDenied(holderKind string)
