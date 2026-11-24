@@ -1382,11 +1382,40 @@ func TestIndexUnreadableKeepsTheCountUnknown(t *testing.T) {
 	}
 }
 
+// noWidgets deletes what earlier tests left of the Widgets, whatever their
+// finalizers: a new index takes a line for each Secret that one names and that is
+// held for it (§10.6.6).
+func noWidgets(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	all := env.Dynamic.Resource(cutest.WidgetGVR)
+	cutest.Eventually(t, time.Minute, func() error {
+		l, err := all.List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		for _, w := range l.Items {
+			one := all.Namespace(w.GetNamespace())
+			if _, err := one.Patch(ctx, w.GetName(), types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+			if err := one.Delete(ctx, w.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+		if len(l.Items) > 0 {
+			return fmt.Errorf("%d widgets were there: %w", len(l.Items), cutest.ErrNotYet)
+		}
+		return nil
+	})
+}
+
 // At 80% of the cap the tracker warns, with the event and the gauge; a full
 // index fails closed for a new holder, and is Degraded for an established
 // one (§10.6.4, L2).
 func TestIndexFillsAndFails(t *testing.T) {
 	cutest.Require(t, env)
+	noWidgets(t) // the cap counts their lines
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-full")
 	m := &indexMetrics{}
 	r := newWriteRig(t, env.Config, cu.SharedOptions{IndexNamespace: idx, IndexMaxLines: 5}, func(o *cu.Options) {
