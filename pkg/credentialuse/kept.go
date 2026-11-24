@@ -33,7 +33,7 @@ func gateDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, d)
 }
 
-// recordedGate is what gateRecorded found.
+// recordedGate is what gateRecorded found. With an error it says nothing.
 type recordedGate struct {
 	// live are the answers read live, for the pass to use rather than read
 	// them again.
@@ -146,7 +146,6 @@ func (p *protocol) gateRecorded(ctx context.Context, obj metav1.Object, a *Acqui
 		unheld = nil
 	}
 	if err != nil {
-		g.withdrawn = map[ID]bool{}
 		return g, err
 	}
 	g.folded = foldedReleases(unheld, ReadUnheld(obj.GetAnnotations()))
