@@ -1310,15 +1310,16 @@ func backoffAfter(n int) time.Duration {
 // the kind's prefix gets its line back, in one write, and a dropped line so
 // restored is reported as tampering (§10.6.6). A check that fails is retried
 // with backoff. An object queued again while its check runs is checked
-// again: what this check read may be older.
+// again: what this check read may be older. The write loops and Disown both
+// make them, so one that fails stays, whatever the other's found.
 func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	ix.mu.Lock()
 	var due []ID
-	queued := map[ID]int{}
+	queued, tamper := map[ID]int{}, map[ID]bool{}
 	for id, r := range ix.pending {
 		if !now.Before(r.due) {
 			due = append(due, id)
-			queued[id] = r.queued
+			queued[id], tamper[id] = r.queued, r.tampered
 		}
 	}
 	ix.mu.Unlock()
@@ -1408,10 +1409,15 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		}
 	}
 	for _, id := range failed {
-		if r := ix.pending[id]; r != nil {
-			r.due = now.Add(backoffAfter(r.fails))
-			r.fails++
+		r := ix.pending[id]
+		if r == nil {
+			// Another check of it, which read it before this one did, has
+			// taken it meanwhile.
+			r = &recheck{tampered: tamper[id]}
+			ix.pending[id] = r
 		}
+		r.due = now.Add(backoffAfter(r.fails))
+		r.fails++
 	}
 	ix.mu.Unlock()
 	if ix.onTampered != nil {

@@ -151,7 +151,7 @@ MUTANTS = [
     ("a failed re-add after a prune isn't queued", IX,
      [("\t\tix.queue(back, false)\n", "")]),
     ("a failed live check isn't retried", IX,
-     [("\tfor _, id := range failed {\n\t\tif r := ix.pending[id]; r != nil {", "\tfor _, id := range failed {\n\t\tdelete(ix.pending, id)\n\t\tif r := ix.pending[id]; r != nil {")]),
+     [("\tfor _, id := range failed {\n\t\tr := ix.pending[id]\n", "\tfor _, id := range failed {\n\t\tdelete(ix.pending, id)\n\t\tr := &recheck{}\n")]),
     ("the pointer is written over an existing one", IX,
      [("\t\tif !ok {\n\t\t\treturn crd, false, nil\n\t\t}\n\t\tif cur != want {", "\t\tif true || !ok {\n\t\t\treturn crd, false, nil\n\t\t}\n\t\tif cur != want {")]),
     ("a failed setup rebuild isn't left to the write loops", IX,

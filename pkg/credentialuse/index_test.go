@@ -539,6 +539,42 @@ func TestAVouchWithdrawnDuringAPrune(t *testing.T) {
 	}
 }
 
+// The write loops and Disown both make the checks that are due. One that
+// finds an object held, and can't add its line, stays pending, though the
+// other's, whose read was before the hold landed, has taken it meanwhile
+// (§10.6.6).
+func TestAFailedCheckSurvivesAnother(t *testing.T) {
+	ctx, now := context.Background(), time.Now()
+	id := SecretRef("ns", "x").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{}}
+	st := &memStore{exists: true, rebuilt: true}
+	ix := testIndex(st, srv)
+	ix.queue([]ID{id}, true)
+	st.beforeUpdate = func(s *memStore) {
+		// Another tick, whose read found x bare, ends first; and this one's
+		// add fails.
+		s.beforeUpdate = nil
+		held := srv.objs
+		srv.objs = nil
+		if err := ix.recheckTick(ctx, now); err != nil || len(ix.pending) != 0 {
+			t.Fatalf("the other check: %v, pending %v", err, ix.pending)
+		}
+		srv.objs, s.exists = held, false
+	}
+	srv.objs[id] = heldObj("x")
+	if err := ix.recheckTick(ctx, now); err == nil {
+		t.Fatal("the add didn't fail")
+	}
+	r := ix.pending[id]
+	if r == nil || !r.due.After(now) || !r.tampered {
+		t.Fatalf("pending %+v; want x, as a tampered one, due later", r)
+	}
+	st.exists = true
+	if err := ix.recheckTick(ctx, now.Add(time.Hour)); err != nil || !slices.Equal(st.lines, linesOf([]ID{id})) || len(ix.pending) != 0 {
+		t.Errorf("the retry: %v, lines %q, pending %v", err, st.lines, ix.pending)
+	}
+}
+
 // getHook is an objServer that runs on before each Get.
 type getHook struct {
 	*objServer
