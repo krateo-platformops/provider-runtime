@@ -69,10 +69,12 @@ type enumState struct {
 	held    map[int]batchKey // what each worker holds
 	stopped bool
 	// places are the objects of each key's next batch, and has those of each
-	// worker's, by when each was added.
-	places map[batchKey]map[ID]int
-	has    map[int]map[ID]int
-	last   int
+	// worker's, by when each was added. What one step of the clock adds is in no
+	// order.
+	places   map[batchKey]map[ID]int
+	has      map[int]map[ID]int
+	last     int
+	stepping bool
 	// owed are the additions not yet in a batch: per key, the objects added
 	// since its last take, each with whether ShutDown excuses it.
 	owed map[batchKey]map[ID]bool
@@ -140,7 +142,9 @@ func (s *enumState) added(k batchKey, id ID) {
 	s.owed[k][id] = true
 	s.since[k][id] = true
 	if _, waits := s.places[k][id]; !waits {
-		s.last++
+		if !s.stepping {
+			s.last++
+		}
 		s.place(k, id, s.last)
 	}
 }
@@ -241,7 +245,7 @@ func (s *enumState) apply(o enumOp) {
 		s.held[o.worker] = k
 		at := s.places[k]
 		for i := 1; i < len(ids); i++ {
-			if at[ids[i-1]] >= at[ids[i]] {
+			if at[ids[i-1]] > at[ids[i]] {
 				s.fail("the batch of %v is %v, which were added at %v", k, ids, at)
 			}
 		}
@@ -282,6 +286,9 @@ func (s *enumState) apply(o enumOp) {
 // step moves the clock by d, and expects the timers due by then to fire.
 func (s *enumState) step(d time.Duration) {
 	s.clk.Step(d)
+	s.last++
+	s.stepping = true
+	defer func() { s.stepping = false }()
 	now := s.clk.Now()
 	var left []enumTimer
 	for _, tm := range s.timers {
