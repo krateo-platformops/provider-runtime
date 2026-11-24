@@ -3385,8 +3385,9 @@ line. With any one off, in seven cases, it reaches none.
 
 - **Its bound** (under `CREDENTIALUSE_MODEL_DEEP`; CI's is in §14): every
   schedule with at most three preemptions, and two in
-  the two cases where the late check and its batch race a holder that goes.
-  Every search finished, within 2,000,000 schedules.
+  the three cases where the late check and its batch race a holder that goes.
+  Every search finished, within 2,000,000 schedules (the largest, 967,369, at
+  5a72b68).
 - **What it is given:** whether the landing is within the margin, so that the
   late check comes after it, or not; and, in the cases without 3, that the
   pruner sees a record naming P.
@@ -3397,12 +3398,19 @@ line. With any one off, in seven cases, it reaches none.
 - **What it leaves out:** a grace period that ends is a kill there. One
   holder, one object, one batch.
 - **The pruner's rules for a hold that may land yet** have cases of their own,
-  **which haven't been run yet**. Four should reach none with all three
-  conditions and a landing within the margin: the sender's successor's prune,
-  kept back at first, with the sender ended within the margin or killed before
-  its check; and the sender's own, with the sender ended within the margin, or
-  alive. Three should still reach it: a successor that prunes at once, in those
-  two ways, and one kept back, with the landing past the margin. Another
+  searched at 5a72b68 within the same bounds. Four reach none with all three
+  conditions and a landing within the margin. The schedules that have a prune
+  leave the line are:
+  - the sender's successor's, kept back at first: 58,436 of 66,163 with the
+    sender ended within the margin, 41,603 of 46,530 with it killed before its
+    check. None has the line taken before the landing;
+  - the sender's own: 68,225 of 75,952 with it ended within the margin, and
+    159,536 of 385,294 with it alive. How many have the line taken before the
+    landing isn't counted here.
+
+  Three still reach it: a successor that prunes at once, in those two ways
+  (33,444 of 93,215 schedules, and 27,709 of 71,700), and one kept back, with
+  the landing past the margin (36,694 of 104,931). Another
   process's prune is the cases above, which follow neither rule. The model has
   no durations: "kept back" is until the landing, or past the margin not.
 
@@ -4603,8 +4611,8 @@ on krateo-057:
   schedule with one preemption less than `CREDENTIALUSE_MODEL_DEEP=1` does,
   which is the bound §10.6.3 states: the flag, 2 with two processes and 3 with
   one (DEEP 3); the late hold, 2, and 1 with the late check and a holder that
-  goes (DEEP 3 and 2), the cases of the pruner's rules included, not run yet
-  and not in the times below; Disown over the index, 1 (DEEP 2); the kill inside a
+  goes (DEEP 3 and 2), the cases of the pruner's rules
+  included; Disown over the index, 1 (DEEP 2); the kill inside a
   prune, 2 for the wait that isn't built and 1 for the other clean cases (DEEP
   2), and with two Disown processes 1 for the wait, the rest under DEEP only,
   at 1. A search that reaches 1,000,000 schedules stops, and says that it
@@ -4621,12 +4629,14 @@ on krateo-057:
   (n2-standard-4), not in CI: the kill 436s to 457s over two runs (900s at
   ae2012d, of which the 481s of the case with two Disown processes and the
   records first are under DEEP only since; not measured without it yet), Disown
-  over the index 222s, the late hold 76s, the flag 46s, the drops 2s. Every
+  over the index 222s, the late hold 76s (147s at 5a72b68, of which 64s are the
+  cases of the pruner's rules, new since), the flag 46s, the drops 2s. Every
   model together took 3,970s, 66 minutes, of which these new ones are about
   13; the older ones alone, main's at 2beee26, took 3,144s there, 52 minutes.
   In CI's last green runs, without the new ones, the model step took 2,134s to
   2,320s; its time with them is not measured yet. Under DEEP on that VM size:
-  the late hold 1,000s, the flag 509s, Disown over the index 5,716s, and the
+  the late hold 1,000s (1,486s at 5a72b68, of which 438s are those cases), the
+  flag 509s, Disown over the index 5,716s, and the
   kill's clean cases with one Disown process 626s; at ae2012d, every case of the
   kill with two Disown processes 1,783s.
 - **A prune leaves the line of a hold that may land yet** (§10.6.2): no prune
