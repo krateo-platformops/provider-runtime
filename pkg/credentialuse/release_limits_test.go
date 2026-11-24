@@ -2,16 +2,22 @@ package credentialuse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 )
 
 // The time a turn's reads take (§6.6): none begins once the turn's time is over,
@@ -222,6 +228,89 @@ func TestANamespaceThatDoesntAnswer(t *testing.T) {
 	}
 	if res, err := r.p.release(ctx, "ns", []ID{b}); err != nil || !slices.Equal(res.Released, []ID{b}) {
 		t.Errorf("the next turn: %+v, %v; want b released", res, err)
+	}
+}
+
+// clientAt is a real metadata client of qps requests a second, with no burst,
+// against an API server that has nothing, and notes the paths it was asked for.
+func clientAt(t *testing.T, qps float32) (srv clientServer, asked func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var paths []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		paths = append(paths, req.URL.Path)
+		mu.Unlock()
+		st := apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, path.Base(req.URL.Path)).Status()
+		st.APIVersion, st.Kind = "v1", "Status"
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(st)
+	}))
+	t.Cleanup(api.Close)
+	md, err := metadata.NewForConfig(&rest.Config{Host: api.URL, QPS: qps, Burst: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return clientServer{md: md, mapper: newFakeRig(t).s.c.Mapper}, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(paths)
+	}
+}
+
+// The premise of a turn's time (§6.6): a client's own rate limiter refuses a read
+// whose wait would pass its deadline at once, unsent, with an error that is
+// neither the context's nor the API server's. So reads that shared a deadline
+// would fail unread, and nothing in the error would say so.
+func TestPremiseAClientRefusesAReadItCantWaitFor(t *testing.T) {
+	srv, asked := clientAt(t, 0.2)
+	if _, err := srv.Get(context.Background(), secretGroupKind, "ns", "first"); Classify(err) != ClassNotFound {
+		t.Fatalf("the first read: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second) // the next token is 5s away
+	defer cancel()
+	_, err := srv.Get(ctx, secretGroupKind, "ns", "second")
+	if err == nil || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		t.Errorf("the refused read: %v, its context %v; want another error, and the context live", err, ctx.Err())
+	}
+	if _, status := statusOf(err); status {
+		t.Errorf("the refused read has an API status: %v", err)
+	}
+	if got := asked(); len(got) != 1 {
+		t.Errorf("the API server was asked for %v, want the first alone", got)
+	}
+}
+
+// With a real client of few requests a second, no read of a turn fails unread:
+// what its time leaves is the rest, and the next turns read it, each object once.
+func TestARealSlowClientsTurns(t *testing.T) {
+	srv, asked := clientAt(t, 20)
+	r := newRig(t)
+	r.p.srv = srv
+	r.p.turnTime = 100 * time.Millisecond
+	ids := someIDs("ns", "s", 10)
+	turns := 0
+	for left := ids; len(left) > 0; turns++ {
+		res, err := r.p.release(context.Background(), "ns", left)
+		if err != nil || len(res.Failed) != 0 || len(res.Bare) == 0 || !slices.Equal(slices.Concat(res.Bare, res.Rest), left) {
+			t.Fatalf("turn %d of %v: read %v, failed %v, rest %v, %v", turns, left, res.Bare, res.Failed, res.Rest, err)
+		}
+		left = res.Rest
+	}
+	if turns < 2 {
+		t.Errorf("%d turn, want several: ten reads take 450ms", turns)
+	}
+	got := asked()
+	for i, p := range got {
+		got[i] = path.Base(p)
+	}
+	var want []string
+	for _, id := range ids {
+		want = append(want, id.Name)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("the API server was asked for %v, want each once, in order: %v", got, want)
 	}
 }
 
