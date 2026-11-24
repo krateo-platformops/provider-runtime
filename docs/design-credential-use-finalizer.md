@@ -3306,6 +3306,20 @@ line. With any one off, in seven cases, it reaches none.
 In LabelScoped mode there is no line to lose: the marker label is in the same
 write as the finalizer.
 
+**Disown's strip and the API server's two steps** (§6.4). When the strip of
+an object being deleted, or `DisownPrefix`'s, removes its last finalizer, the
+API server stores no update: it deletes the object in a second step, with no
+precondition from the patch, so the patch's test of the resourceVersion
+doesn't reach that delete. The strip is then as exposed as R3 is. An A2 that
+lands between the steps is lost with the object. And two such writes, as
+every process's Disown makes of the same objects, can both succeed, the
+second deleting an object created again under the name meanwhile. This was
+read in `k8s.io/apiserver` v0.37.2
+(`pkg/registry/generic/registry/store.go:658-680`, `:847`, `:869-870`;
+`pkg/endpoints/handlers/patch.go:711`), and not probed for the strip. The
+index isn't exposed: its superset is of finalizers that are there, and an
+object created again carries none until an A2, which adds its line first.
+
 #### 10.6.4 Size, and when it fills (L1, L2)
 
 - **The cap is in lines:** `SharedOptions.IndexMaxLines`, 2,000 by default.
