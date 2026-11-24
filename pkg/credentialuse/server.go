@@ -89,6 +89,8 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 	if Classify(err) != ClassNotFound {
 		return out, err
 	}
+	// The texts of the answers, not the errors, below: wrapped, either would
+	// lend the error its class, and the patch's is a NotFound.
 	_, read := c.Get(ctx, name, metav1.GetOptions{})
 	if read == nil {
 		return nil, fmt.Errorf("credential-use: the patch was refused with a 404, and the object is there: %s", err)

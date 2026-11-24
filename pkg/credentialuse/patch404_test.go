@@ -216,7 +216,7 @@ func TestDisownsRemedies(t *testing.T) {
 		want []string
 		not  []string
 	}{
-		"not served": {unservedError(), []string{"its kind isn't served", "once its objects are gone", "if another version"}, []string{"grant", "the next pass"}},
+		"not served": {unservedError(), []string{"its kind isn't served", "restore it", "once its objects are gone", "if another version"}, []string{"grant", "the next pass"}},
 		"forbidden":  {forbidden, []string{"(forbidden)", "grant list"}, []string{"protected kinds", "the next pass"}},
 		"down":       {down, []string{"(serviceunavailable)", "the next pass retries"}, []string{"grant", "protected kinds"}},
 		"gone":       {apierrors.NewResourceExpired(text), []string{"(expired)", "the next pass retries"}, []string{"grant", "protected kinds"}},
@@ -247,7 +247,7 @@ func TestDisownsRemedies(t *testing.T) {
 			}
 			want, not := c.want, c.not
 			if resource == "widgets" && name == "not served" {
-				want, not = []string{"its kind isn't served", "restart"}, []string{"protected kinds", "grant"}
+				want, not = []string{"its kind isn't served", "restore it", "restart"}, []string{"protected kinds", "grant"}
 			}
 			for _, s := range want {
 				if !strings.Contains(e, s) {
@@ -260,13 +260,21 @@ func TestDisownsRemedies(t *testing.T) {
 				}
 			}
 			w.mu.Lock()
-			if !strings.Contains(fmt.Sprint(w.got), c.err.Error()) {
-				t.Errorf("%s, %s: warnings %q don't have the error", name, resource, w.got)
+			if got := fmt.Sprint(w.got); !strings.Contains(got, c.err.Error()) || !strings.Contains(got, "what list ") {
+				t.Errorf("%s, %s: warnings %q don't have the error, or what it is about", name, resource, w.got)
 			}
 			w.mu.Unlock()
 		}
 	}
 }
+
+// unreadableGauge is what the gauge of unreadable objects was set to.
+type unreadableGauge struct {
+	NopMetrics
+	sets []int
+}
+
+func (g *unreadableGauge) DisownUnreadable(_ string, n int) { g.sets = append(g.sets, n) }
 
 // Disown of an indexed kind: an index, or an object, it can't read.
 func TestDisownSaysItCantReadAnIndexedKind(t *testing.T) {
@@ -284,8 +292,9 @@ func TestDisownSaysItCantReadAnIndexedKind(t *testing.T) {
 	} {
 		r := newFakeRig(t)
 		w := &warnings{}
+		g := &unreadableGauge{}
 		o := r.options(widgetGK, ProtectedKind{GVK: secretGVK})
-		o.Logger = w
+		o.Logger, o.Metrics = w, g
 		tr, err := r.s.Track(ctx, o)
 		if err != nil {
 			t.Fatal(err)
@@ -333,11 +342,13 @@ func TestDisownSaysItCantReadAnIndexedKind(t *testing.T) {
 		stopped, cancel := context.WithCancel(ctx)
 		cancel()
 		r.clk.Step(2 * eventThrottle)
-		if !c.fail {
-			r.s.disownPass(stopped, tr, parseDisown("all"))
-			if len(r.events.Events) != 0 {
-				t.Errorf("%s: a stopped pass recorded %q", name, <-r.events.Events)
-			}
+		sets := len(g.sets)
+		r.s.disownPass(stopped, tr, parseDisown("all"))
+		if len(r.events.Events) != 0 {
+			t.Errorf("%s: a stopped pass recorded %q", name, <-r.events.Events)
+		}
+		if want := map[bool]int{true: 1}[c.fail]; sets != 1 || g.sets[0] != want || len(g.sets) != sets {
+			t.Errorf("%s: the gauge was set to %v, want once, to %d", name, g.sets, want)
 		}
 	}
 }

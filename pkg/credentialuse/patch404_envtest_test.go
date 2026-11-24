@@ -254,7 +254,8 @@ func validator404(t *testing.T) admissionregistrationv1.WebhookClientConfig {
 
 // Premise P20 (b): a validator's refusal may be a NotFound that names the very
 // object, which is there. A2 doesn't take it for Missing: a new holder doesn't
-// connect or establish until it lands.
+// connect or establish until it lands. (BeforeEstablish's own A2 was refused
+// too, and kept it from being established, but not from connecting.)
 func TestAValidatorsOwnNotFound(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()

@@ -508,7 +508,7 @@ something and be about something else, since admission answers it:
   this one included.
 
 Taken for "gone", those made a hold Missing, so a new holder connected without
-it; and reported a held object bare, whose index line a prune then took. So
+it, though `BeforeEstablish` kept it from being established; and reported a held object bare, whose index line a prune then took. So
 `clientServer.Patch` confirms a 404 with a GET of the same object, which
 admission isn't asked about. If that GET's 404 names the object, it is NotFound.
 If it finds the object, or fails in any other way, its kind not served, a 403 or
@@ -547,7 +547,7 @@ While a kind isn't served:
 | R2, when the **holder** kind isn't served | the list fails, and the batch is retried. It is never "no users": a live CRD read could tell, and isn't made yet |
 | the index's checks (§10.6) | the line is kept, or put back, and the check is retried |
 | the janitor | retried with backoff |
-| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or the kind it can't list (LabelScoped): its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
+| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or what it can't read as a whole (a LabelScoped kind, the holders, or the index): its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
 | `DisownPrefix` | reports the failure, and goes on with the rest |
 
 **The cost, and the way out.** A protected kind whose CRD is removed for good
@@ -1454,6 +1454,9 @@ default) consecutive passes count zero.
 - **A count that can't be made**, because the index is missing or
   unreadable, or a list fails, is written as `held-count: "unknown"`. That
   clears `disown-settled`, and is never read as zero (§10.6.5).
+- **The holders' list, a LabelScoped kind's, or the index, when it can't be
+  read,** keeps the count `"unknown"`, and the same event and a log line say
+  which, with the failure's class and what to do about it.
 - **An object in the index or a record that can't be read** keeps the count
   `"unknown"` too, since it may carry K's finalizer (the user's decision,
   2026-11-22). Under `resourceNames` RBAC that is a Secret outside the

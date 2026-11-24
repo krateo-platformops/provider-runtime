@@ -190,7 +190,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	if err != nil {
 		known = false
 		t.reportDisownFailed(ctx, "list the holders, "+kindLabel(t.gk), err, "grant list on it, in every namespace",
-			"if another version of it is served, restart at that one")
+			"restore it, or, if another version of it is served, restart at that one")
 	}
 	for i := range holders {
 		if recordsDisowned(&holders[i], set) {
@@ -211,7 +211,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		if err != nil {
 			known = false
 			t.reportDisownFailed(ctx, "list "+kindLabel(gk), err, "grant list on it, in every namespace",
-				"once its objects are gone, stop naming it, let the passes drop it from the records, take it out of the tracker's protected kinds and restart; if another version of it is served, restart at that one instead")
+				"restore it; or, once its objects are gone, stop naming it, let the passes drop it from the records, take it out of the tracker's protected kinds and restart; if another version of it is served, restart at that one instead")
 			continue
 		}
 		for i := range items {
@@ -314,7 +314,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		}
 	}
 	if len(perName) > 0 {
-		t.reportDisownUnreadable(unreadable, texts)
+		t.reportDisownUnreadable(ctx, unreadable, texts)
 	}
 	s.writeDisownCount(ctx, t, set, count, known)
 }
@@ -328,8 +328,13 @@ const EventDisownUnreadable = "CredentialUseDisownUnreadable"
 // the gauge on every pass, and, when there are some, a log line and a
 // Warning event on the CRD naming each with why, which the event sink
 // throttles while the set stays the same. texts are their errors, for the log:
-// an event with them would be a new one at every pass whose errors vary.
-func (t *Tracker) reportDisownUnreadable(unreadable, texts []string) {
+// an event with them would be a new one at every pass whose errors vary. A pass
+// the process's stop cut short says nothing, and leaves the gauge: its reads
+// failed for that.
+func (t *Tracker) reportDisownUnreadable(ctx context.Context, unreadable, texts []string) {
+	if ctx.Err() != nil {
+		return
+	}
 	sinkMetrics{t}.DisownUnreadable(kindLabel(t.gk), len(unreadable))
 	if len(unreadable) == 0 {
 		return
@@ -627,6 +632,6 @@ func (t *Tracker) reportDisownFailed(ctx context.Context, what string, err error
 	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(crd, "Warning", EventDisownUnreadable, "Disown can't "+what+" ("+shortError(err)+"), so held-count stays unknown: "+remedy)
-	t.warn("credential-use: Disown can't "+what+"; its count stays unknown until it can (§7.4)",
-		"kind", t.gk.String(), "why", shortError(err), "error", err.Error())
+	t.warn("credential-use: Disown can't read what it counts; its count stays unknown until it can (§7.4)",
+		"kind", t.gk.String(), "what", what, "why", shortError(err), "error", err.Error())
 }
