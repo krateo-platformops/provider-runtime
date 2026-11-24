@@ -36,6 +36,9 @@ type Driver struct {
 	// Connect reads a held ref's object, as a provider's Connect reads its
 	// credentials. The test checks its invariant there. Nil reads nothing.
 	Connect func(ctx context.Context, holder types.NamespacedName, ref cu.Ref) error
+	// OnRead, if set, sees the holder each pass has just read, before its
+	// Acquire. It must not change it.
+	OnRead func(ctx context.Context, holder *unstructured.Unstructured)
 
 	mu     sync.Mutex
 	events []string
@@ -79,6 +82,9 @@ func (d *Driver) Reconcile(ctx context.Context, nn types.NamespacedName) (Result
 	}
 	if err != nil {
 		return res, err
+	}
+	if d.OnRead != nil {
+		d.OnRead(ctx, obj)
 	}
 
 	// §7.2 item 2: Acquire, before anything reads a protected object.

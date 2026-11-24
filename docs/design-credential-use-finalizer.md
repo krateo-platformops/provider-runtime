@@ -5953,9 +5953,92 @@ remain, the finalizer is removed within a bounded number of steps.
 Widgets over a small pool of Secrets and Targets, in several namespaces
 with cross-namespace refs. Others delete Secrets, recreate them, and delete
 namespaces. Two holder kinds and two `Shared` instances run, as two
-processes would. The §6 invariant is checked on every observed read. At the
+processes would. The run is recorded, and audited at its end (below). At the
 end, every namespace tears down, and no object is left with a
 `credential-use.` finalizer and no users.
+
+**What the stress test shows.** `TestStress` runs direct refs in four of its
+five sub-tests (Secrets in the holder's namespace, with two and with three
+processes and with every hold outside the caches; and Secrets in another
+namespace whose consent toggles), and chains in the fifth. It used to fail
+only when a deleting holder's read failed, and it counted every such failure.
+That could tell neither of two things: a wrong release of an object that
+nobody was reading then, which the test's own DELETE finished off; nor a
+failure that the API server had caused (H3 below). Now:
+
+- **What it has.** Its own watches have every version of every Widget, Target,
+  Secret and Namespace, from a list at the start to an object made after the
+  last write, so a watch that missed something fails the run. resourceVersions
+  order them all, since envtest has one etcd. It sees every call the processes
+  make through their metadata clients, with its answer: for R2's list, the
+  revision of what it answered. It has the answer to each of its own DELETEs.
+  It knows which pass a call belongs to, and for a release, which goroutine,
+  since a batch runs on one. It has its own reading of records, users and
+  consent.
+- **Every release is judged at the moment it lands**, whether the object is
+  being deleted or not, and whatever becomes of it. It must apply to exactly
+  what its batch's R1 read: the same incarnation, no A2 since. And §5's table
+  must allow it, for the users (§6.1) the watch had at R2's revision, or whose
+  A2 on that incarnation had landed when the release did: §6.4 says the second
+  are among the first, so a list read too early is caught. A user that had
+  announced, and whose A2 hadn't landed, isn't one: §6.4's third case. A
+  deletion of a holder or of the namespace after R2's reads is §6.4's accepted
+  window. The grace is measured from when the test began the DELETE, so one
+  shortened by less than the DELETE, the informer and the queue take isn't
+  seen.
+- **Every finalizer that goes, goes by a release, and every object that goes,
+  by a release of that incarnation or by a DELETE that named it.**
+- **What a pass reports is checked:** a deletion pass holds each ref with an
+  A2 of its own. A live one may skip, if its process has written the object
+  since the A1 that named it. No A2 comes before the record names its object.
+  A ref is Missing only if a read of the pass said so.
+- **A record write drops no ref the holder still names,** except one in
+  another namespace whose consent that pass read, live, as refused.
+- **A deletion pass reads what it has just held** (I1). It is a deletion pass
+  if the holder was being deleted when the pass read it. One that began live
+  isn't counted there, and is in every other audit. A failed read is exempt
+  only as H3, on proof: a DELETE of the test's was answered with a Status that
+  names the very incarnation this pass's A2 held; that incarnation carried the
+  finalizer when it went, and was never marked as being deleted; the DELETE
+  began before its first hold could be seen; and no release of that name that
+  succeeded, or whose outcome isn't known, overlaps its life. Nothing is
+  exempt by the error's text, or by how the holder is when it is read again.
+- **On a failure it prints** what it found, and the timeline around it:
+  versions, calls, passes, releases and DELETEs.
+
+Each audit is tested on made-up histories, without an API server, and against
+mutants of the protocol by `hack/revert-check-credential-use-stress.py`, which
+counts the iterations each takes to be found.
+
+**What it can't show:**
+
+- **H3, the API server's, not ours.** A plain DELETE reads an object without
+  finalizers and removes it in a second step, over a first A2 that succeeded
+  in between. No hold can stop it, and it is as if the DELETE had come first.
+  A probe of the chained sub-test, most of it under CPU load, saw held objects
+  that had never been marked as being deleted go 58 times in 472 iterations of
+  8s, and 5 of those failed a deletion pass's read. It didn't have the DELETEs'
+  answers, so it took them for H3 by elimination; the stress has them. It
+  counts both, and fails on neither.
+- **H1, the same gap in a release.** The API server tests R3 and removes the
+  object in two steps. An A2 that lands between them succeeds, and goes with
+  the object. It was seen in 25 of 10,625 removals in that probe, with no
+  failed read. The stress counts it, by the version that R3's answer says its
+  tests ran on; a deletion pass's read that fails for it fails the run. The
+  other half of H1, where a second release of one incarnation removes the
+  next, wasn't seen there. It would fail the run, as a removal that nothing
+  explains.
+- **The chained case.** A pass that followed an older version of a Target may
+  drop from the record a Secret that the holder now needs (H2, open). The
+  stress counts such drops and doesn't fail on them: every release after one
+  is right by the records. Chains aren't in the first release.
+- **A wrong release that its own races hide.** A defect whose window is a few
+  milliseconds is found at the rate at which the stress's operations fall in
+  it, so one green run says little of it.
+- **The way to `AddFinalizer`** (§6.7), the index (§10.6), Disown, a restart
+  and a lost response: other tests', and the model's.
+- **A real cluster's rates.** envtest has one etcd, which doesn't sync its
+  writes, and no latency to it.
 
 **Drain:** cancel the process between A1 and A2, between R1 and R3, and in
 the middle of a release batch. Restart, and assert that it converges with

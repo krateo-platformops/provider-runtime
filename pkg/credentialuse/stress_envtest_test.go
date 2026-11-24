@@ -3,30 +3,38 @@ package credentialuse_test
 // Stress and drain against envtest (plan, PR 3b). Several processes, each a
 // Shared with trackers for two holder kinds and controllers that drive them,
 // with no leader election (§6.8), while goroutines create, re-point and
-// delete holders, and delete and recreate Secrets and namespaces. Every read
-// a deleting holder's pass makes is checked (§14's I1), and at the end no
-// object keeps a credential-use finalizer without a user. The drain tests
+// delete holders, and delete and recreate Secrets and namespaces. The run is
+// recorded (stress_record_test.go), and at its end the audits of
+// stress_history_test.go go over it: every release is judged at the moment it
+// lands, and every read a deletion pass fails to make (§14's I1). At the end
+// no object keeps a credential-use finalizer without a user. The drain tests
 // kill a process at the three points the plan names, start another, and
 // check that it converges.
 //
-// The default run is bounded, about 30s for both variants; set
-// CREDENTIALUSE_STRESS to a duration (per variant) for a longer one, which
-// nobody runs without asking.
+// Each sub-test runs for 8s, and as long again to tear everything down; set
+// CREDENTIALUSE_STRESS to a duration for a longer one, which nobody runs
+// without asking.
+//
+// CREDENTIALUSE_STRESS_SEED is the goroutines' seed: unset, 0, the same in
+// every run; a number; or vary, a random one each time, which the run logs so
+// that it can be given again. A seed fixes the operations each goroutine
+// tries, not their timing.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -48,15 +56,20 @@ var stressKinds = []struct {
 }
 
 // stressProcess is one process: a Shared, its trackers, and a controller
-// per holder kind.
+// per holder kind. stop ends it, and waits until all of it has ended.
 type stressProcess struct {
 	s     *cu.Shared
 	ctrls []*controller
+	stop  func()
 }
 
-func startStressProcess(t *testing.T, so cu.SharedOptions, mode stressMode) *stressProcess {
+// startStressProcess starts process proc, with rec recording its calls and
+// its passes.
+func startStressProcess(t *testing.T, rec *stressRecorder, proc int, so cu.SharedOptions, mode stressMode) *stressProcess {
 	t.Helper()
-	p := &stressProcess{s: cu.NewShared(clientsFor(t, env.Config), so)}
+	clients := clientsFor(t, env.Config)
+	clients.Metadata = rec.calledBy(proc, clients.Metadata)
+	p := &stressProcess{s: cu.NewShared(clients, so)}
 	kinds := stressKinds
 	if mode != stressPlain {
 		// Widgets only, which reach their Secrets through Targets (§9).
@@ -80,13 +93,56 @@ func startStressProcess(t *testing.T, so cu.SharedOptions, mode stressMode) *str
 			t.Fatal(err)
 		}
 		c.d = &driver.Driver{Tracker: tr, Dynamic: env.Dynamic, Holder: k.gvr, OwnerFinalizer: ownerFinalizer}
+		rec.follow(proc, k.gvk.Kind, c)
 		p.ctrls = append(p.ctrls, c)
 	}
-	running(t, p.s)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.s.Run(ctx) }()
+	p.stop = sync.OnceFunc(func() {
+		for _, c := range p.ctrls {
+			if c.stop != nil {
+				c.stop()
+			}
+		}
+		cancel()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v", err)
+		}
+	})
+	t.Cleanup(p.stop)
+	cutest.Eventually(t, time.Minute, func() error {
+		select {
+		case err := <-done:
+			done <- err
+			t.Fatalf("Run returned before it synced: %v", err)
+		default:
+		}
+		if !p.s.HasSynced() {
+			return cutest.ErrNotYet
+		}
+		return nil
+	})
 	for _, c := range p.ctrls {
 		c.start(c.d)
 	}
 	return p
+}
+
+// stressSeed is the seed the run's goroutines start from.
+func stressSeed(t *testing.T) uint64 {
+	switch v := os.Getenv("CREDENTIALUSE_STRESS_SEED"); v {
+	case "":
+		return 0
+	case "vary":
+		return rand.Uint64N(1 << 32)
+	default:
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			t.Fatalf("CREDENTIALUSE_STRESS_SEED=%q: %v", v, err)
+		}
+		return n
+	}
 }
 
 func stressDuration(t *testing.T) time.Duration {
@@ -121,6 +177,7 @@ func TestStress(t *testing.T) {
 // and the holders in each.
 type stressWorld struct {
 	t     *testing.T
+	rec   *stressRecorder
 	procs []*stressProcess
 	// chained: the holders are Widgets naming Targets, which name the
 	// Secrets (§9).
@@ -169,22 +226,25 @@ func (w *stressWorld) newNamespace() string {
 }
 
 func (w *stressWorld) recreateTarget(ns string, i int, secret string) {
-	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"secret": secret}}}
-	u.SetGroupVersionKind(cutest.TargetGVK)
-	u.SetNamespace(ns)
-	u.SetName(fmt.Sprintf("t%d", i))
-	_, err := env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns).Create(context.Background(), u, metav1.CreateOptions{})
+	err := w.rec.createTarget(context.Background(), ns, fmt.Sprintf("t%d", i), secret)
 	if err != nil && !apierrors.IsAlreadyExists(err) && !apierrors.IsForbidden(err) {
 		w.t.Errorf("recreating a Target in %s: %v", ns, err)
 	}
 }
 
 func (w *stressWorld) recreateSecret(ns string, i int) {
-	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("s%d", i)}}
-	_, err := env.Kube.CoreV1().Secrets(ns).Create(context.Background(), s, metav1.CreateOptions{})
+	err := w.rec.createSecret(context.Background(), ns, fmt.Sprintf("s%d", i))
 	if err != nil && !apierrors.IsAlreadyExists(err) && !apierrors.IsForbidden(err) {
 		w.t.Errorf("recreating a Secret in %s: %v", ns, err)
 	}
+}
+
+func (w *stressWorld) deleteSecret(ctx context.Context, ns, name string) {
+	_ = w.rec.deleteObject(ctx, stObj{"Secret", ns, name})
+}
+
+func (w *stressWorld) deleteTarget(ctx context.Context, ns string, i int) {
+	_ = w.rec.deleteObject(ctx, stObj{"Target", ns, fmt.Sprintf("t%d", i)})
 }
 
 // enqueue enqueues a holder in every process, as every process's controller
@@ -267,7 +327,7 @@ func (w *stressWorld) step(ctx context.Context, rng *rand.Rand) {
 			w.enqueue(h.kind, ns, h.name)
 		}
 	case op < 9: // delete a Secret
-		_ = env.Kube.CoreV1().Secrets(ns).Delete(ctx, secret, metav1.DeleteOptions{})
+		w.deleteSecret(ctx, ns, secret)
 	default: // recreate one
 		w.recreateSecret(ns, rng.IntN(stressSecrets))
 	}
@@ -287,7 +347,7 @@ func (w *stressWorld) targetStep(ctx context.Context, ns string, rng *rand.Rand)
 		_ = unstructured.SetNestedField(u.Object, fmt.Sprintf("s%d", rng.IntN(stressSecrets)), "spec", "secret")
 		_, _ = r.Update(ctx, u, metav1.UpdateOptions{})
 	case 1:
-		_ = r.Delete(ctx, fmt.Sprintf("t%d", i), metav1.DeleteOptions{})
+		w.deleteTarget(ctx, ns, i)
 	default:
 		w.recreateTarget(ns, i, fmt.Sprintf("s%d", rng.IntN(stressSecrets)))
 	}
@@ -313,11 +373,11 @@ func (w *stressWorld) teardown(ctx context.Context, ns string) error {
 	if w.chained {
 		// The intermediate objects first, as in TestChainTeardown.
 		for i := range stressTargets {
-			_ = env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns).Delete(ctx, fmt.Sprintf("t%d", i), metav1.DeleteOptions{})
+			w.deleteTarget(ctx, ns, i)
 		}
 	}
 	for i := range stressSecrets {
-		_ = env.Kube.CoreV1().Secrets(ns).Delete(ctx, fmt.Sprintf("s%d", i), metav1.DeleteOptions{})
+		w.deleteSecret(ctx, ns, fmt.Sprintf("s%d", i))
 	}
 	w.mu.Lock()
 	hs := slices.Clone(w.holders[ns])
@@ -385,15 +445,19 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 		resetPublished(t, cutest.WidgetGVR)
 		resetPublished(t, cutest.TargetGVR)
 	})
-	w := &stressWorld{t: t, holders: map[string][]stressHolder{}, chained: chained}
-	for range n {
-		w.procs = append(w.procs, startStressProcess(t, so, mode))
+	seed := stressSeed(t)
+	rec := startRecorder(t, mode)
+	w := &stressWorld{t: t, rec: rec, holders: map[string][]stressHolder{}, chained: chained}
+	for i := range n {
+		w.procs = append(w.procs, startStressProcess(t, rec, i+1, so, mode))
 	}
+	var teardowns atomic.Int64
+	// The audits run whatever ends the test.
+	defer func() { w.audit(fmt.Sprintf("%d processes, %s, seed %d", n, d, seed), teardowns.Load()) }()
 	if mode == stressCross {
 		w.target = env.Namespace(t, "stresstarget")
 		for i := range stressTargets {
-			s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("c%d", i)}}
-			if _, err := env.Kube.CoreV1().Secrets(w.target).Create(context.Background(), s, metav1.CreateOptions{}); err != nil {
+			if err := rec.createSecret(context.Background(), w.target, fmt.Sprintf("c%d", i)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -408,7 +472,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rng := rand.New(rand.NewPCG(uint64(i+1), uint64(n)))
+			rng := rand.New(rand.NewPCG(seed+uint64(i+1), uint64(n)))
 			for time.Now().Before(stop) {
 				w.step(ctx, rng)
 				time.Sleep(time.Duration(rng.IntN(20)) * time.Millisecond)
@@ -421,7 +485,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rng := rand.New(rand.NewPCG(99, uint64(n)))
+			rng := rand.New(rand.NewPCG(seed+99, uint64(n)))
 			for time.Now().Before(stop) {
 				w.mu.Lock()
 				grant := strings.Join(w.nss, ",")
@@ -447,7 +511,6 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	// One namespace at a time is torn down and replaced, while the
 	// goroutines keep working in the others.
 	wg.Add(1)
-	var teardowns atomic.Int64
 	go func() {
 		defer wg.Done()
 		for time.Now().Before(stop) {
@@ -490,7 +553,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 		if chained {
 			// With no users left, each Target is released, so it goes.
 			for i := range stressTargets {
-				_ = env.Dynamic.Resource(cutest.TargetGVR).Namespace(ns).Delete(ctx, fmt.Sprintf("t%d", i), metav1.DeleteOptions{})
+				w.deleteTarget(ctx, ns, i)
 			}
 		}
 	}
@@ -532,22 +595,44 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 		}
 		return nil
 	})
-	var violations []string
+}
+
+// maxFindings bounds how many findings of one class are printed whole.
+const maxFindings = 3
+
+// audit stops the processes, ends the recording, and fails the test on
+// everything the audits find, each with its timeline.
+func (w *stressWorld) audit(what string, teardowns int64) {
+	t := w.t
 	var passes int64
 	for _, p := range w.procs {
+		p.stop()
 		for _, c := range p.ctrls {
-			violations = append(violations, c.violations()...)
 			passes += c.passes.Load()
 		}
 	}
-	t.Logf("%d processes, %s: %d operations, %d namespace teardowns, %d passes", n, d, w.ops.Load(), teardowns.Load(), passes)
-	// A stress that did next to nothing proves nothing (the review of #114).
-	if w.ops.Load() < 100 || passes < 100 || teardowns.Load() < 1 {
-		t.Errorf("the stress did too little: %d operations, %d passes and %d namespace teardowns; want at least 100, 100 and 1",
-			w.ops.Load(), passes, teardowns.Load())
+	h := w.rec.finish(t)
+	r := h.audit()
+	t.Logf("%s: %d operations, %d namespace teardowns, %d passes; %s", what, w.ops.Load(), teardowns, passes, r)
+	printed := map[string]int{}
+	for _, f := range r.findings {
+		if printed[f.class]++; printed[f.class] <= maxFindings {
+			t.Errorf("AUDIT %s: %s\n%s", f.class, f.text, h.timeline(f))
+		}
 	}
-	if len(violations) != 0 {
-		t.Errorf("%d reads failed for holders being deleted: %v", len(violations), violations)
+	for class, n := range printed {
+		if n > maxFindings {
+			t.Errorf("AUDIT %s: and %d more", class, n-maxFindings)
+		}
+	}
+	// A stress that did next to nothing proves nothing (the review of #114),
+	// and nor do audits that had next to nothing to look at.
+	if w.ops.Load() < 100 || passes < 100 || teardowns < 1 {
+		t.Errorf("the stress did too little: %d operations, %d passes and %d namespace teardowns; want at least 100, 100 and 1",
+			w.ops.Load(), passes, teardowns)
+	}
+	if r.counts[countReleases] < 10 || r.counts[countHeldByA2] < 10 || r.counts[countRemovals] < 10 {
+		t.Errorf("the audits had too little to look at: %s; want at least 10 releases judged, 10 deletion passes' holds and 10 removals", r)
 	}
 }
 
