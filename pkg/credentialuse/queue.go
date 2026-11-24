@@ -126,7 +126,9 @@ type askedFor struct {
 }
 
 // A failure is an object that a batch of a key failed at, and none decided
-// since: how often in a row its retries failed, and the one it waits for.
+// since: how often in a row its retries failed, and the one it waits for. It is
+// the name's: one deleted and created again while no batch decided it inherits
+// the count, until one does.
 type failure struct {
 	n     int
 	waits *queueTimer
@@ -242,7 +244,9 @@ func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
 }
 
 // Settle records that ids of k's batch were decided: what they waited for, and
-// how often they had failed, is forgotten.
+// how often they had failed, is forgotten. R0's keep, from the caches alone,
+// decides too (§6.2): the user it saw is in the way of any release, and its own
+// event runs the batch again when it goes.
 func (q *batchQueue) Settle(k batchKey, ids ...ID) {
 	var stop []clock.Timer
 	q.mu.Lock()

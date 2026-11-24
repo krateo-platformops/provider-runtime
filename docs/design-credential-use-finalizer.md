@@ -811,7 +811,13 @@ namespace's live list (§10.5) that fails for one kind is retried
 so too, as a whole, deciding what it can list again, and doesn't hold up the
 kinds that could be listed. An object that fails stays in memory, and is read
 again every 5 minutes, for as long as it fails: it isn't dropped when no record
-names it any more, since a hold may still be there. A time a batch asks for, a
+names it any more, since a hold may still be there. That has no bound, a name
+of a kind that can't be mapped included; bounding what a holder's data can put
+there is the release cost's change. R0's keep is a decision as any other, so it
+ends a pending retry: its user's event runs the batch again. The protocol's
+model decides one batch (`RequeueAt` is all it reads of a schedule), and has
+none for what failed, what asked, or the backoff: those are the release loop's,
+tested on the queue by enumeration and on the loop. A time a batch asks for, a
 grace's end or a repaired epoch's recheck, is for the object that asked, each at
 its own time, not for the rest of the batch, and waits for no backoff. The log line of a failed batch has the first few
 errors, and how many more there are.
