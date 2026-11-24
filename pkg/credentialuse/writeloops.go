@@ -233,8 +233,8 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	}
 	s.wait(k, res.Waiting)
 	waiting := map[ID]bool{}
-	for _, id := range res.Waiting {
-		waiting[id] = true
+	for _, o := range res.Waiting {
+		waiting[o.ID] = true
 	}
 	undecided := func(id ID) bool { return failed[id] || waiting[id] }
 	// The next release of what the batch decided waits again, though its prune,

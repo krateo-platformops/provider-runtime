@@ -43,8 +43,8 @@ func (s *Shared) SetReleaseWait(f func() time.Duration) { s.releaseWait = f }
 func (s *Shared) WaitEnd(gk schema.GroupKind, ns string, id ID) (time.Time, bool) {
 	s.waits.mu.Lock()
 	defer s.waits.mu.Unlock()
-	end, ok := s.waits.ends[batchKey{gk, ns}][id]
-	return end, ok
+	e, ok := s.waits.ends[batchKey{gk, ns}][id]
+	return e.end, ok
 }
 
 // QueueLoad is how many batches wait for a release worker, and how many are

@@ -25,32 +25,37 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG = "pkg/credentialuse/"
 FILES = ["release.go", "releasewait.go", "shared.go", "tracker.go", "writeloops.go"]
 
-R1 = "p.mustWait != nil && !p.namespaceDeletingCached(id.Namespace) && p.mustWait(n, id)"
+R1 = "p.mustWait != nil && !p.namespaceDeletingCached(id.Namespace) && p.mustWait(n, w)"
+WAITS = "if w := (Waiting{id, m.UID}); p.mustWait != nil && p.mustWait(n, w) {\n\t\t\t\t\tres.Waiting = append(res.Waiting, w)\n\t\t\t\t\tcontinue\n\t\t\t\t}\n"
 SETTLE = "\ts.waits.settle(k, slices.DeleteFunc(slices.Clone(ids), undecided)...)\n"
+OVER = "return ok && e.uid == o.UID && !now.Before(e.end)"
+DROPPED = "\t\ts.waits.settle(k, ids...)\n"
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
-    ("nothing waits", "release.go", [("if " + R1 + " {", "if false {")]),
+    ("nothing waits", "release.go", [(R1, "false")]),
     ("a namespace being deleted waits too", "release.go",
-     [(R1, "p.mustWait != nil && p.mustWait(n, id)")]),
+     [(R1, "p.mustWait != nil && p.mustWait(n, w)")]),
+    ("a namespace deleted inside a wait waits on", "release.go",
+     [(R1, "p.mustWait != nil && p.mustWait(n, w)")]),
     ("what isn't being deleted waits too", "release.go",
      [("\t\t\tr := r1Read{id: id, meta: m}\n\t\t\tif m.DeletionTimestamp != nil {",
-       "\t\t\tr := r1Read{id: id, meta: m}\n\t\t\tif m.DeletionTimestamp == nil && p.mustWait != nil && p.mustWait(n, id) {\n\t\t\t\tres.Waiting = append(res.Waiting, id)\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tif m.DeletionTimestamp != nil {")]),
+       "\t\t\tr := r1Read{id: id, meta: m}\n\t\t\tif m.DeletionTimestamp == nil {\n\t\t\t\t" + WAITS + "\t\t\t}\n\t\t\tif m.DeletionTimestamp != nil {")]),
     ("the wait begins inside the grace", "release.go",
-     [("\t\t\t\tif u := cachedUsers[id]; now.Before(r.graceEnd)", "\t\t\t\tif p.mustWait != nil && p.mustWait(n, id) {\n\t\t\t\t\tres.Waiting = append(res.Waiting, id)\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tif u := cachedUsers[id]; now.Before(r.graceEnd)")]),
+     [("\t\t\t\tif u := cachedUsers[id]; now.Before(r.graceEnd)", "\t\t\t\t" + WAITS + "\t\t\t\tif u := cachedUsers[id]; now.Before(r.graceEnd)")]),
     ("nothing queues what waits", "writeloops.go", [("\ts.wait(k, res.Waiting)\n", "")]),
-    ("a wait never ends", "releasewait.go",
-     [("return ok && !now.Before(end)", "return ok && end.IsZero()")]),
-    ("a wait ends at once", "releasewait.go",
-     [("return ok && !now.Before(end)", "return ok && (true || now.Before(end))")]),
+    ("a wait never ends", "releasewait.go", [(OVER, "return ok && e.uid == o.UID && e.end.IsZero()")]),
+    ("a wait ends at once", "releasewait.go", [(OVER, "return ok && e.uid == o.UID && (true || now.Before(e.end))")]),
+    ("another incarnation has the first's ended wait", "releasewait.go", [(OVER, "return ok && !now.Before(e.end)")]),
+    ("another incarnation's wait isn't begun", "releasewait.go", [("return ok && e.uid == o.UID\n", "return ok\n")]),
     ("what is decided keeps its wait while its batch fails", "writeloops.go",
      [(SETTLE, "\tif err == nil {\n\t" + SETTLE + "\t}\n")]),
     ("what a failed prune is of keeps its wait", "writeloops.go",
      [(SETTLE, ""), ("\tdecided := slices.DeleteFunc(", SETTLE + "\tdecided := slices.DeleteFunc(")]),
     ("each batch begins the wait again", "releasewait.go",
-     [("\t\tif s.waits.begun(k, id) {\n", "\t\tif false {\n")]),
+     [("\t\tif s.waits.begun(k, o) {\n", "\t\tif false {\n")]),
     ("one wait serves the whole batch", "releasewait.go",
-     [("\tfor _, id := range ids {\n\t\tif s.waits.begun(k, id) {", "\td0 := s.releaseWait()\n\tfor _, id := range ids {\n\t\tif s.waits.begun(k, id) {"),
+     [("\tfor _, o := range objs {\n\t\tif s.waits.begun(k, o) {", "\td0 := s.releaseWait()\n\tfor _, o := range objs {\n\t\tif s.waits.begun(k, o) {"),
       ("\t\td := s.releaseWait()\n", "\t\td := d0\n")]),
     ("a decided object doesn't wait again", "writeloops.go", [(SETTLE, "")]),
     ("a failed release waits again", "writeloops.go",
@@ -60,18 +65,28 @@ MUTANTS = [
     ("what still waits is settled in the queue", "writeloops.go",
      [("\tdecided := slices.DeleteFunc(slices.Clone(ids), undecided)\n",
        "\tdecided := slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return failed[id] })\n")]),
-    ("a dropped batch keeps its waits", "writeloops.go", [("\t\ts.waits.settle(k, ids...)\n", "")]),
+    ("what still waits leaves the gauge", "writeloops.go",
+     [("\tt.keptUncached(decided, res.Kept)\n",
+       "\tt.keptUncached(slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return failed[id] }), res.Kept)\n")]),
+    ("a dropped batch keeps its waits", "writeloops.go", [(DROPPED, "")]),
+    ("a parked batch keeps its waits", "writeloops.go",
+     [(DROPPED, "\t\ts.mu.Lock()\n\t\tparked := s.tracking[k.Holder] != nil\n\t\ts.mu.Unlock()\n\t\tif !parked {\n\t" + DROPPED + "\t\t}\n")]),
     ("a stop keeps the waits", "writeloops.go", [("\t\ts.waits.clear()\n", "")]),
     ("production has no wait", "shared.go", [("\t\treleaseWait: randomReleaseWait,\n", "")]),
     ("the wait is up to 4s", "releasewait.go", [("rand.N(releaseWaitMax)", "rand.N(2 * releaseWaitMax)")]),
     ("the wait isn't random", "releasewait.go", [("return rand.N(releaseWaitMax)", "return min(releaseWaitMax/2, rand.N(releaseWaitMax)+releaseWaitMax)")]),
     ("a tracker's release has no wait", "tracker.go",
-     [("func(n string, id ID) bool { return s.mustWait(batchKey{gk, n}, id) }", "nil")]),
+     [("func(n string, o Waiting) bool { return s.mustWait(batchKey{gk, n}, o) }", "nil")]),
 ]
 
 KILLERS = {
     "nothing waits": "TestAWaitBeforeReleasingADeletingObject",
     "a namespace being deleted waits too": "TestNoWaitInANamespaceBeingDeleted",
+    "a namespace deleted inside a wait waits on": "TestANamespaceDeletedInsideAWait",
+    "another incarnation has the first's ended wait": "TestARecreatedObjectWaitsOfItsOwn",
+    "another incarnation's wait isn't begun": "TestARecreatedObjectWaitsOfItsOwn",
+    "what still waits leaves the gauge": "TestAWaitingObjectStaysCounted",
+    "a parked batch keeps its waits": "TestAParkedBatchWaitsAgain",
     "what isn't being deleted waits too": "TestOnlyADeletingObjectWaits",
     "the wait begins inside the grace": "TestTheWaitBeginsAtTheGracesEnd",
     "nothing queues what waits": "TestAWaitBeforeReleasingADeletingObject",

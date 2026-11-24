@@ -104,10 +104,10 @@ type protocol struct {
 	// restoredEpochRequeue, if set, replaces the constant of that name
 	// (epochRequeue).
 	restoredEpochRequeue time.Duration
-	// mustWait, if set, reports whether the release of id, which is being
+	// mustWait, if set, reports whether the release of o, which is being
 	// deleted, for holder namespace n must still wait (§6.4). The models have
 	// none: their API server removes an object in one step.
-	mustWait func(n string, id ID) bool
+	mustWait func(n string, o Waiting) bool
 	// heldDeleting, if set, is told of every object an A2 held that its
 	// response shows being deleted, with the holder namespace.
 	heldDeleting func(id ID, namespace string)

@@ -71,6 +71,15 @@ func (r *fakeRig) heldSecret(t *testing.T, name string) bool {
 	return hasFinalizer(r.secretMeta(t, "ns", name), fWidgetNS)
 }
 
+// waits reports whether a wait of id is kept in k, ended or not, of whichever
+// incarnation.
+func (r *fakeRig) waits(k batchKey, id ID) bool {
+	r.s.waits.mu.Lock()
+	defer r.s.waits.mu.Unlock()
+	_, ok := r.s.waits.ends[k][id]
+	return ok
+}
+
 // quiet waits until no batch is queued or worked on.
 func (r *fakeRig) quiet(t *testing.T) {
 	t.Helper()
@@ -252,8 +261,8 @@ func TestAReleasedObjectKeepsNoWait(t *testing.T) {
 	if r.heldSecret(t, "a") || !r.heldSecret(t, "b") {
 		t.Fatalf("a held %v, b held %v", r.heldSecret(t, "a"), r.heldSecret(t, "b"))
 	}
-	if r.s.waits.begun(k, ids[0]) || !r.s.waits.begun(k, ids[1]) {
-		t.Errorf("waits kept: a %v, b %v; want only b's, whose release failed", r.s.waits.begun(k, ids[0]), r.s.waits.begun(k, ids[1]))
+	if r.waits(k, ids[0]) || !r.waits(k, ids[1]) {
+		t.Errorf("waits kept: a %v, b %v; want only b's, whose release failed", r.waits(k, ids[0]), r.waits(k, ids[1]))
 	}
 }
 
@@ -280,8 +289,8 @@ func TestAKeptObjectKeepsNoWaitThoughItsBatchFails(t *testing.T) {
 	if !r.heldSecret(t, "a") || !r.heldSecret(t, "b") {
 		t.Fatalf("a held %v, b held %v", r.heldSecret(t, "a"), r.heldSecret(t, "b"))
 	}
-	if r.s.waits.begun(k, ids[0]) || !r.s.waits.begun(k, ids[1]) {
-		t.Errorf("waits kept: a %v, b %v; want only b's, whose release failed", r.s.waits.begun(k, ids[0]), r.s.waits.begun(k, ids[1]))
+	if r.waits(k, ids[0]) || !r.waits(k, ids[1]) {
+		t.Errorf("waits kept: a %v, b %v; want only b's, whose release failed", r.waits(k, ids[0]), r.waits(k, ids[1]))
 	}
 }
 
@@ -294,7 +303,7 @@ func TestAReplacedObjectKeepsNoWait(t *testing.T) {
 	k := batchKey{widgetGK, "ns"}
 	id := secretID("ns", "s")
 	r.s.releaseBatch(context.Background(), k, []ID{id})
-	if !r.s.waits.begun(k, id) {
+	if !r.waits(k, id) {
 		t.Fatal("precondition: no wait began")
 	}
 	r.clk.Step(time.Second)
@@ -305,7 +314,7 @@ func TestAReplacedObjectKeepsNoWait(t *testing.T) {
 	if !r.heldSecret(t, "s") {
 		t.Fatal("the new object was released, with a live user")
 	}
-	if r.s.waits.begun(k, id) {
+	if r.waits(k, id) {
 		t.Error("the new object has the old one's wait: its release, when it is deleted, wouldn't wait")
 	}
 }
@@ -318,7 +327,7 @@ func TestAFailedPruneKeepsNoWait(t *testing.T) {
 	id, k := secretID("ns", "s"), batchKey{widgetGK, "ns"}
 	tr.idx = testIndex(&unwritable{memStore: &memStore{exists: true, lines: linesOf([]ID{id})}, down: true}, r.s.newServer(tr.o.Holder))
 	r.s.releaseBatch(context.Background(), k, []ID{id})
-	if !r.s.waits.begun(k, id) {
+	if !r.waits(k, id) {
 		t.Fatal("precondition: no wait began")
 	}
 	r.clk.Step(time.Second)
@@ -326,7 +335,7 @@ func TestAFailedPruneKeepsNoWait(t *testing.T) {
 	if retry, _ := timersOf(r.s.queue, k); r.heldSecret(t, "s") || !slices.Equal(retry, []ID{id}) {
 		t.Fatalf("held %v, and %v is retried; want it released, and retried for its line", r.heldSecret(t, "s"), retry)
 	}
-	if r.s.waits.begun(k, id) {
+	if r.waits(k, id) {
 		t.Error("the released object keeps its wait: the next of its name wouldn't wait")
 	}
 }
@@ -424,11 +433,178 @@ func TestAnErrorThatNamesNoObjectLeavesTheWait(t *testing.T) {
 func TestADroppedBatchForgetsItsWaits(t *testing.T) {
 	r := newFakeRig(t)
 	id, k := secretID("ns", "s"), batchKey{widgetGK, "ns"} // nobody tracks it
-	r.s.waits.begin(k, id, r.clk.Now())
+	r.s.waits.begin(k, Waiting{id, "u-s"}, r.clk.Now())
 	r.s.releaseBatch(context.Background(), k, []ID{id})
 	if len(r.s.waits.ends) != 0 {
 		t.Errorf("waits are left: %v", r.s.waits.ends)
 	}
+}
+
+// Nor does one that a Track of its kind parks: what the Track brings back waits
+// once, from its start, though its earlier wait had ended, and is released.
+func TestAParkedBatchWaitsAgain(t *testing.T) {
+	r, d := waitingRig(t, []time.Duration{time.Second}, deletingSecret("ns", "s", time.Now().Add(-time.Hour)))
+	id, k := secretID("ns", "s"), batchKey{widgetGK, "ns"}
+	tr := r.track(t, widgetGK)
+	// The Track runs: its kind isn't tracked yet.
+	mine := &inflight{done: make(chan struct{})}
+	r.s.mu.Lock()
+	delete(r.s.trackers, widgetGK)
+	r.s.tracking[widgetGK] = mine
+	r.s.mu.Unlock()
+	r.s.waits.begin(k, Waiting{id, "u-s"}, r.clk.Now())
+	r.s.releaseBatch(context.Background(), k, []ID{id})
+	if r.waits(k, id) || len(mine.parked) != 1 {
+		t.Fatalf("a wait is kept: %v, and %d batches are parked; want none, and one", r.waits(k, id), len(mine.parked))
+	}
+	// The Track ends, with its kind tracked.
+	r.s.mu.Lock()
+	r.s.trackers[widgetGK] = tr
+	r.s.mu.Unlock()
+	r.s.endTracking(widgetGK, mine)
+	if got := r.next(context.Background(), k); !slices.Equal(got, []ID{id}) || d.count() != 1 || !r.heldSecret(t, "s") {
+		t.Fatalf("once tracked, the batch is %v, %d waits were drawn, held %v; want one wait", got, d.count(), r.heldSecret(t, "s"))
+	}
+	r.clk.Step(time.Second)
+	r.next(context.Background(), k)
+	if r.heldSecret(t, "s") || d.count() != 1 {
+		t.Errorf("at the wait's end: held %v, %d waits drawn", r.heldSecret(t, "s"), d.count())
+	}
+}
+
+// A wait is of one incarnation. Another of the name, held and being deleted while
+// the first's ended wait is kept for its retry, waits for itself; so does one that
+// comes while the first's wait runs, and the first's timer doesn't end it.
+func TestARecreatedObjectWaitsOfItsOwn(t *testing.T) {
+	for _, ended := range []bool{true, false} {
+		ctx := context.Background()
+		r, d := waitingRig(t, []time.Duration{time.Second, 5 * time.Second}, deletingSecret("ns", "s", time.Now().Add(-time.Hour)))
+		var fails atomic.Bool
+		fails.Store(true)
+		r.s.hooks.wrapServer = func(srv server) server {
+			return hookServer{server: srv, before: func(_ context.Context, c Call) error {
+				if c.Op == "patch" && c.GK == secretGroupKind && fails.Load() {
+					return apierrors.NewInternalError(errors.New("test"))
+				}
+				return nil
+			}}
+		}
+		r.track(t, widgetGK)
+		id, k := secretID("ns", "s"), batchKey{widgetGK, "ns"}
+		r.s.releaseBatch(ctx, k, []ID{id})
+		if ended {
+			r.clk.Step(time.Second)
+			r.next(ctx, k) // its release fails, and is retried in 1s
+		}
+		fails.Store(false)
+		next := deletingSecret("ns", "s", time.Now().Add(-time.Hour))
+		next.UID = "u-next"
+		if err := r.md.Tracker().Update(secretsGVR, next, "ns"); err != nil {
+			t.Fatal(err)
+		}
+		// Either way the batch that comes 1s later finds the next one.
+		if !ended {
+			r.s.releaseBatch(ctx, k, []ID{id})
+		}
+		r.clk.Step(time.Second)
+		if got := r.next(ctx, k); !slices.Equal(got, []ID{id}) || !r.heldSecret(t, "s") || d.count() != 2 {
+			t.Errorf("ended %v: the batch is %v, the next one is held %v, and %d waits were drawn; want it to wait", ended, got, r.heldSecret(t, "s"), d.count())
+			continue
+		}
+		rest := 5 * time.Second
+		if !ended {
+			rest -= time.Second
+		}
+		r.clk.Step(rest - 1)
+		if got := r.queued(widgetGK, "ns"); got != nil {
+			t.Errorf("ended %v: before its wait ends the batch is %v", ended, got)
+		}
+		r.clk.Step(1)
+		r.next(ctx, k)
+		if r.heldSecret(t, "s") || d.count() != 2 {
+			t.Errorf("ended %v: at its wait's end: held %v, %d waits drawn", ended, r.heldSecret(t, "s"), d.count())
+		}
+	}
+}
+
+// A namespace that begins to be deleted inside a wait ends it: R1 takes it from the
+// cache, and R2 reads it live. The object is released without a step of the clock,
+// or kept, if it has a user.
+func TestANamespaceDeletedInsideAWait(t *testing.T) {
+	for _, used := range []bool{false, true} {
+		r, d := waitingRig(t, []time.Duration{time.Hour}, deletingSecret("ns", "s", time.Now().Add(-time.Hour)))
+		var reads atomic.Int32
+		r.s.hooks.wrapServer = func(srv server) server {
+			return hookServer{server: srv, before: func(_ context.Context, c Call) error {
+				if c.Op == "get" && c.GK == namespaceGroupKind && c.Name == "ns" {
+					reads.Add(1)
+				}
+				return nil
+			}}
+		}
+		tr := r.track(t, widgetGK)
+		r.run(t)
+		r.drain()
+		id, k := secretID("ns", "s"), batchKey{widgetGK, "ns"}
+		r.s.releaseBatch(context.Background(), k, []ID{id})
+		if d.count() != 1 || !r.waits(k, id) || reads.Load() != 0 {
+			t.Fatalf("precondition: %d waits drawn, kept %v, %d live reads of the namespace", d.count(), r.waits(k, id), reads.Load())
+		}
+		if used {
+			if err := r.md.Tracker().Add(holderObject("ns", "h", id)); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, "the holder, in the cache", func() bool { return len(tr.proto.views.HoldersNaming(id, "ns")) == 1 })
+		}
+		ns := deleting(namespaceObject("ns"), time.Now())
+		if err := r.md.Tracker().Update(namespacesGVR, ns, ""); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "the namespace's deletion, in the cache", func() bool { return tr.proto.namespaceDeletingCached("ns") })
+		r.s.releaseBatch(context.Background(), k, []ID{id})
+		if r.heldSecret(t, "s") != used || d.count() != 1 || reads.Load() != 1 {
+			t.Errorf("used %v: held %v, %d waits drawn, %d live reads of the namespace; want it decided at once, on one", used, r.heldSecret(t, "s"), d.count(), reads.Load())
+		}
+		if r.waits(k, id) {
+			t.Errorf("used %v: its wait is kept", used)
+		}
+	}
+}
+
+// An object outside the caches that was counted as waiting for its users stays
+// counted while its release waits, and leaves the gauge when it is released.
+func TestAWaitingObjectStaysCounted(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t, deleting(heldObject(secretGVK, "out", "s", "u1", widgetGK, "out"), time.Now().Add(-time.Hour)),
+		holderObject("out", "h", secretID("out", "s")))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	kind := kindLabel(widgetGK)
+	gauge := func(want int, when string) {
+		t.Helper()
+		if n := r.metrics.waitingGauge(kind); n != want {
+			t.Errorf("%s: %d counted, want %d", when, n, want)
+		}
+	}
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "s")})
+	gauge(1, "in its grace")
+	if err := r.md.Tracker().Delete(widgetsGVR, "out", "h"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the holder to leave the cache", func() bool { return len(tr.proto.views.HoldersNaming(secretID("out", "s"), "out")) == 0 })
+	d := &draws{waits: []time.Duration{time.Second}}
+	r.s.releaseWait = d.next
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "s")})
+	if d.count() != 1 || !r.heldBy(t, widgetGK, "out", "s") {
+		t.Fatalf("precondition: %d waits drawn, held %v", d.count(), r.heldBy(t, widgetGK, "out", "s"))
+	}
+	gauge(1, "in its wait")
+	r.clk.Step(time.Second)
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "s")})
+	if r.heldBy(t, widgetGK, "out", "s") {
+		t.Error("not released after its wait")
+	}
+	gauge(0, "released")
 }
 
 // Objects of one batch wait each its own time, so that two processes don't meet on

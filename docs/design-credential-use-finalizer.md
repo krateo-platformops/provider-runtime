@@ -878,9 +878,9 @@ for the set of protected objects pending there (R7). For each pending P:
   - Otherwise, if P is being deleted, and its namespace was live when last seen,
     **wait a random time below 2s** first (§6.4, H1): P leaves the batch, which
     goes on with the others, and is queued again when its wait ends; R1 then reads
-    it again. The wait is the object's own, begins once, and ends when a batch
-    decides P: a retry doesn't wait again, and a P that was kept does, at its next
-    release. It holds no worker, moves neither a grace's end nor a retry, and is
+    it again. The wait is the object's own, of that incarnation, begins once, and
+    is forgotten when a batch decides P: a retry doesn't wait again, and a P that
+    was kept does, at its next release. It holds no worker, moves neither a grace's end nor a retry, and is
     dropped when the write loops stop. Nothing that isn't being deleted waits.
 - **R2. The last reads, after every R1 in the batch.** First read the
   clock: whether each P's grace is over is decided on that reading, taken
@@ -1244,10 +1244,17 @@ recreated Secret. Not each overlap can: of the 87 overlaps with the wait of the
 other shapes with the wait below 2s in 5 of 23. At polls of 20ms and 200ms 1 went in 307, of the 40-Secret shape, and none
 in the 200-Secret one; the shuffled runs aren't counted.
 
-- The wait is each object's own. One for a whole batch would let two processes whose
-  batches overlap meet on all of its objects.
+- The wait is each object's own, by its uid. One for a whole batch would let two
+  processes whose batches overlap meet on all of its objects, and one for a name would
+  let the next object of the name go without.
+- It is once for each decision, so an object may wait twice or more: one that a batch
+  keeps waits again before it is released. A holder cache that is behind can be why:
+  R0 keeps P for a user that is gone, or R1 waits where the cache doesn't show the user
+  that R2's list does.
 - **What has no wait.** An object that isn't being deleted at R1, and is by the time
-  R3 lands, is removed by it. And Disown's strips, which are R3's patches: two
+  R3 lands, is removed by it. One in a namespace that the cache shows being deleted,
+  and that has gone and been made again live since: R1 goes by the cache, and R2, which
+  reads it live, may release at once. And Disown's strips, which are R3's patches: two
   processes' strips of an object being deleted can remove the next one as two R3s
   can. It is rarer, since each process has its own interval, and switched on by
   hand.
@@ -1256,7 +1263,8 @@ in the 200-Secret one; the shuffled runs aren't counted.
   A2 and the recreate; it was rejected for now, at one more write per release
   (§15). The condition it was to be taken under, a notable share of lost A2s, isn't
   met.
-- With leader election only a timed-out R3 and its own retry can overlap.
+- With leader election only a timed-out R3 and its own retry can overlap, and at a
+  change of leader an R3 that the old one left in flight and the new one's.
 
 **Error or crash after the announce** (HIGH-1). Suppose A1 succeeds and A2
 fails, times out, or the process dies. Then no `written` entry is issued

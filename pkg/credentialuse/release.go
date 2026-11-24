@@ -97,7 +97,7 @@ type ReleaseResult struct {
 	// Waiting are the objects being deleted that the batch didn't decide, since
 	// their release must wait (§6.4): the caller queues each when it may go on.
 	// None is in Failed or Asked.
-	Waiting []ID
+	Waiting []Waiting
 	// RequeueAt, when set, is the soonest of Asked's times. They are absolute,
 	// the deadline itself rather than a duration from some reading of the
 	// clock, so the requeue lands exactly on it
@@ -110,6 +110,12 @@ type ReleaseResult struct {
 type Asked struct {
 	ID ID
 	At time.Time
+}
+
+// Waiting is an object whose release must wait, as R1 read it.
+type Waiting struct {
+	ID  ID
+	UID types.UID
 }
 
 func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
@@ -219,8 +225,8 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				}
 				// The wait before it may be released (§6.4), except in a
 				// namespace being deleted, where it can't be created again.
-				if p.mustWait != nil && !p.namespaceDeletingCached(id.Namespace) && p.mustWait(n, id) {
-					res.Waiting = append(res.Waiting, id)
+				if w := (Waiting{id, m.UID}); p.mustWait != nil && !p.namespaceDeletingCached(id.Namespace) && p.mustWait(n, w) {
+					res.Waiting = append(res.Waiting, w)
 					continue
 				}
 			}

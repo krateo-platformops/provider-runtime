@@ -4,6 +4,8 @@ import (
 	"math/rand/v2"
 	"sync"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // The wait before the release of an object being deleted (§6.4, H1; the user's
@@ -24,41 +26,48 @@ func randomReleaseWait() time.Duration { return rand.N(releaseWaitMax) }
 
 // releaseWaits are the waits of the batches' objects: when each ends. An entry
 // goes when a batch decides its object, so that the next release of it waits
-// again; a batch that fails keeps it, and its retry doesn't wait twice. The
-// timers are the queue's, so they hold no worker.
+// again; a batch that fails keeps it, and its retry doesn't wait twice. It is of
+// one incarnation: another of the name waits for itself. The timers are the
+// queue's, so they hold no worker.
 type releaseWaits struct {
 	mu   sync.Mutex
-	ends map[batchKey]map[ID]time.Time
+	ends map[batchKey]map[ID]waitEnd
 }
 
-// over reports whether id's wait in k has ended by now. One that hasn't begun
+// waitEnd is when the wait of the object with uid ends.
+type waitEnd struct {
+	uid types.UID
+	end time.Time
+}
+
+// over reports whether o's wait in k has ended by now. One that hasn't begun
 // hasn't.
-func (w *releaseWaits) over(k batchKey, id ID, now time.Time) bool {
+func (w *releaseWaits) over(k batchKey, o Waiting, now time.Time) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	end, ok := w.ends[k][id]
-	return ok && !now.Before(end)
+	e, ok := w.ends[k][o.ID]
+	return ok && e.uid == o.UID && !now.Before(e.end)
 }
 
-// begun reports whether id's wait in k has begun.
-func (w *releaseWaits) begun(k batchKey, id ID) bool {
+// begun reports whether o's wait in k has begun.
+func (w *releaseWaits) begun(k batchKey, o Waiting) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, ok := w.ends[k][id]
-	return ok
+	e, ok := w.ends[k][o.ID]
+	return ok && e.uid == o.UID
 }
 
-// begin begins id's wait in k, until end.
-func (w *releaseWaits) begin(k batchKey, id ID, end time.Time) {
+// begin begins o's wait in k, until end, in place of an earlier incarnation's.
+func (w *releaseWaits) begin(k batchKey, o Waiting, end time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.ends == nil {
-		w.ends = map[batchKey]map[ID]time.Time{}
+		w.ends = map[batchKey]map[ID]waitEnd{}
 	}
 	if w.ends[k] == nil {
-		w.ends[k] = map[ID]time.Time{}
+		w.ends[k] = map[ID]waitEnd{}
 	}
-	w.ends[k][id] = end
+	w.ends[k][o.ID] = waitEnd{o.UID, end}
 }
 
 // settle ends what is kept of ids' waits in k, which a batch decided.
@@ -80,20 +89,20 @@ func (w *releaseWaits) clear() {
 	w.ends = nil
 }
 
-// mustWait reports whether the release of id in k must wait, or go on waiting.
-func (s *Shared) mustWait(k batchKey, id ID) bool {
-	return s.releaseWait != nil && !s.waits.over(k, id, s.clock.Now())
+// mustWait reports whether the release of o in k must wait, or go on waiting.
+func (s *Shared) mustWait(k batchKey, o Waiting) bool {
+	return s.releaseWait != nil && !s.waits.over(k, o, s.clock.Now())
 }
 
-// wait begins the waits of ids, each of its own length, and queues each again
+// wait begins the waits of objs, each of its own length, and queues each again
 // when it ends. One that has begun goes on as it is.
-func (s *Shared) wait(k batchKey, ids []ID) {
-	for _, id := range ids {
-		if s.waits.begun(k, id) {
+func (s *Shared) wait(k batchKey, objs []Waiting) {
+	for _, o := range objs {
+		if s.waits.begun(k, o) {
 			continue // the queue gives k to one worker at a time
 		}
 		d := s.releaseWait()
-		s.waits.begin(k, id, s.clock.Now().Add(d))
-		s.queue.AddAfter(k, d, id)
+		s.waits.begin(k, o, s.clock.Now().Add(d))
+		s.queue.AddAfter(k, d, o.ID)
 	}
 }
