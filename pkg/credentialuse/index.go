@@ -400,10 +400,11 @@ type index struct {
 	late map[lateHold]time.Time
 	// lost: the index was seen deleted, or recreated by an add; the write
 	// loops rebuild it from the records (§10.6.6). lostDue is when the next
-	// try is due, lostFails how many failed in a row.
-	lost      bool
-	lostDue   time.Time
-	lostFails int
+	// try is due, lostFails how many failed in a row. rebuilding: one is under
+	// way, which takes lost, so that a loss meanwhile asks for another.
+	lost, rebuilding bool
+	lostDue          time.Time
+	lostFails        int
 	// fresh: the kind was never tracked before this process's Track, and
 	// had no index, so that a missing one, until this process has rebuilt
 	// it, isn't a lost one (§7.4).
@@ -1234,7 +1235,7 @@ func (ix *index) setFresh(fresh bool) {
 func (ix *index) unsure(kinds map[schema.GroupKind]bool) bool {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	if ix.lost {
+	if ix.lost || ix.rebuilding {
 		return true
 	}
 	for id := range ix.pending {
@@ -1279,24 +1280,23 @@ func (ix *index) lostTick(ctx context.Context, now time.Time) error {
 	ix.mu.Lock()
 	due := ix.lost && !now.Before(ix.lostDue)
 	if due {
-		ix.lost = false
+		ix.lost, ix.rebuilding = false, true
 	}
 	ix.mu.Unlock()
 	if !due {
 		return nil
 	}
 	err := ix.rebuild(ctx)
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.rebuilding = false
 	if err == nil {
-		ix.mu.Lock()
 		ix.lostFails = 0
-		ix.mu.Unlock()
 		return nil
 	}
-	ix.mu.Lock()
 	ix.lost = true
 	ix.lostDue = now.Add(backoffAfter(ix.lostFails))
 	ix.lostFails++
-	ix.mu.Unlock()
 	return err
 }
 

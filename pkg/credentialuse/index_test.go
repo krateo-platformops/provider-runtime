@@ -575,6 +575,32 @@ func TestAFailedCheckSurvivesAnother(t *testing.T) {
 	}
 }
 
+// A rebuild under way leaves the index unsure until it has ended, as one that
+// is due does (§7.4).
+func TestARebuildUnderWayIsUnsure(t *testing.T) {
+	secrets := map[schema.GroupKind]bool{secretGroupKind: true}
+	for name, fail := range map[string]bool{"that completes": false, "that fails": true} {
+		st := &memStore{}
+		ix := testIndex(st, &objServer{})
+		during := 0
+		st.beforeCreate = func(s *memStore) {
+			if during++; !ix.unsure(secrets) {
+				t.Errorf("a rebuild %s: sure while it is under way", name)
+			}
+		}
+		if fail {
+			st.beforeUpdate = func(s *memStore) { s.exists = false }
+		}
+		ix.markLost()
+		if err := ix.lostTick(context.Background(), time.Now()); (err != nil) != fail || during == 0 {
+			t.Errorf("a rebuild %s: %v, %d creates", name, err, during)
+		}
+		if ix.unsure(secrets) != fail {
+			t.Errorf("after a rebuild %s: unsure %v", name, ix.unsure(secrets))
+		}
+	}
+}
+
 // getHook is an objServer that runs on before each Get.
 type getHook struct {
 	*objServer
