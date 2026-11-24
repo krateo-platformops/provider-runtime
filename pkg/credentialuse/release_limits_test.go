@@ -101,8 +101,8 @@ func TestEachSortsFirstIsRead(t *testing.T) {
 		if !slices.Contains(read, shown[0]) || !slices.Contains(read, others[0]) {
 			t.Errorf("%s doesn't answer: read %v, rest %v; want the first of each sort read", hanging, read, res.Rest)
 		}
-		if hanging == "s000" && !slices.Equal(res.Rest, []ID{shown[1], others[1]}) {
-			t.Errorf("rest %v, want the second of each sort", res.Rest)
+		if hanging == "s000" && !slices.Equal(res.Rest, []ID{others[1], shown[1]}) {
+			t.Errorf("rest %v, want the second of each sort, in the order they were queued", res.Rest)
 		}
 	}
 }
