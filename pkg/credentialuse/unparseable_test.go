@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -420,6 +421,195 @@ func TestWhatTheBatchOfTheNamespaceKeeps(t *testing.T) {
 		if got, err := r.s.heldIn(context.Background(), tr, "ns"); err != nil || !slices.Equal(got, []ID{id}) {
 			t.Errorf("heldIn = %v, %v once its watch delivered it", got, err)
 		}
+	})
+}
+
+// toggles is a holder whose record is spoiled and repaired, over and over, by
+// its events; what the API server and the caches have of it is set.
+type toggles struct {
+	r         *fakeRig
+	tr        *Tracker
+	bad, good *metav1.PartialObjectMetadata
+}
+
+func newToggles(r *fakeRig, tr *Tracker) toggles {
+	return toggles{r, tr, unparseable(holderObject("ns", "h")), holderObject("ns", "h")}
+}
+
+// burst is 100 toggles, the last of which leaves it unparseable. They queue one
+// batch, of the whole namespace.
+func (g toggles) burst(t *testing.T) {
+	t.Helper()
+	for range 100 {
+		holderHandler{g.tr}.OnUpdate(g.bad, g.good)
+		holderHandler{g.tr}.OnUpdate(g.good, g.bad)
+	}
+	if got := g.r.queued(widgetGK, "ns"); !slices.Contains(got, fillAll) || g.r.s.queue.Len() != 1 {
+		t.Fatalf("%d batches, of %q; want one, of the whole namespace", g.r.s.queue.Len(), got)
+	}
+}
+
+// set makes it m, and waits for what its event queues when that is its repair.
+func (g toggles) set(t *testing.T, m *metav1.PartialObjectMetadata) {
+	t.Helper()
+	g.r.updateHolder(t, m)
+	eventually(t, "the holder's cache", func() bool {
+		o, ok, err := g.tr.holders.GetIndexer().GetByKey("ns/h")
+		return err == nil && ok && o.(*metav1.PartialObjectMetadata).Annotations[AnnotationRefs] == m.Annotations[AnnotationRefs]
+	})
+	if m == g.good {
+		eventually(t, "the batch of its repair", func() bool { return slices.Contains(g.r.queued(widgetGK, "ns"), fillAll) })
+	}
+}
+
+// work runs the batch that waits, and fails t unless it reads the Secret once,
+// and leaves it held or not, and timers timers.
+func (g toggles) work(t *testing.T, what string, held bool, timers int) {
+	t.Helper()
+	if n := g.r.secretGets(t, g.tr, true); n != 1 {
+		t.Errorf("%s: the batch read the Secret %d times, want once", what, n)
+	}
+	if got := hasFinalizer(g.r.secretMetaOf("ns", "s"), mustFinalizer(widgetGK, "ns")); got != held {
+		t.Fatalf("%s: held %v, want %v", what, got, held)
+	}
+	if n := g.r.queueTimers(); n != timers {
+		t.Errorf("%s: %d timers, want %d", what, n, timers)
+	}
+}
+
+// Toggles while a deleting object waits for its grace, or for its namespace's
+// teardown: no batch releases it while the record is unparseable, but §5's last
+// row, whoever uses it; each reads it once, and sets no timer that there isn't;
+// and the repair releases it.
+func TestTogglesDuringAGrace(t *testing.T) {
+	rig := func(t *testing.T, ns *metav1.PartialObjectMetadata) toggles {
+		t.Helper()
+		r := newFakeRig(t, ns, deleting(heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns"), time.Now()), unparseable(holderObject("ns", "h")))
+		tr := r.track(t, widgetGK)
+		r.run(t)
+		eventually(t, "the Secret's batch, and its grace's timer", func() bool { return r.queued(widgetGK, "ns") != nil && r.queueTimers() == 1 })
+		return newToggles(r, tr)
+	}
+	live, going := namespaceObject("ns"), func() *metav1.PartialObjectMetadata { return deleting(namespaceObject("ns"), time.Now()) }
+	// In a live namespace the batch asks for the grace's end too.
+	t.Run("in a live namespace, repaired", func(t *testing.T) {
+		g := rig(t, live)
+		g.work(t, "before any", true, 2)
+		for range 3 {
+			g.burst(t)
+			g.work(t, "toggled", true, 2)
+		}
+		g.set(t, g.good)
+		g.work(t, "repaired", false, 2)
+	})
+	t.Run("in a live namespace, to the grace's end", func(t *testing.T) {
+		g := rig(t, live)
+		g.burst(t)
+		g.work(t, "toggled", true, 2)
+		g.r.clk.Step(DefaultDeletionGrace - time.Second)
+		g.burst(t)
+		g.work(t, "toggled a second before the end", true, 2)
+		g.r.clk.Step(2 * time.Second)
+		g.work(t, "§5's last row", false, 0)
+	})
+	t.Run("in a namespace that is being deleted", func(t *testing.T) {
+		g := rig(t, going())
+		g.work(t, "before any", true, 1)
+		g.burst(t)
+		g.work(t, "toggled", true, 1)
+		g.r.clk.Step(2 * DefaultDeletionGrace)
+		g.burst(t)
+		g.work(t, "toggled after the grace", true, 0)
+		g.set(t, g.good)
+		g.work(t, "repaired", false, 0)
+	})
+}
+
+// Toggles while the batch fails, at the object or at the namespace's list: they
+// put off no retry and set no other, none of them releases it while the record
+// is unparseable, and a repair that a batch failed at is made good by the retry,
+// without another event.
+func TestTogglesWhileABatchFails(t *testing.T) {
+	t.Run("at the object", func(t *testing.T) {
+		r := newFakeRig(t, deleting(namespaceObject("ns"), time.Now()),
+			deleting(heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns"), time.Now()), unparseable(holderObject("ns", "h")))
+		var fails atomic.Bool
+		r.md.PrependReactor("get", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			if fails.Load() {
+				return true, nil, apierrors.NewServiceUnavailable("overloaded")
+			}
+			return false, nil, nil
+		})
+		tr := r.track(t, widgetGK)
+		r.run(t)
+		eventually(t, "the Secret's batch, and its grace's timer", func() bool { return r.queued(widgetGK, "ns") != nil && r.queueTimers() == 1 })
+		g := newToggles(r, tr)
+		fails.Store(true)
+		g.work(t, "failing", true, 2) // the grace's, and the retry
+		for range 3 {
+			g.burst(t)
+			g.work(t, "toggled, failing", true, 2)
+		}
+		r.clk.Step(releaseBackoffMax) // both fire, in one batch
+		g.work(t, "its retry, failing", true, 1)
+		// Answered, and unparseable.
+		fails.Store(false)
+		r.clk.Step(releaseBackoffMax)
+		g.work(t, "its retry, answered", true, 0)
+		// Repaired in a batch that fails.
+		fails.Store(true)
+		g.set(t, g.good)
+		g.work(t, "repaired, failing", true, 1)
+		// Spoiled again before the retry: it keeps.
+		g.set(t, g.bad)
+		fails.Store(false)
+		r.clk.Step(releaseBackoffMax)
+		g.work(t, "its retry, spoiled again", true, 0)
+		// And repaired for good, in a batch that fails.
+		fails.Store(true)
+		g.set(t, g.good)
+		g.work(t, "repaired again, failing", true, 1)
+		fails.Store(false)
+		r.clk.Step(releaseBackoffMax)
+		g.work(t, "its retry, repaired", false, 0)
+	})
+	t.Run("at the namespace's list, outside the caches", func(t *testing.T) {
+		r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, namespaceObject("in"), namespaceObject("ns"),
+			heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns"), unparseable(holderObject("ns", "h")))
+		tr := r.track(t, widgetGK)
+		r.run(t)
+		r.drain()
+		g := newToggles(r, tr)
+		// Without the list there is nothing to read.
+		failing := func(what string) {
+			t.Helper()
+			if n := r.secretGets(t, tr, true); n != 0 || !hasFinalizer(r.secretMetaOf("ns", "s"), mustFinalizer(widgetGK, "ns")) || r.queueTimers() != 1 {
+				t.Fatalf("%s: %d reads, %d timers; want none, the list's retry, and it held", what, n, r.queueTimers())
+			}
+		}
+		r.forbidList.Store("secrets", true)
+		for range 3 {
+			g.burst(t)
+			failing("toggled, failing")
+		}
+		r.clk.Step(releaseBackoffMax)
+		failing("its retry, failing")
+		r.forbidList.Delete("secrets")
+		r.clk.Step(releaseBackoffMax)
+		g.work(t, "its retry, answered", true, 0)
+		r.forbidList.Store("secrets", true)
+		g.set(t, g.good)
+		failing("repaired, failing")
+		g.set(t, g.bad)
+		r.forbidList.Delete("secrets")
+		r.clk.Step(releaseBackoffMax)
+		g.work(t, "its retry, spoiled again", true, 0)
+		r.forbidList.Store("secrets", true)
+		g.set(t, g.good)
+		failing("repaired again, failing")
+		r.forbidList.Delete("secrets")
+		r.clk.Step(releaseBackoffMax)
+		g.work(t, "its retry, repaired", false, 0)
 	})
 }
 
