@@ -4615,7 +4615,8 @@ on krateo-057:
   which is the bound §10.6.3 states: the flag, 2 with two processes and 3 with
   one (DEEP 3); the late hold, 2, and 1 with the late check and a holder that
   goes (DEEP 3 and 2), the cases of the pruner's rules
-  included; Disown over the index, 1 (DEEP 2); the kill inside a
+  included, but 1 in both for the control of the sender's own prune; Disown over
+  the index, 1 (DEEP 2); the kill inside a
   prune, 2 for the wait that isn't built and 1 for the other clean cases (DEEP
   2), and with two Disown processes 1 for the wait, the rest under DEEP only,
   at 1. A search that reaches 1,000,000 schedules stops, and says that it

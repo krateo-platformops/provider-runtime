@@ -160,8 +160,12 @@ func (c lateCase) lateChecks() bool { return c.lost && !c.killedBeforeCheck && !
 
 // preemptions is the bound c is searched within: 3, and 2 with the late check
 // and its batch racing a holder that goes, whose schedules with 3 are past
-// 2,000,000; one less of each in CI.
+// 2,000,000; one less of each in CI. The control of the sender's own prune is
+// searched with 1 in both, for its time.
 func (c lateCase) preemptions() int {
+	if c.own && c.landsPastMargin {
+		return 1
+	}
 	if c.lateChecks() && c.unnamed {
 		return modelBound(1, 2)
 	}
@@ -392,7 +396,8 @@ func exploreLate(t *testing.T, c lateCase) (r lateResult) {
 // within the margin, and the prune is the sender's successor's, or its own.
 // The successor's that prunes at once reaches it, as another process's does,
 // which has neither rule, and is the one without its own for the sender's: it
-// shares nothing with it. Past the margin, a successor's reaches it too.
+// shares nothing with it. Past the margin, a successor's reaches it too, and
+// the sender's own.
 func TestModelLateHold(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
@@ -406,6 +411,8 @@ func TestModelLateHold(t *testing.T) {
 		"a successor at once, lost, ended within the margin":  {lost: true, killedWithinMargin: true, unnamed: true, successor: true},
 		"a successor at once, lost, and killed before it":     {lost: true, killedBeforeCheck: true, killedWithinMargin: true, unnamed: true, successor: true},
 		"a successor quiet at first, lost, lands past margin": {lost: true, killedWithinMargin: true, landsPastMargin: true, unnamed: true, successor: true, quiet: true},
+
+		"its own, lost, lands past the margin": {lost: true, landsPastMargin: true, unnamed: true, own: true},
 	}
 	for name, c := range reached {
 		t.Run("all three/"+name, func(t *testing.T) {
