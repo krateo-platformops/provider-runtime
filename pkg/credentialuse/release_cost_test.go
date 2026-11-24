@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // What one release batch costs (§6.6): whoever can edit a holder's record
@@ -258,4 +260,63 @@ func (r *fakeRig) turn(ctx context.Context) (batchKey, bool) {
 	r.s.releaseBatch(ctx, k, ids)
 	r.s.queue.Done(k)
 	return k, true
+}
+
+// quiet is a tracker on objs whose informers don't run, so its caches are
+// empty and nothing but the test queues a batch.
+func quiet(t *testing.T, objs ...runtime.Object) (*fakeRig, *Tracker, *costLog) {
+	t.Helper()
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, append(objs, namespaceObject("in"), namespaceObject("out"))...)
+	l := r.log()
+	return r, r.track(t, widgetGK), l
+}
+
+// 200 held Secrets that nothing uses any more, among 500 holders that use
+// others: every Secret is read once and released, 64 to a turn, and every turn
+// lists the holders once and parses each of their records once.
+func TestAReleaseOfManyAmongManyHolders(t *testing.T) {
+	const secrets, holders = 200, 500
+	var objs []runtime.Object
+	ids := someIDs("out", "s", secrets)
+	for _, id := range ids {
+		objs = append(objs, heldObject(secretGVK, "out", id.Name, types.UID("u-"+id.Name), widgetGK, "out"))
+	}
+	for i := range holders {
+		objs = append(objs, holderObject("out", fmt.Sprintf("h%03d", i), secretID("out", fmt.Sprintf("used%03d", i))))
+	}
+	r, tr, l := quiet(t, objs...)
+	parses := parsesOf(tr.proto)
+	k := batchKey{widgetGK, "out"}
+	r.s.queue.Add(k, ids...)
+	turns := 0
+	for {
+		clear(parses)
+		if _, ok := r.turn(context.Background()); !ok {
+			break
+		}
+		turns++
+		for h, n := range parses {
+			if n > 1 {
+				t.Errorf("turn %d parsed the record of %s %d times, want once", turns, h, n)
+				break // one line of a turn is enough
+			}
+		}
+		if len(parses) != holders {
+			t.Errorf("turn %d parsed the records of %d holders, want all %d", turns, len(parses), holders)
+		}
+		if turns > secrets {
+			t.Fatal("the turns don't end")
+		}
+	}
+	if turns != 4 || l.lists != 4 {
+		t.Errorf("%d turns, %d lists; want 4 of each, of 64 Secrets at most", turns, l.lists)
+	}
+	if gets := l.take(); len(gets) != secrets || len(SortedIDs(gets)) != secrets {
+		t.Errorf("%d GETs of %d objects, want %d, one of each", len(gets), len(SortedIDs(gets)), secrets)
+	}
+	for _, id := range ids {
+		if r.heldBy(t, widgetGK, "out", id.Name) {
+			t.Fatalf("%s wasn't released", id)
+		}
+	}
 }
