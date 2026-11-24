@@ -269,6 +269,9 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		conflicts:       newConflictSet(),
 		written:         newRecordWrites(),
 		unheldReads:     s.unheldReads,
+		readLimit: func(n string, id ID) time.Duration {
+			return readLimitAfter(s.queue.failures(batchKey{gk, n}, id))
+		},
 		enqueueBatch: func(id ID, ns string) {
 			s.queue.Add(batchKey{gk, ns}, id)
 		},

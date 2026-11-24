@@ -280,6 +280,16 @@ func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
 	return soonest
 }
 
+// failures is how often in a row the retries of id, of k's batch, failed.
+func (q *batchQueue) failures(k batchKey, id ID) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if f := q.failing[k][id]; f != nil {
+		return f.n
+	}
+	return 0
+}
+
 // Settle records that ids of k's batch were decided: what they waited for, and
 // how often they had failed, is forgotten. R0's keep, from the caches alone,
 // decides too (§6.2): the user it saw is in the way of any release, and its own

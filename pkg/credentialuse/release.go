@@ -143,6 +143,43 @@ const (
 	turnReadTime  = 10 * time.Second
 )
 
+// Each read that begins has a time of its own, whatever its turn's: a read cut
+// short by others' would be refused unread, as client-go's rate limiter does, or
+// cut at its every try. It is releaseReadLimit, doubled at each failure of its
+// object in a row, to maxReadLimit, the API server's own for a request: so an
+// object whose reads take long is released late, not never.
+const (
+	releaseReadLimit = 10 * time.Second
+	maxReadLimit     = 60 * time.Second
+)
+
+// readLimitAfter is the time of the read of an object that failed n times.
+func readLimitAfter(n int) time.Duration {
+	return min(releaseReadLimit<<min(n, 3), maxReadLimit)
+}
+
+// read is R1's GET of id, for holder namespace n.
+func (p *protocol) read(ctx context.Context, n string, id ID) (*metav1.PartialObjectMetadata, error) {
+	limit := releaseReadLimit
+	if p.readLimit != nil {
+		limit = p.readLimit(n, id)
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	return p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+}
+
+// readNamespace is R2's GET of Namespace ns.
+func (p *protocol) readNamespace(ctx context.Context, ns string) (*metav1.PartialObjectMetadata, error) {
+	limit := releaseReadLimit
+	if p.namespaceLimit != 0 {
+		limit = p.namespaceLimit
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	return p.srv.Get(ctx, namespaceGroupKind, "", ns)
+}
+
 // readTime is turnReadTime, unless a test sets its own.
 func (p *protocol) readTime() time.Duration {
 	if p.turnTime != 0 {
@@ -255,7 +292,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				res.Rest = append(res.Rest, id)
 				continue
 			}
-			m, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+			m, err := p.read(ctx, n, id)
 			switch Classify(err) {
 			case ClassNone:
 			case ClassNotFound:
@@ -321,6 +358,8 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		now := p.clock.Now()
 		nsDeleting := map[string]bool{}
 		nsReadAt := map[string]time.Time{}
+		nsFailed := map[string]bool{} // the error is one for all that are in it
+		window, closeWindow = context.WithTimeout(ctx, p.readTime())
 		var decidable []r1Read
 		for _, r := range live {
 			ns := r.id.Namespace
@@ -328,8 +367,17 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				decidable = append(decidable, r)
 				continue
 			}
+			if nsFailed[ns] {
+				res.Failed = append(res.Failed, r.id)
+				continue
+			}
 			if _, done := nsReadAt[ns]; !done {
-				m, err := p.srv.Get(ctx, namespaceGroupKind, "", ns)
+				// As R1's reads: none begins once the time is over, but the first.
+				if len(nsReadAt)+len(nsFailed) > 0 && window.Err() != nil {
+					res.Rest = append(res.Rest, r.id)
+					continue
+				}
+				m, err := p.readNamespace(ctx, ns)
 				switch Classify(err) {
 				case ClassNone:
 					nsDeleting[ns] = m.DeletionTimestamp != nil
@@ -338,6 +386,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 					// matter: treat it as deleting.
 					nsDeleting[ns] = true
 				default:
+					nsFailed[ns] = true
 					fail(fmt.Errorf("credential-use: reading namespace %s: %w", ns, err), r.id)
 					continue
 				}
@@ -345,6 +394,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			}
 			decidable = append(decidable, r)
 		}
+		closeWindow()
 		if len(decidable) == 0 {
 			break
 		}

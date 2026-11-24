@@ -17,6 +17,12 @@ import (
 // listPageSize bounds each page of a consistent list (R2, the prober).
 const listPageSize = 500
 
+// listPageTime bounds how long each page of one takes, from the client's rate
+// limiter to its answer: the API server's own time for a request, by default, so
+// that a page it would still have answered isn't cut. A list has as many pages as
+// it needs.
+const listPageTime = time.Minute
+
 // clientServer is the protocol's server on client-go (plan, PR 3): the
 // metadata client for every read and write, and the RESTMapper to find each
 // GroupKind's resource. Every read is live: Get and List carry no
@@ -166,8 +172,12 @@ func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace s
 	c := s.client(gvr, namespaced, namespace)
 	var out []metav1.PartialObjectMetadata
 	opts := metav1.ListOptions{Limit: listPageSize}
+	limit := s.pageTime
+	if limit == 0 {
+		limit = listPageTime
+	}
 	for {
-		l, err := c.List(ctx, opts)
+		l, err := listPage(ctx, limit, c, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -181,4 +191,10 @@ func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace s
 		}
 		opts.Continue = l.Continue
 	}
+}
+
+func listPage(ctx context.Context, limit time.Duration, c metadata.ResourceInterface, opts metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	return c.List(ctx, opts)
 }
