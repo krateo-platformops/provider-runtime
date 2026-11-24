@@ -129,6 +129,8 @@ type protocol struct {
 	turnTime       time.Duration
 	readLimit      func(n string, id ID) time.Duration
 	namespaceLimit time.Duration
+	// missed are the kinds a release couldn't map; nil remembers none.
+	missed *missedKinds
 	// heldDeleting, if set, is told of every object an A2 held that its
 	// response shows being deleted, with the holder namespace.
 	heldDeleting func(id ID, namespace string)

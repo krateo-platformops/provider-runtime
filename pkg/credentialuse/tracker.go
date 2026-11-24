@@ -254,6 +254,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		mustWait:        func(n string, o Waiting) bool { return s.mustWait(batchKey{gk, n}, o) },
 		followChains:    s.hooks.followChains,
 		calls:           &s.calls,
+		missed:          s.missed,
 		maxDepth:        o.MaxDepth,
 		contentKinds:    map[schema.GroupKind]bool{},
 		contentCache:    trackerViews{t},

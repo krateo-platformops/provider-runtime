@@ -2,6 +2,7 @@ package credentialuse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	testingclock "k8s.io/utils/clock/testing"
 )
 
 // A kind that can't be mapped (§6.6): a mapper looks for one again at every
@@ -157,5 +159,41 @@ func TestAKindOutsideProtectedIsStillReleased(t *testing.T) {
 	}
 	if m, ok := metadataOf(o); !ok || hasFinalizer(m, mustFinalizer(widgetGK, "out")) {
 		t.Errorf("the ConfigMap has the finalizer still: %+v", o)
+	}
+}
+
+// The memory is of 256 kinds at most, the oldest out, and of a minute from each
+// miss; a miss again is a new one.
+func TestMissedKindsAreBounded(t *testing.T) {
+	clk := testingclock.NewFakeClock(time.Now())
+	m, boom := &missedKinds{}, errors.New("no match")
+	kind := func(i int) schema.GroupKind { return schema.GroupKind{Group: "x", Kind: fmt.Sprint(i)} }
+	for i := range maxMissedKinds {
+		m.add(kind(i), boom, clk.Now())
+		clk.Step(time.Millisecond)
+	}
+	m.add(kind(0), boom, clk.Now()) // the newest now
+	clk.Step(time.Millisecond)
+	m.add(kind(-1), boom, clk.Now())
+	if len(m.at) != maxMissedKinds || m.known(kind(1), clk) != nil {
+		t.Errorf("%d kinds are remembered, the oldest %v; want %d, without it", len(m.at), m.known(kind(1), clk), maxMissedKinds)
+	}
+	for _, i := range []int{0, 2, maxMissedKinds - 1, -1} {
+		if m.known(kind(i), clk) != boom {
+			t.Errorf("kind %d isn't remembered", i)
+		}
+	}
+	clk.Step(missedKindTime - 2*time.Millisecond)
+	if m.known(kind(0), clk) == nil || m.known(kind(2), clk) != nil {
+		t.Error("want the miss made again remembered, and the older one forgotten after its minute")
+	}
+	clk.Step(time.Millisecond)
+	if m.known(kind(0), clk) != nil || m.known(kind(-1), clk) == nil {
+		t.Error("want each forgotten a minute after its last miss")
+	}
+	var none *missedKinds
+	none.add(kind(0), boom, clk.Now())
+	if none.known(kind(0), clk) != nil {
+		t.Error("a nil memory remembers")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -158,15 +159,23 @@ func readLimitAfter(n int) time.Duration {
 	return min(releaseReadLimit<<min(n, 3), maxReadLimit)
 }
 
-// read is R1's GET of id, for holder namespace n.
+// read is R1's GET of id, for holder namespace n, unless its kind couldn't be
+// mapped just before (missedKinds).
 func (p *protocol) read(ctx context.Context, n string, id ID) (*metav1.PartialObjectMetadata, error) {
 	limit := releaseReadLimit
 	if p.readLimit != nil {
 		limit = p.readLimit(n, id)
 	}
+	if err := p.missed.known(id.GroupKind(), p.clock); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	return p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+	m, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+	if meta.IsNoMatchError(err) {
+		p.missed.add(id.GroupKind(), err, p.clock.Now())
+	}
+	return m, err
 }
 
 // readNamespace is R2's GET of Namespace ns.

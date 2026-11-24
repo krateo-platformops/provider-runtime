@@ -236,6 +236,8 @@ type Shared struct {
 	failures watchFailures
 	// calls are the acquirer calls in flight, which a drain waits for.
 	calls callsInFlight
+	// missed are the kinds that the release batches couldn't map.
+	missed *missedKinds
 
 	// trackWaiting counts Tracks waiting for another Track of their kind,
 	// for tests.
@@ -350,6 +352,7 @@ func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 		// holder kind of the process (§9.4).
 		unheldReads: newSharedReads(clk),
 		releaseWait: randomReleaseWait,
+		missed:      &missedKinds{},
 		trackers:    map[schema.GroupKind]*Tracker{},
 		tracking:    map[schema.GroupKind]*inflight{},
 		runDone:     make(chan struct{}),
