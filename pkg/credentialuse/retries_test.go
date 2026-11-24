@@ -941,10 +941,12 @@ func TestTheIndexsRecheckRetriesWhatFailed(t *testing.T) {
 	ctx := context.Background()
 	id := func(n string) ID { return SecretRef("ns", n).ID() }
 	held, fails, bare, denied, vouched := id("held"), id("fails"), id("bare"), id("denied"), id("vouched")
+	named := id("named") // bare too, but a record names it, so its line stays
 	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held"), fails: heldObj("fails")},
 		fail: map[ID]bool{fails: true, vouched: true}, forbid: map[ID]bool{denied: true}}
-	st := &unwritable{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare, denied, fails, held, vouched}), vouched: unheldRef(vouched)}}
+	st := &unwritable{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare, denied, fails, held, named, vouched}), vouched: unheldRef(vouched)}}
 	ix := testIndex(st, srv)
+	ix.recorded = func(id ID) bool { return id == named }
 	done := map[ID]bool{}
 	var enqueued []ID
 	try := func() (gets []ID, err error) {
@@ -962,8 +964,8 @@ func TestTheIndexsRecheckRetriesWhatFailed(t *testing.T) {
 	if err == nil || len(enqueued) != 0 || slices.Contains(gets, held) || slices.Contains(gets, denied) || slices.Contains(gets, vouched) || !slices.Contains(gets, fails) || !slices.Contains(gets, bare) {
 		t.Errorf("the second try read %v and enqueued %v, %v; want what failed, and what wasn't pruned", gets, enqueued, err)
 	}
-	if slices.Contains(st.lines, bare.String()) {
-		t.Error("the bare object's line stays")
+	if slices.Contains(st.lines, bare.String()) || !slices.Contains(st.lines, named.String()) {
+		t.Errorf("lines %q; want the bare object's gone, and the one a record names", st.lines)
 	}
 	srv.fail[fails] = false
 	gets, err = try()

@@ -181,7 +181,7 @@ MUTANTS = [
      [("\t\t\t\t// neither reported nor retried (§10.6.6).\n\t\t\t\tdone[id] = true\n", "\t\t\t\t// neither reported nor retried (§10.6.6).\n")]),
     ("what couldn't be pruned is dealt with", IX,
      [("\t} else {\n\t\tfor _, id := range bare {\n\t\t\tdone[id] = true\n\t\t}\n\t}\n", "\t}\n\tfor _, id := range bare {\n\t\tdone[id] = true\n\t}\n")]),
-    ("what was pruned is read again", IX,
+    ("a bare object whose line stays is read again", IX,
      [("\t\tfor _, id := range bare {\n\t\t\tdone[id] = true\n\t\t}\n", "")]),
 ]
 
@@ -268,7 +268,7 @@ KILLERS = {
     "a refused object isn't dealt with": IDX,
     "a vouched object isn't dealt with": IDX,
     "what couldn't be pruned is dealt with": IDX,
-    "what was pruned is read again": IDX,
+    "a bare object whose line stays is read again": IDX,
 }
 
 # Mutants a run showed no test can kill, with why.
