@@ -22,8 +22,8 @@ the protocol's code (§17, "Revision 17"). Revision 18 amends the index's
 dropped lines and Disown's settling (§17, "Revision 18").
 
 **The first tag holds direct refs only** (the user's decision, 2026-11-24).
-A ref with a `Next`, a chain, is refused with a clear error, before anything
-is held or announced. §9 says what that looks like and why; the chain design in §9 and
+A ref with a `Next`, a chain, is refused with a clear error, before the pass
+looks at the list. §9 says what that looks like and why; the chain design in §9 and
 §10.4 is built and tested, and ships in the next release.
 
 §17 maps every review item to the section that resolves it, and §18 holds
@@ -2492,8 +2492,8 @@ chain code stays, and stays tested, but nothing in production reaches it:
   refs to one object. Holding the direct refs alone would write a record
   that drops what a chain held, and would look like protection. A
   `Guaranteed` ref without a `Next` is accepted, as before.
-- **Where.** In the protocol's `acquire`, before it looks at any ref: before
-  A1 and A2, and before any read that a ref asks for. Every pass of every
+- **Where.** In the protocol's `acquire`, before it looks at the list: before
+  A1 and A2, and before any read that the list asks for. Every pass of every
   runtime goes through it, and it is the one place that follows a `Next`. A
   list that passes has no `Next`, so no pass ever finds a ref that way:
   nothing deeper is left to refuse. `BeforeEstablish` refuses the same refs,
@@ -2523,14 +2523,19 @@ chain code stays, and stays tested, but nothing in production reaches it:
 | Being deleted, without an owner finalizer | provider-runtime doesn't acquire on it (§8 step 5), so nothing is refused |
 | It names no `Next` again | The next pass writes the exact record, holds what it names, and releases the rest |
 
-What an established holder loses while it is refused is upkeep, not holds: a
+What an established holder loses while it is refused is upkeep, and, but for
+the two cases below, no hold: a
 ref that is new, or an object recreated since, isn't held, a lost finalizer
 isn't written again, and the missing-ref prober forgets the holder (§10.3),
 since no pass of it could hold what the prober finds. A withdrawn consent is
-acted on, as in every pass (above).
+acted on, as in every pass (above); **that hold is one that goes and doesn't
+come back while the holder is refused**, if the owner grants consent again.
 
 **The event is recorded once per holder**, with the log line, until a pass of
-it isn't degraded, or it is forgotten. This state lasts until the provider or
+it isn't degraded, or it is forgotten. That is of a refusal alone: when the
+gate's write fails in a refused pass, the pass is reported as any failure,
+under the event throttle, and counts `Announce` as well, since a withdrawn ref
+stays held meanwhile. This state lasts until the provider or
 the object changes, so the event throttle alone would let one through per
 holder every 10 minutes for as long: 17 a second for 10,000 holders. A restart
 records each once more. The counter counts every pass. A new holder's message
@@ -2539,7 +2544,9 @@ is its condition's, as for any failure.
 **Disown (§7.4) is no remedy for a refused new holder**: it doesn't connect
 while its refs have a `Next`, whatever the switch covers. An established one
 isn't in Disown's way: the loop strips its record and the finalizers, a
-refused pass writes neither back, and the switch settles.
+refused pass writes neither back, and the switch settles. Nor does a refused
+pass write them back once the switch is removed: those holds are the other
+ones that go and don't come back while it is refused.
 
 **A holder that held through a chain under an older build** is the
 established row, or the new one if it hadn't got its finalizer. No release

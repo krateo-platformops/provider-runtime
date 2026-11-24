@@ -1271,7 +1271,7 @@ unchanged.
 - `ErrChainsNotSupported`, exported, which a caller matches with
   `errors.Is` on `Acquired.Err`. It says what to do, and the error that
   wraps it names the ref's kind, namespace and name.
-- **Refused in the protocol's `acquire`, before it looks at any ref**, and so
+- **Refused in the protocol's `acquire`, before it looks at the list**, and so
   before A1 and A2: `refuseChains` over the whole list `RefsFunc` returned,
   **just after the gate of what the record names** (§11.3), which begins
   every pass, this one too. That order is the consent fix's and the review's:
@@ -1289,7 +1289,9 @@ unchanged.
   mid-pass isn't established again.
 - **Its reports:** `credentialuse_degraded_total` has a reason of its own for
   it, `ChainsNotSupported`, every pass; the event and the log line are
-  recorded once per holder, since it doesn't pass by itself.
+  recorded once per holder, since it doesn't pass by itself. A refused pass
+  whose gate also failed is reported as any failure, and counts `Announce`
+  too: a Secret may be held against its owner meanwhile.
 - `AssertCredentialRefsCover` fails on a ref with a `Next`, or a provider's
   test would pass and its holders then not connect. It can't be used for a
   fixture whose Connect reads a Secret through another object (§9).

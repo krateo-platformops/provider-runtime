@@ -20,8 +20,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
@@ -290,24 +292,26 @@ func TestARefusedPassGatesWhatTheRecordNames(t *testing.T) {
 			t.Errorf("acquire = %v, want ErrHolderConflict, as any A1's", err)
 		}
 	})
-	t.Run("the gate's write fails", func(t *testing.T) {
-		r := start(t, true)
-		setConsent(t, r, secretKey("other", "s"), "")
-		r.rep.degraded = nil
-		r.srv.before = func(op, kind, _ string) error {
-			if op == "patch" && kind == "Widget" {
-				return apierrors.NewServiceUnavailable("down")
+	for established, reasons := range map[bool][]string{true: {"Announce", "ChainsNotSupported"}, false: nil} {
+		t.Run(fmt.Sprintf("the gate's write fails, established %v", established), func(t *testing.T) {
+			r := start(t, established)
+			setConsent(t, r, secretKey("other", "s"), "")
+			r.rep.degraded = nil
+			r.srv.before = func(op, kind, _ string) error {
+				if op == "patch" && kind == "Widget" {
+					return apierrors.NewServiceUnavailable("down")
+				}
+				return nil
 			}
-			return nil
-		}
-		a := pass(t, r, true)
-		if !strings.Contains(a.Err.Error(), "down") || !slices.Equal(r.rep.degraded, []string{"ChainsNotSupported"}) {
-			t.Errorf("Err %v, degraded reports %v; want both errors, under the refusal's reason", a.Err, r.rep.degraded)
-		}
-		if !slices.Equal(chainRecord(t, r, "h"), all) {
-			t.Errorf("record %v, want it as it was", chainRecord(t, r, "h"))
-		}
-	})
+			a := pass(t, r, established)
+			if !strings.Contains(a.Err.Error(), "down") || !slices.Equal(r.rep.degraded, reasons) {
+				t.Errorf("Err %v, degraded reports %v; want both errors, and %v", a.Err, r.rep.degraded, reasons)
+			}
+			if !slices.Equal(chainRecord(t, r, "h"), all) {
+				t.Errorf("record %v, want it as it was", chainRecord(t, r, "h"))
+			}
+		})
+	}
 }
 
 // TestDirectRefsAreNotRefused is the control: the same rig takes a list with
@@ -630,6 +634,95 @@ func TestARefusedChainIsReportedOnce(t *testing.T) {
 	if len(tr.refused.m) != 0 {
 		t.Errorf("%v is still remembered after the holder went", tr.refused.m)
 	}
+}
+
+// TestARefusedChainsGateFailureIsReported: a refusal alone is reported once,
+// and a gate that fails in a refused pass is reported as any failure, however
+// long ago the refusal was: a Secret stays held against its owner meanwhile.
+func TestARefusedChainsGateFailureIsReported(t *testing.T) {
+	ctx := context.Background()
+	secret := plainSecret("other", "s")
+	secret.Annotations = map[string]string{AnnotationAllowHoldersFrom: "ns"}
+	r := newFakeRig(t, holderObject("ns", "h", otherSecretID()), namespaceObject("ns"), namespaceObject("other"), secret)
+	failing := false
+	r.md.PrependReactor("patch", "widgets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if failing {
+			return true, nil, apierrors.NewServiceUnavailable("the A1 is down")
+		}
+		return false, nil, nil
+	})
+	log := &warnCount{Logger: logging.NewNopLogger()}
+	chained := SecretRef("ns", "outer")
+	chained.Next = func(*unstructured.Unstructured) ([]Ref, error) { return nil, nil }
+	o := r.options(widgetGK)
+	o.Logger = log
+	o.Refs = func(metav1.Object) ([]Ref, error) { return []Ref{chained}, nil }
+	tr, err := r.s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// pass is one pass, its events, which each say every one of says, and the
+	// reasons it counted.
+	pass := func(what string, events int, lines int64, reasons []string, says ...string) {
+		t.Helper()
+		r.metrics.mu.Lock()
+		r.metrics.reasons = nil
+		r.metrics.mu.Unlock()
+		a, err := tr.Acquire(ctx, r.currentHolder(t))
+		if err != nil || !a.Degraded || !errors.Is(a.Err, ErrChainsNotSupported) {
+			t.Fatalf("%s: Acquire = %+v, %v; want it refused", what, a, err)
+		}
+		got := r.takeEvents()
+		degraded := slices.DeleteFunc(slices.Clone(got), func(e string) bool { return !strings.Contains(e, EventDegraded) })
+		if len(degraded) != events {
+			t.Errorf("%s: events %q, want %d of %s", what, got, events, EventDegraded)
+		}
+		for _, e := range degraded {
+			for _, s := range says {
+				if !strings.Contains(e, s) {
+					t.Errorf("%s: event %q doesn't say %q", what, e, s)
+				}
+			}
+		}
+		if n := log.n.Load(); n != lines {
+			t.Errorf("%s: %d log lines in all, want %d", what, n, lines)
+		}
+		r.metrics.mu.Lock()
+		defer r.metrics.mu.Unlock()
+		if !slices.Equal(r.metrics.reasons, reasons) {
+			t.Errorf("%s: counted %v, want %v", what, r.metrics.reasons, reasons)
+		}
+	}
+	recorded := func() bool { return ReadRecord(r.currentHolder(t)).Names(otherSecretID()) }
+	alone, both := []string{"ChainsNotSupported"}, []string{"Announce", "ChainsNotSupported"}
+
+	pass("Monday, refused", 1, 1, alone, chained.ID().String())
+	r.clk.Step(24 * time.Hour)
+	pass("later, refused", 0, 1, alone)
+
+	withdrawn := plainSecret("other", "s")
+	if err := r.md.Tracker().Update(secretsGVR, withdrawn, "other"); err != nil {
+		t.Fatal(err)
+	}
+	failing = true
+	pass("Tuesday, the gate's A1 fails", 1, 2, both, "the A1 is down", chained.ID().String())
+	pass("again, within the throttle", 0, 2, both)
+	for range 3 {
+		r.clk.Step(2 * eventThrottle)
+		pass("again, past the throttle", 1, 2, both, "the A1 is down")
+	}
+	if !recorded() {
+		t.Fatal("the withdrawn ref was dropped though its A1 failed: the case shows nothing")
+	}
+
+	failing = false
+	r.clk.Step(2 * eventThrottle)
+	pass("the A1 goes through", 0, 2, alone)
+	if recorded() {
+		t.Error("the withdrawn ref is still recorded")
+	}
+	r.clk.Step(2 * eventThrottle)
+	pass("refused still", 0, 2, alone)
 }
 
 // TestFollowChainsReachesTheTracker: the switch the chain tests set is the

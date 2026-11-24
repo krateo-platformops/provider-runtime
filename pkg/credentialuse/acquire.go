@@ -79,6 +79,10 @@ type Acquired struct {
 	// followed: held, unheld, or Guaranteed (§9.2). WithResolved hands them
 	// on. Production follows none in this release (ErrChainsNotSupported).
 	resolved map[ID]*unstructured.Unstructured
+
+	// gateErr is why the gate of recorded refs failed (§11.3), in a pass whose
+	// chain was refused: Err joins the two.
+	gateErr error
 }
 
 // ErrHolderConflict is a conflict on the holder's own record write (A1). The
@@ -378,7 +382,7 @@ func isBuiltin(gk schema.GroupKind) bool { return gk.Group == "" }
 // acquire runs A1 and A2 for holder obj, which the caller has just read, and
 // refs, which RefsFunc returned for it (§6.2), and follows their chains
 // (§9.1). Production refuses a list with a chain in it, whole, before it looks
-// at any ref (refuseChains); only tests set followChains. It runs on every
+// at the list (refuseChains); only tests set followChains. It runs on every
 // pass, deletion passes included, before anything reads a protected object.
 //
 // The chain is followed level by level, and each hop is held before it is
@@ -420,7 +424,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	if errors.Is(err, ErrHolderConflict) {
 		return a, err
 	}
-	// Then chains are refused (§9, "Not in this release"), before any ref is
+	// Then chains are refused (§9, "Not in this release"), before the list is
 	// looked at: the pass reads and writes nothing more, so an established
 	// holder's record, and its holds with it, stay as the gate leaves them.
 	// Not before the gate: it looks at no ref, and a holder that could keep it
@@ -428,7 +432,13 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// against the owner's withdrawal. Refs are found inside another only by
 	// its Next, so a list that passes is the whole chain: one level, all
 	// direct.
+	//
+	// A gate that failed is counted as well, and kept apart, so that it is
+	// reported though the refusal was already (reportOutcome).
 	if refused := p.refuseChains(refs); refused != nil {
+		if a.gateErr = err; err != nil && established {
+			p.reports.Degraded(p.holder, "Announce")
+		}
 		return fail(errors.Join(refused, err), reasonChainsRefused)
 	}
 	if err != nil {

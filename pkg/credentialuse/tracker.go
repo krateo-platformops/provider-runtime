@@ -64,7 +64,8 @@ type Tracker struct {
 	degradedLogged *reportedSet
 	// refused are the holders whose refused chain was reported, event and log
 	// line both, keyed and cleared as degradedLogged is. It is apart, so that
-	// neither that nor another failure hides the other.
+	// neither that nor another failure hides the other, the failed gate of a
+	// refused pass included.
 	refused *reportedSet
 	// misplaced are the holders in the index namespace whose refusal was
 	// logged, once each (§10.6.1).
@@ -496,7 +497,9 @@ func (t *Tracker) heldDeleting(id ID, namespace string) {
 // A refused chain's event is recorded once too, with its log line, and cleared
 // the same way: it lasts until the provider or the object changes, so a
 // throttle alone would record one per holder every eventThrottle, for ever.
-// The counter counts every pass.
+// The counter counts every pass. That is of a refusal alone: one whose gate
+// failed too is reported as any failure, since a Secret may stay held against
+// its owner meanwhile.
 func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
 	key := consentKey{holder: obj.GetUID()}
 	if !a.Degraded {
@@ -507,7 +510,7 @@ func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
 	if a.Err == nil {
 		return
 	}
-	refused := errors.Is(a.Err, ErrChainsNotSupported)
+	refused := errors.Is(a.Err, ErrChainsNotSupported) && a.gateErr == nil
 	if refused && !t.refused.first(key) {
 		return
 	}

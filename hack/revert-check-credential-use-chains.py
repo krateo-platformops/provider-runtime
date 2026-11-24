@@ -51,7 +51,8 @@ def sub(s, old, new):
 
 IF = "if refused := p.refuseChains(refs); refused != nil {"
 FAIL = "return fail(errors.Join(refused, err), reasonChainsRefused)"
-REFUSE = "\t" + IF + "\n\t\t" + FAIL + "\n\t}\n"
+APART = "\t\tif a.gateErr = err; err != nil && established {\n\t\t\tp.reports.Degraded(p.holder, \"Announce\")\n\t\t}\n"
+REFUSE = "\t" + IF + "\n" + APART + "\t\t" + FAIL + "\n\t}\n"
 FIRST = "\t" + IF + "\n\t\treturn fail(refused, reasonChainsRefused)\n\t}\n"
 GATE = "\t// The gate of what the record names, first (§11.3)."
 EACH = "\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())\n\t\t}\n"
@@ -108,6 +109,10 @@ MUTANTS = [
      [(EACH, sub(EACH, "fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())", "ErrChainsNotSupported"))]),
     ("the error doesn't wrap the sentinel", CH, [(EACH, sub(EACH, "%w", "%v"))]),
     # Its event and log line, once per holder.
+    ("a joined error is suppressed as a refusal", TR,
+     [("\trefused := errors.Is(a.Err, ErrChainsNotSupported) && a.gateErr == nil\n", "\trefused := errors.Is(a.Err, ErrChainsNotSupported)\n")]),
+    ("a refused pass's failed gate isn't counted", AQ, [(APART, "\t\ta.gateErr = err\n")]),
+    ("a refused new holder's failed gate is counted as degraded", AQ, [(APART, sub(APART, "err != nil && established", "err != nil"))]),
     ("the event is throttled only", TR, [("\tif refused && !t.refused.first(key) {\n\t\treturn\n\t}\n", "")]),
     ("the event is hidden by another failure's log line", TR, [("\tif refused && !t.refused.first(key) {", "\tif refused && !t.degradedLogged.first(key) {")]),
     ("the refusal hides another failure's event", TR, [("\tif refused && !t.refused.first(key) {", "\tif !t.refused.first(key) {")]),
@@ -181,6 +186,9 @@ KILLERS = {
     "a new holder's chain is refused before the gate": BOTH,
     "the gate's error hides the refusal": GATED,
     "the refusal hides the gate's error": GATED,
+    "a joined error is suppressed as a refusal": {C: "TestARefusedChainsGateFailureIsReported"},
+    "a refused pass's failed gate isn't counted": {C: "TestARefusedChainsGateFailureIsReported|TestARefusedPassGatesWhatTheRecordNames"},
+    "a refused new holder's failed gate is counted as degraded": GATED,
     "the event is throttled only": ONCE,
     "the event is hidden by another failure's log line": ONCE,
     "the refusal hides another failure's event": ONCE,
