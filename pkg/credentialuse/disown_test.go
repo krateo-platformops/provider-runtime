@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -130,6 +131,70 @@ func TestAFailedCheckOfAnotherKind(t *testing.T) {
 		if err != nil || crd.GetAnnotations()[AnnotationHeldCount] != want {
 			t.Errorf("the switch at %s: held-count %q, %v; want %s", value, crd.GetAnnotations()[AnnotationHeldCount], err, want)
 		}
+	}
+}
+
+// A tenant's record that names any number of objects the process can't read
+// keeps Disown's count unknown until an operator vouches for the namespace,
+// once; the report names the remedy, and fits in an event (§7.4).
+func TestDisownWithAVouchedNamespace(t *testing.T) {
+	ctx := context.Background()
+	var forged []ID
+	for i := range 400 {
+		forged = append(forged, secretID("team-a", fmt.Sprintf("a-rather-long-name-for-a-secret-%03d", i)))
+	}
+	r := newFakeRig(t, holderObject("team-a", "forged", forged...))
+	tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// As a PerName kind, with an index of the test's own.
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
+	st := &memStore{exists: true, rebuilt: true}
+	tr.idx = testIndex(st, r.s.newServer())
+	tr.idx.maxLines = 2000
+	r.md.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, rbacForbidden(a.GetNamespace(), a.(clienttesting.GetAction).GetName())
+	})
+	recorded := func() bool {
+		h, err := r.md.Resource(tr.gvr).Namespace("team-a").Get(ctx, "forged", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ReadRecord(h).Present
+	}
+	count := func() string {
+		crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return crd.GetAnnotations()[AnnotationHeldCount]
+	}
+	r.s.disownPass(ctx, tr, parseDisown("all"))
+	var got []string
+	for len(r.events.Events) > 0 {
+		got = append(got, <-r.events.Events)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], EventDisownUnreadable) || !strings.Contains(got[0], "and 397 more") ||
+		!strings.Contains(got[0], "labelled "+MarkerLabel(widgetGK)+"=true, and once none is, add team-a/*") ||
+		!strings.Contains(got[0], "no sooner than "+(tr.o.TimeoutBound+LandingMargin).String()) || len(got[0]) > 1024 {
+		t.Errorf("events %q, of %d bytes; want one, with the namespace's remedy, of 1,024 at most", got, len(strings.Join(got, "")))
+	}
+	if !recorded() || count() != "unknown" {
+		t.Errorf("not vouched for: recorded %v, held-count %q", recorded(), count())
+	}
+	st.vouched = "team-b/*"
+	if r.s.disownPass(ctx, tr, parseDisown("all")); !recorded() || count() != "unknown" {
+		t.Errorf("another namespace vouched for: recorded %v, held-count %q", recorded(), count())
+	}
+	st.vouched = "team-a/*"
+	r.s.disownPass(ctx, tr, parseDisown("all")) // counts the record, and strips it
+	if r.s.disownPass(ctx, tr, parseDisown("all")); recorded() || count() != "0" {
+		t.Errorf("the namespace vouched for: recorded %v, held-count %q", recorded(), count())
 	}
 }
 

@@ -384,8 +384,9 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	perName := t.disownPerName(set)
 	var lined []ID          // the index's lines of the kinds set covers
 	var unreadable []string // the objects of those that couldn't be read, with why
+	var where []string      // their namespaces
 	var texts []string      // and the errors
-	var vouched map[ID]bool
+	var vouched vouches
 	unlined := map[ID]bool{}    // recorded objects whose line couldn't be added
 	unstripped := map[ID]bool{} // objects that couldn't be read, or stripped
 	if len(perName) > 0 {
@@ -435,7 +436,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			case ClassNotFound:
 				continue
 			default:
-				if vouched[id] {
+				if vouched.has(id) {
 					// An operator checked by hand that it carries no
 					// finalizer of the kind (§7.4): skipped while it can't
 					// be read.
@@ -447,11 +448,12 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				unstripped[id] = true
 				known = false
 				unreadable = append(unreadable, unheldRef(id)+": "+shortError(err))
+				where = append(where, id.Namespace)
 				texts = append(texts, err.Error())
 				continue
 			}
 			n := countPrefix(m.Finalizers, t.prefix)
-			if n > 0 && vouched[id] {
+			if n > 0 && vouched.names(id) {
 				t.idx.vouchWrong(id) // readable, and held: counted as any other
 			}
 			count += n
@@ -517,7 +519,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		}
 	}
 	if len(perName) > 0 {
-		t.reportDisownUnreadable(ctx, unreadable, texts)
+		t.reportDisownUnreadable(ctx, unreadable, where, texts)
 	}
 	if !s.writeDisownCount(ctx, t, set, count, known) || len(lined) == 0 {
 		return
@@ -536,7 +538,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 // freeLines returns those of lined that a live read proves free: gone, or
 // without a finalizer of the kind, or vouched for by an operator and not
 // readable. One whose strip failed in this pass isn't.
-func (t *Tracker) freeLines(ctx context.Context, srv server, lined []ID, unstripped, vouched map[ID]bool) []ID {
+func (t *Tracker) freeLines(ctx context.Context, srv server, lined []ID, unstripped map[ID]bool, vouched vouches) []ID {
 	var free []ID
 	for _, id := range lined {
 		if unstripped[id] {
@@ -550,7 +552,7 @@ func (t *Tracker) freeLines(ctx context.Context, srv server, lined []ID, unstrip
 			}
 		case ClassNotFound:
 		default:
-			if !vouched[id] {
+			if !vouched.has(id) {
 				continue
 			}
 		}
@@ -564,20 +566,25 @@ func (t *Tracker) freeLines(ctx context.Context, srv server, lined []ID, unstrip
 // those records, and its count stays "unknown" (§7.4).
 const EventDisownIndexFull = "CredentialUseDisownIndexFull"
 
+// fewOf is list as an event names it, which a note of 1,024 bytes bounds: the
+// first most of it, and how many more.
+func fewOf(list []string, most int) string {
+	if n := len(list) - most; n > 0 {
+		list = append(slices.Clone(list[:most]), fmt.Sprintf("and %d more", n))
+	}
+	return strings.Join(list, ", ")
+}
+
 // holdersNaming are the holders, as <namespace>/<name>, whose record names one
 // of ids; the first three, and how many more.
 func holdersNaming(holders []metav1.PartialObjectMetadata, ids map[ID]bool) string {
-	const most = 3
 	var names []string
 	for i := range holders {
 		if slices.ContainsFunc(ReadRecord(&holders[i]).IDs, func(id ID) bool { return ids[id] }) {
 			names = append(names, holders[i].Namespace+"/"+holders[i].Name)
 		}
 	}
-	if n := len(names) - most; n > 0 {
-		names = append(names[:most], fmt.Sprintf("and %d more", n))
-	}
-	return strings.Join(names, ", ")
+	return fewOf(names, 3)
 }
 
 // reportDisownUnlined reports that the lines of objects the records of holders
@@ -602,12 +609,14 @@ const EventDisownUnreadable = "CredentialUseDisownUnreadable"
 
 // reportDisownUnreadable reports the objects a Disown pass couldn't read:
 // the gauge on every pass, and, when there are some, a log line and a
-// Warning event on the CRD naming each with why, which the event sink
-// throttles while the set stays the same. texts are their errors, for the log:
+// Warning event on the CRD naming the first with why, and how many more, which
+// the event sink throttles while that stays the same. A record, which a tenant
+// may write, can name any number; where are their namespaces, one of which an
+// operator may vouch for whole. texts are their errors, for the log:
 // an event with them would be a new one at every pass whose errors vary. A pass
 // the process's stop cut short says nothing, and leaves the gauge: its reads
 // failed for that.
-func (t *Tracker) reportDisownUnreadable(ctx context.Context, unreadable, texts []string) {
+func (t *Tracker) reportDisownUnreadable(ctx context.Context, unreadable, where, texts []string) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -615,14 +624,24 @@ func (t *Tracker) reportDisownUnreadable(ctx context.Context, unreadable, texts 
 	if len(unreadable) == 0 {
 		return
 	}
-	note := "Disown can't read " + strings.Join(unreadable, ", ") + ", so held-count stays unknown: grant get on each, " +
-		"or confirm by hand that it carries no finalizer of " + kindLabel(t.gk) + " and add it to the " + AnnotationVouched +
+	note := "Disown can't read " + fewOf(unreadable, 3) + ", so held-count stays unknown: grant get on each, " +
+		"or, no sooner than " + (t.o.TimeoutBound + t.s.landingMargin()).String() + " after the switch was last changed, " +
+		"confirm by hand that it carries no finalizer of " + kindLabel(t.gk) + " and add it to the " + AnnotationVouched +
 		" annotation of the index " + t.idx.ref() + " (§7.4)"
+	var all []string
+	for _, ns := range slices.Compact(slices.Sorted(slices.Values(where))) {
+		if ns != "" {
+			all = append(all, ns+"/*")
+		}
+	}
+	if len(all) > 0 {
+		note += "; or, for what can't be read in a namespace, list its objects labelled " + MarkerLabel(t.gk) + "=true, and once none is, add " + fewOf(all, 3)
+	}
 	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(crd, "Warning", EventDisownUnreadable, note)
 	t.warn("credential-use: Disown can't read objects its index or the records name; its count stays unknown",
-		"kind", t.gk.String(), "crd", t.crdName, "unreadable", strings.Join(unreadable, ", "), "errors", strings.Join(texts, "; "))
+		"kind", t.gk.String(), "crd", t.crdName, "unreadable", fewOf(unreadable, 50), "errors", fewOf(texts, 50))
 }
 
 // EventIndexLost (Warning, on the holder kind's CRD): the index was lost

@@ -1128,7 +1128,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   - a prune may remove its line;
   - a rebuild doesn't add it.
 
-  Once readable and carrying the prefix, it is treated normally, and the
+  An entry `ns/*` is every object of a namespace (the user's decision,
+  2026-11-24), once none there carries the kind's marker label. Once readable and carrying the prefix, it is treated normally, and the
   wrong vouch is logged. Every other unreadable line keeps the superset's
   rule. The process never writes the annotation, and its writes keep it,
   as they keep the rebuilt marker. Disown's event names the vouch as the
@@ -1372,7 +1373,9 @@ tests.
     `CredentialUseDisownUnreadable` (PR 8): grant `get` on each object the
     event names, or confirm by hand that it carries no finalizer of the kind
     and add it to the index's `credential-use.krateo.io/vouched`
-    annotation (removing the line alone is undone by the tamper check);
+    annotation, or `ns/*` for a namespace none of whose objects carries the
+    kind's marker label, and remove that one again once Disown has settled
+    (removing the line alone is undone by the tamper check);
   - the runbook entries for Disown's other events (§7.4):
     `CredentialUseIndexLost`, with the `vouched-index` steps;
     `CredentialUseDisownIndexFull`, raise `IndexMaxLines`, or correct the

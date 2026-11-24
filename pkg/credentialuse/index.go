@@ -321,7 +321,7 @@ func (s configMapStore) create(ctx context.Context, lines []string) (indexVersio
 // latest version, or this process's latest write.
 type indexSnapshot struct {
 	lines   map[string]bool
-	vouched map[ID]bool
+	vouched vouches
 	rebuilt bool // the marker is of the index's kinds
 }
 
@@ -841,17 +841,17 @@ func (ix *index) checkRemoved(check, ctx context.Context, tried []string, kept f
 	// What can't be read may carry the prefix, unless an operator vouched
 	// for it (§10.6.6): read live, since the vouch may have been withdrawn.
 	// An index that can't be read vouches for nothing.
-	var vouched map[ID]bool
+	var vouched vouches
 	if cur, err := ix.store.get(ctx); err == nil {
 		vouched = ix.parseVouched(cur.vouched)
 	}
 	for _, id := range carry {
-		if vouched[id] {
+		if vouched.names(id) {
 			ix.vouchWrong(id)
 		}
 	}
 	for _, id := range unread {
-		if !vouched[id] {
+		if !vouched.has(id) {
 			back = append(back, id)
 		}
 	}
@@ -902,22 +902,44 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 	return carriesUnknown
 }
 
+// vouches are what an operator vouched for to carry no finalizer of the kind,
+// while it can't be read (§10.6.6): objects, and every object of namespaces.
+type vouches struct {
+	ids        map[ID]bool
+	namespaces map[string]bool
+}
+
+// has reports whether id is vouched for.
+func (v vouches) has(id ID) bool {
+	return v.ids[id] || id.Namespace != "" && v.namespaces[id.Namespace]
+}
+
+// names reports whether id is vouched for by name: found to carry the prefix,
+// the vouch is wrong. A namespace's is of what can't be read there, and says
+// nothing of what can.
+func (v vouches) names(id ID) bool { return v.ids[id] }
+
 // parseVouched reads AnnotationVouched: comma-separated refs written
-// <namespace>/<Kind[.group]>/<name>, blanks trimmed; a malformed entry is
-// ignored, and reported once per value of the annotation.
-func (ix *index) parseVouched(v string) map[ID]bool {
-	out := map[ID]bool{}
+// <namespace>/<Kind[.group]>/<name>, and namespaces written <namespace>/*,
+// blanks trimmed; a malformed entry is ignored, and reported once per value of
+// the annotation.
+func (ix *index) parseVouched(v string) vouches {
+	out := vouches{ids: map[ID]bool{}, namespaces: map[string]bool{}}
 	var bad []string
 	for _, e := range strings.Split(v, ",") {
 		if e = strings.TrimSpace(e); e == "" {
 			continue
 		}
+		if ns, all := strings.CutSuffix(e, "/*"); all && len(validation.IsDNS1123Label(ns)) == 0 {
+			out.namespaces[ns] = true
+			continue
+		}
 		id, ok := parseUnheldRef(e)
-		if !ok {
+		if !ok || id.Name == "*" {
 			bad = append(bad, e)
 			continue
 		}
-		out[id] = true
+		out.ids[id] = true
 	}
 	if len(bad) > 0 {
 		ix.mu.Lock()
@@ -950,13 +972,12 @@ func parseUnheldRef(s string) (ID, bool) {
 	return ID{Group: group, Kind: kind, Namespace: parts[0], Name: parts[2]}, true
 }
 
-// vouchedNow is the vouched objects of the index as this process last saw
-// it.
-func (ix *index) vouchedNow() map[ID]bool {
+// vouchedNow is the vouches of the index as this process last saw it.
+func (ix *index) vouchedNow() vouches {
 	if s := ix.snap.Load(); s != nil {
 		return s.vouched
 	}
-	return nil
+	return vouches{}
 }
 
 // vouchWrong reports, once per object, a vouched object found carrying the
@@ -1191,7 +1212,7 @@ func (ix *index) rebuild(ctx context.Context) error {
 			}
 		}
 	}
-	var vouched map[ID]bool
+	var vouched vouches
 	if cur, err := ix.store.get(ctx); err == nil {
 		vouched = ix.parseVouched(cur.vouched)
 	}
@@ -1199,12 +1220,12 @@ func (ix *index) rebuild(ctx context.Context) error {
 	for _, id := range SortedIDs(keysOf(named)) {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
-			if vouched[id] {
+			if vouched.names(id) {
 				ix.vouchWrong(id)
 			}
 			keep = append(keep, id)
 		case carriesUnknown, carriesRBACDenied:
-			if vouched[id] {
+			if vouched.has(id) {
 				continue // vouched by an operator while it can't be read
 			}
 			keep = append(keep, id)
@@ -1381,7 +1402,7 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	var back, failed, done, unread, bare []ID
 	for _, id := range due {
 		c := ix.carries(ctx, id)
-		if vouched[id] && c != carriesYes && c != carriesNot {
+		if vouched.has(id) && c != carriesYes && c != carriesNot {
 			// An operator vouched that it carries no finalizer of the
 			// kind: its dropped line stays dropped while it can't be read
 			// (§10.6.6).
@@ -1390,7 +1411,7 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		}
 		switch c {
 		case carriesYes:
-			if vouched[id] {
+			if vouched.names(id) {
 				ix.vouchWrong(id)
 			}
 			back = append(back, id)
@@ -1747,7 +1768,7 @@ func (t *Tracker) newTrackerIndex() error {
 			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
 	}
 	ix.onVouchMalformed = func(entries []string) {
-		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name> (§10.6.6)",
+		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name>, or <namespace>/* (§10.6.6)",
 			"kind", t.gk.String(), "index", ix.ref(), "entries", strings.Join(entries, ", "))
 	}
 	ix.onVouchWrong = func(id ID) {
@@ -1863,7 +1884,7 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 			bare = append(bare, id)
 			continue
 		default:
-			if vouched[id] {
+			if vouched.has(id) {
 				// An operator checked by hand that it carries no finalizer
 				// of the kind: while it can't be read, it is skipped,
 				// neither reported nor retried (§10.6.6).
@@ -1894,7 +1915,7 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 		}
 		if !held {
 			bare = append(bare, id)
-		} else if vouched[id] {
+		} else if vouched.names(id) {
 			// Readable, and held: treated as any other, its batch enqueued.
 			ix.vouchWrong(id)
 		}

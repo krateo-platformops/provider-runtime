@@ -71,8 +71,9 @@ const (
 	// the unheld annotation names a ref: <namespace>/<Kind[.group]>/<name>
 	// (§7.4, §10.6.6). While such an object can't be read, Disown and the
 	// startup recheck skip it after a read that fails, and its line may go;
-	// a vouched object that can be read is treated as any other. The
-	// process never writes it.
+	// a vouched object that can be read is treated as any other. An entry
+	// <namespace>/* is every object of a namespace, once none there carries
+	// the kind's marker label. The process never writes it.
 	AnnotationVouched = Domain + "/vouched"
 	// AnnotationVouchedIndex is an operator's word, after the index was lost
 	// while Disown was on, that no object of some kinds carries a finalizer of

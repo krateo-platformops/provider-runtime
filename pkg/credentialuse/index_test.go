@@ -1704,17 +1704,30 @@ func TestParseVouched(t *testing.T) {
 			{Group: "x.io", Kind: "Cluster", Name: "c"}:                                            true,
 			{Group: "core.krateo.io", Kind: "KubernetesTarget", Namespace: "team-b", Name: "prod"}: true,
 		}
-		if len(got) != len(want) {
+		if len(got.ids) != len(want) || len(got.namespaces) != 0 {
 			t.Fatalf("parsed %v, want %v", got, want)
 		}
 		for id := range want {
-			if !got[id] {
+			if !got.has(id) || !got.names(id) {
 				t.Errorf("%v missing from %v", id, got)
 			}
 		}
 	}
 	if len(reports) != 1 || !slices.Equal(reports[0], []string{"nonsense", "a/b/c/d"}) {
 		t.Errorf("reports %q, want the two malformed entries once", reports)
+	}
+	// Namespaces, whole; neither every namespace, nor what has none.
+	reports = nil
+	got := ix.parseVouched("team-a/*, */*,/*,*,team-b/Secret/*,team_c/*")
+	if len(got.ids) != 0 || !maps.Equal(got.namespaces, map[string]bool{"team-a": true}) {
+		t.Errorf("parsed %v, want team-a only", got)
+	}
+	if len(reports) != 1 || !slices.Equal(reports[0], []string{"*/*", "/*", "*", "team-b/Secret/*", "team_c/*"}) {
+		t.Errorf("reports %q, want the malformed entries", reports)
+	}
+	in := SecretRef("team-a", "s").ID()
+	if !got.has(in) || got.names(in) || got.has(SecretRef("team-b", "s").ID()) || got.has(ID{Kind: "Cluster", Name: "c"}) {
+		t.Errorf("%v: has and names don't follow the namespace", got)
 	}
 	if got, ok := parseUnheldRef(unheldRef(SecretRef("ns", "s").ID())); !ok || got != SecretRef("ns", "s").ID() {
 		t.Errorf("parseUnheldRef(unheldRef) = %v, %v", got, ok)
@@ -1787,6 +1800,41 @@ func TestAVouchedLine(t *testing.T) {
 	}
 	if want := linesOf([]ID{unvouched}); !slices.Equal(st2.lines, want) {
 		t.Errorf("after the rebuild: %q, want %q", st2.lines, want)
+	}
+}
+
+// A vouched namespace is a vouch for each of its objects that can't be read,
+// and for none that can: one that carries the prefix is treated as any other,
+// and isn't a wrong vouch (§10.6.6).
+func TestAVouchedNamespace(t *testing.T) {
+	ctx := context.Background()
+	in, out, carrying := SecretRef("team-a", "in").ID(), SecretRef("team-b", "out").ID(), SecretRef("team-a", "carrying").ID()
+	prefix, _ := FinalizerPrefix(widgetGK)
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{carrying: {ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "carrying", Finalizers: []string{prefix + "team-a"}}}},
+		forbid: map[ID]bool{in: true, out: true}}
+	st := &memStore{exists: true, rebuilt: true, vouched: "team-a/*", lines: linesOf([]ID{in, carrying})}
+	ix := testIndex(st, srv)
+	ix.onVouchWrong = func(id ID) { t.Errorf("a wrong vouch of %v", id) }
+	var denials []ID
+	ix.onDenied = func(id ID, _ error) { denials = append(denials, id) }
+	var enqueued []ID
+	if err := ix.recheck(ctx, func(id ID, _ string) { enqueued = append(enqueued, id) }); err != nil || !slices.Equal(enqueued, []ID{carrying}) || len(denials) != 0 {
+		t.Errorf("the recheck: %v, enqueued %v, denials %v; want %v enqueued, and nothing denied", err, enqueued, denials, carrying)
+	}
+	st.lines = nil
+	ix.queue([]ID{in, out, carrying}, true)
+	if err := ix.recheckTick(ctx, time.Now()); err != nil || !slices.Equal(st.lines, linesOf([]ID{out, carrying})) {
+		t.Errorf("after the live checks: %v, %q", err, st.lines)
+	}
+	st.lines = linesOf([]ID{in, out, carrying})
+	if err := ix.prune(ctx, []ID{in, out, carrying}); err != nil || !slices.Equal(st.lines, linesOf([]ID{out, carrying})) {
+		t.Errorf("after the prune: %v, %q", err, st.lines)
+	}
+	rec, _ := EncodeRecord([]ID{in, out, carrying})
+	h := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "h", Annotations: map[string]string{AnnotationRefs: rec}}}
+	st2 := &memStore{exists: true, vouched: "team-a/*"}
+	if err := testIndex(st2, holdersServer{srv, []metav1.PartialObjectMetadata{h}}).rebuild(ctx); err != nil || !slices.Equal(st2.lines, linesOf([]ID{out, carrying})) {
+		t.Errorf("after the rebuild: %v, %q", err, st2.lines)
 	}
 }
 

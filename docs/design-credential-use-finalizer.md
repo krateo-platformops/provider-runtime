@@ -2000,12 +2000,20 @@ else changed in between.
   2026-11-22). Under `resourceNames` RBAC that is a Secret outside the
   grant: an ensure wrote its line before an A2 that got a 403. Disown says
   so: a Warning event on the CRD, `CredentialUseDisownUnreadable`, names
-  each such object and why (`team-a/Secret/nogrant: forbidden`), throttled
-  while the set stays the same; a log line; and the gauge
+  the first three and why (`team-a/Secret/nogrant: forbidden`), and how many
+  more, throttled while that stays the same; a log line, with the first 50;
+  and the gauge
   `credentialuse_disown_unreadable`. **The remedy:** grant `get` on the
-  object, or confirm by hand that it carries no finalizer of K and add it
+  object, or, no sooner than `TimeoutBound` + 60s after the switch was last
+  changed, when an A2 from before it has landed, confirm by hand that it
+  carries no finalizer of K and add it
   to the index's `credential-use.krateo.io/vouched` annotation. Disown then
-  settles, and removes the line itself. Removing the line by hand
+  settles, and removes the line itself. **Or vouch for a namespace**, with
+  `team-a/*`, once none of its objects of the kinds the switch covers carries
+  K's marker label, which takes one list of each: a tenant may name any number
+  of objects the process can't read, in a spec or in a record it forges, and
+  each would need a vouch of its own (the user's decision, 2026-11-24).
+  Removing the line by hand
   alone does nothing: the tamper check restores the line of an object it
   can't read (§10.6.6). The vouch, the user's decision of
   2026-11-22, is described in §10.6.6. An object that only a record names
@@ -3541,15 +3549,21 @@ the operator's word in its place, for Disown's count only.
 **An operator's vouch** (the user's decision, 2026-11-22). The index's
 `credential-use.krateo.io/vouched` annotation lists, comma-separated and
 written as the unheld annotation names refs (`team-a/Secret/nogrant`), the
-objects an operator has checked by hand to carry no finalizer of K. Malformed
-entries are ignored, with a warning once per value. While a vouched object
+objects an operator has checked by hand to carry no finalizer of K. An entry
+`team-a/*` is every object of that namespace (the user's decision,
+2026-11-24); there is none for every namespace, or for one kind of it.
+Malformed entries are ignored, with a warning once per value. While a vouched object
 can't be read, Disown's count and its strip skip it, the startup recheck
 skips it after its read fails, the tamper check doesn't restore its
 dropped line, a prune may remove its line, and a rebuild doesn't add it. Every other unreadable
 line keeps the superset's rule: restored, and counted unknown. A vouched
 object that can be read and carries K's prefix is treated as any other,
-counted and kept, and the wrong vouch is logged. The process never writes
-the annotation, and its own writes keep it.
+counted and kept, and the wrong vouch is logged, when it was vouched for by
+name: a namespace's vouch says nothing of what can be read there. The process
+never writes the annotation, and its own writes keep it. **A vouch stays until
+it is removed**, and a later hold of an object that then can't be read, its
+grant revoked, isn't in the index's superset: remove a namespace's once Disown
+has settled.
 
 **If the ConfigMap is deleted**, the tracker recreates it and rebuilds it
 from the records. It lists the holders of K, takes the union of their
