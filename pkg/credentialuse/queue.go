@@ -354,6 +354,14 @@ func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 	return k, ids, true
 }
 
+// PutBack adds to k's batch what its worker didn't get to. With no ids it does
+// nothing.
+func (q *batchQueue) PutBack(k batchKey, ids ...ID) {
+	if len(ids) > 0 {
+		q.Add(k, ids...)
+	}
+}
+
 // Done ends the work on k's batch. If k was added meanwhile, it is queued
 // again with what was added.
 func (q *batchQueue) Done(k batchKey) {

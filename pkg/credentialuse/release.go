@@ -90,6 +90,9 @@ type ReleaseResult struct {
 	// Failed are the objects the batch couldn't decide, each for an error it
 	// returns: the caller retries them, and only them, with backoff.
 	Failed []ID
+	// Rest are the objects the batch didn't get to: neither decided nor
+	// failed. The caller puts them back where they were in the queue.
+	Rest []ID
 	// Asked are the objects that must be looked at again, and when each: at the
 	// end of its grace, or for its restored epoch's recheck. Nothing else of
 	// the batch is.
@@ -126,6 +129,23 @@ func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
 	if r.RequeueAt.IsZero() || at.Before(r.RequeueAt) {
 		r.RequeueAt = at
 	}
+}
+
+// The most objects a batch reads at R1.
+const maxTurnReads = 64
+
+// isUser is IsUser, and isDeletingUser IsDeletingUser, through the protocol's
+// readRecord.
+func (p *protocol) isUser(h metav1.Object, id ID) bool {
+	read := p.readRecord
+	if read == nil {
+		read = ReadRecord
+	}
+	return !notAUser(h, p.ownerFinalizers) && read(h).Names(id)
+}
+
+func (p *protocol) isDeletingUser(h metav1.Object, id ID) bool {
+	return h.GetDeletionTimestamp() != nil && p.isUser(h, id)
 }
 
 // r1Read is one protected object as R1 read it.
@@ -299,11 +319,11 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			var users, deletingUsers []types.NamespacedName
 			for i := range holders {
 				nn := types.NamespacedName{Namespace: holders[i].Namespace, Name: holders[i].Name}
-				if IsUser(&holders[i], r.id, p.ownerFinalizers) {
+				if p.isUser(&holders[i], r.id) {
 					in.Users++
 					users = append(users, nn)
 				}
-				if IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {
+				if p.isDeletingUser(&holders[i], r.id) {
 					in.DeletingUsers++
 					deletingUsers = append(deletingUsers, nn)
 				}
@@ -388,10 +408,10 @@ func (p *protocol) fastKeep(id ID, n string) cachedUse {
 	cached, ok := p.views.Protected(id)
 	for _, h := range p.views.HoldersNaming(id, n) {
 		nn := types.NamespacedName{Namespace: h.Namespace, Name: h.Name}
-		if IsUser(h, id, p.ownerFinalizers) {
+		if p.isUser(h, id) {
 			u.users = append(u.users, nn)
 		}
-		if IsDeletingUser(h, id, p.ownerFinalizers) {
+		if p.isDeletingUser(h, id) {
 			u.deletingUsers = append(u.deletingUsers, nn)
 		}
 	}
