@@ -145,8 +145,8 @@ func (p pruneRig) gvr(v string) schema.GroupVersionResource {
 	return schema.GroupVersionResource{Group: pruneGroup, Version: v, Resource: strings.ToLower(p.kind) + "s"}
 }
 
-// pruneSeq numbers the rigs' kinds.
-var pruneSeq atomic.Int64
+// crdSeq numbers the kinds of CRDs that stay after their test.
+var crdSeq atomic.Int64
 
 // newPruneRig creates a CRD of its own, whose kind is kind with a number, so
 // that a test can run again in one process. The CRD stays, as the rig's namespace
@@ -155,7 +155,7 @@ var pruneSeq atomic.Int64
 func newPruneRig(t *testing.T, kind, storage string, conversion *apiextensionsv1.CustomResourceConversion) pruneRig {
 	t.Helper()
 	ctx := context.Background()
-	kind = fmt.Sprintf("%sN%d", kind, pruneSeq.Add(1))
+	kind = fmt.Sprintf("%sN%d", kind, crdSeq.Add(1))
 	if err := env.Client.Create(ctx, pruneCRD(kind, storage, conversion)); err != nil {
 		t.Fatal(err)
 	}
