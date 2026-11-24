@@ -45,7 +45,8 @@ type Clients struct {
 	// Discovery reads the API server's discovery documents, live: a
 	// discovery client's RESTClient(), for one. A holder kind whose CRD is
 	// gone is looked up in them, and what it held is released only if no
-	// other resource serves it (§6.4). Nil never takes a kind for gone.
+	// other resource serves it (§6.4). Nil never takes a kind for gone, and
+	// Track warns of it; a nil of a concrete type isn't nil, and panics.
 	//
 	// It is a REST client and not a discovery client, so that a caching one
 	// can't answer for the API server.
@@ -902,6 +903,10 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	t, err := s.newTracker(o)
 	if err != nil {
 		return nil, setupFailed(err)
+	}
+	if s.c.Discovery == nil {
+		t.warn("credential-use: Clients.Discovery isn't set: what this kind's holders held isn't released if its CRD goes, until DisownPrefix strips it (§6.4)",
+			"kind", gk.String())
 	}
 	if t.idx != nil {
 		t.idx.setFresh(fresh)

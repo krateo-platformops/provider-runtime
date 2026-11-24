@@ -106,7 +106,8 @@ func WithCredentialUse(o credentialuse.KindOptions) ReconcilerOption {
 // the Shared NewReconciler builds once per manager with the default
 // SharedOptions (§7.5). A provider that needs other SharedOptions
 // (Namespaces, Listers, IndexNamespace for PerName) builds its own and passes it to every Reconciler of
-// the manager, in production as in tests. With a manager that has a config,
+// the manager, in production as in tests; it fills credentialuse.Clients
+// itself, Discovery too. With a manager that has a config,
 // NewReconciler adds s's two runnables to it, once per Shared; with a test
 // manager's nil config, the test runs s itself (Run, or RunInformers and
 // RunWriteLoops).
@@ -454,26 +455,37 @@ func wiringFor(m manager.Manager, s *credentialuse.Shared) (*credentialuse.Share
 // newDefaultShared builds a manager's Shared from its config and RESTMapper,
 // with the default SharedOptions (§7.5).
 func newDefaultShared(m manager.Manager) (*credentialuse.Shared, error) {
+	c, err := credentialUseClients(m)
+	if err != nil {
+		return nil, err
+	}
+	return credentialuse.NewShared(c, credentialuse.SharedOptions{}), nil
+}
+
+// credentialUseClients are the core's clients from a manager's config: every
+// field, the optional ones too.
+func credentialUseClients(m manager.Manager) (credentialuse.Clients, error) {
+	var c credentialuse.Clients
 	cfg := m.GetConfig()
 	md, err := metadata.NewForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("building the metadata client: %w", err)
+		return c, fmt.Errorf("building the metadata client: %w", err)
 	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("building the dynamic client: %w", err)
+		return c, fmt.Errorf("building the dynamic client: %w", err)
 	}
 	disc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("building the discovery client: %w", err)
+		return c, fmt.Errorf("building the discovery client: %w", err)
 	}
-	return credentialuse.NewShared(credentialuse.Clients{
+	return credentialuse.Clients{
 		Metadata:  md,
 		Dynamic:   dyn,
 		Mapper:    m.GetRESTMapper(),
 		Discovery: disc.RESTClient(),
 		Events:    m.GetEventRecorder(credentialUseRecorderName),
-	}, credentialuse.SharedOptions{}), nil
+	}, nil
 }
 
 // sharedWiring is a Shared as a manager runs it: two runnables (§7.5, IP4),

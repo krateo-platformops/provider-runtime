@@ -22,7 +22,9 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
 CG, WF, RL, TR, DI, IX, SH, PN, LW = [C + f for f in (
     "crdgone.go", "watchfail.go", "release.go", "tracker.go", "disown.go", "index.go", "shared.go", "pername.go", "listwatch.go")]
-FILES = [CG, WF, RL, TR, DI, IX, SH, PN, LW]
+R = "pkg/reconciler/"
+RC = R + "credentialuse.go"
+FILES = [CG, WF, RL, TR, DI, IX, SH, PN, LW, RC]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -78,6 +80,12 @@ MUTANTS = [
      [("\tfor _, v := range group.Versions {\n", "\tfor _, v := range group.Versions[:1] {\n")]),
     ("any document is the version's", CG,
      [("\t\tif list.Kind != \"APIResourceList\" || list.GroupVersion != v.GroupVersion {\n", "\t\tif false {\n")]),
+    ("provider-runtime sets no Discovery", RC,
+     [("\t\tDiscovery: disc.RESTClient(),\n", "\t\t// disc\n"), ("\tdisc, err := discovery", "\t_, err = discovery")]),
+    ("a Track without Discovery says nothing", SH,
+     [("\tif s.c.Discovery == nil {\n", "\tif false && s.c.Discovery == nil {\n")]),
+    ("every Track warns of Discovery", SH,
+     [("\tif s.c.Discovery == nil {\n", "\tif true || s.c.Discovery == nil {\n")]),
     ("the kind's case matters", CG,
      [("strings.EqualFold(r.Kind, t.gk.Kind)", "r.Kind == t.gk.Kind")]),
     ("a 404 that isn't the API server's is the evidence", CG,
@@ -248,6 +256,9 @@ KILLERS = {
     "only the first version is read": VETO,
     "any document is the version's": VETO,
     "the kind's case matters": VETO,
+    "provider-runtime sets no Discovery": {R: "TestTheDefaultSharedHasEveryClient"},
+    "a Track without Discovery says nothing": {C: "TestTrackWarnsWithoutDiscovery"},
+    "every Track warns of Discovery": {C: "TestTrackWarnsWithoutDiscovery"},
     "a 404 that isn't the API server's is the evidence": NONE,
     "a 404 that names nothing is the evidence": NONE,
     "a 404 that names another CRD is the evidence": NONE,

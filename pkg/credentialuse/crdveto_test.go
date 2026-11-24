@@ -234,6 +234,23 @@ func TestTheDiscoverysVeto(t *testing.T) {
 	})
 }
 
+// A Track without Clients.Discovery says what that costs, once, and one with it
+// nothing.
+func TestTrackWarnsWithoutDiscovery(t *testing.T) {
+	for _, set := range []bool{true, false} {
+		r := newFakeRig(t)
+		if !set {
+			r.s.c.Discovery = nil
+		}
+		sink := &sinkLines{}
+		r.trackLogged(t, sink)
+		r.trackLogged(t, sink) // the same Options: the same tracker
+		if n := sink.warned("Clients.Discovery isn't set"); (n == 1) == set {
+			t.Errorf("set %v: warned %d times", set, n)
+		}
+	}
+}
+
 // Two processes, without leader election (§6.8). This one, O, tracks Widgets
 // as widgets. That CRD goes, and another, widgetries, brings the kind back; a
 // new process, N, tracks it, and its holder holds the Secret again and again,
