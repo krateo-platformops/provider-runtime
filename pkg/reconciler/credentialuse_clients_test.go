@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -35,8 +36,12 @@ func TestTheDefaultSharedHasEveryClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Metadata == nil || c.Dynamic == nil || c.Mapper == nil || c.Discovery == nil || c.Events == nil {
-		t.Errorf("the clients of the default Shared: %+v; want each one set", c)
+	// Every field, one added later too.
+	v := reflect.ValueOf(c)
+	for i := range v.NumField() {
+		if v.Field(i).IsZero() {
+			t.Errorf("the default Shared's Clients.%s isn't set", v.Type().Field(i).Name)
+		}
 	}
 	if s, err := newDefaultShared(configManager{cfg: &rest.Config{Host: "https://localhost"}}); err != nil || s == nil {
 		t.Errorf("newDefaultShared = %v, %v", s, err)

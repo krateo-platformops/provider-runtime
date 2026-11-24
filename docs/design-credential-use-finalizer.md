@@ -1410,9 +1410,10 @@ the evidence: the GET is.
   `handler_apis.go`; seen through a summary of the source). A group that has an
   APIService is the aggregator's in both, so a **version** that comes later to
   it isn't there before its own APIService: a group whose kinds come with
-  versions of their own has that gap. N's `Track` needs the kind in its mapper,
-  and so in some API server's discovery, before N's first A2, which leaves O
-  an API server that lags behind N's: the third limit below.
+  versions of their own has that gap, also on one and the same API server. N's
+  mapper may find the kind sooner, in the aggregated discovery, which the CRD's
+  own handlers feed without an APIService. The gap ends when the version's
+  APIService is registered: the third limit below.
 - *An aggregated API server* in K's group is asked through the API server: one
   that serves K vetoes, and one that is down answers 503, which keeps the holds
   for as long as it lasts (the aggregator lists a group's versions whether or not
@@ -1457,7 +1458,7 @@ two as well.
 |---|---|---|
 | Instances left behind a CRD that is gone | Its cleanup finalizer was stripped by hand, or it was deleted while not established: the cleanup deletes instances only of an established CRD (`apiextensions-apiserver@v0.37.2/pkg/controller/finalizer/crd_finalizer.go:144-170`). Nobody can read them. If the CRD returns, they do, and each one's next pass holds P again | Don't strip `customresourcecleanup.apiextensions.k8s.io`. Delete the holders first |
 | An instance a stale API server creates after the cleanup's last check | Several API servers, one of them behind by more than the cleanup: its own source has a TODO for it (`crd_finalizer.go:235`). The instance is readable only through that server, until it catches up | None is needed once it has caught up: the instance is the row above's |
-| K's CRD replaced by one of another plural, or by an aggregated API server, while a process tracks the first, and the API server that answers its discovery hasn't seen that yet | Strips, for as long as that API server's discovery lags, each put back by its holder's next pass: a process usually keeps one connection, so the same API server answers it at every turn. It ends when that server catches up. In a namespace being deleted the first is enough for P to go | Restart every process of the kind when its plural changes, before the new CRD has holders: the old tracker's resource is fixed at `Track` (§7.3) |
+| K's CRD replaced by one of another plural, or by an aggregated API server, while a process tracks the first, and the group's discovery doesn't show it yet: the API server that answers lags, or the CRD comes with a version new to the group, whose APIService isn't registered yet | Strips, for as long as that lasts, each put back by its holder's next pass: a process usually keeps one connection, so the same API server answers it at every turn. It ends when that server catches up, or has the APIService. In a namespace being deleted the first is enough for P to go | Restart every process of the kind when its plural changes, before the new CRD has holders: the old tracker's resource is fixed at `Track` (§7.3) |
 
 *And what it doesn't cover*, where a hold stays, and `DisownPrefix` remains the
 remedy:

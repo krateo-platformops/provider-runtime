@@ -568,7 +568,25 @@ func TestAnotherPluralsHoldsStay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stopNew := running(t, s)
+	newCtx, cancelNew := context.WithCancel(ctx)
+	ended := make(chan error, 1)
+	go func() { ended <- s.Run(newCtx) }()
+	var once sync.Once
+	stopNew := func() { // and waits: none of its batches runs after it
+		once.Do(func() {
+			cancelNew()
+			if err := <-ended; err != nil {
+				t.Errorf("the new process's Run: %v", err)
+			}
+		})
+	}
+	t.Cleanup(stopNew)
+	cutest.Eventually(t, time.Minute, func() error {
+		if !s.HasSynced() {
+			return cutest.ErrNotYet
+		}
+		return nil
+	})
 	c.start(&driver.Driver{Tracker: tr, Dynamic: env.Dynamic, Holder: oidGVR, OwnerFinalizer: ownerFinalizer})
 	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"secret": "s"}}}
 	u.SetGroupVersionKind(gizmoGVK)
@@ -609,10 +627,13 @@ func TestAnotherPluralsHoldsStay(t *testing.T) {
 		t.Errorf("%d epochs in ten seconds: the two processes fight over the hold", len(epochs))
 	}
 
-	// The new process is gone before its holder and CRD: only the old one is
-	// left to release, at its next retry, within its backoff by now.
+	// The new process is gone, its last batch too, before its holder and CRD:
+	// only the old one is left to release, at its next retry.
 	c.stop()
 	stopNew()
+	if !gizmoHolds(ns, "s") {
+		t.Fatal("released before the new holder went")
+	}
 	removeOids()
 	gizmoReleased(t, 3*time.Minute, ns, "s")
 }

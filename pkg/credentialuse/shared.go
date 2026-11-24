@@ -753,6 +753,10 @@ func (s *Shared) Track(ctx context.Context, o Options) (*Tracker, error) {
 	if err != nil {
 		return nil, s.abandonedOr(ctx, gk, err)
 	}
+	if s.c.Discovery == nil {
+		t.warn("credential-use: Clients.Discovery isn't set: what this kind's holders held isn't released if its CRD goes, until DisownPrefix strips it (§6.4)",
+			"kind", gk.String())
+	}
 	return t, nil
 }
 
@@ -903,10 +907,6 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 	t, err := s.newTracker(o)
 	if err != nil {
 		return nil, setupFailed(err)
-	}
-	if s.c.Discovery == nil {
-		t.warn("credential-use: Clients.Discovery isn't set: what this kind's holders held isn't released if its CRD goes, until DisownPrefix strips it (§6.4)",
-			"kind", gk.String())
 	}
 	if t.idx != nil {
 		t.idx.setFresh(fresh)

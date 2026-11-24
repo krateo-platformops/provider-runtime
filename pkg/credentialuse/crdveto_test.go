@@ -251,6 +251,17 @@ func TestTrackWarnsWithoutDiscovery(t *testing.T) {
 			r.s.c.Discovery = nil
 		}
 		sink := &sinkLines{}
+		opts := r.options(widgetGK)
+		opts.Logger = sink
+		r.run(t)
+		r.denied.Store("watch widgets", true)
+		if _, err := r.s.Track(context.Background(), opts); err == nil {
+			t.Fatal("Track succeeded without its grant")
+		}
+		r.denied.Delete("watch widgets")
+		if n := sink.warned("Clients.Discovery isn't set"); n != 0 {
+			t.Errorf("set %v: a Track that failed warned", set)
+		}
 		r.trackLogged(t, sink)
 		r.trackLogged(t, sink) // the same Options: the same tracker
 		if n := sink.warned("Clients.Discovery isn't set"); (n == 1) == set {
