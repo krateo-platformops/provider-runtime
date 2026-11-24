@@ -2,20 +2,28 @@ package credentialuse
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
+	clienttesting "k8s.io/client-go/testing"
 )
 
-// A holder kind whose CRD was cluster-scoped, and was created again namespaced
-// (§6.2). A process that mapped it before keeps that mapping; it runs beside one
-// that maps it as it is, whose holders are in namespaces. What the old one can't
-// list is never "no users".
+// A holder kind whose CRD was deleted, and created again with another scope
+// (§6.2): spec.scope can't change on an established CRD. A process that mapped
+// it before keeps that mapping. What the old one can't list is never "no
+// users".
 
 // scopeRig is a rig whose mapper has Widgets at scope. Nothing is cached: its
 // informers don't run, so R0 decides nothing, as with a cache that doesn't
@@ -44,54 +52,79 @@ func TestR2OfAHolderKindMappedClusterScoped(t *testing.T) {
 	ctx := context.Background()
 	id := secretID("ns", "s")
 	for name, c := range map[string]struct {
-		scope meta.RESTScope
-		n     string // the batch's namespace
-		users bool
-		fails bool
-		held  bool // after it
+		scope  meta.RESTScope
+		n      string   // the batch's namespace
+		users  []string // the namespaces of holders that name the Secret
+		held   bool     // after the batch
+		listed string   // the namespace the list asked for
 	}{
-		"mapped as it was, with a user":    {meta.RESTScopeRoot, "ns", true, true, true},
-		"mapped as it was, without one":    {meta.RESTScopeRoot, "ns", false, true, true},
-		"mapped as it is, with a user":     {meta.RESTScopeNamespace, "ns", true, false, true},
-		"mapped as it is, without one":     {meta.RESTScopeNamespace, "ns", false, false, false},
-		"cluster-scoped, with a user":      {meta.RESTScopeRoot, "", true, false, true},
-		"cluster-scoped, without one":      {meta.RESTScopeRoot, "", false, false, false},
-		"namespaced, of no namespace":      {meta.RESTScopeNamespace, "", true, false, true},
-		"namespaced, of none, without one": {meta.RESTScopeNamespace, "", false, false, false},
+		// The process mapped the kind before it was namespaced.
+		"mapped as it was, a user there":              {meta.RESTScopeRoot, "ns", []string{"ns"}, true, ""},
+		"mapped as it was, users there and elsewhere": {meta.RESTScopeRoot, "ns", []string{"ns", "other"}, true, ""},
+		"mapped as it was, a user elsewhere alone":    {meta.RESTScopeRoot, "ns", []string{"other"}, false, ""},
+		"mapped as it was, no user":                   {meta.RESTScopeRoot, "ns", nil, false, ""},
+		// The kind is cluster-scoped, and the finalizer from when it wasn't: the
+		// cluster-scoped user has a finalizer of its own.
+		"cluster-scoped, an old finalizer":                 {meta.RESTScopeRoot, "ns", []string{""}, false, ""},
+		"cluster-scoped, a user":                           {meta.RESTScopeRoot, "", []string{""}, true, ""},
+		"cluster-scoped, no user":                          {meta.RESTScopeRoot, "", nil, false, ""},
+		"namespaced, a user there":                         {meta.RESTScopeNamespace, "ns", []string{"ns"}, true, "ns"},
+		"namespaced, a user elsewhere alone":               {meta.RESTScopeNamespace, "ns", []string{"other"}, false, "ns"},
+		"namespaced, no user":                              {meta.RESTScopeNamespace, "ns", nil, false, "ns"},
+		"namespaced, a cluster-scoped finalizer, any user": {meta.RESTScopeNamespace, "", []string{"ns"}, true, ""},
 	} {
 		objs := []runtime.Object{heldObject(secretGVK, "ns", "s", "u1", widgetGK, c.n)}
-		if c.users {
-			objs = append(objs, holderObject(c.n, "h", id))
+		for _, ns := range c.users {
+			objs = append(objs, holderObject(ns, "h", id))
 		}
 		r, tr, _ := scopeRig(t, c.scope, objs...)
+		r.md.ClearActions()
 		res, err := tr.proto.release(ctx, c.n, []ID{id})
-		if (err != nil) != c.fails || (len(res.Released) == 0) != c.held || len(res.Bare) != len(res.Released) {
-			t.Errorf("%s: %+v, %v; want failed %v, held %v", name, res, err, c.fails, c.held)
+		if err != nil || (len(res.Released) == 0) != c.held {
+			t.Errorf("%s: %+v, %v; want held %v", name, res, err, c.held)
 		}
 		if got := hasFinalizer(r.secretMeta(t, "ns", "s"), mustFinalizer(widgetGK, c.n)); got != c.held {
 			t.Errorf("%s: held %v, want %v", name, got, c.held)
 		}
-		// Users, for diagnostics, says no less.
+		var lists []string
+		for _, a := range r.md.Actions() {
+			if a.GetVerb() == "list" && a.GetResource().Resource == "widgets" {
+				lists = append(lists, a.GetNamespace())
+			}
+		}
+		if !slices.Equal(lists, []string{c.listed}) {
+			t.Errorf("%s: lists of the holders in %q, want one, in %q", name, lists, c.listed)
+		}
+		// Users, for diagnostics, says the same.
 		users, err := tr.Users(ctx, SecretRef("ns", "s"), c.n)
-		if (err != nil) != c.fails || err == nil && (len(users) == 1) != c.users {
-			t.Errorf("%s: Users = %v, %v", name, users, err)
+		if err != nil || (len(users) > 0) != c.held {
+			t.Errorf("%s: Users = %v, %v; want some %v", name, users, err, c.held)
 		}
 	}
 }
 
-// The release loop retries such a batch, and says why; the hold stays.
-func TestABatchOfAHolderKindMappedClusterScopedIsRetried(t *testing.T) {
+// With the CRD gone, the list is made, so it gets the API server's 404, which
+// is never "no users": the batch is retried, and the hold stays.
+func TestABatchOfAHolderKindMappedClusterScopedWithoutItsCRD(t *testing.T) {
+	ctx := context.Background()
 	id := secretID("ns", "s")
-	r, _, w := scopeRig(t, meta.RESTScopeRoot, heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "h", id))
+	r, tr, w := scopeRig(t, meta.RESTScopeRoot, heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	r.md.PrependReactor("list", "widgets", func(clienttesting.Action) (bool, runtime.Object, error) { return true, nil, unservedError() })
+	if _, err := tr.proto.release(ctx, "ns", []ID{id}); err == nil || !notServed(err) {
+		t.Errorf("release = %v; want the API server's 404 in its chain", err)
+	}
+	if _, err := tr.Users(ctx, SecretRef("ns", "s"), "ns"); !notServed(err) {
+		t.Errorf("Users = %v; want the API server's 404", err)
+	}
 	k := batchKey{widgetGK, "ns"}
 	for n, d := range []time.Duration{1, 2, 4} {
-		r.s.releaseBatch(context.Background(), k, []ID{id})
+		r.s.releaseBatch(ctx, k, []ID{id})
 		if !r.heldBy(t, widgetGK, "ns", "s") {
 			t.Fatalf("released, at run %d", n+1)
 		}
 		w.mu.Lock()
-		if len(w.got) != n+1 || !strings.Contains(w.got[n], "cluster-scoped") {
-			t.Errorf("run %d: warnings %q; want one more, saying why", n+1, w.got)
+		if len(w.got) != n+1 || !strings.Contains(w.got[n], "release batch failed") {
+			t.Errorf("run %d: warnings %q; want one more", n+1, w.got)
 		}
 		w.mu.Unlock()
 		r.clk.Step(d * time.Second)
@@ -99,5 +132,55 @@ func TestABatchOfAHolderKindMappedClusterScopedIsRetried(t *testing.T) {
 			t.Fatalf("run %d: the queued batch is %v, want it retried", n+1, got)
 		}
 		r.drain()
+	}
+}
+
+// The list is filtered on every page, and only the holder kind's is made.
+func TestAListOfAHolderKindMappedClusterScopedIsFiltered(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Path+" "+r.URL.Query().Get("continue"))
+		mu.Unlock()
+		item := func(ns, name string) string {
+			return fmt.Sprintf(`{"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":%q,"name":%q,"uid":%q}}`, ns, name, ns+name)
+		}
+		next, items := "2", item("a", "1")+","+item("b", "1")
+		if r.URL.Query().Get("continue") == "2" {
+			next, items = "", item("b", "2")+","+item("a", "2")+","+item("", "a")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","metadata":{"continue":"`+next+`"},"items":[`+items+`]}`)
+	}))
+	defer srv.Close()
+	md, err := metadata.NewForConfig(&rest.Config{Host: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	thing := schema.GroupVersionKind{Group: "x.io", Version: "v1", Kind: "Thing"}
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Version: "v1"}, thing.GroupVersion()})
+	mapper.Add(thing, meta.RESTScopeRoot)
+	mapper.Add(secretGVK, meta.RESTScopeNamespace)
+	for ns, want := range map[string][]string{"a": {"a/1", "a/2"}, "b": {"b/1", "b/2"}, "c": nil, "": {"a/1", "b/1", "b/2", "a/2", "/a"}} {
+		l, err := clientServer{md: md, mapper: mapper, holder: thing}.List(ctx, thing.GroupKind(), ns)
+		var got []string
+		for i := range l {
+			got = append(got, l[i].Namespace+"/"+l[i].Name)
+		}
+		if err != nil || !slices.Equal(got, want) {
+			t.Errorf("in %q: %v, %v; want %v", ns, got, err, want)
+		}
+		if a := []string{"/apis/x.io/v1/things ", "/apis/x.io/v1/things 2"}; !slices.Equal(asked, a) {
+			t.Errorf("in %q: the calls %q, want %q", ns, asked, a)
+		}
+		asked = nil
+	}
+	// Another kind's, and one of no tracker's, names no object: no call.
+	for _, s := range []clientServer{{md: md, mapper: mapper}, {md: md, mapper: mapper, holder: secretGVK}} {
+		if l, err := s.List(ctx, thing.GroupKind(), "a"); err != nil || len(l) != 0 || len(asked) != 0 {
+			t.Errorf("a cluster-scoped kind that isn't the holder's: %v, %v, the calls %q; want none", l, err, asked)
+		}
 	}
 }
