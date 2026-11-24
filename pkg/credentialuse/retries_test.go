@@ -175,7 +175,9 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 	// one who can add it. A shared one is added again and again, also while its
 	// batch is worked on or being taken, each time with a fresh one-off object:
 	// one call adds both or neither, so one of those additions that is dropped
-	// is seen, which a look at the shared one alone can forgive. Its worker
+	// is seen, which a look at the shared one alone can forgive. An addition
+	// that skipped only the objects being worked on isn't: the fresh one is
+	// not; TestBatchQueueEveryOrdering has that. Its worker
 	// fails it now and then. (Fail and Settle of one object are its worker's
 	// alone, as in the release loop: a Settle that raced another's Fail would
 	// forget it.) A settled one fails and is settled; it owes nothing.
@@ -297,8 +299,10 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 						owe(k, with)
 						q.Add(k, shared, with)
 					case 4:
+						// Times that several additions share, so that the
+						// shared object's is often there already.
 						owe(k, with)
-						q.AddAfter(k, time.Duration(i%7)*unit, shared, with)
+						q.AddAt(k, clk.Now().Truncate(8*unit).Add(time.Duration(i%3)*8*unit), shared, with)
 					case 5:
 						id := idOf(fmt.Sprintf("settled%d-%d", a, i%40))
 						q.Fail(k, id)
@@ -320,8 +324,8 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 			out = lost()
 			q.mu.Lock()
 			defer q.mu.Unlock()
-			if len(q.timers)+len(q.failing)+len(q.pending)+len(q.working) > 0 {
-				out = append(out, fmt.Sprintf("%d timers, %d keys with failures, %d waiting, %d worked on", len(q.timers), len(q.failing), len(q.pending), len(q.working)))
+			if len(q.timers)+len(q.failing)+len(q.asked)+len(q.pending)+len(q.working) > 0 {
+				out = append(out, fmt.Sprintf("%d timers, %d keys with failures, %d times asked for, %d waiting, %d worked on", len(q.timers), len(q.failing), len(q.asked), len(q.pending), len(q.working)))
 			}
 			return out
 		}
@@ -362,8 +366,8 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.timers) != 0 || len(q.failing) != 0 {
-		t.Errorf("%d timers and %d keys with failures after ShutDown", len(q.timers), len(q.failing))
+	if len(q.timers) != 0 || len(q.failing) != 0 || len(q.asked) != 0 {
+		t.Errorf("%d timers, %d keys with failures and %d times asked for after ShutDown", len(q.timers), len(q.failing), len(q.asked))
 	}
 }
 
