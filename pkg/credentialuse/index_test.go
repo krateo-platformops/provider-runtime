@@ -165,6 +165,57 @@ func TestIndexLineCodec(t *testing.T) {
 	}
 }
 
+// A line that wouldn't read back as its ID, or is of a name too long (§10.6),
+// is refused before A2, so that its holder isn't connected, or is Degraded;
+// and no add writes it.
+func TestAnIndexLineReadsBack(t *testing.T) {
+	ctx := context.Background()
+	good := SecretRef("ns", "good").ID()
+	for _, id := range []ID{
+		SecretRef("ns", "a\nb").ID(),
+		SecretRef("ns", "a\n").ID(),
+		SecretRef("ns", "a ").ID(),
+		SecretRef("ns\n", "a").ID(),
+		SecretRef("a/b", "c").ID(),
+		// A name or a namespace longer than 253 bytes.
+		SecretRef("ns", strings.Repeat("n", 254)).ID(),
+		SecretRef(strings.Repeat("n", 254), "a").ID(),
+		SecretRef("ns", strings.Repeat("n", 250_000)).ID(),
+		SecretRef("ns", strings.Repeat("\x01", 254)).ID(),
+	} {
+		st := &memStore{exists: true, rebuilt: true}
+		ix := testIndex(st, nil)
+		if err := ix.ensure(ctx, id); err == nil || errors.Is(err, errIndexFull) || st.updates != 0 || len(err.Error()) > 1000 {
+			t.Errorf("ensure of %.40q: %.200v, %d updates; want it refused, and the error short", id, err, st.updates)
+		}
+		if err := ix.add(ctx, []ID{id, good}); err != nil || !slices.Equal(st.lines, linesOf([]ID{good})) {
+			t.Errorf("an add with %.40q: %v, %d lines; want the other's only", id, err, len(st.lines))
+		}
+		st = &memStore{}
+		if err := testIndex(st, nil).add(ctx, []ID{id}); err != nil || len(st.lines) != 0 {
+			t.Errorf("an index created for %.40q: %v, %d lines", id, err, len(st.lines))
+		}
+	}
+	for _, id := range []ID{good, SecretRef("ns", "a/b").ID(), {Group: "x.io", Kind: "Thing", Name: "c"}, SecretRef(strings.Repeat("n", 253), strings.Repeat("n", 253)).ID()} {
+		st := &memStore{exists: true, rebuilt: true}
+		if err := testIndex(st, nil).ensure(ctx, id); err != nil || !slices.Equal(st.lines, linesOf([]ID{id})) {
+			t.Errorf("ensure of %.40q: %v, %d lines; want its line", id, err, len(st.lines))
+		}
+	}
+	// What the holder gets, which fits in an event's note.
+	for _, name := range []string{"a\n", strings.Repeat("\x01", 254), strings.Repeat("n", 250_000)} {
+		for _, established := range []bool{false, true} {
+			r := newRig(t)
+			st := &memStore{exists: true, rebuilt: true}
+			r.p.lines = testIndex(st, r.srv)
+			a, err := r.p.acquire(ctx, r.holder(t, "h", established), []Ref{SecretRef("ns", name)})
+			if err != nil || a.Err == nil || a.MustNotConnect == established || a.Degraded != established || len(st.lines) != 0 || len(a.Err.Error()) > 1024 {
+				t.Errorf("%.10q, established %v: must not connect %v, degraded %v, %.200v, %d lines; want it refused, and the error short", name, established, a.MustNotConnect, a.Degraded, a.Err, len(st.lines))
+			}
+		}
+	}
+}
+
 // An add past the cap, or past a ConfigMap's 1 MiB, fails with
 // errIndexFull, before any write (§10.6.4); an index already past a lowered
 // cap still takes an add of a line it has.
@@ -189,7 +240,7 @@ func TestIndexFull(t *testing.T) {
 		t.Errorf("a line the full index has: %v", err)
 	}
 	ix.maxLines = IndexMaxLinesCeiling
-	long := ID{Kind: "Secret", Namespace: "ns", Name: strings.Repeat("n", 250)}
+	long := ID{Kind: "Secret", Namespace: "ns", Name: strings.Repeat("n", 249)} // 253 bytes with its number
 	var many []ID
 	for i := range 4300 {
 		l := long
