@@ -94,6 +94,10 @@ type ReleaseResult struct {
 	// end of its grace, or for its restored epoch's recheck. Nothing else of
 	// the batch is.
 	Asked []Asked
+	// Waiting are the objects being deleted that the batch didn't decide, since
+	// their release must wait (§6.4): the caller queues each when it may go on.
+	// None is in Failed or Asked.
+	Waiting []ID
 	// RequeueAt, when set, is the soonest of Asked's times. They are absolute,
 	// the deadline itself rather than a duration from some reading of the
 	// clock, so the requeue lands exactly on it
@@ -211,6 +215,12 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				if u := cachedUsers[id]; now.Before(r.graceEnd) && len(u.users) > 0 && !p.namespaceDeletingCached(id.Namespace) {
 					res.requeueAt(now, r.graceEnd, id)
 					res.Kept = append(res.Kept, Kept{P: id, Why: KeptGrace, GraceEnd: r.graceEnd, Users: u.users, DeletingUsers: u.deletingUsers})
+					continue
+				}
+				// The wait before it may be released (§6.4), except in a
+				// namespace being deleted, where it can't be created again.
+				if p.mustWait != nil && !p.namespaceDeletingCached(id.Namespace) && p.mustWait(n, id) {
+					res.Waiting = append(res.Waiting, id)
 					continue
 				}
 			}
