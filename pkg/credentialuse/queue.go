@@ -1,6 +1,7 @@
 package credentialuse
 
 import (
+	"cmp"
 	"context"
 	"slices"
 	"sync"
@@ -27,8 +28,11 @@ type batchKey struct {
 // A key is queued once however often it is added, and the protected objects
 // added with it accumulate until the batch is taken. A key added while its
 // batch is being worked on is queued again when the work is done, with what
-// was added meanwhile. Timers run on the queue's clock, so tests drive them
-// with a fake one.
+// was added meanwhile. Each object has its place, by when it was added: adding
+// it again doesn't move it, and what a batch didn't get to keeps it (PutBack).
+// So an object waits for no more than what was queued before it, and a key for
+// no more than one batch of every other. Timers run on the queue's clock, so
+// tests drive them with a fake one.
 //
 // The queue never calls its clock while holding mu. A clock may run a
 // timer's function while holding a lock of its own, as the fake clock of
@@ -41,11 +45,13 @@ type batchQueue struct {
 
 	mu      sync.Mutex
 	cond    *sync.Cond
-	pending map[batchKey]map[ID]bool // what each key's next batch covers
-	ready   []batchKey               // keys waiting to be taken, in order
-	queued  map[batchKey]bool        // in ready
-	working map[batchKey]bool        // taken, not yet done
-	timers  map[*queueTimer]bool     // AddAfter's, AddAt's and Fail's, neither fired nor stopped
+	pending map[batchKey]places  // what each key's next batch covers
+	taken   map[batchKey]places  // what each batch being worked on covers
+	placed  uint64               // the last place given
+	ready   []batchKey           // keys waiting to be taken, in order
+	queued  map[batchKey]bool    // in ready
+	working map[batchKey]bool    // taken, not yet done
+	timers  map[*queueTimer]bool // AddAfter's, AddAt's and Fail's, neither fired nor stopped
 	failing map[batchKey]map[ID]*failure
 	asked   map[askedFor]bool                // what AddAt's timers wait for
 	backoff func(failures int) time.Duration // backoffAfter, but for tests
@@ -59,7 +65,8 @@ type batchQueue struct {
 func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 	q := &batchQueue{
 		clock:   c,
-		pending: map[batchKey]map[ID]bool{},
+		pending: map[batchKey]places{},
+		taken:   map[batchKey]places{},
 		queued:  map[batchKey]bool{},
 		working: map[batchKey]bool{},
 		timers:  map[*queueTimer]bool{},
@@ -69,6 +76,17 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
+}
+
+// places are the objects of a batch, each with its place: the lower, the longer
+// it has waited. Those of one namespace's list share its place.
+type places map[ID]uint64
+
+// inOrder returns the objects of p, those that have waited longest first.
+func (p places) inOrder() []ID {
+	ids := SortedIDs(keysOf(p))
+	slices.SortStableFunc(ids, func(a, b ID) int { return cmp.Compare(p[a], p[b]) })
+	return ids
 }
 
 // fillAll is never an object: it stands in a batch for "every object of
@@ -98,14 +116,26 @@ func (q *batchQueue) addLocked(k batchKey, ids []ID) {
 	if q.stopped {
 		return
 	}
+	set := q.pendingLocked(k)
+	for _, id := range ids {
+		if _, waits := set[id]; !waits {
+			q.placed++
+			set[id] = q.placed
+		}
+	}
+	q.readyLocked(k)
+}
+
+func (q *batchQueue) pendingLocked(k batchKey) places {
 	set := q.pending[k]
 	if set == nil {
-		set = map[ID]bool{}
+		set = places{}
 		q.pending[k] = set
 	}
-	for _, id := range ids {
-		set[id] = true
-	}
+	return set
+}
+
+func (q *batchQueue) readyLocked(k batchKey) {
 	if !q.queued[k] && !q.working[k] {
 		q.queued[k] = true
 		q.ready = append(q.ready, k)
@@ -328,7 +358,7 @@ func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 }
 
 // Get takes the next batch, waiting for one, and marks it as being worked
-// on: the caller calls Done when it has finished. It returns false once the
+// on, with its objects in the order they were added: the caller calls Done when it has finished. It returns false once the
 // queue is shut down, or ctx is done.
 func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 	stop := context.AfterFunc(ctx, func() {
@@ -349,17 +379,36 @@ func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 	q.ready = q.ready[1:]
 	delete(q.queued, k)
 	q.working[k] = true
-	ids := SortedIDs(keysOf(q.pending[k]))
+	q.taken[k] = q.pending[k]
 	delete(q.pending, k)
-	return k, ids, true
+	return k, q.taken[k].inOrder(), true
 }
 
-// PutBack adds to k's batch what its worker didn't get to. With no ids it does
-// nothing.
+// PutBack adds to k's next batch what its worker didn't get to, each object at
+// the place it had, so before whatever was added since; one that a whole
+// namespace's list found, at the list's. With no ids it does nothing. It is for
+// the worker of k's batch, before Done. After ShutDown it does nothing.
 func (q *batchQueue) PutBack(k batchKey, ids ...ID) {
-	if len(ids) > 0 {
-		q.Add(k, ids...)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.stopped || len(ids) == 0 {
+		return
 	}
+	set := q.pendingLocked(k)
+	for _, id := range ids {
+		place, had := q.taken[k][id]
+		if !had {
+			place, had = q.taken[k][fillAll]
+		}
+		if !had {
+			q.placed++
+			place = q.placed
+		}
+		if again, waits := set[id]; !waits || place < again {
+			set[id] = place
+		}
+	}
+	q.readyLocked(k)
 }
 
 // Done ends the work on k's batch. If k was added meanwhile, it is queued
@@ -368,6 +417,7 @@ func (q *batchQueue) Done(k batchKey) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	delete(q.working, k)
+	delete(q.taken, k)
 	if _, again := q.pending[k]; again && !q.queued[k] && !q.stopped {
 		q.queued[k] = true
 		q.ready = append(q.ready, k)
@@ -396,7 +446,8 @@ func (q *batchQueue) ShutDown() {
 	clear(q.timers)
 	clear(q.failing)
 	clear(q.asked)
-	q.ready, q.pending = nil, map[batchKey]map[ID]bool{}
+	q.ready, q.pending = nil, map[batchKey]places{}
+	clear(q.taken)
 	clear(q.queued)
 	q.cond.Broadcast()
 	q.mu.Unlock()
