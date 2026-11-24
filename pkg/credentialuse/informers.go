@@ -198,7 +198,8 @@ func holderIndexer(obj any) ([]string, error) {
 // holderHandler keeps tracker t's verified set (§6.3) and maps holder events
 // to release batches (§10.2): a create, an update whose record or owner
 // finalizer changed, and a delete, enqueue the (K, N) batch of every
-// protected object in the old and the new record.
+// protected object in the old and the new record. A holder that stops being a
+// user of everything (usesAll) enqueues the batch of its whole namespace.
 type holderHandler struct{ t *Tracker }
 
 func (h holderHandler) now() time.Time { return h.t.s.clock.Now() }
@@ -276,7 +277,10 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)
 }
 
-// enqueue adds one batch, of every ID in old's and cur's records.
+// enqueue adds one batch, of every ID in old's and cur's records; and, when old
+// was a user of everything held for its namespace and cur isn't, of all of it.
+// What such a holder kept is in no record of its own, and an object that is
+// being deleted has no event left to come: its batch would never run again.
 func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata) {
 	// In one Add: a worker may take what one queues before the next, and a
 	// batch of its own would read the names in both records again.
@@ -288,9 +292,18 @@ func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata) {
 			ids = append(ids, ReadRecord(m).IDs...)
 		}
 	}
+	if h.usesAll(old) && !h.usesAll(cur) {
+		ids = append(ids, fillAll)
+	}
 	if len(ids) > 0 { // with none, an Add is of the whole namespace
 		h.t.s.queue.Add(k, ids...)
 	}
+}
+
+// usesAll reports whether m counts as a user of every object held for its
+// namespace (§6.1): its record can't be parsed, and so names them all.
+func (h holderHandler) usesAll(m *metav1.PartialObjectMetadata) bool {
+	return m != nil && ReadRecord(m).Unparseable && IsUser(m, ID{}, h.t.o.OwnerFinalizers)
 }
 
 // --- the protected informers: one per protected kind, shared (§10.1) ---

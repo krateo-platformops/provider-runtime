@@ -237,7 +237,9 @@ the holder's name. The holder's next acquire that reaches its last A1
 overwrites it with a valid record. One that ends before it doesn't: a `Refs`
 error, a holder in the index namespace, a refused chain (§9). The record then
 stays unparseable, and keeps what it counts as used, as a paused holder's
-record does (§11.3).
+record does (§11.3). Until then it keeps every object held for its namespace;
+when it stops counting as a user of them all, they are all checked again
+(§10.2).
 
 **Annotation, not status.** Every kind has annotations, unstructured
 objects included. Annotations survive backup, restore and GitOps re-applies
@@ -399,6 +401,10 @@ same write that removes its owner finalizer (§8). The exclusion covers
 everything else that can leave a stale record behind: a third party
 removing the owner finalizer, or someone else's finalizer keeping H around.
 It also breaks foreground-deletion cycles (§11.8).
+
+A holder whose record can't be parsed uses every P in question, and stops when
+it is gone, when its record is repaired or removed, or when it is being deleted
+without the owner finalizer. §10.2 queues what it kept: its record can't.
 
 ### 6.2 The two sides
 
@@ -2880,7 +2886,25 @@ Its index maps each recorded ref to holders. The index serves:
 - **R0's fast path**;
 - **mapping holder events to release batches**: a create, an update whose
   record or owner finalizer changed, and a delete map to the protected
-  objects in the old and the new record, and enqueue their (K, N) batch;
+  objects in the old and the new record, and enqueue their (K, N) batch.
+  **A holder that stops being a user of everything** (its record couldn't be
+  parsed, and it is gone, repaired, or deleting without its owner finalizer,
+  §6.1) enqueues the batch of its whole namespace: every object that carries
+  K's finalizer for N, in the caches, and, where they don't cover N, in N by a
+  live list (found in a review of the release's cost, 2026-11-24). What it kept
+  is in no record, and an object already being deleted has no event left to
+  come, so nothing would look at it again before the write loops' next start: a
+  namespace's teardown waited on a holder that was gone.
+  - **Not covered:** a hold for N on an object of another namespace that the
+    caches don't cover (§10.5). Nothing lists it but the write loops' next
+    start, and a holder that names it.
+  - **Its cost.** It is one batch of the namespace, however big the record and
+    however often it changes meanwhile: the queue holds it once. It reads every
+    cached object of every protected kind, with no call; where the caches don't
+    cover N, it lists N's held objects live, once per protected kind. Objects
+    whose users the cache shows cost nothing more; the others are the ones to
+    read. Whoever can edit a holder can cause one for each pair of writes of
+    its record, or for one write and a pass of the holder, which repairs it;
 - **enqueueing holders when a protected object changes** (§9.2), through
   `CredentialUseSource` or `Options.Enqueue`. A label-scoped informer
   delivers an object losing its label as a deletion. That is the signature
