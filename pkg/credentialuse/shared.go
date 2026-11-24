@@ -261,6 +261,9 @@ type hooks struct {
 	// wrapIndex, every tracker's index store.
 	wrapServer func(server) server
 	wrapIndex  func(indexStore) indexStore
+	// released sees, and may change, what a batch's release returned, before
+	// the release loop acts on it.
+	released func(*ReleaseResult)
 }
 
 // NewShared builds the process-wide state. It creates the batch queue before

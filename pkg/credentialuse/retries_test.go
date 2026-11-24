@@ -1309,6 +1309,34 @@ func TestABatchThatFailsAtNothing(t *testing.T) {
 	}
 }
 
+// An error that forgets to say which objects it left undecided loses none of
+// them: the whole batch is retried.
+func TestAnErrorThatNamesNoObjectLosesNone(t *testing.T) {
+	a, b := secretID("out", "a"), secretID("out", "b")
+	for _, stopped := range []bool{false, true} {
+		r, k := outside(t, heldObject(secretGVK, "out", "a", "u1", widgetGK, "out"), heldObject(secretGVK, "out", "b", "u2", widgetGK, "out"))
+		r.failWhile(func(name string) bool { return name == "a" })
+		r.s.hooks.released = func(res *ReleaseResult) { res.Failed = nil }
+		r.track(t, widgetGK)
+		r.run(t)
+		r.drain()
+		ctx, cancel := context.WithCancel(context.Background())
+		if stopped {
+			cancel()
+		}
+		r.s.releaseBatch(ctx, k, []ID{a, b})
+		retry, n := timersOf(r.s.queue, k)
+		queued := r.queued(widgetGK, "out")
+		if !stopped && (!slices.Equal(retry, []ID{a, b}) || n != 1 || queued != nil) {
+			t.Errorf("%v waits for a retry, with %d timers, and %v is queued; want the whole batch to wait", retry, n, queued)
+		}
+		if stopped && (n != 0 || !slices.Equal(queued, []ID{a, b})) {
+			t.Errorf("stopped: %d timers, and %v is queued; want the whole batch queued", n, queued)
+		}
+		cancel()
+	}
+}
+
 // A batch that fails at many objects says how many, and why the first few did.
 func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	ctx := context.Background()

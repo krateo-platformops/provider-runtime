@@ -207,6 +207,9 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		ids = slices.Compact(ids)
 	}
 	res, err := t.proto.release(ctx, k.Namespace, ids)
+	if f := s.hooks.released; f != nil {
+		f(&res)
+	}
 	if err != nil {
 		errs = append(errs, err)
 	}
