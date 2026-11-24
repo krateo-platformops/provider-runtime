@@ -792,10 +792,38 @@ is (c) there too, and anything else is an error for the batch.
 revision 16). If R1's fresh GET returns the very resourceVersion the failed
 patch was built from, nothing changed, so the 422 isn't contention: the
 patch didn't match the state it was built from, which is a defect. The
-releaser doesn't retry it. It logs it, records a Warning event on P
+releaser doesn't retry it in that batch. It logs it, records a Warning event on P
 (`CredentialReleaseRejected`), counts `credentialuse_release_rejected_total`,
 and requeues the batch with backoff. The same holds for Disown's strips and
 the janitor's patch.
+
+**What fails is retried, and only that.** A batch returns the objects it
+couldn't decide, and those alone are requeued with backoff; the rest are done,
+or looked at again at the time they asked for, as at a grace's end. So an
+object that fails for good, as of a kind that isn't served, delays no other.
+**The backoff is the object's**, per (K, N): 1s, doubling to 5 minutes at each
+of its retries that fails, and forgotten when a batch decides it. It has one
+pending retry: failing again before that, in a batch an event queued, neither
+moves nor lengthens it. Objects that fail together, as often, share a timer, so
+failures set no more timers than objects that fail. A time an object asks for
+again, as each batch that finds it in its grace does, has one timer too. A
+namespace's live list (§10.5) that fails for one kind is retried
+so too, as a whole, deciding what it can list again, and doesn't hold up the
+kinds that could be listed. An object that fails stays in memory, and is read
+again every 5 minutes, for as long as it fails: it isn't dropped when no record
+names it any more, since a hold may still be there. That has no bound, a name
+of a kind that can't be mapped included; bounding what a holder's data can put
+there is the release cost's change. R0's keep is a decision as any other, so it
+ends a pending retry: its user's event runs the batch again. Two users have no
+such event yet, and their fixes are their own: one whose record can't be parsed,
+which names nothing to queue when it goes, and a ghost of a kind whose CRD is
+gone, which the cache keeps. The protocol's
+model decides one batch (`RequeueAt` is all it reads of a schedule), and has
+none for what failed, what asked, or the backoff: those are the release loop's,
+tested on the queue by enumeration and on the loop. A time a batch asks for, a
+grace's end or a repaired epoch's recheck, is for the object that asked, each at
+its own time, not for the rest of the batch, and waits for no backoff. The log line of a failed batch has the first few
+errors, and how many more there are.
 
 **The releaser** works on one holder kind K and one namespace N at a time,
 for the set of protected objects pending there (R7). For each pending P:
@@ -2331,6 +2359,7 @@ design exists to prevent. Two more triggers release such objects:
   held objects outside the caches, and enqueues the batch of each of their
   (K, N) finalizers. A failed list is retried with the release loop's
   backoff until it succeeds: a recheck that is skipped can strand a hold.
+  Only what failed is retried: each kind's lists, and each index, alone.
 
 The lists only find what to recheck; R1 to R3 then read and write each
 object as for any batch, so nothing is released earlier than §5 allows.
@@ -2343,7 +2372,7 @@ grant.
 replica (§12). Outside the caches it counts what this process's release
 loop last found kept for users, so only the process that runs the write
 loops reports those, and it forgets them when its write loops stop. It is
-a batch's view: a batch that fails leaves its last count until a retry
+a batch's view: an object a batch fails at keeps its last count until a retry
 succeeds, and an object whose finalizer a third party strips stays counted
 until a batch covers it again. It is counted per object, not per
 (object, N), which is exact while no hold crosses namespaces (cross-namespace
@@ -2751,7 +2780,8 @@ line. The marker label still finds it (§10.6.6).
   kept, logged and counted
   (`credentialuse_index_read_denied_total`) once per object, and never
   retried: no retry can read it before RBAC changes. Any other failed read
-  makes the recheck retry with backoff. A line an operator vouched for
+  makes the recheck retry with backoff, reading again only what failed. A
+  line an operator vouched for
   (§10.6.6) is read like any other: while it can't be read it is skipped,
   neither reported nor retried, and once readable and held its batch is
   enqueued.

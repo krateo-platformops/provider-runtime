@@ -87,18 +87,32 @@ type ReleaseResult struct {
 	// the holder kind at all, or gone: in R1, or in R3's response. In
 	// PerName mode their index lines may be pruned (§10.6.2).
 	Bare []ID
-	// RequeueAt, when set, is when the batch must run again: the end of a
-	// grace, or a restored epoch's recheck. It is absolute, the deadline
-	// itself rather than a duration from some reading of the clock, so the
-	// requeue lands exactly on it (docs/credential-use-model-reduction.md
-	// §10.2). A time already past means at once: it is the batch's now.
+	// Failed are the objects the batch couldn't decide, each for an error it
+	// returns: the caller retries them, and only them, with backoff.
+	Failed []ID
+	// Asked are the objects that must be looked at again, and when each: at the
+	// end of its grace, or for its restored epoch's recheck. Nothing else of
+	// the batch is.
+	Asked []Asked
+	// RequeueAt, when set, is the soonest of Asked's times. They are absolute,
+	// the deadline itself rather than a duration from some reading of the
+	// clock, so the requeue lands exactly on it
+	// (docs/credential-use-model-reduction.md §10.2). A time already past means
+	// at once: it is the batch's now.
 	RequeueAt time.Time
 }
 
-func (r *ReleaseResult) requeueAt(now, at time.Time) {
+// Asked is an object a batch must look at again, and when.
+type Asked struct {
+	ID ID
+	At time.Time
+}
+
+func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
 	if at.Before(now) {
 		at = now
 	}
+	r.Asked = append(r.Asked, Asked{id, at})
 	if r.RequeueAt.IsZero() || at.Before(r.RequeueAt) {
 		r.RequeueAt = at
 	}
@@ -113,19 +127,25 @@ type r1Read struct {
 
 // release runs one batch for holder kind K and holder namespace n, over the
 // protected objects pending there (§6.2 R0 to R3). It returns an error when
-// some object couldn't be decided; the caller requeues the batch with
+// some object couldn't be decided: Failed, which the caller requeues with
 // backoff. Every object it decided is in the result either way.
 func (p *protocol) release(ctx context.Context, n string, pending []ID) (ReleaseResult, error) {
 	var res ReleaseResult
 	f, err := FinalizerName(p.holder, n)
 	if err != nil {
+		res.Failed = pending
 		return res, err
 	}
 	prefix, err := FinalizerPrefix(p.holder)
 	if err != nil {
+		res.Failed = pending
 		return res, err
 	}
 	var errs []error
+	fail := func(err error, ids ...ID) {
+		errs = append(errs, err)
+		res.Failed = append(res.Failed, ids...)
+	}
 
 	// R0. The fast path, from the caches.
 	cachedUsers := map[ID]cachedUse{}
@@ -143,7 +163,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 	builtFrom := map[ID]string{} // the resourceVersion each failed release was built from
 	for round := 0; len(todo) > 0; round++ {
 		if round == maxReleaseRounds {
-			errs = append(errs, fmt.Errorf("credential-use: the state of %v kept changing under %d releases", todo, maxReleaseRounds))
+			fail(fmt.Errorf("credential-use: the state of %v kept changing under %d releases", todo, maxReleaseRounds), todo...)
 			break
 		}
 
@@ -158,12 +178,12 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				res.Bare = append(res.Bare, id)
 				continue // gone: nothing to release
 			default:
-				errs = append(errs, fmt.Errorf("credential-use: reading %s: %w", id, err))
+				fail(fmt.Errorf("credential-use: reading %s: %w", id, err), id)
 				continue
 			}
 			if rv, ok := builtFrom[id]; ok && rv == m.ResourceVersion {
 				p.reports.ReleaseRejected(p.holder, id, rv)
-				errs = append(errs, fmt.Errorf("%w: %s at resourceVersion %s", ErrReleaseRejected, id, rv))
+				fail(fmt.Errorf("%w: %s at resourceVersion %s", ErrReleaseRejected, id, rv), id)
 				continue
 			}
 			if !hasFinalizer(m, f) {
@@ -175,10 +195,11 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			}
 			if m.Annotations[f] == "" {
 				if err := p.restoreEpoch(ctx, id, m, n); err != nil {
-					errs = append(errs, err)
+					fail(err, id)
+					continue
 				}
 				now := p.clock.Now()
-				res.requeueAt(now, now.Add(p.epochRequeue()))
+				res.requeueAt(now, now.Add(p.epochRequeue()), id)
 				continue
 			}
 			r := r1Read{id: id, meta: m}
@@ -188,7 +209,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				// Inside the grace, in a namespace last seen live, with users:
 				// nothing to decide until the grace ends (§6.2 R1).
 				if u := cachedUsers[id]; now.Before(r.graceEnd) && len(u.users) > 0 && !p.namespaceDeletingCached(id.Namespace) {
-					res.requeueAt(now, r.graceEnd)
+					res.requeueAt(now, r.graceEnd, id)
 					res.Kept = append(res.Kept, Kept{P: id, Why: KeptGrace, GraceEnd: r.graceEnd, Users: u.users, DeletingUsers: u.deletingUsers})
 					continue
 				}
@@ -225,7 +246,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 					// matter: treat it as deleting.
 					nsDeleting[ns] = true
 				default:
-					errs = append(errs, fmt.Errorf("credential-use: reading namespace %s: %w", ns, err))
+					fail(fmt.Errorf("credential-use: reading namespace %s: %w", ns, err), r.id)
 					continue
 				}
 				nsReadAt[ns] = p.clock.Now()
@@ -237,7 +258,10 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		}
 		holders, err := p.srv.List(ctx, p.holder, n)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("credential-use: listing %s in %s: %w", p.holder, n, err))
+			fail(fmt.Errorf("credential-use: listing %s in %s: %w", p.holder, n, err))
+			for _, r := range decidable {
+				res.Failed = append(res.Failed, r.id)
+			}
 			break
 		}
 
@@ -276,14 +300,14 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				}
 				continue
 			case WaitForGrace:
-				res.requeueAt(now, r.graceEnd)
+				res.requeueAt(now, r.graceEnd, r.id)
 				kept.Why = KeptGrace
 				res.Kept = append(res.Kept, kept)
 				continue
 			}
 			pt, err := ReleasePatch(r.meta, p.holder, n)
 			if err != nil {
-				errs = append(errs, err)
+				fail(err, r.id)
 				continue
 			}
 			out, err := p.srv.Patch(ctx, r.id.GroupKind(), r.id.Namespace, r.id.Name, pt.Type, pt.Data)
@@ -302,7 +326,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			case ClassNotFound:
 				res.Bare = append(res.Bare, r.id) // gone
 			default:
-				errs = append(errs, fmt.Errorf("credential-use: releasing %s: %w", r.id, err))
+				fail(fmt.Errorf("credential-use: releasing %s: %w", r.id, err), r.id)
 			}
 		}
 		todo = next

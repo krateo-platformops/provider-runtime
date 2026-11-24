@@ -34,8 +34,8 @@ type batchKey struct {
 // timer's function while holding a lock of its own, as the fake clock of
 // k8s.io/utils does under Step, and that function takes mu; so calling the
 // clock under mu would order the two locks both ways (D1 of the review of
-// #109). AddAfter therefore registers a timer in two steps, and ShutDown
-// stops the timers after releasing mu.
+// #109). AddAfter and Fail therefore register a timer in two steps, and Settle
+// and ShutDown stop timers after releasing mu.
 type batchQueue struct {
 	clock clock.WithDelayedExecution
 
@@ -45,7 +45,10 @@ type batchQueue struct {
 	ready   []batchKey               // keys waiting to be taken, in order
 	queued  map[batchKey]bool        // in ready
 	working map[batchKey]bool        // taken, not yet done
-	timers  map[*queueTimer]bool     // AddAfter timers neither fired nor stopped
+	timers  map[*queueTimer]bool     // AddAfter's, AddAt's and Fail's, neither fired nor stopped
+	failing map[batchKey]map[ID]*failure
+	asked   map[askedFor]bool                // what AddAt's timers wait for
+	backoff func(failures int) time.Duration // backoffAfter, but for tests
 	stopped bool
 }
 
@@ -56,6 +59,9 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 		queued:  map[batchKey]bool{},
 		working: map[batchKey]bool{},
 		timers:  map[*queueTimer]bool{},
+		failing: map[batchKey]map[ID]*failure{},
+		asked:   map[askedFor]bool{},
+		backoff: backoffAfter,
 	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
@@ -78,6 +84,10 @@ func (q *batchQueue) Add(k batchKey, ids ...ID) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.addLocked(k, ids)
+}
+
+func (q *batchQueue) addLocked(k batchKey, ids []ID) {
 	if q.stopped {
 		return
 	}
@@ -96,11 +106,32 @@ func (q *batchQueue) Add(k batchKey, ids ...ID) {
 	}
 }
 
-// A queueTimer is one AddAfter. It is in the queue's timers from before the
-// clock is asked for a timer until the timer fires or ShutDown takes it; t is
-// set once the clock has returned it.
+// A queueTimer is one AddAfter, or AddAt, or the pending retry of the objects
+// that one Fail gave the same delay. It is in the queue's timers from before the clock
+// is asked for a timer until the timer fires, ShutDown takes it, or everything
+// it would retry is decided; t is set once the clock has returned it.
 type queueTimer struct {
-	t clock.Timer
+	t     clock.Timer
+	ids   []ID
+	retry bool
+	left  int   // a retry's objects that still wait for it
+	at    int64 // an AddAt's time
+}
+
+// askedFor is one object's time that an AddAt's timer waits for.
+type askedFor struct {
+	k  batchKey
+	id ID
+	at int64 // Unix nanoseconds
+}
+
+// A failure is an object that a batch of a key failed at, and none decided
+// since: how often in a row its retries failed, and the one it waits for. It is
+// the name's: one deleted and created again while no batch decided it inherits
+// the count, until one does.
+type failure struct {
+	n     int
+	waits *queueTimer
 }
 
 // AddAfter adds k's batch, covering ids, once d has passed on the queue's
@@ -111,11 +142,10 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 		q.Add(k, ids...)
 		return
 	}
-	ids = slices.Clone(ids)
+	e := &queueTimer{ids: slices.Clone(ids)}
 	if len(ids) == 0 {
-		ids = []ID{fillAll}
+		e.ids = []ID{fillAll}
 	}
-	e := &queueTimer{}
 	q.mu.Lock()
 	if q.stopped {
 		q.mu.Unlock()
@@ -123,15 +153,155 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 	}
 	q.timers[e] = true
 	q.mu.Unlock()
+	q.arm(k, d, e)
+}
 
+// AddAt adds k's batch, covering ids, at the time at, as AddAfter does, but an
+// object's time has one timer: one that a batch asks for again, as every batch
+// that finds an object in its grace does, is there already. Unlike AddAfter,
+// with no ids it does nothing.
+func (q *batchQueue) AddAt(k batchKey, at time.Time, ids ...ID) {
+	if len(ids) == 0 {
+		return
+	}
+	d := at.Sub(q.clock.Now())
+	if d <= 0 {
+		q.Add(k, ids...)
+		return
+	}
+	e := &queueTimer{at: at.UnixNano()}
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return
+	}
+	for _, id := range ids {
+		if f := (askedFor{k, id, e.at}); !q.asked[f] {
+			q.asked[f] = true
+			e.ids = append(e.ids, id)
+		}
+	}
+	if len(e.ids) == 0 {
+		q.mu.Unlock()
+		return
+	}
+	q.timers[e] = true
+	q.mu.Unlock()
+	q.arm(k, d, e)
+}
+
+// Fail schedules the retry of ids, which k's batch failed at: each object on a
+// backoff of its own, from releaseBackoffBase, doubling at each retry that
+// fails, to releaseBackoffMax. So one that fails for good puts off no other.
+// An object that already waits for its retry keeps it, and isn't counted
+// again: what failed was a run an event queued. Objects of one Fail that get
+// the same delay share its timer, so there are never more timers than objects.
+// It returns the soonest delay it gave, or 0 if all of them were waiting. After
+// ShutDown it does nothing. Fail and Settle are for the worker of k's batch,
+// one at a time: a Settle forgets a Fail, so what one decided mustn't race what
+// another failed at.
+func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
+	q.mu.Lock()
+	if q.stopped || len(ids) == 0 {
+		q.mu.Unlock()
+		return 0
+	}
+	m := q.failing[k]
+	if m == nil {
+		m = map[ID]*failure{}
+		q.failing[k] = m
+	}
+	timers := map[time.Duration]*queueTimer{}
+	for _, id := range ids {
+		f := m[id]
+		if f == nil {
+			f = &failure{}
+			m[id] = f
+		}
+		if f.waits != nil {
+			continue
+		}
+		d := q.backoff(f.n)
+		f.n++
+		e := timers[d]
+		if e == nil {
+			e = &queueTimer{retry: true}
+			timers[d] = e
+			q.timers[e] = true
+		}
+		e.ids = append(e.ids, id)
+		e.left++
+		f.waits = e
+	}
+	q.mu.Unlock()
+	for d, e := range timers {
+		if soonest == 0 || d < soonest {
+			soonest = d
+		}
+		q.arm(k, d, e)
+	}
+	return soonest
+}
+
+// Settle records that ids of k's batch were decided: what they waited for, and
+// how often they had failed, is forgotten. R0's keep, from the caches alone,
+// decides too (§6.2): the user it saw is in the way of any release, and its own
+// event runs the batch again when it goes, but for a user whose record can't be
+// parsed, and one of a kind whose CRD is gone (§6.2).
+func (q *batchQueue) Settle(k batchKey, ids ...ID) {
+	var stop []clock.Timer
+	q.mu.Lock()
+	m := q.failing[k]
+	for _, id := range ids {
+		f := m[id]
+		if f == nil {
+			continue
+		}
+		delete(m, id)
+		if e := f.waits; e != nil {
+			if e.left--; e.left == 0 {
+				delete(q.timers, e)
+				if e.t != nil {
+					stop = append(stop, e.t)
+				}
+			}
+		}
+	}
+	if m != nil && len(m) == 0 {
+		delete(q.failing, k)
+	}
+	q.mu.Unlock()
+	for _, t := range stop {
+		t.Stop()
+	}
+}
+
+// arm asks the clock for e's timer, which adds k's batch. e is in timers.
+func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 	t := q.clock.AfterFunc(d, func() {
 		q.mu.Lock()
-		live := q.timers[e]
-		delete(q.timers, e)
-		q.mu.Unlock()
-		if live {
-			q.Add(k, ids...)
+		defer q.mu.Unlock()
+		if !q.timers[e] {
+			return
 		}
+		delete(q.timers, e)
+		ids := e.ids
+		if e.at != 0 {
+			for _, id := range ids {
+				delete(q.asked, askedFor{k, id, e.at})
+			}
+		}
+		if e.retry {
+			ids = nil
+			for _, id := range e.ids {
+				// Not one decided since, which may have failed again.
+				if f := q.failing[k][id]; f != nil && f.waits == e {
+					f.waits = nil
+					ids = append(ids, id)
+				}
+			}
+		}
+		q.addLocked(k, ids)
 	})
 
 	q.mu.Lock()
@@ -141,9 +311,9 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 	}
 	q.mu.Unlock()
 	if !live {
-		// It fired already, or ShutDown took it before it had a timer to
-		// stop: either way it is no longer the queue's, and stopping it is
-		// harmless if it fired.
+		// It fired already, or ShutDown or a Settle took it before it had a
+		// timer to stop: either way it is no longer the queue's, and stopping
+		// it is harmless if it fired.
 		t.Stop()
 	}
 }
@@ -207,6 +377,8 @@ func (q *batchQueue) ShutDown() {
 		}
 	}
 	clear(q.timers)
+	clear(q.failing)
+	clear(q.asked)
 	q.ready, q.pending = nil, map[batchKey]map[ID]bool{}
 	clear(q.queued)
 	q.cond.Broadcast()

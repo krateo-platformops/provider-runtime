@@ -15,6 +15,11 @@ package credentialuse
 //     previous batch was taken;
 //   - a key is never queued twice: Len never exceeds the keys waiting;
 //   - a timer adds nothing before its time, and nothing after ShutDown;
+//   - a failed object is added once its own backoff has passed, which failing
+//     while it waits neither moves nor lengthens, unless it is settled first;
+//     and there are no more timers than objects that wait;
+//   - a time asked for twice for one object has one timer;
+//   - the clock is never called under the queue's lock;
 //   - after ShutDown, Get takes nothing and Add queues nothing.
 //
 // The goroutine races are the D1 probes' (shared_unit_test.go), and the
@@ -23,17 +28,19 @@ package credentialuse
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"k8s.io/utils/clock"
 	testingclock "k8s.io/utils/clock/testing"
 )
 
 // An enumOp is one operation of a scenario.
 type enumOp struct {
-	kind   string // add, after, step, get, done, rescan, shutdown
+	kind   string // add, after, at, fail, settle, step, get, done, rescan, shutdown
 	key    string // A or B
 	id     string
 	worker int
@@ -41,7 +48,7 @@ type enumOp struct {
 
 func (o enumOp) String() string {
 	switch o.kind {
-	case "add", "after":
+	case "add", "after", "at", "fail", "settle":
 		return o.kind + "(" + o.key + o.id + ")"
 	case "get", "done":
 		return fmt.Sprintf("%s%d", o.kind, o.worker)
@@ -67,12 +74,33 @@ type enumState struct {
 	since map[batchKey]map[ID]bool
 	// timers are the AddAfters not yet fired: when, and what.
 	timers []enumTimer
+	// failing are the objects that failed, and weren't settled since.
+	failing map[batchKey]map[ID]*enumFailure
+}
+
+type enumFailure struct {
+	n  int       // how often, while it didn't wait
+	at time.Time // when it is retried, if it waits
+}
+
+// waiting is how many of the failed objects wait for their retry.
+func (s *enumState) waiting() int {
+	n := 0
+	for _, m := range s.failing {
+		for _, f := range m {
+			if !f.at.IsZero() {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 type enumTimer struct {
-	at  time.Time
-	key batchKey
-	id  ID
+	at    time.Time
+	key   batchKey
+	id    ID
+	asked bool // an AddAt's
 }
 
 func enumKey(k string) batchKey { return batchKey{widgetGK, k} }
@@ -82,8 +110,10 @@ const enumDelay = time.Second
 
 func newEnumState(t *testing.T, order string) *enumState {
 	clk := testingclock.NewFakeClock(time.Unix(0, 0))
-	return &enumState{t: t, order: order, clk: clk, q: newBatchQueue(clk), start: clk.Now(),
-		held: map[int]batchKey{}, owed: map[batchKey]map[ID]bool{}, since: map[batchKey]map[ID]bool{}}
+	q := newBatchQueue(nil)
+	q.clock = &unlockedClock{FakeClock: clk, t: t, q: q}
+	return &enumState{t: t, order: order, clk: clk, q: q, start: clk.Now(),
+		held: map[int]batchKey{}, owed: map[batchKey]map[ID]bool{}, since: map[batchKey]map[ID]bool{}, failing: map[batchKey]map[ID]*enumFailure{}}
 }
 
 func (s *enumState) fail(format string, args ...any) {
@@ -118,8 +148,40 @@ func (s *enumState) apply(o enumOp) {
 	case "after":
 		s.q.AddAfter(enumKey(o.key), enumDelay, enumID(o.id))
 		if !s.stopped {
-			s.timers = append(s.timers, enumTimer{s.clk.Now().Add(enumDelay), enumKey(o.key), enumID(o.id)})
+			s.timers = append(s.timers, enumTimer{at: s.clk.Now().Add(enumDelay), key: enumKey(o.key), id: enumID(o.id)})
 		}
+	case "at":
+		// One time, the same for every object: past it, at once.
+		tm := enumTimer{at: s.start.Add(enumDelay), key: enumKey(o.key), id: enumID(o.id), asked: true}
+		s.q.AddAt(tm.key, tm.at, tm.id)
+		switch {
+		case s.stopped:
+		case !s.clk.Now().Before(tm.at):
+			s.added(tm.key, tm.id)
+		case !slices.Contains(s.timers, tm):
+			s.timers = append(s.timers, tm)
+		}
+	case "fail":
+		k, id := enumKey(o.key), enumID(o.id)
+		s.q.Fail(k, id)
+		if s.stopped {
+			break
+		}
+		if s.failing[k] == nil {
+			s.failing[k] = map[ID]*enumFailure{}
+		}
+		f := s.failing[k][id]
+		if f == nil {
+			f = &enumFailure{}
+			s.failing[k][id] = f
+		}
+		if f.at.IsZero() {
+			f.at = s.clk.Now().Add(enumDelay << f.n)
+			f.n++
+		}
+	case "settle":
+		s.q.Settle(enumKey(o.key), enumID(o.id))
+		delete(s.failing[enumKey(o.key)], enumID(o.id))
 	case "step":
 		s.step(enumDelay / 2)
 	case "get":
@@ -140,6 +202,9 @@ func (s *enumState) apply(o enumOp) {
 			if hk == k {
 				s.fail("worker %d took %v, which worker %d holds", o.worker, k, w)
 			}
+		}
+		if len(ids) == 0 {
+			s.fail("the batch of %v has no objects, which asks for the whole namespace", k)
 		}
 		for _, id := range ids {
 			if !s.since[k][id] {
@@ -163,6 +228,7 @@ func (s *enumState) apply(o enumOp) {
 		s.q.ShutDown()
 		s.stopped = true
 		s.timers = nil
+		clear(s.failing)
 	}
 	s.check()
 }
@@ -180,6 +246,14 @@ func (s *enumState) step(d time.Duration) {
 		}
 	}
 	s.timers = left
+	for k, m := range s.failing {
+		for id, f := range m {
+			if !f.at.IsZero() && !now.Before(f.at) {
+				s.added(k, id)
+				f.at = time.Time{}
+			}
+		}
+	}
 }
 
 // check holds after every step.
@@ -203,6 +277,27 @@ func (s *enumState) check() {
 	}
 	if s.q.Len() > waiting {
 		s.fail("Len is %d with %d keys waiting: a key is queued twice", s.q.Len(), waiting)
+	}
+	s.q.mu.Lock()
+	timers, counts := len(s.q.timers), map[ID]int{}
+	for _, m := range s.q.failing {
+		for id, f := range m {
+			counts[id] += f.n
+		}
+	}
+	s.q.mu.Unlock()
+	if want := len(s.timers) + s.waiting(); timers != want {
+		s.fail("%d timers, want %d", timers, want)
+	}
+	for _, m := range s.failing {
+		for id, f := range m {
+			counts[id] -= f.n
+		}
+	}
+	for id, n := range counts {
+		if n != 0 {
+			s.fail("%s has failed %d times more than counted", id, n)
+		}
 	}
 	// Nothing is pending that the model hasn't added: a timer not yet due
 	// has added nothing (the review of #114).
@@ -300,7 +395,7 @@ func ops(spec string) []enumOp {
 	var out []enumOp
 	for _, f := range strings.Fields(spec) {
 		switch {
-		case strings.HasPrefix(f, "add") || strings.HasPrefix(f, "after"):
+		case strings.Contains(f, ":"):
 			kind, rest, _ := strings.Cut(f, ":")
 			out = append(out, enumOp{kind: kind, key: rest[:1], id: rest[1:]})
 		case strings.HasPrefix(f, "get") || strings.HasPrefix(f, "done"):
@@ -328,6 +423,13 @@ func TestBatchQueueEveryOrdering(t *testing.T) {
 		"two workers, one key":        "add:A1 add:A2 get1 get2 done1 done2 add:A1",
 		"work, then more for the key": "add:A1 get1 add:A2 add:B1 done1 get2 done2",
 		"timers":                      "after:A1 add:A2 after:B2 step step get1 done1",
+		"failures":                    "fail:A1 fail:A2 fail:A1 step step settle:A1 get1 fail:B1",
+		"failing again":               "fail:A1 fail:A1 step step step step step step get1 done1",
+		"a failure and a grace":       "fail:A1 after:A2 add:A1 step step get1 done1 settle:A1",
+		"failing while it runs":       "add:A1 get1 fail:A1 add:A1 done1 step step get2 done2",
+		"a time asked for again":      "at:A1 at:A1 at:A2 after:A1 step step get1 done1",
+		"stop with times asked for":   "at:A1 at:A1 fail:A1 step get1 shutdown done1 at:A2",
+		"stop with failures":          "fail:A1 fail:A2 step settle:A1 get1 shutdown done1 fail:A3",
 		"the rescan":                  "rescan add:A2 after:B1 step get1 get2 done1 done2",
 		"stop":                        "add:A1 after:B2 get1 step shutdown done1 add:A2",
 		"stop with both held":         "add:A1 add:B2 get1 get2 after:A2 shutdown done1 done2",
@@ -351,4 +453,40 @@ func TestBatchQueueEveryOrdering(t *testing.T) {
 		})
 	}
 	t.Logf("%d orders in all", total)
+}
+
+// unlockedClock fails t at once when it is called under q's lock, which stays
+// held: nothing may touch q after that. Only for tests of one goroutine, the
+// test's own: another may hold the lock rightly.
+type unlockedClock struct {
+	*testingclock.FakeClock
+	t *testing.T
+	q *batchQueue
+}
+
+func (c *unlockedClock) check(what string) {
+	if !c.q.mu.TryLock() {
+		c.t.Fatalf("%s was called under the queue's lock", what)
+	}
+	c.q.mu.Unlock()
+}
+
+func (c *unlockedClock) Now() time.Time {
+	c.check("Now")
+	return c.FakeClock.Now()
+}
+
+func (c *unlockedClock) AfterFunc(d time.Duration, f func()) clock.Timer {
+	c.check("AfterFunc")
+	return unlockedTimer{c.FakeClock.AfterFunc(d, f), c}
+}
+
+type unlockedTimer struct {
+	clock.Timer
+	c *unlockedClock
+}
+
+func (t unlockedTimer) Stop() bool {
+	t.c.check("Stop")
+	return t.Timer.Stop()
 }

@@ -1425,17 +1425,18 @@ func (s *Shared) runIndexes(ctx context.Context) {
 // recheckIndex is the write loops' startup recheck from t's index (§10.2,
 // §10.6.5, M1 of the review of revision 16), run at their start and after a
 // Track while they run.
-func (s *Shared) recheckIndex(ctx context.Context, t *Tracker) error {
-	return t.idx.recheck(ctx, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
+func (s *Shared) recheckIndex(ctx context.Context, t *Tracker, done map[ID]bool) error {
+	return t.idx.recheckRest(ctx, done, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
 }
 
-// recheck reads the index live, reads each object it names, and hands
+// recheckRest reads the index live, reads each object it names, and hands
 // enqueue every (object, holder namespace) of a finalizer of the kind it
 // finds, for its release batch; the lines of objects that carry none, or are
 // gone, and that no record names, are pruned under §10.6.2's rule. A missing
 // index is rebuilt first. A read that fails fails the recheck, which the
-// caller retries: a skipped recheck can strand a hold.
-func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) error {
+// caller retries: a skipped recheck can strand a hold. done are the objects a
+// try before this one dealt with, which this one skips, and adds to.
+func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func(id ID, n string)) error {
 	var errs []error
 	cur, err := ix.store.get(ctx)
 	if Classify(err) == ClassNotFound || err == nil && ix.needsRebuild(cur) {
@@ -1455,6 +1456,9 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 	vouched := ix.parseVouched(cur.vouched)
 	var bare []ID
 	for _, id := range ix.ids(cur.lines) {
+		if done[id] {
+			continue
+		}
 		m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 		switch Classify(err) {
 		case ClassNone:
@@ -1468,6 +1472,7 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 				// An operator checked by hand that it carries no finalizer
 				// of the kind: while it can't be read, it is skipped,
 				// neither reported nor retried (§10.6.6).
+				done[id] = true
 				continue
 			}
 			if Classify(err) == ClassRBAC {
@@ -1476,6 +1481,7 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 				// reported once, never retried as an error. Any other 403,
 				// an admission or a policy denial, is retried.
 				ix.denied(id, err)
+				done[id] = true
 				continue
 			}
 			errs = append(errs, fmt.Errorf("reading %s: %w", id, err))
@@ -1488,6 +1494,9 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 				enqueue(id, n)
 			}
 		}
+		if held {
+			done[id] = true
+		}
 		if !held {
 			bare = append(bare, id)
 		} else if vouched[id] {
@@ -1497,6 +1506,10 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 	}
 	if err := ix.prune(ctx, ix.prunable(bare)); err != nil {
 		errs = append(errs, err)
+	} else {
+		for _, id := range bare {
+			done[id] = true
+		}
 	}
 	return errors.Join(errs...)
 }
