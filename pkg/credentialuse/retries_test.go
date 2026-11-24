@@ -806,7 +806,7 @@ func TestAFailedPruneIsRetriedAlone(t *testing.T) {
 	r.run(t)
 	r.drain()
 	st := &unwritable{memStore: &memStore{exists: true, lines: linesOf([]ID{secretID("ns", "s"), secretID("ns", "kept")})}, down: true}
-	tr.idx = testIndex(st, r.s.newServer())
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 	k := batchKey{widgetGK, "ns"}
 	r.s.releaseBatch(context.Background(), k, []ID{secretID("ns", "s"), secretID("ns", "kept")})
 	if retry, _ := timersOf(r.s.queue, k); !slices.Equal(retry, []ID{secretID("ns", "s")}) {
