@@ -201,11 +201,11 @@ func (p *protocol) readTime() time.Duration {
 // rest. Those that shown says are known to carry the finalizer, from how they were
 // queued or the caches, are read first, since they are the likely releases; but
 // the others may be real holds too, as outside the caches, so they have a part in
-// every turn that no number of the former can take. Each sort is in todo's order, that of waiting; first are
-// the first of each, which the turn reads however long its reads take. So every
-// turn decides the one of each sort that has waited longest, or fails it: an
-// object waits for no more turns than objects were queued before it, whatever is
-// queued since, and whichever sort the caches say it is of.
+// every turn that no number of the former can take. Each sort is in todo's order,
+// that of waiting; first are the first of each, which the turn reads however long
+// its reads take. So every turn decides the one of each sort that has waited
+// longest, or fails it: an object waits for no more turns than objects were queued
+// before it, whatever is queued since, and whichever sort the caches say it is of.
 func turnOf(todo []ID, shown func(ID) bool) (now, rest []ID, first map[ID]bool) {
 	var carry, others []ID
 	for _, id := range todo {
@@ -236,9 +236,10 @@ type r1Read struct {
 // release runs one batch for holder kind K and holder namespace n, over the
 // protected objects pending there (§6.2 R0 to R3), in the order they have waited.
 // R0 covers them all, and what it leaves is bounded (turnOf): the rest, and what
-// the end of the turn's time, or of ctx, left unread, is Rest. It returns an error when some object
-// couldn't be decided: Failed, which the caller requeues with backoff. Every
-// object it decided is in the result either way, and none of the rest is.
+// the end of the turn's time, or of ctx, left unread, is Rest. It returns an error
+// when some object couldn't be decided: Failed, which the caller requeues with
+// backoff. Every object it decided is in the result either way, and none of the
+// rest is.
 func (p *protocol) release(ctx context.Context, n string, pending []ID) (ReleaseResult, error) {
 	var res ReleaseResult
 	f, err := FinalizerName(p.holder, n)
