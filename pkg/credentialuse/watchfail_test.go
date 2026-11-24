@@ -379,6 +379,61 @@ func TestAStoppedPerNameWatchForgetsItsFailure(t *testing.T) {
 	if got := sink.warned("a per-name informer can't list or watch"); got != 2 {
 		t.Errorf("warned %d times, want once before and once after the recovery: %q", got, sink.warns)
 	}
+	// So does a refusal: the line that comes back is warned of again.
+	n.watchFailed(ctx, nil, b, wb, errTest403)
+	n.follow(nil)
+	if len(n.forbidden) != 0 || len(n.failures.by) != 0 {
+		t.Errorf("with every watch stopped: forbidden %v, failures %v", n.forbidden, n.failures.by)
+	}
+	n.follow([]ID{b})
+	n.watchFailed(ctx, nil, b, n.by[b], errTest403)
+	if got := sink.warned("is forbidden"); got != 2 {
+		t.Errorf("the refusal was warned of %d times, want once for each watch: %q", got, sink.warns)
+	}
+}
+
+// A Track that fails forgets what its informers failed with, so that the next
+// says why it fails too, and not only that it didn't sync in time.
+func TestAFailedTracksFailuresAreLoggedByTheNext(t *testing.T) {
+	r, kl := newFakeRig(t), &klogLines{}
+	r.runLogged(t, kl)
+	r.s.syncTimeout.Store(int64(2 * time.Second))
+	try := func(protected ...ProtectedKind) *sinkLines {
+		t.Helper()
+		sink := &sinkLines{}
+		opts := r.options(gadgetGK, protected...)
+		opts.Logger = sink
+		if _, err := r.s.Track(context.Background(), opts); err == nil {
+			t.Fatal("Track succeeded")
+		}
+		return sink
+	}
+	gadgets := r.breakable("gadgets")
+	gadgets.fail(errTest404)
+	for n := 1; n <= 2; n++ {
+		if sink := try(); sink.warned("the holder informer of", `"its kind isn't served"`) != 1 {
+			t.Errorf("Track %d logged %q, want why its holder informer fails, once", n, sink.warns)
+		}
+	}
+	gadgets.heal()
+	crds := r.breakable("customresourcedefinitions")
+	crds.fail(errTest404)
+	for n := 1; n <= 2; n++ {
+		if sink := try(); sink.warned("the CRD informer of", `"its kind isn't served"`) != 1 {
+			t.Errorf("Track %d logged %q, want why its CRD informer fails, once", n, sink.warns)
+		}
+	}
+	crds.heal()
+	r.breakable("configmaps").fail(errTest404)
+	for n := 1; n <= 2; n++ {
+		try(ProtectedKind{GVK: configMapGVK})
+		if got := kl.logged("Failed to watch", "could not find"); got != n {
+			t.Errorf("after Track %d, a protected informer it started logged %d times, want %d: %q", n, got, n, kl.lines)
+		}
+	}
+	if len(r.s.failures.by) != 0 {
+		t.Errorf("failures that nothing has any more: %v", r.s.failures.by)
+	}
 }
 
 // Each cause is logged once, also when causes alternate, until a recovery.

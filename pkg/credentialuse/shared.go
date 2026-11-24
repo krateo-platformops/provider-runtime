@@ -977,11 +977,15 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 		// Roll back every piece of state this call created (D3 of the
 		// review of #109): the informers it started stop, its handlers
 		// leave the informers it shares, and it gives up its claims; an
-		// informer nobody claims any more goes.
+		// informer nobody claims any more goes. What they failed with is
+		// forgotten, so that the next Track logs why it fails too.
 		t.stopInformers()
 		t.leaveAll()
+		s.failures.recovered(t.informer().what, ID{})
+		s.failures.recovered(t.crdInformer().what, ID{})
 		if t.idx != nil {
 			t.names.stopAll()
+			s.failures.recovered(t.indexInformer().what, ID{})
 		}
 		s.mu.Lock()
 		stops := s.releaseLocked(ps)
@@ -1012,8 +1016,11 @@ func (s *Shared) releaseLocked(ps []*protectedInformer) []context.CancelFunc {
 		if s.protected[p.key()] == p {
 			delete(s.protected, p.key())
 		}
-		if p.stop != nil {
-			stops = append(stops, p.stop)
+		if stop := p.stop; stop != nil {
+			stops = append(stops, func() {
+				stop()
+				s.failures.recovered(p.what(), ID{})
+			})
 		}
 	}
 	return stops

@@ -117,11 +117,13 @@ func (n *perNames) follow(want []ID) {
 	}
 }
 
-// stopLocked stops w, the watch of id, and takes its counts off the
-// gauges. n.mu is held.
+// stopLocked stops w, the watch of id, takes its counts off the gauges, and
+// forgets what it failed with, so that another watch of id logs it again.
+// n.mu is held.
 func (n *perNames) stopLocked(id ID, w *nameWatch) {
 	w.stop()
 	delete(n.by, id)
+	delete(n.forbidden, id)
 	n.failures.recovered(id.GroupKind().String(), id)
 	n.t.dropCounts(w)
 }
