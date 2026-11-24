@@ -136,7 +136,7 @@ func TestAHolderKindThatReturnsNamespaced(t *testing.T) {
 	// The Secrets of a are outside its caches, so R0 decides nothing of them,
 	// and every batch reads the holders live.
 	s, old := crd.track(cu.SharedOptions{Namespaces: []string{cached}})
-	ref := cu.SecretRef(a, "used")
+	ref := cu.SecretRef(a, "a-used")
 	if u, err := old.Users(ctx, ref, ""); err != nil || len(u) != 0 {
 		t.Fatalf("before: Users = %v, %v", u, err)
 	}
@@ -160,17 +160,18 @@ func TestAHolderKindThatReturnsNamespaced(t *testing.T) {
 	}
 
 	// The release loop of the old process: what has a user stays, in the batch
-	// that releases what has none.
-	holdSecret(t, crd.kind().GroupKind(), a, "used")
-	holdSecret(t, crd.kind().GroupKind(), a, "unused")
+	// that releases what has none. The used one is the first of the batch, so a
+	// release of it would be there when the other's is.
+	holdSecret(t, crd.kind().GroupKind(), a, "a-used")
+	holdSecret(t, crd.kind().GroupKind(), a, "b-unused")
 	running(t, s)
 	cutest.Eventually(t, 60*time.Second, func() error {
-		if f := finalizersOf(t, a, "unused"); len(f) != 0 {
+		if f := finalizersOf(t, a, "b-unused"); len(f) != 0 {
 			return fmt.Errorf("the unused Secret's finalizers are %v: %w", f, cutest.ErrNotYet)
 		}
 		return nil
 	})
-	if f := finalizersOf(t, a, "used"); len(f) != 1 {
+	if f := finalizersOf(t, a, "a-used"); len(f) != 1 {
 		t.Fatalf("the used Secret's finalizers are %v, want its hold", f)
 	}
 	// Its user gone, it is released.
@@ -181,7 +182,7 @@ func TestAHolderKindThatReturnsNamespaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	cutest.Eventually(t, 60*time.Second, func() error {
-		if f := finalizersOf(t, a, "used"); len(f) != 0 {
+		if f := finalizersOf(t, a, "a-used"); len(f) != 0 {
 			return fmt.Errorf("the used Secret's finalizers are %v: %w", f, cutest.ErrNotYet)
 		}
 		return nil
