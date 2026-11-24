@@ -37,7 +37,7 @@ MUTANTS = [
     ("a watch-list stream's completion isn't recorded", "listwatch.go",
      [("\t\t\t\tw.lw.completed()\n", "")]),
     ("the bookmark is recorded after it is passed on", "listwatch.go",
-     [("\t\t\tif w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {\n\t\t\t\tw.lw.completed()\n\t\t\t}\n"
+     [("\t\t\tif w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {\n\t\t\t\tw.lw.completed()\n\t\t\t\tw.lw.watches()\n\t\t\t}\n"
        "\t\t\tselect {\n\t\t\tcase w.out <- ev:\n\t\t\tcase <-w.done:\n\t\t\t\treturn\n\t\t\t}\n",
        "\t\t\tselect {\n\t\t\tcase w.out <- ev:\n\t\t\tcase <-w.done:\n\t\t\t\treturn\n\t\t\t}\n"
        "\t\t\tif w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {\n\t\t\t\tw.lw.completed()\n\t\t\t}\n")]),

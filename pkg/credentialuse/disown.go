@@ -72,10 +72,11 @@ func (d disownSet) key() string {
 
 // newCRDInformer builds the informer on the holder kind's own CRD, selected
 // by name (§7.4), caching its metadata with only its credential-use.
-// annotations.
-func newCRDInformer(md metadata.Interface, name string, clk clock.PassiveClock) (cache.SharedIndexInformer, error) {
+// annotations. recovered is its listWatch's.
+func newCRDInformer(md metadata.Interface, name string, clk clock.PassiveClock, recovered func()) (cache.SharedIndexInformer, error) {
 	lw := newListWatch(md, crdGVR, "", "", clk, nil)
 	lw.field = "metadata.name=" + name
+	lw.recovered = recovered
 	inf := cache.NewSharedIndexInformerWithOptions(lw, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
 		ObjectDescription: "credential-use CRD " + name,
 	})

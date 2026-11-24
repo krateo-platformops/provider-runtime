@@ -4827,6 +4827,25 @@ the interface by a type assertion, silently records none of these metrics.
 `CredentialUseDisownUnreadable`, `CredentialUseDisownIndexFull`,
 `CredentialUseIndexLost` and `CredentialUseDisownRestarted` (§7.4).
 
+**An informer that can't list or watch is a warning**, since what it caches
+then goes stale in silence (the CRD and RBAC probes, 2026-11-24). The core
+sets its own watch error handler, to fail a start on a 403, which takes
+client-go's log away, so it logs instead: once per informer and cause, as the
+API server's reason, however often the reflector retries, and again after the
+informer has watched again. A list alone isn't that: with `watch` refused, the
+reflector lists at every retry.
+
+- **The holder, CRD and index informers** log on the tracker's sink.
+- **The per-name informers** (§13 shape 1) log there too: a 403 once per
+  name, since each name needs its own grant; anything else once per protected
+  kind, until all of the kind's watch again, since what one meets they all do.
+- **The Namespace and protected-kind informers** are shared by every tracker
+  and have no sink: they log as client-go does, through klog.
+
+A watch that expired or ended, and what fails as the process stops, are
+routine, and aren't logged. Before an informer's first sync a 403 is the
+start's error, and isn't logged twice.
+
 ## 13. RBAC (U7)
 
 **Cluster-scoped, by name where the names are known.** A ClusterRole plus a

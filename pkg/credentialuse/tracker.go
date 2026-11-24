@@ -271,6 +271,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	// The holder informer's list or relist completion is a floor under
 	// every observation of the record (§6.5 L2).
 	lw := newListWatch(s.c.Metadata, m.Resource, "", "", s.clock, t.listCompleted)
+	lw.recovered = s.watchRecovered(t.informer().what)
 	t.holderLW = lw
 	if wrap := holderListWatchSeam; wrap != nil {
 		t.holderLW = wrap(lw)
@@ -286,7 +287,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		return nil, err
 	}
 	t.crdName = m.Resource.Resource + "." + m.Resource.Group
-	if t.crd, err = newCRDInformer(s.c.Metadata, t.crdName, s.clock); err != nil {
+	if t.crd, err = newCRDInformer(s.c.Metadata, t.crdName, s.clock, s.watchRecovered(t.crdInformer().what)); err != nil {
 		return nil, err
 	}
 	if _, err := t.crd.AddEventHandler(crdHandler{t}); err != nil {
@@ -309,13 +310,13 @@ func (t *Tracker) listCompleted(at time.Time) {
 }
 
 func (t *Tracker) informer() informer {
-	return informer{inf: t.holders, gvr: t.gvr, what: "the holder informer of " + t.gk.String()}
+	return informer{t: t, inf: t.holders, gvr: t.gvr, what: "the holder informer of " + t.gk.String()}
 }
 
 // crdInformer is the informer on t's own CRD, which carries the Disown
 // switch (§7.4); it needs list and watch on that CRD's name alone.
 func (t *Tracker) crdInformer() informer {
-	return informer{inf: t.crd, gvr: crdGVR, name: t.crdName, what: "the CRD informer of " + t.gk.String()}
+	return informer{t: t, inf: t.crd, gvr: crdGVR, name: t.crdName, what: "the CRD informer of " + t.gk.String()}
 }
 
 // join registers t's handler on protected informer p. On an informer that

@@ -1677,7 +1677,7 @@ func (h indexHandler) OnDelete(any) {
 func newIndexInformer(t *Tracker) (cache.SharedIndexInformer, error) {
 	s := t.s
 	lw := newContentListWatch(s.c.Dynamic, configMapGVR, t.idx.namespace, "", s.clock)
-	lw.field = "metadata.name=" + t.idx.name
+	lw.field, lw.recovered = "metadata.name="+t.idx.name, s.watchRecovered(t.indexInformer().what)
 	inf := cache.NewSharedIndexInformerWithOptions(lw, &unstructured.Unstructured{}, cache.SharedIndexInformerOptions{
 		ObjectDescription: "credential-use index " + t.idx.ref(),
 	})
@@ -1690,7 +1690,7 @@ func newIndexInformer(t *Tracker) (cache.SharedIndexInformer, error) {
 // indexInformer is t's informer on its index, for the RBAC check before it
 // starts: list and watch on that one ConfigMap.
 func (t *Tracker) indexInformer() informer {
-	return informer{inf: t.idx.inf, gvr: configMapGVR, ns: t.idx.namespace, name: t.idx.name, what: "the index informer of " + t.gk.String()}
+	return informer{t: t, inf: t.idx.inf, gvr: configMapGVR, ns: t.idx.namespace, name: t.idx.name, what: "the index informer of " + t.gk.String()}
 }
 
 // indexChanged is a new version of t's index: the index's checks, then the
