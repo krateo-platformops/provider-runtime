@@ -1341,8 +1341,43 @@ func TestAnErrorThatNamesNoObjectLosesNone(t *testing.T) {
 	}
 }
 
-// And they back off as objects an error names do: they aren't settled first,
-// which would start their backoff again at every failure.
+// Objects left undecided without an error are retried too, and the log says
+// that nothing says why.
+func TestWhatFailedWithoutAnErrorIsRetried(t *testing.T) {
+	a, b := secretID("out", "a"), secretID("out", "b")
+	for _, stopped := range []bool{false, true} {
+		r, k := outside(t)
+		r.s.hooks.released = func(res *ReleaseResult) { res.Failed = []ID{a} }
+		w := &warnings{}
+		o := r.options(widgetGK)
+		o.Logger = w
+		if _, err := r.s.Track(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+		r.run(t)
+		r.drain()
+		ctx, cancel := context.WithCancel(context.Background())
+		if stopped {
+			cancel()
+		}
+		r.s.releaseBatch(ctx, k, []ID{a, b})
+		retry, n := timersOf(r.s.queue, k)
+		queued := r.queued(widgetGK, "out")
+		w.mu.Lock()
+		said := len(w.got) == 1 && strings.Contains(w.got[0], "undecided")
+		w.mu.Unlock()
+		if !stopped && (!slices.Equal(retry, []ID{a}) || n != 1 || queued != nil || !said) {
+			t.Errorf("%v waits for a retry, with %d timers, %v is queued, said %v; want the one that failed to wait, and said", retry, n, queued, said)
+		}
+		if stopped && (n != 0 || !slices.Equal(queued, []ID{a})) {
+			t.Errorf("stopped: %d timers, and %v is queued; want the one that failed queued", n, queued)
+		}
+		cancel()
+	}
+}
+
+// Objects an error doesn't name back off as those one names do: they aren't
+// settled first, which would start their backoff again at every failure.
 func TestAnErrorThatNamesNoObjectBacksOff(t *testing.T) {
 	ctx := context.Background()
 	for _, named := range []bool{true, false} {
