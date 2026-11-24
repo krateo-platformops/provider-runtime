@@ -2516,7 +2516,7 @@ chain code stays, and stays tested, but nothing in production reaches it:
 
 | The holder | What it sees |
 |---|---|
-| New (no owner finalizer), with no such record | `MustNotConnect`. No call by the core, no Connect, no finalizer. Synced=False/ReconcileError with the error, which names the ref; Ready=NotObserved; backoff |
+| New (no owner finalizer), with no record that names a ref in another namespace | `MustNotConnect`. No call by the core, no Connect, no finalizer. Synced=False/ReconcileError with the error, which names the ref; Ready=NotObserved; backoff |
 | New, with a record that names a ref in another namespace | The same, after the gate, which may write the drop of a withdrawn ref. It isn't established, but it counts as a user (§6.1), so without the gate it would keep that ref held against its owner |
 | Established | `Degraded`. Nothing written but the gate's drop, if any: the rest of its record, its `unheld` list and its holds stay as they are. A release reads that same record, so it takes only what §5 always lets it take. `CredentialUseDegraded` and a log line once (below), and the counter every pass, under the reason `ChainsNotSupported`. It connects as today, and `Resolved` finds nothing |
 | Established and being deleted | The same, then its external Delete runs, and `Forget` removes the record in the write that removes its finalizer, which releases what it held |

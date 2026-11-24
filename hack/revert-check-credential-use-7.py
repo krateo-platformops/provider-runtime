@@ -82,7 +82,7 @@ MUTANTS = [
     ("Enqueue doesn't reach the queue", RC,
      [("\t\t(*q).Add(reconcile.Request{NamespacedName: nn})", "\t\t_ = q")]),
     ("HasSynced is always true", CA,
-     [("\tif !t.holders.HasSynced() || !t.crd.HasSynced() {\n\t\treturn false\n\t}\n\tfor _, reg := range t.regs {\n\t\tif !reg.HasSynced() {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true",
+     [("\tif !t.holders.HasSynced() || !t.crd.HasSynced() {\n\t\treturn false\n\t}\n\tif t.idx != nil && !t.idx.inf.HasSynced() {\n\t\treturn false\n\t}\n\tfor _, reg := range t.regs {\n\t\tif !reg.HasSynced() {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true",
        "\treturn true")]),
     # §8 steps 4 and 7: Forget in the finalizer's write, or on its own.
     ("no Forget on the orphan path", RR,
