@@ -409,6 +409,7 @@ func TestBatchQueueEveryOrdering(t *testing.T) {
 		"failures":                    "fail:A1 fail:A2 fail:A1 step step settle:A1 get1 fail:B1",
 		"failing again":               "fail:A1 fail:A1 step step step step step step get1 done1",
 		"a failure and a grace":       "fail:A1 after:A2 add:A1 step step get1 done1 settle:A1",
+		"failing while it runs":       "add:A1 get1 fail:A1 add:A1 done1 step step get2 done2",
 		"stop with failures":          "fail:A1 fail:A2 step settle:A1 get1 shutdown done1 fail:A3",
 		"the rescan":                  "rescan add:A2 after:B1 step get1 get2 done1 done2",
 		"stop":                        "add:A1 after:B2 get1 step shutdown done1 add:A2",

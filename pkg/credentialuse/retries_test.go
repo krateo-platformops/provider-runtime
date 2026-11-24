@@ -238,6 +238,7 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var workers, adding, stepping sync.WaitGroup
+		var quiet atomic.Bool // the workers fail nothing any more
 		for range 2 {
 			workers.Add(1)
 			go func() {
@@ -257,7 +258,7 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 					time.Sleep(20 * time.Microsecond) // a batch takes time
 					var failed, decided []ID
 					for i, id := range ids {
-						if strings.HasPrefix(id.Name, "shared") && (turn+i)%3 == 0 {
+						if strings.HasPrefix(id.Name, "shared") && (turn+i)%3 == 0 && !quiet.Load() {
 							begin(id)
 							failed = append(failed, id)
 						} else {
@@ -320,14 +321,27 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 			}()
 		}
 		adding.Wait()
-		// The workers fail the shared objects now and then: it ends once none
-		// is owed at some moment, and stays so while nothing is added.
-		deadline := time.Now().Add(30 * time.Second)
-		for len(lost()) > 0 && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
+		// Nothing is added or fails any more, so everything there is drains:
+		// nothing is owed, waits, or is remembered. While the workers still
+		// failed the shared objects, one was owed between two looks.
+		quiet.Store(true)
+		left := func() (out []string) {
+			out = lost()
+			q.mu.Lock()
+			defer q.mu.Unlock()
+			if len(q.timers)+len(q.failing)+len(q.pending)+len(q.working) > 0 {
+				out = append(out, fmt.Sprintf("%d timers, %d keys with failures, %d waiting, %d worked on", len(q.timers), len(q.failing), len(q.pending), len(q.working)))
+			}
+			return out
 		}
-		if l := lost(); len(l) > 0 {
-			t.Errorf("%d lost, the first %v", len(l), l[0])
+		deadline := time.Now().Add(30 * time.Second)
+		l := left()
+		for len(l) > 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+			l = left()
+		}
+		if len(l) > 0 {
+			t.Errorf("%d left after 30s of quiet: %v", len(l), l[:min(len(l), 5)])
 		}
 		invariant()
 
@@ -359,6 +373,137 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 	defer q.mu.Unlock()
 	if len(q.timers) != 0 || len(q.failing) != 0 {
 		t.Errorf("%d timers and %d keys with failures after ShutDown", len(q.timers), len(q.failing))
+	}
+}
+
+// duringClock runs during, once, in the next AfterFunc, before or after the
+// timer is the clock's: what may happen between Fail's two steps.
+type duringClock struct {
+	*testingclock.FakeClock
+	before, after func(d time.Duration)
+}
+
+func (c *duringClock) AfterFunc(d time.Duration, f func()) clock.Timer {
+	once := func(p *func(time.Duration)) {
+		if h := *p; h != nil {
+			*p = nil
+			h(d)
+		}
+	}
+	once(&c.before)
+	t := c.FakeClock.AfterFunc(d, f)
+	once(&c.after)
+	return t
+}
+
+// Every schedule of one thing that happens while Fail is between its two
+// steps: the object is retried once, at its time, or decided; never lost, and
+// nothing is left.
+func TestFailBetweenItsTwoSteps(t *testing.T) {
+	ctx := context.Background()
+	k, id := batchNS, idOf("a")
+	run := func(t *testing.T, q *batchQueue, settle bool) {
+		t.Helper()
+		q.Add(k, id)
+		got, ids, _ := q.Get(ctx)
+		if got != k || !slices.Equal(ids, []ID{id}) {
+			t.Fatalf("Get = %v %v", got, ids)
+		}
+		if settle {
+			q.Settle(k, id)
+		} else if d := q.Fail(k, id); d != 0 {
+			t.Errorf("failing while it waits gave it %s", d)
+		}
+		q.Done(k)
+	}
+	for name, c := range map[string]struct {
+		during func(t *testing.T, q *batchQueue, clk *testingclock.FakeClock, d time.Duration)
+		early  bool // it can only happen once the clock has the timer
+		// When the retry is taken: at once, after the base delay, or never.
+		now, later bool
+		n          int // how often it failed, then
+	}{
+		"nothing":         {during: func(*testing.T, *batchQueue, *testingclock.FakeClock, time.Duration) {}, later: true, n: 1},
+		"the timer fires": {during: func(_ *testing.T, _ *batchQueue, clk *testingclock.FakeClock, d time.Duration) { clk.Step(d) }, early: true, now: true, n: 1},
+		"it is settled":   {during: func(_ *testing.T, q *batchQueue, _ *testingclock.FakeClock, _ time.Duration) { q.Settle(k, id) }},
+		"the timer fires, and it settles": {during: func(_ *testing.T, q *batchQueue, clk *testingclock.FakeClock, d time.Duration) {
+			clk.Step(d)
+			q.Settle(k, id)
+		}, early: true, now: true},
+		"it is settled, and fails again": {during: func(t *testing.T, q *batchQueue, _ *testingclock.FakeClock, _ time.Duration) {
+			q.Settle(k, id)
+			if d := q.Fail(k, id); d != time.Second {
+				t.Errorf("failing after it was decided gave it %s", d)
+			}
+		}, later: true, n: 1},
+		"it fails again": {during: func(t *testing.T, q *batchQueue, _ *testingclock.FakeClock, _ time.Duration) {
+			if d := q.Fail(k, id); d != 0 {
+				t.Errorf("failing while it waits gave it %s", d)
+			}
+		}, later: true, n: 1},
+		"an event's batch decides it":  {during: func(t *testing.T, q *batchQueue, _ *testingclock.FakeClock, _ time.Duration) { run(t, q, true) }},
+		"an event's batch fails at it": {during: func(t *testing.T, q *batchQueue, _ *testingclock.FakeClock, _ time.Duration) { run(t, q, false) }, later: true, n: 1},
+		"the queue is shut down":       {during: func(_ *testing.T, q *batchQueue, _ *testingclock.FakeClock, _ time.Duration) { q.ShutDown() }},
+		"the timer fires, and shut down": {during: func(_ *testing.T, q *batchQueue, clk *testingclock.FakeClock, d time.Duration) {
+			clk.Step(d)
+			q.ShutDown()
+		}, early: true},
+	} {
+		for _, before := range []bool{true, false} {
+			if before && c.early {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s, before %v", name, before), func(t *testing.T) {
+				clk := testingclock.NewFakeClock(time.Now())
+				q := newBatchQueue(nil)
+				dc := &duringClock{FakeClock: clk}
+				q.clock = dc
+				during := func(d time.Duration) { c.during(t, q, clk, d) }
+				if before {
+					dc.before = during
+				} else {
+					dc.after = during
+				}
+				q.Fail(k, id)
+				taken := func() bool {
+					if q.Len() == 0 {
+						return false
+					}
+					got, ids, _ := q.Get(ctx)
+					q.Done(got)
+					return got == k && slices.Equal(ids, []ID{id})
+				}
+				if got := taken(); got != c.now {
+					t.Errorf("taken at once: %v, want %v", got, c.now)
+				}
+				clk.Step(releaseBackoffBase - 1)
+				if taken() {
+					t.Error("taken before its time")
+				}
+				clk.Step(1)
+				if got := taken(); got != c.later {
+					t.Errorf("taken after its delay: %v, want %v", got, c.later)
+				}
+				if got := failuresOf(q, k)[id]; got != c.n {
+					t.Errorf("it failed %d times, want %d", got, c.n)
+				}
+				if ids, n := timersOf(q, k); n != 0 || len(ids) != 0 || clk.HasWaiters() {
+					t.Errorf("%d timers, %v waiting, the clock's waiters %v; want none", n, ids, clk.HasWaiters())
+				}
+				clk.Step(time.Hour)
+				if taken() {
+					t.Error("taken again")
+				}
+			})
+		}
+	}
+}
+
+// A Fail of nothing remembers nothing.
+func TestFailOfNothing(t *testing.T) {
+	q := newBatchQueue(testingclock.NewFakeClock(time.Now()))
+	if d := q.Fail(batchNS); d != 0 || len(q.failing) != 0 || len(q.timers) != 0 {
+		t.Errorf("a Fail of nothing gave %s, %d keys, %d timers", d, len(q.failing), len(q.timers))
 	}
 }
 

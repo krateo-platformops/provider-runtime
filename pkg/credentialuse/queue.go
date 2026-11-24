@@ -156,7 +156,7 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 // another failed at.
 func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
 	q.mu.Lock()
-	if q.stopped {
+	if q.stopped || len(ids) == 0 {
 		q.mu.Unlock()
 		return 0
 	}
