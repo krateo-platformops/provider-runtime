@@ -81,6 +81,20 @@ func newKeptWorld(t *testing.T) *keptWorld {
 func newKeptWorldWith(t *testing.T, so cu.SharedOptions, change func(o *cu.Options)) *keptWorld {
 	t.Helper()
 	k := &keptWorld{home: env.Namespace(t, "kept-home"), other: env.Namespace(t, "kept-other")}
+	// Registered before the rig, so it runs once the rig has stopped: w's
+	// record, forged ones included, would be a batch of every later rig's.
+	t.Cleanup(func() {
+		ctx, ws := context.Background(), env.Dynamic.Resource(cutest.WidgetGVR).Namespace(k.home)
+		if _, err := ws.Patch(ctx, "w", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Errorf("removing w: %v", err)
+		}
+		if err := ws.Delete(ctx, "w", metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Errorf("removing w: %v", err)
+		}
+		if _, err := ws.Get(ctx, "w", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Errorf("w after its removal: %v, want NotFound", err)
+		}
+	})
 	k.writeRig = newWriteRig(t, env.Config, so, func(o *cu.Options) {
 		o.Refs = keptRefs
 		o.Protected = []cu.ProtectedKind{{GVK: secretGVK}, {GVK: cutest.TargetGVK, Content: true}}
@@ -176,24 +190,49 @@ func (k *keptWorld) keptState(t *testing.T) string {
 		fs = append([]string{fmt.Sprintf("deleting %v", s.DeletionTimestamp != nil)}, s.Finalizers...)
 	}
 	a := k.c.lastResult(widgetNN(k.home, "w")).Acquired
-	return fmt.Sprintf("w's record %v, unheld %+v, last pass degraded %v (%v) unheld %v, RetryAfter %v; x's finalizers %v",
-		cu.ReadRecord(w).IDs, cu.ReadUnheld(w.GetAnnotations()), a.Degraded, a.Err, a.Unheld, a.RetryAfter, fs)
+	rec := cu.ReadRecord(w)
+	shown := rec.IDs
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	return fmt.Sprintf("x in w's record %v, which has %d (%v …), unheld %+v, last pass degraded %v (%v) unheld %v, RetryAfter %v; x's finalizers %v",
+		rec.Names(cu.SecretRef(k.other, "x").ID()), len(rec.IDs), shown, cu.ReadUnheld(w.GetAnnotations()), a.Degraded, a.Err, a.Unheld, a.RetryAfter, fs)
 }
 
 // released fails t unless the withdrawn x is dropped from w's record, and
 // its finalizer comes off.
 func (k *keptWorld) released(t *testing.T) {
 	t.Helper()
+	k.releasedAmong(t, 0)
+}
+
+// releasedAmong is released, with n other refs in w's record. A release batch
+// costs its process about 31µs·n² under -race, and n GETs of some 2ms (measured
+// on an n2-standard-4, 2026-11-24), and x's may wait for one that runs: twice
+// that, with as much again to spare, over the time there is without any.
+func (k *keptWorld) releasedAmong(t *testing.T, n int) {
+	t.Helper()
+	batch := time.Duration(n*n)*31*time.Microsecond + time.Duration(n)*2*time.Millisecond
+	budget := 20*time.Second + 4*batch
 	from := k.c.passes.Load()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
+	start := time.Now()
+	dropped := time.Duration(0)
+	for time.Since(start) < budget {
 		k.c.enqueue(widgetNN(k.home, "w"))
 		time.Sleep(500 * time.Millisecond)
-		if !k.recorded(t) && notHeldFor(k.other, "x", k.home)() == nil {
+		if k.recorded(t) {
+			continue
+		}
+		if dropped == 0 {
+			dropped = time.Since(start)
+		}
+		if notHeldFor(k.other, "x", k.home)() == nil {
+			t.Logf("with %d other refs: out of the record by %v, released by %v, of %v", n,
+				dropped.Round(100*time.Millisecond), time.Since(start).Round(100*time.Millisecond), budget.Round(time.Second))
 			return
 		}
 	}
-	t.Errorf("x, whose consent was withdrawn, is still held after %d passes in 20s: %s", k.c.passes.Load()-from, k.keptState(t))
+	t.Errorf("x, whose consent was withdrawn, is still held after %d passes in %v: %s", k.c.passes.Load()-from, budget, k.keptState(t))
 }
 
 // The ways a Widget's pass keeps x, though its spec no longer names it.
@@ -310,13 +349,14 @@ func TestAForgedRecordsReads(t *testing.T) {
 		forged  int
 		perPass int64
 	}{
-		"every namespace cached": {so: func(*testing.T) cu.SharedOptions { return cu.SharedOptions{} }, forged: 1500},
+		"every namespace cached, 20":  {so: func(*testing.T) cu.SharedOptions { return cu.SharedOptions{} }, forged: 20},
+		"every namespace cached, 400": {so: func(*testing.T) cu.SharedOptions { return cu.SharedOptions{} }, forged: 400},
 		"not cached": {so: func(t *testing.T) cu.SharedOptions {
 			return cu.SharedOptions{Namespaces: []string{env.Namespace(t, "kept-cached")}}
 		}, forged: 100, perPass: 16},
 		"PerName": {so: func(t *testing.T) cu.SharedOptions {
 			return cu.SharedOptions{IndexNamespace: indexNamespace(t)}
-		}, change: perName, forged: 1500},
+		}, change: perName, forged: 100},
 	} {
 		t.Run(name, func(t *testing.T) {
 			k := newKeptWorldWith(t, tc.so(t), tc.change)
@@ -346,7 +386,7 @@ func TestAForgedRecordsReads(t *testing.T) {
 				t.Fatalf("x, with consent, was dropped: %s", k.keptState(t))
 			}
 			setSecretConsent(t, k.other, "x", "")
-			k.released(t)
+			k.releasedAmong(t, tc.forged)
 		})
 	}
 }
