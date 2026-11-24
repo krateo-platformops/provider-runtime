@@ -139,6 +139,15 @@ func (t *Tracker) discover(ctx context.Context, out any, path ...string) error {
 	return nil
 }
 
+// releasedGone logs the first object released for want of the kind, once for
+// each time its CRD goes: after R3, which an API server may refuse.
+func (t *Tracker) releasedGone(id ID) {
+	if t.goneLogged.CompareAndSwap(false, true) {
+		t.sinkInfo("credential-use: the holder kind's CRD is gone, and its holders with it: what they held is being released",
+			"kind", t.gk.String(), "crd", t.crdName, "first", id.String())
+	}
+}
+
 // crdAbsent reports whether t's CRD is absent from its informer, which has
 // synced: the kind's lists and watches fail then, so the holder cache shows
 // what it last saw until the CRD returns, holders that are gone among it. It

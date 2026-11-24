@@ -1024,8 +1024,8 @@ func (s *Shared) disownWritten(t *Tracker, rv string) {
 // goes, it queues what the kind still holds (§10.2).
 type crdHandler struct{ t *Tracker }
 
-func (crdHandler) OnAdd(any, bool) {}
-func (h crdHandler) OnDelete(any)  { h.t.s.requeueHeld(h.t) }
+func (h crdHandler) OnAdd(any, bool) { h.t.goneLogged.Store(false) }
+func (h crdHandler) OnDelete(any)    { h.t.s.requeueHeld(h.t) }
 func (h crdHandler) OnUpdate(oldObj, newObj any) {
 	o, ok1 := metadataOf(oldObj)
 	n, ok2 := metadataOf(newObj)

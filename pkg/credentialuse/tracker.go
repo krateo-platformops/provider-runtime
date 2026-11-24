@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,6 +56,10 @@ type Tracker struct {
 	// Under Shared.mu: rechecking, a recheck that t's CRD's deletion started
 	// runs (recheckSoon); recheckAgain, another was asked for meanwhile.
 	rechecking, recheckAgain bool
+
+	// goneLogged: a release for want of the kind has been logged since the
+	// CRD was last seen.
+	goneLogged atomic.Bool
 
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).
@@ -261,6 +266,8 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		disownLive: t.disownForHold,
 		noHolders:  t.noHolders,
 		kindAbsent: t.crdAbsent,
+
+		releasedGone: t.releasedGone,
 	}
 	for _, pk := range o.Protected {
 		if pk.Content {

@@ -93,6 +93,49 @@ func TestReleaseListsWhatThereIs(t *testing.T) {
 	}
 }
 
+// What is released for want of the kind is logged after R3, not when R3 is
+// refused, and once for each time the CRD goes, whatever the objects.
+func TestAReleaseForWantOfTheKindIsLoggedOnce(t *testing.T) {
+	const logged = "the holder kind's CRD is gone"
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "a", "u-a", widgetGK, "ns"), heldObject(secretGVK, "ns", "b", "u-b", widgetGK, "ns"))
+	out, sink := r.breakable("widgets"), &sinkLines{}
+	r.trackLogged(t, sink)
+	r.run(t)
+	out.fail(errTest404)
+	r.removeCRD(t, widgetGK)
+	var refuse atomic.Bool
+	refuse.Store(true)
+	r.md.PrependReactor("patch", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if refuse.Load() {
+			return true, nil, errTest403
+		}
+		return false, nil, nil
+	})
+	r.runWrites(t)
+	eventually(t, "a refused R3", func() bool { return sink.warned("a release batch failed") >= 1 })
+	if n := sink.informed(logged); n != 0 {
+		t.Errorf("a refused R3 was logged as a release %d times", n)
+	}
+	refuse.Store(false)
+	releasedStepping(t, r, "both holds to be released", func() bool {
+		return !r.heldBy(t, widgetGK, "ns", "a") && !r.heldBy(t, widgetGK, "ns", "b")
+	})
+	eventually(t, "the log", func() bool { return sink.informed(logged) >= 1 })
+	r.idle(t, batchKey{widgetGK, "ns"})
+	if n := sink.informed(logged); n != 1 {
+		t.Errorf("logged %d times, want once: %q", n, sink.infos)
+	}
+	// It returns, and goes again.
+	r.restoreCRD(t, widgetGK)
+	tr := r.s.trackers[widgetGK]
+	eventually(t, "the CRD informer to see it back", func() bool { return !tr.crdAbsent() })
+	eventually(t, "the log to be due again", func() bool { return !tr.goneLogged.Load() })
+	must(r.md.Tracker().Create(secretsGVR, heldObject(secretGVK, "ns", "c", "u-c", widgetGK, "ns"), "ns"))
+	r.removeCRD(t, widgetGK)
+	releasedStepping(t, r, "the later hold to be released", func() bool { return !r.heldBy(t, widgetGK, "ns", "c") })
+	eventually(t, "the second log", func() bool { return sink.informed(logged) == 2 })
+}
+
 // crdGets are the GETs of CRDs made through the metadata client, by name.
 func (r *fakeRig) crdGets() []string {
 	var out []string
@@ -312,9 +355,7 @@ func TestAHoldOfAKindThatIsGoneIsReleased(t *testing.T) {
 		r.removeCRD(t, widgetGK)
 		r.runWrites(t)
 		released(t, r)
-		if n := sink.informed("the holder kind's CRD is gone"); n == 0 {
-			t.Error("it doesn't say why it released")
-		}
+		eventually(t, "it to say why it released", func() bool { return sink.informed("the holder kind's CRD is gone") == 1 })
 	})
 	t.Run("the CRD exists, then goes", func(t *testing.T) {
 		r, o, sink := holderless(t, SharedOptions{}, "ns")
