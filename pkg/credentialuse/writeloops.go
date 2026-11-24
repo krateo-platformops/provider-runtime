@@ -222,6 +222,9 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	if f := s.hooks.released; f != nil {
 		f(&res)
 	}
+	if err == nil && len(res.Failed) > 0 {
+		err = errors.New("credential-use: a batch left objects undecided, and no error says why")
+	}
 	if err != nil {
 		fail(err, res.Failed...)
 	}
