@@ -566,6 +566,15 @@ func TestAuditGapRecreate(t *testing.T) {
 		b.follow()
 		b.want(t, "H1-RECREATE")
 	})
+	t.Run("the late one's process had released it before the create too", func(t *testing.T) {
+		b := recreated([]int{1, 2}, true, nil)
+		n := len(b.calls)
+		first, again := b.calls[n-2], b.calls[n-1]
+		again.end = first.end
+		b.calls = append(b.calls, again)
+		b.follow()
+		b.want(t, "UNEXPLAINED-REMOVAL")
+	})
 	t.Run("a DELETE that may have landed, whose client gave up before the create", func(t *testing.T) {
 		c := recreated([]int{1, 2}, true, nil)
 		c.writes = append([]stWrite{{op: "DELETE", obj: auditS, start: c.calls[0].start, end: c.calls[0].start, answer: answerUnknown}}, c.writes...)
@@ -624,12 +633,27 @@ func TestAuditGapRecreateEnd(t *testing.T) {
 		}
 		return b
 	}
+	// Its own delivery bounds it, whatever else there is or isn't.
 	late(nil, time.Millisecond).want(t, "H1-RECREATE")
-	late(nil, time.Second).want(t, "H1-RECREATE-UNBOUNDED")
-	late(nil, 0).want(t, "H1-RECREATE-UNBOUNDED")
+	late(nil, time.Second).want(t, "H1-RECREATE")
+	late(nil, 0).want(t, "H1-RECREATE")
+	// So does a write after it, where its delivery is late.
+	delivered := func(gap time.Duration) *auditRun {
+		b := late(nil, gap)
+		for i := range b.vs {
+			if v := &b.vs[i]; v.gone && v.uid == "u2" {
+				v.at = v.at.Add(2 * time.Second)
+			}
+		}
+		return b
+	}
+	delivered(time.Millisecond).want(t, "H1-RECREATE")
+	delivered(time.Second).want(t, "H1-RECREATE-UNBOUNDED")
+	delivered(0).want(t, "H1-RECREATE-UNBOUNDED")
+	late(func(b *auditRun) { b.wait(time.Second) }, 0).want(t, "H1-RECREATE-UNBOUNDED")
 	// What bounds it has to have been answered within the bound: till then,
 	// its revision may be later.
-	b := late(nil, time.Millisecond)
+	b := delivered(time.Millisecond)
 	b.calls[len(b.calls)-1].end = b.at.Add(time.Second)
 	b.want(t, "H1-RECREATE-UNBOUNDED")
 	// A page after the first is of the first's revision.
@@ -704,6 +728,21 @@ func TestAuditGapLag(t *testing.T) {
 			}
 			b.wait(10 * time.Second)
 		}, nil}, // a relist's tombstone
+		{"a held object, delivered twice by a relist, and no more, long before it went", func(b *auditRun) {
+			deliver(b)
+			w := b.began(auditS)
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+			for range 2 {
+				for _, k := range []string{"Widget", "Target"} {
+					b.events = append(b.events, stEvent{stFeed: stFeed{1, k, "protected"}, uid: "u1", rv: b.rv, at: b.tick()})
+				}
+			}
+			b.wait(2 * time.Second)
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e1") })
+			b.remove(auditS)
+			b.answer(w, answerStatus, "u1")
+			b.wait(10 * time.Second)
+		}, []string{"LAG", "LAG", "LAG", "LAG"}}, // a relist delivers what it finds unchanged again
 		{"a held object", func(b *auditRun) {
 			deliver(b)
 			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
@@ -732,6 +771,19 @@ func TestAuditGapLag(t *testing.T) {
 			b.want(t, c.want...)
 		})
 	}
+
+	// How many of the holders' versions it judged is told: an end covers all
+	// those of the 5s before it.
+	for gone, judged := range map[bool]int{false: 1, true: 0} {
+		b := base()
+		deliver(b)
+		if gone {
+			b.remove(auditH)
+		}
+		b.wait(10 * time.Second)
+		b.stopped = b.at
+		wantCount(t, b.want(t), "holder versions judged for lag", judged)
+	}
 }
 
 // Contexts that end aren't the API server's answers; and a process's own
@@ -745,8 +797,8 @@ func TestAuditGapThirdReview(t *testing.T) {
 		want []string
 	}{
 		{context.Background(), errors.New("connect: connection refused"), nil},
-		{context.Background(), fmt.Errorf("patching: %w", context.Canceled), []string{"ACQUIRE-FAILED"}},
-		{context.Background(), fmt.Errorf("patching: %w", context.DeadlineExceeded), []string{"ACQUIRE-FAILED"}},
+		{ended, fmt.Errorf("patching: %w", context.Canceled), []string{"ACQUIRE-FAILED"}},
+		{context.Background(), fmt.Errorf("dial tcp: %w", context.DeadlineExceeded), nil}, // the net package's own timeouts are that error too
 		{context.Background(), errors.New("client rate limiter Wait returned an error: rate: Wait(n=1) would exceed context deadline"), []string{"ACQUIRE-FAILED"}},
 		{ended, errors.New("connect: operation was canceled"), []string{"ACQUIRE-FAILED"}},
 		{context.Background(), apierrors.NewTimeoutError("context deadline exceeded", 1), nil}, // the API server's 504
@@ -817,6 +869,44 @@ func TestAuditGapKept(t *testing.T) {
 			b.put(canary, "uc", func(v *stVersion) { v.deleting = c.del })
 			b.batch()
 			wantCount(t, b.want(t), countKept, c.want)
+		})
+	}
+
+	// The first sight is the process's: any of its trackers' feeds, or a live
+	// read of a batch's, whichever came first.
+	for name, sight := range map[string]func(b *auditRun){
+		"another tracker's feed": func(b *auditRun) {
+			b.events = append(b.events, stEvent{stFeed: stFeed{2, "Target", "protected"}, uid: "u1", rv: b.rv, at: b.tick()})
+		},
+		"a batch's read": func(b *auditRun) {
+			b.call(stCall{proc: 2, g: "8", op: "get", obj: auditS}, func(c *stCall) { c.from(b.last[auditS]) })
+		},
+		"another process's feed": func(b *auditRun) {
+			b.deliver(1, auditS)
+		},
+		"a pass's read": func(b *auditRun) {
+			b.call(stCall{proc: 2, g: "8", pass: 1, op: "get", obj: auditS}, func(c *stCall) { c.from(b.last[auditS]) })
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newAuditRun(stressPlain)
+			b.put(canary, "uc", func(v *stVersion) { v.spec, v.rec, v.fins = "s", []stObj{auditS}, []string{ownerFinalizer} })
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e1") })
+			b.mark(auditS)
+			sight(b)
+			first := b.at
+			b.wait(20 * time.Millisecond)
+			b.deliver(2, auditS) // the list's own tracker's feed
+			b.put(canary, "uc", func(v *stVersion) { v.deleting = true })
+			b.r1()
+			b.at = first.Add(testGrace)
+			b.namespace()
+			b.list()
+			want := 1
+			if name == "another process's feed" || name == "a pass's read" {
+				want = 0
+			}
+			wantCount(t, b.want(t), countKept, want)
 		})
 	}
 }
