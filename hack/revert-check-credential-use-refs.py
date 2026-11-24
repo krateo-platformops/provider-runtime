@@ -72,7 +72,7 @@ MUTANTS = [
     ("every ref met again is reported", AQ,
      [("\t\tif hold || next {\n", "\t\tif true || hold || next {\n")]),
     ("a hold is reported on every pass", AQ,
-     [("hold && !before.hold && !told.hold &&", "hold && !before.hold &&")]),
+     [("hold && !told.hold &&", "hold &&")]),
     ("a Next is reported on every pass", AQ,
      [("next = next && !told.next", "next = next && (true || !told.next)")]),
     ("a Next's report is a hold's", AQ,
@@ -110,26 +110,11 @@ MUTANTS = [
      [("\t\tif !unfollowed {\n\t\t\tp.conflicts.keep", "\t\tif true || !unfollowed {\n\t\t\tp.conflicts.keep")]),
     ("every pass forgets as it ends", AQ,
      [("\tlevel := refs\n\tfor depth := 1;", "\tdefer metAll()\n\tlevel := refs\n\tfor depth := 1;")]),
-    # Who could hold (§9.1).
-    ("a Disowned kind's hold is reported", CF,
-     [("\tif p.isDisowned(id.GroupKind()) {\n", "\tif false && p.isDisowned(id.GroupKind()) {\n")]),
+    # A Disowned kind's (§9.1).
+    ("a Disowned kind's hold is reported", AQ,
+     [("hold && !told.hold && !p.isDisowned(id.GroupKind())", "hold && !told.hold")]),
     ("a Disowned kind's Next isn't reported", AQ,
      [("next = next && !told.next", "next = next && !told.next && !p.isDisowned(id.GroupKind())")]),
-    ("a hold without consent is reported", CF,
-     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldLive || g == gateHoldCached || g == gateNotHeld\n")]),
-    ("a hold with consent unknown is reported", CF,
-     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldLive || g == gateHoldCached || g == gateUnknown\n")]),
-    ("a hold of a target that is gone is reported", CF,
-     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldLive || g == gateHoldCached || g == gateMissing\n")]),
-    ("a hold with consent isn't reported", CF,
-     [("\treturn g == gateHoldLive || g == gateHoldCached\n", "\treturn g == gateHoldCached\n")]),
-    ("a hold in the holder's namespace needs consent", CF,
-     [("\tif id.Namespace == obj.GetNamespace() {\n", "\tif false && id.Namespace == obj.GetNamespace() {\n")]),
-    ("consent is read for each ref of one object", AQ,
-     [("hold && !before.hold && !told.hold &&", "hold && !told.hold &&")]),
-    ("consent is read once it was reported", AQ,
-     [("hold = hold && !before.hold && !told.hold && p.couldHold(ctx, obj, id)",
-       "hold = hold && !before.hold && p.couldHold(ctx, obj, id) && !told.hold")]),
     # The recorder (§12).
     ("a recorder that is none isn't logged", RC,
      [("\t} else if r.metrics != nil {\n", "\t} else if false && r.metrics != nil {\n")]),
@@ -201,7 +186,7 @@ MUTANTS = [
 
 CONFLICT = "TestRefsConflicting"
 FORGOT = "TestRefsConflictingForgotten"
-COULD = "TestRefsConflictingThatCouldNotBeHeld"
+REPORTED = "TestRefsConflictingReported"
 COVER = "TestAssertCredentialRefsCoverRefsThatConflict"
 RULES = "TestAssertCredentialRefsCoverEnforcesTheRuntimesRules"
 SHAPE = "TestAssertCredentialRefsCoverGivesNextTheRuntimesObject"
@@ -236,15 +221,8 @@ KILLERS = {
     "only a pass whose last level leads nowhere forgets": {C: FORGOT},
     "a pass that couldn't follow a hop forgets": {C: FORGOT},
     "every pass forgets as it ends": {C: FORGOT},
-    "a Disowned kind's hold is reported": {C: COULD},
-    "a Disowned kind's Next isn't reported": {C: COULD},
-    "a hold without consent is reported": {C: COULD},
-    "a hold with consent unknown is reported": {C: COULD},
-    "a hold of a target that is gone is reported": {C: COULD},
-    "a hold with consent isn't reported": {C: COULD},
-    "a hold in the holder's namespace needs consent": {C: CONFLICT},
-    "consent is read for each ref of one object": {C: COULD},
-    "consent is read once it was reported": {C: COULD},
+    "a Disowned kind's hold is reported": {C: REPORTED},
+    "a Disowned kind's Next isn't reported": {C: REPORTED},
     "a recorder that is none isn't logged": {R: "TestCredentialUseMetricsRecorderThatIsNone"},
     "no recorder is logged": {R: "TestCredentialUseMetricsRecorderThatIsNone"},
     "a hold isn't counted": {C: "TestRefsConflictingReport"},

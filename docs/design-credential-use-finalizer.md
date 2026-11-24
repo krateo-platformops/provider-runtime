@@ -1828,11 +1828,9 @@ the holder, the object and what was asked, and counts in
 (§12). **In a provider's tests it is refused**: `AssertCredentialRefsCover`
 fails on a conflict (§11.9).
 
-**A hold that couldn't have been made is not reported**: one of a kind the
-Disown switch covers (§7.4), or in another namespace without its target's
-consent (§11.3). Consent is learned as for a ref that isn't held: from the
-caches, or with live reads on each pass, until the conflict is reported, and
-then no more. An unknown consent, or a target that is gone, reports nothing.
+A hold of a kind the Disown switch covers is not reported, since no ref of it
+is held (§7.4). Any other hold asked for is, even without its target's consent
+(§11.3): learning that would cost reads on every pass, before the A1.
 
 **A conflict is reported once while it lasts**, per holder, object and thing
 asked for. What was reported is forgotten when the holder's refs no longer

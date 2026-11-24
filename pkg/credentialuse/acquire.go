@@ -295,7 +295,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	asked := map[ID]asks{}
 	// met reports whether r's object was met. It reports what r asks for that
 	// the first ref of the object doesn't, once per holder, object and thing
-	// asked for, and a hold only when it could have been made (§9.1).
+	// asked for, and a hold not of a Disowned kind (§9.1). It reads nothing.
 	met := func(r Ref) bool {
 		id := r.ID()
 		first, ok := seen[id]
@@ -305,7 +305,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		hold, next := r.AsksMoreThan(first)
 		before, told := asked[id], p.conflicts.told(obj.GetUID(), id)
 		asked[id] = asks{before.hold || hold, before.next || next}
-		hold = hold && !before.hold && !told.hold && p.couldHold(ctx, obj, id)
+		hold = hold && !told.hold && !p.isDisowned(id.GroupKind())
 		next = next && !told.next
 		if hold || next {
 			p.conflicts.tell(obj.GetUID(), id, asks{hold, next})

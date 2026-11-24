@@ -594,10 +594,10 @@ func TestConflictSet(t *testing.T) {
 	}
 }
 
-// A hold that couldn't have been made isn't reported (§9.1): of a kind the
-// Disown switch covers, or in another namespace without its target's consent.
-// Consent is read until the conflict is reported, once a pass, and not after.
-func TestRefsConflictingThatCouldNotBeHeld(t *testing.T) {
+// A hold of a kind the Disown switch covers isn't reported, since no ref of it
+// is held (§7.4); its Next is. A conflict reads nothing to be reported, in
+// another namespace without consent too (§9.1).
+func TestRefsConflictingReported(t *testing.T) {
 	ctx := context.Background()
 	t.Run("a Disowned kind's hold isn't, and its Next is", func(t *testing.T) {
 		r, fc := chainRig(t)
@@ -624,64 +624,20 @@ func TestRefsConflictingThatCouldNotBeHeld(t *testing.T) {
 		disowned = false
 		pass("hold=false next=true", "hold=true next=false")
 	})
-	t.Run("without consent", func(t *testing.T) {
+	t.Run("in another namespace without consent, with no read", func(t *testing.T) {
 		r, _ := consentRig(t, "")
 		must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{}))
 		g := otherSecret()
 		g.Guaranteed = true
 		h := r.holder(t, "h", false)
-		// pass returns how often the Secret was read.
-		pass := func() int {
-			t.Helper()
-			r.srv.calls = nil
-			if a, err := r.p.acquire(ctx, h, []Ref{g, otherSecret(), otherSecret()}); err != nil || a.MustNotConnect || a.RetryAfter != 0 || len(a.Unheld) != 0 {
+		r.srv.calls = nil
+		for range 2 {
+			if a, err := r.p.acquire(ctx, h, []Ref{g, otherSecret()}); err != nil || a.MustNotConnect || len(a.Unheld) != 0 {
 				t.Fatalf("acquire = %+v, %v", a, err)
 			}
-			n := 0
-			for _, c := range r.srv.calls {
-				if c == "get Secret/s" {
-					n++
-				}
-			}
-			return n
 		}
-		for range 2 {
-			if n := pass(); n != 1 || len(r.rep.conflicting) != 0 {
-				t.Errorf("without consent: %d reads, reported %q; want one, and nothing", n, r.rep.conflicting)
-			}
-		}
-		setConsent(t, r, secretKey("other", "s"), "ns")
-		r.srv.before = func(op, kind, _ string) error {
-			if op == "get" && kind == "Secret" {
-				return errors.New("unreachable")
-			}
-			return nil
-		}
-		if pass(); len(r.rep.conflicting) != 0 {
-			t.Errorf("with consent unreadable: reported %q", r.rep.conflicting)
-		}
-		r.srv.before = nil
-		if n := pass(); n != 1 || !slices.Equal(r.rep.conflicting, []string{"h /Secret/other/s hold=true next=false"}) {
-			t.Errorf("with consent: %d reads, reported %q; want one, and the hold", n, r.rep.conflicting)
-		}
-		if n := pass(); n != 0 || len(r.rep.conflicting) != 1 {
-			t.Errorf("once reported: %d reads, reported %q; want none, and no more", n, r.rep.conflicting)
-		}
-		// Withdrawn, the conflict is still met, so it stays reported.
-		setConsent(t, r, secretKey("other", "s"), "")
-		if n := pass(); n != 0 || len(r.rep.conflicting) != 1 {
-			t.Errorf("withdrawn: %d reads, reported %q", n, r.rep.conflicting)
-		}
-		if held(r, t) {
-			t.Error("held: the first ref wins")
-		}
-	})
-	t.Run("of a target that is gone", func(t *testing.T) {
-		r, _ := consentRig(t, "ns")
-		g := otherSecret()
-		g.Guaranteed = true
-		if _, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{g, otherSecret()}); err != nil || len(r.rep.conflicting) != 0 {
-			t.Errorf("acquire: %v, reported %q; want nothing", err, r.rep.conflicting)
+		if want := []string{"h /Secret/other/s hold=true next=false"}; !slices.Equal(r.rep.conflicting, want) || len(r.srv.calls) != 0 {
+			t.Errorf("reported %q, calls %q; want %q, and none", r.rep.conflicting, r.srv.calls, want)
 		}
 	})
 }

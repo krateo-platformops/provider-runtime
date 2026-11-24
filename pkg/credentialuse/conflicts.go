@@ -1,10 +1,8 @@
 package credentialuse
 
 import (
-	"context"
 	"sync"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -75,19 +73,4 @@ func (c *conflictSet) forget(holder types.UID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.m, holder)
-}
-
-// couldHold reports whether a pass of obj could hold id, as far as the Disown
-// switch (§7.4) and consent (§11.3) go: a ref that asked to is worth a report
-// only then (§9.1). In another namespace it reads the target's consent, unless
-// the caches have it, and an unknown one, or a target that is gone, is no.
-func (p *protocol) couldHold(ctx context.Context, obj metav1.Object, id ID) bool {
-	if p.isDisowned(id.GroupKind()) {
-		return false
-	}
-	if id.Namespace == obj.GetNamespace() {
-		return true
-	}
-	g := p.gate(ctx, obj, id, true)
-	return g == gateHoldLive || g == gateHoldCached
 }
