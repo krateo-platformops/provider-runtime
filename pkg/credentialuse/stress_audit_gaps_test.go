@@ -303,7 +303,11 @@ func TestAuditGapSkip(t *testing.T) {
 			b.deliver(1, auditS)
 			return b
 		}, []string{"HELD-WITHOUT-A2"}},
-		{"it released it itself", func() *auditRun { return released(1, false) }, []string{"HELD-WITHOUT-A2"}},
+		{"it released it itself", func() *auditRun {
+			b := released(1, false)
+			b.wait(time.Second)
+			return b
+		}, []string{"HELD-WITHOUT-A2"}},
 		{"another process released it over a user, and its informer has delivered the loss", func() *auditRun {
 			b := newAuditRun(stressPlain).acquired()
 			b.batch()
@@ -457,7 +461,9 @@ func recreated(procs []int, inFlight bool, f func(b *auditRun)) *auditRun {
 		if f != nil {
 			f(b)
 		}
-		b.remove(auditS)
+		if b.last[auditS].uid == "u2" {
+			b.remove(auditS)
+		}
 	}
 	first := b.call(stCall{proc: procs[0], g: gs[0], op: "r3", obj: auditS, fin: auditFin}, func(c *stCall) {
 		removed(c)
@@ -537,6 +543,158 @@ func TestAuditGapRecreate(t *testing.T) {
 		}
 		b.want(t, "UNEXPLAINED-REMOVAL")
 	})
+}
+
+// The recreate's far end is bound without clocks: what began after the late
+// release had ended, and was answered as of before the removal, shows that
+// the release didn't make it.
+func TestAuditGapRecreateEnd(t *testing.T) {
+	// late is a recreate whose removal comes after the late release ended,
+	// and after f; before, if f is nil. A write follows in gap.
+	late := func(f func(b *auditRun), gap time.Duration) *auditRun {
+		var gone stVersion
+		b := recreated([]int{1, 2}, true, func(b *auditRun) {
+			if f != nil {
+				gone = b.last[auditS]
+				delete(b.last, auditS) // removed below
+			}
+		})
+		if f != nil {
+			b.last[auditS] = gone
+			f(b)
+			b.remove(auditS)
+		}
+		if gap > 0 {
+			b.wait(gap)
+			p := b.pass()
+			b.a1(p)
+			b.end(p)
+		}
+		return b
+	}
+	r := late(nil, time.Millisecond).want(t, "H1-RECREATE")
+	wantCount(t, r, "H1: recreates unbounded", 0)
+	r = late(nil, time.Second).want(t, "H1-RECREATE")
+	wantCount(t, r, "H1: recreates unbounded", 1)
+	r = late(nil, 0).want(t, "H1-RECREATE")
+	wantCount(t, r, "H1: recreates unbounded", 1)
+	late(func(b *auditRun) {
+		p := b.pass()
+		b.a1(p)
+		b.end(p)
+	}, 0).want(t, "UNEXPLAINED-REMOVAL")
+	late(func(b *auditRun) {
+		b.call(stCall{op: "get", obj: auditS}, func(c *stCall) { c.from(b.last[auditS]) })
+	}, 0).want(t, "UNEXPLAINED-REMOVAL")
+	late(func(b *auditRun) { b.listBy(3, "12") }, 0).want(t, "UNEXPLAINED-REMOVAL")
+	late(func(b *auditRun) { b.create(auditS2, "v1") }, 0).want(t, "UNEXPLAINED-REMOVAL")
+}
+
+// Each version of a holder, and of a held object, reaches every process's
+// feed within 5s of the test's watch, or a later one does.
+func TestAuditGapLag(t *testing.T) {
+	base := func() *auditRun {
+		b := newAuditRun(stressPlain)
+		b.synced = map[int]time.Time{1: b.tick()}
+		b.put(auditH, "uh", func(v *stVersion) { v.rec = []stObj{auditS} })
+		return b
+	}
+	deliver := func(b *auditRun) {
+		b.deliver(1, auditH)
+		b.events = append(b.events, stEvent{stFeed: stFeed{1, "Target", "holder"}, uid: "x", rv: 1, at: b.tick()})
+	}
+	for _, c := range []struct {
+		name  string
+		build func(b *auditRun)
+		want  []string
+	}{
+		{"delivered", func(b *auditRun) {
+			deliver(b)
+			b.wait(10 * time.Second)
+		}, nil},
+		{"never", func(b *auditRun) { b.wait(10 * time.Second) }, []string{"LAG"}},
+		{"late", func(b *auditRun) {
+			b.wait(6 * time.Second)
+			deliver(b)
+		}, []string{"LAG"}},
+		{"a later one, in time", func(b *auditRun) {
+			b.put(auditH, "uh", nil)
+			deliver(b)
+			b.wait(10 * time.Second)
+		}, nil},
+		{"the process stopped", func(b *auditRun) { b.wait(4 * time.Second) }, nil},
+		{"a held object", func(b *auditRun) {
+			deliver(b)
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+			b.wait(10 * time.Second)
+		}, []string{"LAG", "LAG"}}, // to each of the two kinds' trackers
+		{"an object that isn't held", func(b *auditRun) {
+			deliver(b)
+			b.put(auditS, "u1", nil)
+			b.wait(10 * time.Second)
+		}, nil},
+		{"a process that syncs after it", func(b *auditRun) {
+			b.synced[1] = b.tick()
+			b.wait(10 * time.Second)
+		}, nil},
+		{"outside the caches, a held object", func(b *auditRun) {
+			b.outside = true
+			deliver(b)
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+			b.wait(10 * time.Second)
+		}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := base()
+			c.build(b)
+			b.stopped = b.at
+			b.want(t, c.want...)
+		})
+	}
+}
+
+// Contexts that end aren't the API server's answers; and a process's own
+// release drops what it wrote once it has returned.
+func TestAuditGapThirdReview(t *testing.T) {
+	for _, c := range []struct {
+		err  string
+		want []string
+	}{
+		{"connect: connection refused", nil},
+		{"context canceled", []string{"ACQUIRE-FAILED"}},
+		{"context deadline exceeded", []string{"ACQUIRE-FAILED"}},
+	} {
+		b := newAuditRun(stressPlain).acquired()
+		p := b.pass()
+		b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, unknown: true, err: c.err})
+		p.degraded, p.acqErr = true, c.err
+		b.end(p)
+		b.want(t, c.want...)
+	}
+
+	// own is a history whose process 1 released its own hold just before a
+	// live pass that skips.
+	own := func(since func(b *auditRun)) *auditRun {
+		b := newAuditRun(stressPlain).acquired()
+		b.mark(auditS)
+		b.wait(testGrace)
+		from := len(b.calls)
+		b.batch()
+		b.r3()
+		for i := from; i < len(b.calls); i++ {
+			b.calls[i].proc = 1
+		}
+		if since != nil {
+			since(b)
+		}
+		b.end(b.pass(), auditS)
+		return b
+	}
+	own(nil).want(t) // the worker may not have got to it
+	own(func(b *auditRun) { b.wait(time.Second) }).want(t, "HELD-WITHOUT-A2")
+	own(func(b *auditRun) {
+		b.call(stCall{proc: 1, g: "9", op: "get", obj: auditS2, err: "not found", notFound: true}, func(*stCall) {})
+	}).want(t, "HELD-WITHOUT-A2") // it has made its next call
 }
 
 // A read that answers less than the watch had delivered before it began isn't

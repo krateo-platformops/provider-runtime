@@ -39,6 +39,10 @@ type auditRun struct {
 	events []stEvent
 	gaps   []string
 	last   map[stObj]stVersion
+	// synced and stopped bound what the feeds must deliver: none without them.
+	synced  map[int]time.Time
+	stopped time.Time
+	outside bool
 }
 
 // newAuditRun begins a history with a live namespace, the Secret s, and the
