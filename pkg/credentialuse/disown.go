@@ -207,6 +207,8 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		items, err := s.liveList(ctx, gk, "", MarkerLabel(t.gk))
 		if err != nil {
 			known = false
+			t.warn("credential-use: Disown can't list a protected kind; its count stays unknown until it can (§7.4)",
+				"kind", t.gk.String(), "protected", gk.String(), "why", shortError(err), "error", err.Error())
 			continue
 		}
 		for i := range items {

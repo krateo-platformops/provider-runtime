@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -158,6 +159,25 @@ func TestPremiseUnservedResource(t *testing.T) {
 	check("the CRD gone")
 }
 
+// multiRig is a PerName rig of Widgets whose spec.secret names a Multi.
+func multiRig(t *testing.T, idx string, logs *warnLog) *writeRig {
+	t.Helper()
+	return perNameRig(t, idx, func(o *cu.Options) {
+		disownOptions(o)
+		if logs != nil {
+			o.Logger = logs
+		}
+		o.Protected = []cu.ProtectedKind{{GVK: multiGVK, Watch: cu.PerName}}
+		o.Refs = func(obj metav1.Object) ([]cu.Ref, error) {
+			name, _, _ := unstructured.NestedString(obj.(*unstructured.Unstructured).Object, "spec", "secret")
+			if name == "" {
+				return nil, nil
+			}
+			return []cu.Ref{{GroupKind: multiGVK.GroupKind(), Namespace: obj.GetNamespace(), Name: name}}, nil
+		}
+	}, nil)
+}
+
 // A protected kind that stops being served while the process runs (PerName):
 // what it holds is unknown, not gone. A new holder doesn't connect; a hold
 // whose holder goes keeps its line; and Disown's count is unknown, never zero,
@@ -172,20 +192,7 @@ func TestAProtectedKindThatStopsBeingServed(t *testing.T) {
 		createMulti(t, ns, n)
 		createSecret(t, ns, n) // what the driver's Connect reads
 	}
-	multi := func(obj metav1.Object) (cu.Ref, bool) {
-		name, _, _ := unstructured.NestedString(obj.(*unstructured.Unstructured).Object, "spec", "secret")
-		return cu.Ref{GroupKind: multiGVK.GroupKind(), Namespace: obj.GetNamespace(), Name: name}, name != ""
-	}
-	r := perNameRig(t, idx, func(o *cu.Options) {
-		disownOptions(o)
-		o.Protected = []cu.ProtectedKind{{GVK: multiGVK, Watch: cu.PerName}}
-		o.Refs = func(obj metav1.Object) ([]cu.Ref, error) {
-			if ref, ok := multi(obj); ok {
-				return []cu.Ref{ref}, nil
-			}
-			return nil, nil
-		}
-	}, nil)
+	r := multiRig(t, idx, nil)
 	f, _ := cu.FinalizerName(widgetGK, ns)
 	carries := func(name string) bool {
 		u, err := env.Dynamic.Resource(multiV1).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
@@ -241,4 +248,62 @@ func TestAProtectedKindThatStopsBeingServed(t *testing.T) {
 		t.Error("Disown settled at zero while m carries the finalizer")
 	}
 	lined(t, idx, line, false)
+}
+
+// The way out when the kind is gone for good (§6.2): its objects are gone with
+// it, so nothing can be read. The log and the event say so, and an operator's
+// vouch settles Disown without a read.
+func TestAVouchGetsDisownOutOfAnUnservedKind(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "unserved-vouch")
+	serve := multiCRD(t)
+	createMulti(t, ns, "m")
+	createSecret(t, ns, "m")
+	logs := &warnLog{}
+	r := multiRig(t, idx, logs)
+	line := cu.ID{Group: cutest.Group, Kind: "Multi", Namespace: ns, Name: "m"}.String()
+	createWidget(t, ns, "w", "m")
+	r.c.enqueue(widgetNN(ns, "w"))
+	cutest.Eventually(t, time.Minute, func() error {
+		w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(ctx, "w", metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(w.GetFinalizers(), ownerFinalizer) {
+			return fmt.Errorf("w isn't established: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	serve(false)
+	multis := env.Dynamic.Resource(multiV1).Namespace(ns)
+	if _, err := multis.Patch(ctx, "m", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := multis.Delete(ctx, "m", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deleteWidget(t, ns, "w")
+	r.c.enqueue(widgetNN(ns, "w"))
+	gone(t, 30*time.Second, "w", widgetGet(ns, "w"))
+	set("all")
+	eventSeen(t, r, cu.EventDisownUnreadable, "isn't served")
+	cutest.Eventually(t, 30*time.Second, func() error {
+		a := widgetCRDAnnotations(t)
+		if a[cu.AnnotationHeldCount] != "unknown" || len(logs.matching("a release batch failed")) == 0 || len(logs.matching("Disown can't read objects")) == 0 {
+			return fmt.Errorf("held-count %q, warnings %v: %w", a[cu.AnnotationHeldCount], logs.matching(""), cutest.ErrNotYet)
+		}
+		return nil
+	})
+	if lines, _ := indexLines(t, idx); !slices.Contains(lines, line) {
+		t.Fatalf("the index is %q, without the line the vouch is for", lines)
+	}
+	editIndex(t, idx, func(cm *corev1.ConfigMap) {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		cm.Annotations[cu.AnnotationVouched] = ns + "/Multi." + cutest.Group + "/m"
+	})
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
 }

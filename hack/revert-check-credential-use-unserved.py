@@ -67,6 +67,12 @@ MUTANTS = [
      [("\t\tif Classify(err) == ClassNotFound {\n\t\t\treturn false, 0, nil\n", "\t\tif c := Classify(err); c == ClassNotFound || c == ClassOther {\n\t\t\treturn false, 0, nil\n")]),
     ("DisownPrefix takes it for gone", DP,
      [("\t\t\tif Classify(err) == ClassNotFound {\n\t\t\t\tcontinue\n", "\t\t\tif c := Classify(err); c == ClassNotFound || c == ClassOther {\n\t\t\t\tcontinue\n")]),
+    ("Disown doesn't say which kind it can't list", DS,
+     [("\t\t\tt.warn(\"credential-use: Disown can't list a protected kind;", "\t\t\tt.sinkInfo(\"credential-use: Disown can't list a protected kind;")]),
+    ("DisownPrefix stops at a kind it can't list", DP,
+     [("\t\t\tif err != nil {\n\t\t\t\terrs = append(errs, err)\n\t\t\t\tcontinue\n", "\t\t\tif err != nil {\n\t\t\t\treturn rep, err\n")]),
+    ("DisownPrefix stops at an object it can't read", DP,
+     [("\t\t\t\terrs = append(errs, fmt.Errorf(\"reading %s: %w\", id, err))\n\t\t\t\tcontinue\n", "\t\t\t\treturn rep, fmt.Errorf(\"reading %s: %w\", id, err)\n")]),
     ("an unheld hop's failed read is remembered", CH,
      [("\tif err != nil && Classify(err) != ClassNotFound {\n", "\tif err != nil && Classify(err) != ClassNotFound && Classify(err) != ClassOther {\n")]),
 ]
@@ -96,6 +102,9 @@ KILLERS = {
     "a strip takes it for gone": {C: DIS},
     "a strip's second read takes it for gone": {C: DIS},
     "DisownPrefix takes it for gone": {C: DIS},
+    "Disown doesn't say which kind it can't list": {C: "TestDisownSaysWhichKindItCantList"},
+    "DisownPrefix stops at a kind it can't list": {C: "TestDisownPrefixStripsAroundAnUnservedKind"},
+    "DisownPrefix stops at an object it can't read": {C: "TestDisownPrefixStripsAroundAnUnservedKind"},
     "an unheld hop's failed read is remembered": {C: "TestAnUnheldHopOfAnUnservedKind"},
 }
 

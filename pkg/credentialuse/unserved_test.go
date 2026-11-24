@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 	metadatafake "k8s.io/client-go/metadata/fake"
 	clienttesting "k8s.io/client-go/testing"
 	testingclock "k8s.io/utils/clock/testing"
+
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 // A 404 for a resource the API server doesn't serve says nothing of the
@@ -245,6 +248,94 @@ func TestDisownAndTheJanitorOfAnUnservedKind(t *testing.T) {
 	_, err := DisownPrefix(ctx, Clients{Metadata: md, Dynamic: dyn, Mapper: mapper}, DisownPrefixOptions{Holder: widgetGK, Names: []Ref{SecretRef("ns", "s")}})
 	if err == nil || errors.Is(err, ErrHolderCRDExists) {
 		t.Errorf("DisownPrefix = %v; want the read's failure", err)
+	}
+}
+
+// DisownPrefix can't read or strip an unserved kind's objects: it strips the
+// others, and reports those it couldn't, on every run while they are named or
+// the kind is listed; without them it succeeds.
+func TestDisownPrefixStripsAroundAnUnservedKind(t *testing.T) {
+	ctx := context.Background()
+	gone := schema.GroupVersionKind{Group: widgetGK.Group, Version: "v1", Kind: "Multi"}
+	run := func(o DisownPrefixOptions, mapped bool) (DisownReport, error) {
+		t.Helper()
+		dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"})
+		scheme := metadatafake.NewTestScheme()
+		if err := metav1.AddMetaToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+		held := heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns")
+		held.ResourceVersion = "1"
+		held.Labels[MarkerLabel(widgetGK)] = "true"
+		md := metadatafake.NewSimpleMetadataClient(scheme, held)
+		md.PrependReactor("*", "multis", func(clienttesting.Action) (bool, runtime.Object, error) { return true, nil, unservedError() })
+		mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Version: "v1"}, {Group: gone.Group, Version: "v1"}})
+		mapper.Add(secretGVK, meta.RESTScopeNamespace)
+		if mapped { // as a mapper that hasn't noticed
+			mapper.Add(gone, meta.RESTScopeNamespace)
+		}
+		o.Holder = widgetGK
+		return DisownPrefix(ctx, Clients{Metadata: md, Dynamic: dyn, Mapper: mapper}, o)
+	}
+	multi := Ref{GroupKind: gone.GroupKind(), Namespace: "ns", Name: "m"}
+	for name, o := range map[string]DisownPrefixOptions{
+		"by name":       {Names: []Ref{SecretRef("ns", "s"), multi}},
+		"by the marker": {Protected: []schema.GroupVersionKind{secretGVK, gone}},
+	} {
+		for _, mapped := range []bool{true, false} {
+			rep, err := run(o, mapped)
+			if err == nil || len(rep.Stripped) != 1 || rep.Stripped[0] != SecretRef("ns", "s").ID() {
+				t.Errorf("%s, mapped %v: %+v, %v; want the Secret stripped, and the unserved kind reported", name, mapped, rep, err)
+			}
+		}
+	}
+	if rep, err := run(DisownPrefixOptions{Names: []Ref{SecretRef("ns", "s")}}, false); err != nil || len(rep.Stripped) != 1 {
+		t.Errorf("without it: %+v, %v", rep, err)
+	}
+}
+
+// warnings records a tracker's warnings.
+type warnings struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (w *warnings) Info(string, ...any)         {}
+func (w *warnings) Debug(string, ...any)        {}
+func (w *warnings) Error(error, string, ...any) {}
+func (w *warnings) Warn(msg string, kv ...any) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.got = append(w.got, fmt.Sprint(msg, kv))
+}
+func (w *warnings) WithValues(...any) logging.Logger { return w }
+func (w *warnings) WithName(string) logging.Logger   { return w }
+
+// Disown of a LabelScoped kind that isn't served: the count is unknown, and
+// each pass says which kind, and why.
+func TestDisownSaysWhichKindItCantList(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	w := &warnings{}
+	o := r.options(widgetGK)
+	o.Logger = w
+	tr, err := r.s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	r.md.PrependReactor("list", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) { return true, nil, unservedError() })
+	r.s.disownPass(ctx, tr, parseDisown("all"))
+	crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+	if err != nil || crd.GetAnnotations()[AnnotationHeldCount] != "unknown" {
+		t.Errorf("held-count %q, %v; want unknown", crd.GetAnnotations()[AnnotationHeldCount], err)
+	}
+	if !slices.ContainsFunc(w.got, func(s string) bool { return strings.Contains(s, "Secret") && strings.Contains(s, "isn't served") }) {
+		t.Errorf("warnings %q; want one naming Secret, and that it isn't served", w.got)
 	}
 }
 

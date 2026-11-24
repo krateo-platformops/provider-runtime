@@ -502,12 +502,35 @@ isn't served:
 | Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object: its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
 | `DisownPrefix` | reports the failure, and goes on with the rest |
 
-**The cost:** a protected kind whose CRD is removed for good while objects of
-it are held, which takes forcing the CRD's cleanup finalizer since the holds
-block it, leaves batches retrying, at most every 5 minutes, and Disown's count
-unknown. The remedy is the vouch of §10.6.6, or restoring the CRD. Taking such
+**The cost, and the way out.** A protected kind whose CRD is removed for good
+while objects of it are held, which takes forcing the CRD's cleanup finalizer
+since the holds block it, is never read as gone: batches for its objects are
+retried, at most every 5 minutes, and Disown's count stays unknown. Taking such
 a 404 for "gone" let Disown settle at zero, and dropped index lines, with
-finalizers left on objects that a later release of the CRD serves again.
+finalizers left on objects that a CRD installed again would serve.
+
+- **What is logged.** Each failed batch, with the delay and the error ("a
+  release batch failed"), and each failed index check; a Degraded pass, once
+  per holder, with its event; and, while Disown is on, on each pass, the
+  objects it can't read (a log line, the event `CredentialUseDisownUnreadable`
+  on the holder CRD, throttled, and the gauge
+  `credentialuse_disown_unreadable`), or, for a LabelScoped kind, the kind it
+  can't list (a log line alone). Disown's say that the kind isn't served; the
+  others carry client-go's error, "the server could not find the requested
+  resource".
+- **Restore the CRD**, at a version the trackers map. Everything goes on by
+  itself. This is the only way that strips a finalizer an object still has,
+  since nothing can write it meanwhile.
+- **Or say it is gone**, once the objects are. *PerName:* vouch for each object
+  (§10.6.6): Disown skips what it can't read of a vouched object, so it
+  settles, and a prune drops the line. *LabelScoped:* no vouch applies.
+- **And take the kind out of the tracker's `Protected`, and restart.** That is
+  what ends the batches, which live in the process's memory, and it settles
+  Disown for either mode. While the kind stays in `Protected` with no CRD, a
+  restarted process refuses to start, since it can't map it (§7.3).
+- **`DisownPrefix`** reads no more than the others: it strips what is served,
+  and returns an error naming what isn't, on every run. Leave the kind out of
+  `Protected` and `Names`, and its lines out of the index it is given.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an
