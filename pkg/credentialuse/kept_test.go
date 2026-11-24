@@ -1024,6 +1024,21 @@ func TestAForgedRecordCantStarveARef(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a hung read of a pass with little time left", func(t *testing.T) {
+		for _, left := range []time.Duration{3 * time.Second, time.Second} {
+			r := world(t)
+			hung := SecretRef("other", "t").ID()
+			forgeRecord(t, r, []ID{hung, otherSecretID()})
+			r.p.srv = hungServer{ctxServer{r.p.srv}, hung}
+			r.p.gateContext = gateDeadline
+			pass, end := context.WithTimeout(ctx, left)
+			_, err := r.p.acquire(pass, r.get(t, widgetKey("ns", "h")), failingNext())
+			end()
+			if err != nil || keptRecorded(t, r) {
+				t.Errorf("with %v left: acquire = %v, s recorded %v; want it dropped", left, err, keptRecorded(t, r))
+			}
+		}
+	})
 	t.Run("a pass goes on after the gate's deadline", func(t *testing.T) {
 		r := world(t)
 		r.p.gateContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -1070,6 +1085,20 @@ func (s ctxServer) Patch(ctx context.Context, gk schema.GroupKind, namespace, na
 		return nil, ctx.Err()
 	}
 	return s.server.Patch(ctx, gk, namespace, name, pt, data)
+}
+
+// hungServer answers no read of hung until its context ends.
+type hungServer struct {
+	server
+	hung ID
+}
+
+func (s hungServer) Get(ctx context.Context, gk schema.GroupKind, namespace, name string) (*metav1.PartialObjectMetadata, error) {
+	if (ID{Group: gk.Group, Kind: gk.Kind, Namespace: namespace, Name: name}) == s.hung {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.server.Get(ctx, gk, namespace, name)
 }
 
 // TestTheBackoffOfForgedRefs: the gate has one backoff a holder, of its own,
@@ -1381,12 +1410,20 @@ func TestCacheLacks(t *testing.T) {
 	if tr.cacheLacks(secretID("in", "absent")) {
 		t.Error("a cache that hasn't synced lacks nothing yet")
 	}
-	// The gate's reads have a deadline of their own.
-	reads, cancel := tr.proto.gateContext(ctx)
-	if d, ok := reads.Deadline(); !ok || time.Until(d) > gateReadTimeout {
-		t.Errorf("the gate's deadline is %v, %v; want %v from now", d, ok, gateReadTimeout)
+	// The gate's reads have a deadline of their own: 5s, or half of what the
+	// pass has left.
+	for left, want := range map[time.Duration]time.Duration{0: 5 * time.Second, time.Minute: 5 * time.Second, 10 * time.Second: 5 * time.Second, 6 * time.Second: 3 * time.Second} {
+		pass, endPass := ctx, context.CancelFunc(func() {})
+		if left > 0 {
+			pass, endPass = context.WithTimeout(ctx, left)
+		}
+		reads, end := tr.proto.gateContext(pass)
+		if d, ok := reads.Deadline(); !ok || time.Until(d) > want || time.Until(d) < want-time.Second {
+			t.Errorf("with %v left, the gate's deadline is in %v (%v), want %v", left, time.Until(d), ok, want)
+		}
+		end()
+		endPass()
 	}
-	cancel()
 	r.run(t)
 	for id, want := range map[ID]bool{
 		secretID("in", "absent"):                        true,
