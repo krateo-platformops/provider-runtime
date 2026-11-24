@@ -166,7 +166,7 @@ func (q *batchQueue) Add(k batchKey, ids ...ID) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.addLocked(k, ids, func(id ID) bool { return id == fillAll })
+	q.addLocked(k, ids, func(ID) bool { return false })
 }
 
 // AddHeld is Add of objects known to carry K's finalizer for N, as a cache, an
@@ -201,7 +201,7 @@ func (q *batchQueue) addLocked(k batchKey, ids []ID, held func(ID) bool) {
 	set, ls := q.pendingLocked(k)
 	for _, id := range ids {
 		p, waits := set[id]
-		known := held(id)
+		known := id == fillAll || held(id)
 		if waits && (p.held || !known) {
 			continue
 		}

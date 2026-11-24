@@ -167,19 +167,23 @@ func TestTheQueuesLines(t *testing.T) {
 	q.Done(k)
 
 	// A namespace's list is of the held line, and so is what it found.
-	q, _ = setup()
+	q, clk := setup()
 	q.Add(k)
 	if got := get(q); !slices.Contains(got, fillAll) || !q.held(k, x) || q.held(k, names[0]) {
 		t.Error("want the namespace's list in the first batch, and what it finds known to be held")
 	}
+	q.Fail(k, fillAll) // its retry too
 	q.PutBack(k, x)
 	q.Done(k)
 	want("what the list found, put back", get(q), append(slices.Clone(names[1024:2048]), x)) // at the list's place, after the names
 	q.Done(k)
+	clk.Step(releaseBackoffBase)
+	want("the list's retry", get(q), append(slices.Clone(names[2048:]), fillAll))
+	q.Done(k)
 
 	// A failure's retry is of the line its object was in; a time asked for, and a
 	// grace's end, are of the held one.
-	q, clk := setup()
+	q, clk = setup()
 	q.AddHeld(k, x)
 	get(q)
 	q.Fail(k, x, names[0])

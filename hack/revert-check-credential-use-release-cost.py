@@ -145,7 +145,7 @@ LIST = [
     ("a time asked for waits with the rest", QU,
      [("\t\t\treturn !e.retry || f != nil && f.held\n", "\t\t\treturn f != nil && f.held\n")], "TestTheQueuesLines"),
     ("a namespace's list waits with the rest", QU,
-     [("\tq.addLocked(k, ids, func(id ID) bool { return id == fillAll })\n", "\tq.addLocked(k, ids, func(id ID) bool { return false })\n")], "TestTheQueuesLines"),
+     [("\t\tknown := id == fillAll || held(id)\n", "\t\tknown := held(id)\n")], "TestTheQueuesLines"),
     ("what a namespace's list finds isn't known", QU,
      [("\treturn p.held || !added && fill\n", "\treturn p.held || false && !added && fill\n")], "TestTheQueuesLines"),
     ("Done remembers what was taken", QU,
