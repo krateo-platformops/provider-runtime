@@ -560,6 +560,7 @@ const (
 	countEstablished    = "establishments checked"
 	countDegraded       = "deletion passes Degraded, on an object being deleted without their finalizer"
 	countAPIErrors      = "acquires stopped by a 429, a 5xx or a lost answer"
+	countHolderVersions = "holder versions judged for lag"
 	countKept           = "batches that met the canary's deleting user after the grace"
 )
 
@@ -575,7 +576,10 @@ type stFloor struct {
 // the runs on file have. So a defect that makes fewer passes lowers them too.
 func (h *stHistory) floors(passes int64) []stFloor {
 	per := func(thousand int64) int { return max(1, int(passes*thousand/1000)) }
-	fs := []stFloor{{countReleases, 3}, {countReleasesLive, 1}, {countReleasesUsers, 1}, {countRemovals, 2}, {countHeldByA2, per(5)}, {countEstablished, per(2)}}
+	fs := []stFloor{{countReleases, 3}, {countReleasesLive, 1}, {countReleasesUsers, 1}, {countRemovals, 2}, {countHeldByA2, per(5)}, {countEstablished, per(2)},
+		// Two canaries' holders live from the start to the end, whose first
+		// versions are judged in each process's feed.
+		{countHolderVersions, 4}}
 	if !h.outside {
 		fs = append(fs, stFloor{countSkips, per(8)}, stFloor{countKept, 1})
 	}
@@ -908,7 +912,8 @@ func (h *stHistory) auditGets(r *stReport) {
 
 // since is something that began after t, and was made at a revision below rv:
 // a write, or a whole consistent list. So what was made at rv came after t.
-// Or "". Nothing else says so: a watch's time is only when it delivered.
+// Or "". A watch's time doesn't say so: it bounds from above when what it
+// delivered was made, and not from below.
 func (h *stHistory) since(t time.Time, rv uint64) string {
 	for _, c := range h.calls {
 		if at, ok := c.revision(); ok && c.ok() && c.start.After(t) && at < rv {
@@ -937,9 +942,9 @@ const feedLag = 5 * time.Second
 //
 // A relist skips what is between, and tells of a removal by the last version
 // the informer had, again. So an incarnation's end covers what came before it:
-// a holder's, whose removals the hook doesn't see, by the watch's word; a
-// protected object's, by a version that its feed delivers a second time, which
-// nothing else does: no informer here resyncs.
+// a holder's, whose removals the hook doesn't see, by the watch's word, for
+// the feedLag before it, so the versions judged are counted; a protected
+// object's, by its tombstone.
 func (h *stHistory) auditFeeds(r *stReport) {
 	trackers := []string{"Widget"}
 	if h.mode == stressPlain {
@@ -969,9 +974,12 @@ func (h *stHistory) auditFeeds(r *stReport) {
 				if !held && gone && !d.at.After(by) {
 					continue
 				}
+				if !held && len(feeds) > 0 {
+					r.counts[countHolderVersions]++
+				}
 				for _, f := range feeds {
 					es := h.eventsOn[stFeedObj{f, o}]
-					if !slices.ContainsFunc(es, func(e stEvent) bool { return !e.at.After(by) && (e.rv >= v.rv || gone && h.tombstone(es, e, v.uid)) }) {
+					if !slices.ContainsFunc(es, func(e stEvent) bool { return !e.at.After(by) && (e.rv >= v.rv || gone && h.tombstone(es, e, d)) }) {
 						r.find(stFinding{class: findLag, text: fmt.Sprintf("p%d's %s %s feed hadn't delivered %s, or a later one, %s after the test's watch; the test itself stood still for %s at most",
 							f.proc, f.kind, f.what, v, feedLag, h.frozen.Round(time.Millisecond)),
 							obj: o, from: v.at.Add(-time.Second), to: v.at.Add(feedLag + time.Second), zero: v.at})
@@ -982,27 +990,34 @@ func (h *stHistory) auditFeeds(r *stReport) {
 	}
 }
 
-// tombstone: e, of a feed's events es on one object, is the second delivery of
-// a version of incarnation uid, and the incarnation's last: its removal, as a
-// relist found it.
-func (h *stHistory) tombstone(es []stEvent, e stEvent, uid string) bool {
+// tombstone: e, of a feed's events es on one object, is removal d's incarnation
+// as a relist found it gone: the second delivery of a version of it, and the
+// last of any, no earlier than d. A relist delivers what it finds unchanged a
+// second time too, but before the removal. The test's watch may have delivered
+// d late: by a second, or by as long as the test stood still.
+func (h *stHistory) tombstone(es []stEvent, e stEvent, d stVersion) bool {
+	if e.uid != d.uid || e.at.Before(d.at.Add(-max(time.Second, h.frozen))) {
+		return false
+	}
 	before := false
 	for _, x := range es {
 		switch {
-		case x.uid != uid:
+		case x.uid != d.uid:
 		case x.at.After(e.at):
 			return false
 		case x.at.Before(e.at) && x.rv == e.rv:
 			before = true
 		}
 	}
-	return before && e.uid == uid
+	return before
 }
 
 // auditKept counts the batches that meet §5's last row as the canary makes it:
 // their list has the canary being deleted, a user of an object that R1 read as
 // being deleted, in a Namespace that R2 read as not, after the grace by when
-// this process first saw the object being deleted.
+// this process first saw the object being deleted. One a run is all there need
+// be: once a batch's list has met the user, the other process's R0 may have it
+// in its cache, and keeps the object without a list.
 func (h *stHistory) auditKept(r *stReport) {
 	for i, l := range h.calls {
 		if l.op != "list" || !l.ok() || l.pass != 0 || l.continued || l.more || !h.holderKind(l.obj.kind) {
@@ -1024,7 +1039,9 @@ func (h *stHistory) auditKept(r *stReport) {
 // metAfterGrace: the last reads of o and of its Namespace that the goroutine of
 // the list at index i made before it, and after its last release, are of an
 // object being deleted, in a Namespace that isn't, and the latter began after
-// the grace's end in that process.
+// the grace's end in that process. Its first sight is the earliest of any of
+// its trackers' deliveries, and of any live read outside a pass, that has the
+// object being deleted: the trackers share it, and may get to it in any order.
 func (h *stHistory) metAfterGrace(i int, o stObj) bool {
 	l := h.calls[i]
 	var r1, ns stCall
@@ -1047,18 +1064,25 @@ func (h *stHistory) metAfterGrace(i int, o stObj) bool {
 	if !r1.deleting || ns.op == "" || ns.deleting {
 		return false
 	}
-	var first time.Time // when the process's informers first delivered it being deleted
+	first := r1.end
 	for f, es := range h.eventsOn {
-		if f.proc != l.proc || f.obj != o || f.what != protectedFeed(o.kind) || f.kind != l.obj.kind {
+		if f.proc != l.proc || f.obj != o || f.what != protectedFeed(o.kind) {
 			continue
 		}
 		for _, e := range es {
-			if v, ok := h.entry(o, e.rv); ok && v.uid == r1.uid && v.deleting && (first.IsZero() || e.at.Before(first)) {
+			if v, ok := h.entry(o, e.rv); ok && v.uid == r1.uid && v.deleting && e.at.Before(first) {
 				first = e.at
 			}
 		}
 	}
-	return !first.IsZero() && !ns.start.Before(first.Add(h.grace))
+	for _, c := range h.callsOn(o, func(c stCall) bool {
+		return c.proc == l.proc && c.pass == 0 && c.op == "get" && c.ok() && c.uid == r1.uid && c.deleting
+	}) {
+		if c.end.Before(first) {
+			first = c.end
+		}
+	}
+	return !ns.start.Before(first.Add(h.grace))
 }
 
 // auditWorkers: one key of the release queue is one worker's at a time, so
@@ -1536,7 +1560,8 @@ func (h *stHistory) auditRemovals(r *stReport) {
 // that may have landed, however early its client gave it up. But an A2 whose
 // answer has its finalizer took nothing; and a release that was, too, answered
 // as the removal of the incarnation before, by a process of its own, is
-// another candidate for the late one. Nothing is asked of what happened to
+// another candidate for the late one. A process that has two of those is a
+// defect of ours, whenever they were. Nothing is asked of what happened to
 // this one meanwhile: it may have been held, or marked.
 func (h *stHistory) recreate(d stVersion) (string, []stCall) {
 	created := h.createBegan(d.stObj, d.uid)
@@ -1557,6 +1582,13 @@ func (h *stHistory) recreate(d stVersion) (string, []stCall) {
 	rs := h.callsOn(d.stObj, func(c stCall) bool { return c.removal() && c.uid == before.uid && c.start.Before(before.at) })
 	if len(rs) < 2 {
 		return fmt.Sprintf("%d releases of the incarnation before it answered", len(rs)), nil
+	}
+	released := map[int]bool{}
+	for _, c := range rs {
+		if released[c.proc] {
+			return fmt.Sprintf("p%d released the incarnation before it twice", c.proc), nil
+		}
+		released[c.proc] = true
 	}
 	same := func(a, b stCall) bool { return a.proc == b.proc && a.g == b.g && a.start.Equal(b.start) }
 	why := "no two processes released the incarnation before it, one of them until after its create began"
@@ -1618,16 +1650,19 @@ func (h *stHistory) outlived(d stVersion, late stCall) string {
 	return ""
 }
 
-// recreateBound is how soon after the late release ended a write, or a list,
-// must have been answered for its revision to bound the removal.
+// recreateBound is how soon after the late release ended the removal must have
+// been delivered, or something later answered, to bound it.
 const recreateBound = 200 * time.Millisecond
 
-// bounded reports whether something that was answered within recreateBound of
-// the late release's end has a later revision than removal d: so d came no
-// later than that. In a quiet moment nothing does, and a removal long after
-// would look the same.
+// bounded reports whether removal d was delivered, or something with a later
+// revision than its answered, within recreateBound of the late release's end:
+// so d came no later than that. If neither was, a removal long after would
+// look the same.
 func (h *stHistory) bounded(d stVersion, late stCall) bool {
 	near := func(t time.Time) bool { return t.Sub(late.end) <= recreateBound }
+	if near(d.at) {
+		return true
+	}
 	for _, c := range h.calls {
 		if rv, ok := c.revision(); ok && c.ok() && near(c.end) && rv > d.rv {
 			return true

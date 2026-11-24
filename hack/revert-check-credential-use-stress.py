@@ -19,9 +19,12 @@ at most, is set aside, and the iterations left go on, whether or not a rate is
 stated for the class: it is no find of a mutant's. One other error line, and it
 isn't. The rates of those are printed beside the baseline's and the stated ones
 (count-credential-use-stress.py), and RAISES-H1 marks a mutant that only raises
-one of them above its stated rate. The baseline must pass REVERT_BASELINE
-iterations (default 3), so set aside, or the run is invalid. Each source file
-is restored after its mutant, and the end checks the tree is as it started.
+one of them above its stated rate: while none is stated it can't appear, and
+such a mutant is GREEN, with its rate printed. What is printed of a rate is the
+count script's rule, under which such an iteration is red. The baseline must
+pass REVERT_BASELINE iterations (default 3), so set aside, or the run is
+invalid. Each source file is restored after its mutant, and the end checks the
+tree is as it started.
 
 Two kinds of mutant: as a defect would be, and, where its window is a few
 milliseconds, the same with 200ms slept inside it. The second says the audit

@@ -6071,8 +6071,8 @@ namespaces of cross-namespace holds, only the canary's is deleted.
 
 An iteration is excused only if every error line of it is an audit's of the API
 server's own H1, two findings at most, of a class whose rate is **stated** for
-its sub-test, with the commit it was measured at. **None is stated now, so an
-iteration with H1 is red.** H1's wait changes the rates: one measured before
+its sub-test, with the commit it was measured at, which nothing compares with
+the one that ran. **None is stated now, so an iteration with H1 is red.** H1's wait changes the rates: one measured before
 it would hide a defect that loses the wait, which brings the old rate back. They
 are to be measured on top of it, every one read by hand, and again when the wait,
 the audits or the machine change. A stated rate is itself a count, and is
@@ -6119,11 +6119,11 @@ began, and whose far end is bounded. So they state nothing.
   landed; and nothing that began after the late release had ended was answered
   as of before the removal. An A2 whose answer has its finalizer may overlap;
   and so may a third process's release that, too, was answered as the removal
-  of the incarnation before: it is another candidate for the late one. Where
-  nothing was answered, within 200ms of the late release's end, as of after the
-  removal, it isn't bounded: it fails the run as `H1-RECREATE-UNBOUNDED`, which
-  nothing excuses. One process's two releases are a defect of ours
-  (`RELEASED-TWICE`).
+  of the incarnation before: it is another candidate for the late one. Where,
+  within 200ms of the late release's end, neither the removal was delivered nor
+  anything answered as of after it, it isn't bounded: it fails the run as
+  `H1-RECREATE-UNBOUNDED`, which nothing excuses. One process's two releases of
+  one incarnation are a defect of ours, whenever they were.
 - **The chained case.** A pass that followed an older version of a Target may
   drop from the record a Secret that the holder now needs (H2, open). The
   stress counts such drops and doesn't fail on them: every release after one
@@ -6138,8 +6138,9 @@ began, and whose far end is bounded. So they state nothing.
 - **What the mutants weren't run on.** With three processes, and chained, the
   same audits run, and what they would miss there isn't measured.
 - **`LAG`'s blind spots:** a run's last 5s; the Namespaces' feed; a handler that
-  returns just after the test's hook; a holder's versions within 5s of its end;
-  and, of a protected object that a relist found gone, its versions before that.
+  returns just after the test's hook; a holder's versions within 5s of its end
+  (how many are judged is counted, with a floor); and, of a protected object that
+  a relist found gone, its versions in the 5s before that.
   A machine that stands still for 5s fails it, and it can't tell.
 - **A stale NotFound** of an incarnation that did go soon after, in a moment when
   nothing else was written between.

@@ -485,12 +485,13 @@ func (w *stressWorld) canaryDeletingUser(ctx context.Context) {
 	if !ok {
 		return
 	}
-	// A slow holder: no pass of it runs, nor does one that had begun. And no
-	// list of the batch begins before its deletion is done, in any process: one
-	// that did would rightly release.
+	// A slow holder: no pass of it begins, and those that had have ended. One
+	// that was about to begin isn't waited for: it reads a live holder, with
+	// the whole grace before it. And no list of the batch begins before its
+	// deletion is done, in any process: one that did would rightly release.
 	w.pause(ns, true)
 	defer w.pause(ns, false)
-	if !w.canaryUntil(ctx, ns, o, findNotHeld, "no pass of its holder runs any more", func() (bool, string) {
+	if !w.canaryUntil(ctx, ns, o, findNotHeld, "its holder's passes must end", func() (bool, string) {
 		return !w.rec.running(stObj{"Widget", ns, canaryHolder}), "one does"
 	}) {
 		return

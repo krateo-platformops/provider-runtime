@@ -10,7 +10,9 @@ added up.
 
 STATED is empty: H1's wait changes the rates, so none is stated before they are
 measured on top of it. Each entry carries the commit it was measured at, and is
-to be measured again when the wait, the audits or the machine change. A stated
+to be measured again when the wait, the audits or the machine change. Nothing
+compares that commit with the one that ran: who states a rate, and who reads a
+run, must. A stated
 rate is compared as what it is, a count of its own: n in this run's iterations
 is over it if, were the two rates the same, n or more of the two runs' total
 would fall in this one with a probability under 2.5% (a binomial). The output

@@ -226,7 +226,8 @@ func (r *stressRecorder) finish(t *testing.T) *stHistory {
 		gaps: r.gaps, synced: r.synced, stopped: r.stopped, frozen: r.frozen, outside: r.outside})
 }
 
-// running reports whether a pass of holder o has begun and hasn't ended.
+// running reports whether a pass of holder o has begun and hasn't ended. One
+// whose controller has looked at paused, and that hasn't begun, isn't seen.
 func (r *stressRecorder) running(o stObj) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -427,12 +428,13 @@ func (r *stressRecorder) add(c stCall) {
 // endedByUs reports whether err, a call's with ctx, isn't the API server's
 // answer, and comes of the call's own context: it has ended, or, by the
 // client's rate limiter, would have. A 504 whose text speaks of a deadline has
-// a code, and is the API server's.
+// a code, and is the API server's; and the net package's own timeouts, which
+// are context.DeadlineExceeded by errors.Is, are a lost answer.
 func endedByUs(ctx context.Context, err error) bool {
 	if codeOf(err) != 0 {
 		return false
 	}
-	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "would exceed context deadline")
+	return ctx.Err() != nil || strings.Contains(err.Error(), "would exceed context deadline")
 }
 
 // answered reports whether err is the API server's refusal: the call did
