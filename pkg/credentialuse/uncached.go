@@ -125,6 +125,9 @@ func (s *Shared) listHolders(ctx context.Context, t *Tracker) ([]metav1.PartialO
 	return listResource(ctx, s.c, t.gk, t.gvr, "", "")
 }
 
+// livePageTime is listPageTime, but for tests.
+var livePageTime = listPageTime
+
 // listLive is liveList on clients cl, for DisownPrefix, which has no Shared.
 func listLive(ctx context.Context, cl Clients, gk schema.GroupKind, namespace, selector string) ([]metav1.PartialObjectMetadata, error) {
 	m, err := cl.Mapper.RESTMapping(gk)
