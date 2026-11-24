@@ -157,11 +157,17 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		res.Failed = append(res.Failed, ids...)
 	}
 
-	// R0. The fast path, from the caches.
+	// R0. The fast path, from the caches: but nothing from the holder cache
+	// of a kind whose CRD is absent, which may show holders that are gone for
+	// as long as it is.
 	cachedUsers := map[ID]cachedUse{}
+	absent := p.kindAbsent != nil && p.kindAbsent()
 	var todo []ID
 	for _, id := range SortedIDs(pending) {
-		u := p.fastKeep(id, n)
+		var u cachedUse
+		if !absent {
+			u = p.fastKeep(id, n)
+		}
 		cachedUsers[id] = u
 		if !u.keep {
 			todo = append(todo, id)

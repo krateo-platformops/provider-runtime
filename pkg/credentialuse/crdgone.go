@@ -52,6 +52,56 @@ func (t *Tracker) noHolders(ctx context.Context, listErr error) error {
 	return nil
 }
 
+// crdAbsent reports whether t's CRD is absent from its informer, which has
+// synced: the kind's lists and watches fail then, so the holder cache shows
+// what it last saw until the CRD returns, holders that are gone among it. It
+// is a hint, as every cache is; whether the CRD is gone, noHolders reads live.
+func (t *Tracker) crdAbsent() bool {
+	if t.crd == nil || !t.crd.HasSynced() {
+		return false
+	}
+	_, ok, err := t.crd.GetStore().GetByKey(t.crdName)
+	return err == nil && !ok
+}
+
+// requeueHeld enqueues the batch of every (K, N) finalizer of t on the
+// protected objects in the caches, as the write loops' start does, when t's
+// CRD goes: the holder informer delivers no more deletions, so nothing else
+// would look at a hold whose holder it missed (§10.2). Outside the caches
+// (§10.5) the recheck does it, if the write loops run; their start does
+// otherwise.
+func (s *Shared) requeueHeld(t *Tracker) {
+	for _, p := range append(s.protectedInformers(), t.names.all()...) {
+		for _, obj := range p.inf.GetStore().List() {
+			m, ok := metadataOf(obj)
+			if !ok {
+				continue
+			}
+			id := ID{Group: p.gk.Group, Kind: p.gk.Kind, Namespace: m.Namespace, Name: m.Name}
+			for n := range holds(t, m) {
+				s.queue.Add(batchKey{t.gk, n}, id)
+			}
+		}
+	}
+	if len(s.uncachedKinds(t)) == 0 {
+		return
+	}
+	// As endTracking does: an Add only under mu, while the write loops run,
+	// so that their end waits for it.
+	s.mu.Lock()
+	ctx := s.writeCtx
+	if ctx == nil || ctx.Err() != nil {
+		s.mu.Unlock()
+		return
+	}
+	s.writeWG.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.writeWG.Done()
+		s.recheckUncached(ctx, []*Tracker{t})
+	}()
+}
+
 // kindUnserved reports whether err, of a list, may mean that the kind isn't
 // served: a 404, or a mapper that doesn't know the kind.
 func kindUnserved(err error) bool {

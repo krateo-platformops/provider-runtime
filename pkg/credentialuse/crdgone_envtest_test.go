@@ -505,6 +505,97 @@ func TestAKindThatReturnsBeforeR3KeepsItsHold(t *testing.T) {
 	}
 }
 
+// The connection is down while a holder goes, its finalizer stripped as an
+// uninstall's cleanup may, and then its CRD. The holder informer never sees
+// it: its every list is a 404, so its cache keeps the ghost. The CRD informer
+// sees the CRD gone, and what the ghost held is released; its index loses the
+// line. The holder informer says once that it fails.
+func TestAGhostsHoldIsReleasedWhenItsCRDGoes(t *testing.T) {
+	cutest.Require(t, env)
+	for _, name := range []string{"LabelScoped", "PerName", "outside the caches"} {
+		t.Run(name, func(t *testing.T) {
+			var g gizmoOptions
+			index := ""
+			ns := env.Namespace(t, "gone-ghost")
+			switch name {
+			case "PerName":
+				index = env.Namespace(t, "gone-ghost-idx")
+				g.so.IndexNamespace = index
+				g.change = perName
+			case "outside the caches":
+				g.so.Namespaces = []string{"default"}
+			}
+			cfg, link := lossyConfig(env.Config)
+			t.Cleanup(func() { link.set(false) })
+			r := newGizmoRig(t, cfg, g)
+			r.startWrites(t)
+			r.create(t, ns, "g", "s")
+			cutest.Eventually(t, time.Minute, func() error { // the ghost-to-be is cached
+				if r.tr.CachedHolders() != 1 {
+					return cutest.ErrNotYet
+				}
+				return nil
+			})
+			link.set(true)
+			freeGizmos(t)
+			deleteGizmoCRD(t)
+			if !gizmoHolds(ns, "s") {
+				t.Fatal("released while the connection was down")
+			}
+			link.set(false)
+			gizmoReleased(t, 3*time.Minute, ns, "s")
+			if n := r.tr.CachedHolders(); n != 1 {
+				t.Errorf("%d holders cached: the ghost left, and the test shows nothing", n)
+			}
+			if index != "" {
+				noGizmoLines(t, index)
+			}
+			informer := "the holder informer of " + gizmoGVK.GroupKind().String() + " can't list or watch"
+			notFound := func() int {
+				n := 0
+				for _, w := range r.logs.matching(informer) {
+					if strings.Contains(w, "its kind isn't served") {
+						n++
+					}
+				}
+				return n
+			}
+			cutest.Eventually(t, time.Minute, func() error {
+				if notFound() == 0 {
+					return fmt.Errorf("the holder informer's failure isn't logged: %w", cutest.ErrNotYet)
+				}
+				return nil
+			})
+			time.Sleep(10 * time.Second) // more retries
+			if n := notFound(); n != 1 {
+				t.Errorf("the holder informer's failure was logged %d times, want once", n)
+			}
+		})
+	}
+}
+
+// While the process is up and connected: the kind goes with its holder, whose
+// controller runs, and returns; its tracker serves it as before.
+func TestAKindThatGoesAndReturns(t *testing.T) {
+	cutest.Require(t, env)
+	ns := env.Namespace(t, "gone-return")
+	r := newGizmoRig(t, env.Config, gizmoOptions{})
+	r.startWrites(t)
+	r.create(t, ns, "g", "s")
+	r.removeKind(t, ns, "g")
+	gizmoReleased(t, time.Minute, ns, "s")
+	createGizmoCRD(t)
+	r.create(t, ns, "g2", "s2")
+	for range 20 {
+		if !gizmoHolds(ns, "s2") {
+			t.Fatal("the returned kind's hold was released")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	r.removeKind(t, ns, "g2")
+	gizmoReleased(t, 2*time.Minute, ns, "s2")
+}
+
 func secretEpoch(ns, name, f string) string {
 	s, err := secrets(env.Metadata, ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {

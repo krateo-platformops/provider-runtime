@@ -1846,8 +1846,12 @@ func (t *Tracker) pointIndex(ctx context.Context) error {
 func (t *Tracker) isPerName(gk schema.GroupKind) bool { return t.idx.covers(gk) }
 
 // recorded reports whether some cached holder's record names id, or can't
-// be parsed, and so may: its line stays (§10.6.2).
+// be parsed, and so may: its line stays (§10.6.2). While the kind's CRD is
+// absent none does: what the holder cache still shows may be gone for good.
 func (t *Tracker) recorded(id ID) bool {
+	if t.crdAbsent() {
+		return false
+	}
 	idx := t.holders.GetIndexer()
 	for _, key := range []string{id.String(), unparseableKey} {
 		if objs, err := idx.ByIndex(refsIndex, key); err == nil && len(objs) > 0 {

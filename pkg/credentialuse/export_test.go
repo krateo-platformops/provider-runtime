@@ -105,6 +105,9 @@ func (t *Tracker) LastList() time.Time {
 	return t.ver.lastList
 }
 
+// CachedHolders is how many holders the holder informer's cache has.
+func (t *Tracker) CachedHolders() int { return len(t.holders.GetStore().ListKeys()) }
+
 // HolderSynced reports whether the holder informer has synced.
 func (t *Tracker) HolderSynced() bool { return t.holders.HasSynced() }
 

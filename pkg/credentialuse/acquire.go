@@ -178,6 +178,11 @@ type protocol struct {
 	// otherwise the batch's error. It must read live, and is called after
 	// R1's reads. nil knows of no kind that is gone.
 	noHolders func(ctx context.Context, listErr error) error
+	// kindAbsent reports whether the holder kind's CRD is absent from its
+	// informer, so that the holder cache may never catch up: R0 and R1's
+	// grace shortcut then take nothing from it (§6.2). A hint: it decides
+	// nothing. nil is never.
+	kindAbsent func() bool
 
 	// lines keeps the index's lines for the PerName kinds (§10.6.2): the
 	// line before each A2, and the live check after it. Nil keeps none.

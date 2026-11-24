@@ -1020,11 +1020,12 @@ func (s *Shared) disownWritten(t *Tracker, rv string) {
 
 // crdHandler enqueues every holder of t's kind when the Disown switch
 // changes (§7.4): a holder's next pass then reads it, and stops holding the
-// kinds it covers, or, once it is removed, holds them again.
+// kinds it covers, or, once it is removed, holds them again. When the CRD
+// goes, it queues what the kind still holds (§10.2).
 type crdHandler struct{ t *Tracker }
 
 func (crdHandler) OnAdd(any, bool) {}
-func (crdHandler) OnDelete(any)    {}
+func (h crdHandler) OnDelete(any)  { h.t.s.requeueHeld(h.t) }
 func (h crdHandler) OnUpdate(oldObj, newObj any) {
 	o, ok1 := metadataOf(oldObj)
 	n, ok2 := metadataOf(newObj)

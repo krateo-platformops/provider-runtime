@@ -256,6 +256,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		disowned:   func(pk schema.GroupKind) bool { return t.disownSwitch().covers(pk) },
 		disownLive: t.disownForHold,
 		noHolders:  t.noHolders,
+		kindAbsent: t.crdAbsent,
 	}
 	for _, pk := range o.Protected {
 		if pk.Content {

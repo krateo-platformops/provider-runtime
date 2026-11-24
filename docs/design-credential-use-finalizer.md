@@ -877,6 +877,15 @@ for the set of protected objects pending there (R7). For each pending P:
   A stale cache can only keep a hold longer, which is always safe. The
   release then runs on the event that shows the user gone.
 
+  That rests on the cache catching up, and while K's CRD is gone it doesn't:
+  the holder informer's every list is a 404, so a holder whose deletion it
+  missed, as one whose connection was down does, stays in the cache as a ghost
+  (the probes of 2026-11-24). So **while K's CRD is absent from its informer,
+  which has synced, R0 settles nothing**, nor does R1's shortcut inside the
+  grace: the batch goes on to R1 and R2, which are live, and the GET of the CRD
+  decides (§6.4). The CRD informer is a hint, as every cache is: a stale one
+  costs live reads, or keeps a hold.
+
   **The teardown cost**, for a namespace with M held Secrets and H holders
   deleting:
   - *before*, every holder event re-ran the whole batch: up to H × (M GETs,
@@ -1367,8 +1376,9 @@ lands between tG and tR breaks R3, and the next round asks again; one after tR
 adds the finalizer back. **A CRD created again** between the GET and R3 is
 these same cases: its new holders are those a list just before them misses too.
 A skip rests on the same two (below). It never matters which process did what,
-so two processes are no different (§6.8). The model searches it, with the GET
-moved before R1 as its control, which it must find unsafe. A mapper that finds
+so two processes are no different (§6.8). The model searches it, on an API
+server whose list lags; its controls, the GET moved before R1 and no GET at
+all, it must find unsafe. A mapper that finds
 K under another resource is no evidence of anything: the CRD that is gone isn't
 K's any more.
 
@@ -2982,6 +2992,15 @@ enqueue is harmless.
 enqueues its (K, N) batch, in the watched modes. R0's fast path settles it
 at once when users exist.
 
+**The deletion of K's CRD** (2026-11-24) enqueues the (K, N) batch of every
+finalizer of K on every object in the protected caches, the per-name ones
+included, as the start's rescan does. With the CRD gone the holder informer
+delivers no more deletions, so a hold whose holder it missed has no other event
+to be released on. Where `SharedOptions.Namespaces` restricts the caches, the
+recheck outside them (§10.5) runs too, on the process whose write loops run. A
+CRD that is back before the batch keeps R0 as it was: the holder informer lists
+again, within its backoff, and delivers what it missed.
+
 **And the acquirer enqueues the batch itself** after any A2 issued from a
 view it can't vouch for (L2). That is always so for a cross-namespace ref,
 whose consent can change under it, and for every A2 in PerNamePoll mode,
@@ -3097,7 +3116,8 @@ design exists to prevent. Two more triggers release such objects:
   handler enqueues each tracker's (K, N) batch for it with no objects, and
   the release loop fills it with a live list of the objects there that
   carry the held label and K's finalizer for N;
-- **the write loops' start, and a Track while they run**: one live list per
+- **the write loops' start, a Track while they run, and the deletion of the
+  kind's CRD** (§10.2): one live list per
   protected kind, in every namespace, selected by the held label, finds the
   held objects outside the caches, and enqueues the batch of each of their
   (K, N) finalizers. A failed list is retried with the release loop's
@@ -3473,6 +3493,9 @@ another writer's change.
   some holder's record names the ref: PerNamePoll needs its grant for the
   prober's GET (§10.3). The release batch prunes it, under the rule above,
   once no record names the ref and the object carries no finalizer of K.
+  The records are the holder cache's, so none counts while K's CRD is absent
+  from its informer, as in R0 (§6.2): a ghost's would keep its line for good.
+  A prune rests on no record for safety, as below.
 - **The startup recheck's prune** follows the same rule. It prunes the lines
   whose objects carry no finalizer with K's prefix, and that no record names,
   then live-GETs those objects, and adds back any that now do.
