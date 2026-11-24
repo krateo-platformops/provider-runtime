@@ -2072,7 +2072,11 @@ count to find it by. So:
   line there for a later pass's count, even one a prune took before the
   switch was set. An index that can't take the lines, a full one, leaves
   those records unstripped and the count `"unknown"`, with the Warning event
-  `CredentialUseDisownIndexFull`, which names `SharedOptions.IndexMaxLines`.
+  `CredentialUseDisownIndexFull`, which names `SharedOptions.IndexMaxLines`
+  and the holders. **Each holder's lines are taken or left whole, the smallest
+  first**, in one write: a record is an annotation a tenant may write, so one
+  of 2,500 made-up names stays, and keeps the count unknown, but doesn't keep
+  another holder's record.
 - **A dropped line of a bare object goes back** while the switch is
   unsettled (E3), and isn't reported as tampering.
 

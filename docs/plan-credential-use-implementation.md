@@ -1373,7 +1373,8 @@ tests.
     annotation (removing the line alone is undone by the tamper check);
   - the runbook entries for Disown's other events (§7.4):
     `CredentialUseIndexLost`, with the `vouched-index` steps;
-    `CredentialUseDisownIndexFull`, raise `IndexMaxLines`;
+    `CredentialUseDisownIndexFull`, raise `IndexMaxLines`, or correct the
+    record of the holder it names;
     `CredentialUseDisownRestarted`, find and stop the CRD's writer;
   - the three checks that say Disown has settled, and the by-hand removal of
     a finalizer that landed later than the margin;

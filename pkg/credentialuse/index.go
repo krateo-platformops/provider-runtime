@@ -1,6 +1,7 @@
 package credentialuse
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -494,6 +495,43 @@ func (ix *index) fits(next []string, before int) error {
 			errIndexFull, ix.ref(), size, indexMaxBytes)
 	}
 	return nil
+}
+
+// fitting returns, of sets of IDs, those whose lines fit together in an index
+// of lines, the sets taken whole, the smallest first; and the IDs of the sets
+// that don't, with why, as fits has it.
+func (ix *index) fitting(lines []string, sets [][]ID) (add, over []ID, err error) {
+	size := func(set []ID) (n int) {
+		for _, id := range set {
+			n += len(id.String()) + 1
+		}
+		return n
+	}
+	in := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		in[l] = true
+	}
+	count, bytes := len(lines), len(indexDataKey)+len(encodeIndex(lines))
+	sets = slices.Clone(sets)
+	slices.SortStableFunc(sets, func(a, b []ID) int { return cmp.Or(cmp.Compare(len(a), len(b)), cmp.Compare(size(a), size(b))) })
+	for _, set := range sets {
+		fresh := slices.DeleteFunc(SortedIDs(set), func(id ID) bool { return in[id.String()] })
+		n := size(fresh)
+		if len(fresh) > 0 && (count+len(fresh) > ix.maxLines || bytes+n > indexMaxBytes) {
+			over = append(over, fresh...)
+			continue
+		}
+		count, bytes = count+len(fresh), bytes+n
+		for _, id := range fresh {
+			in[id.String()] = true
+			add = append(add, id)
+		}
+	}
+	over = slices.DeleteFunc(SortedIDs(over), func(id ID) bool { return in[id.String()] })
+	if len(over) > 0 {
+		err = ix.fits(union(lines, linesOf(append(slices.Clone(add), over...))), len(lines))
+	}
+	return add, over, err
 }
 
 // writeErr wraps an index write's error. A write the namespace's admission

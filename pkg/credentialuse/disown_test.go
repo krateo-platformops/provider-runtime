@@ -52,6 +52,83 @@ func TestALostIndexHasOneReport(t *testing.T) {
 	}
 }
 
+// One holder's record that doesn't fit in the index keeps that record only: a
+// tenant may forge one of any names. The others are stripped, theirs among the
+// names included (§7.4).
+func TestDisownWithARecordThatDoesntFit(t *testing.T) {
+	ctx := context.Background()
+	var forged []ID
+	for i := range 10 {
+		forged = append(forged, secretID("ns", "f"+strconv.Itoa(i)))
+	}
+	r := newFakeRig(t, holderObject("ns", "forged", forged...),
+		holderObject("ns", "honest", secretID("ns", "a"), secretID("ns", "b")),
+		holderObject("ns", "shares", forged[0]))
+	tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// As a PerName kind, with an index of the test's own, of five lines.
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
+	st := &memStore{exists: true, rebuilt: true}
+	tr.idx = testIndex(st, r.s.newServer())
+	r.s.disownPass(ctx, tr, parseDisown("all"))
+	if want := linesOf([]ID{secretID("ns", "a"), secretID("ns", "b"), forged[0]}); !slices.Equal(st.lines, want) {
+		t.Errorf("lines %q, want %q", st.lines, want)
+	}
+	for name, kept := range map[string]bool{"forged": true, "honest": false, "shares": false} {
+		h, err := r.md.Resource(tr.gvr).Namespace("ns").Get(ctx, name, metav1.GetOptions{})
+		if err != nil || ReadRecord(h).Present != kept {
+			t.Errorf("%s: record kept %v, %v; want %v", name, ReadRecord(h).Present, err, kept)
+		}
+	}
+	crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+	if err != nil || crd.GetAnnotations()[AnnotationHeldCount] != "unknown" {
+		t.Errorf("held-count %q, %v; want unknown", crd.GetAnnotations()[AnnotationHeldCount], err)
+	}
+	var got []string
+	for len(r.events.Events) > 0 {
+		got = append(got, <-r.events.Events)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], EventDisownIndexFull) || !strings.Contains(got[0], "the records of ns/forged name") {
+		t.Errorf("events %q, want one %s naming ns/forged only", got, EventDisownIndexFull)
+	}
+}
+
+// Sets that fit are taken whole, the smallest first, within the cap and the
+// size, and one that is there already needs no room.
+func TestIndexFitting(t *testing.T) {
+	ids := func(names ...string) (out []ID) {
+		for _, n := range names {
+			out = append(out, SecretRef("ns", n).ID())
+		}
+		return out
+	}
+	long := SecretRef("ns", strings.Repeat("x", indexMaxBytes)).ID()
+	for name, c := range map[string]struct {
+		lines     []ID
+		sets      [][]ID
+		add, over []ID
+	}{
+		"all":                     {sets: [][]ID{ids("a", "b"), ids("c")}, add: ids("a", "b", "c")},
+		"the smallest first":      {sets: [][]ID{ids("a", "b", "c", "d"), ids("e", "f")}, add: ids("e", "f"), over: ids("a", "b", "c", "d")},
+		"one that shares":         {sets: [][]ID{ids("a", "b", "c", "d", "e", "f"), ids("a")}, add: ids("a"), over: ids("b", "c", "d", "e", "f")},
+		"partly there":            {lines: ids("a", "b", "c", "d"), sets: [][]ID{ids("a", "b", "e")}, add: ids("e")},
+		"there already":           {lines: ids("a", "b", "c", "d", "e"), sets: [][]ID{ids("a", "b"), ids("f")}, over: ids("f")},
+		"a cap since lowered":     {lines: ids("a", "b", "c", "d", "e", "f"), sets: [][]ID{ids("a", "f")}},
+		"past a ConfigMap's size": {sets: [][]ID{{long}, ids("a")}, add: ids("a"), over: []ID{long}},
+	} {
+		add, over, err := testIndex(&memStore{}, nil).fitting(linesOf(c.lines), c.sets)
+		if !slices.Equal(SortedIDs(add), c.add) || !slices.Equal(over, c.over) || (err != nil) != (len(c.over) > 0) || err != nil && !errors.Is(err, errIndexFull) {
+			t.Errorf("%s: %v, over %d, %v; want %v, over %d", name, add, len(over), err, c.add, len(c.over))
+		}
+	}
+}
+
 func TestParseDisown(t *testing.T) {
 	secret := schema.GroupKind{Kind: "Secret"}
 	target := schema.GroupKind{Group: "core.krateo.io", Kind: "KubernetesTarget"}

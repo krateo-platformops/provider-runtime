@@ -462,15 +462,29 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		// records are stripped: A1 comes before A2, so an A2 that lands after
 		// the strip has its object's line there for a later pass's count,
 		// even one a prune took before the switch. A vouched object that
-		// can't be read is the one the operator answers for.
-		add := slices.DeleteFunc(SortedIDs(keysOf(named)), func(id ID) bool { return slices.Contains(lined, id) || skipped[id] })
+		// can't be read is the one the operator answers for. What doesn't fit
+		// in the index keeps the records that name it, and no other: a tenant
+		// may write a record of any names.
+		var sets [][]ID
+		for i := range holders {
+			if r := ReadRecord(&holders[i]); !r.Unparseable {
+				sets = append(sets, slices.DeleteFunc(slices.Clone(r.IDs), func(id ID) bool { return !perName[id.GroupKind()] || skipped[id] }))
+			}
+		}
+		add, over, full := t.idx.fitting(cur.lines, sets)
+		keep := func(ids []ID, err error) {
+			known = false
+			for _, id := range ids {
+				unlined[id] = true
+			}
+			t.reportDisownUnlined(err, holdersNaming(holders, unlined))
+		}
+		if full != nil {
+			keep(over, full)
+		}
 		if len(add) > 0 {
 			if err := t.idx.add(ctx, add); err != nil {
-				known = false
-				for _, id := range add {
-					unlined[id] = true
-				}
-				t.reportDisownUnlined(err)
+				keep(add, err)
 			}
 		}
 	}
@@ -551,18 +565,35 @@ func (t *Tracker) freeLines(ctx context.Context, srv server, lined []ID, unstrip
 // those records, and its count stays "unknown" (§7.4).
 const EventDisownIndexFull = "CredentialUseDisownIndexFull"
 
-// reportDisownUnlined reports that the lines of recorded objects couldn't
-// be added; on a full index, with the remedy, as an event on the CRD.
-func (t *Tracker) reportDisownUnlined(err error) {
+// holdersNaming are the holders, as <namespace>/<name>, whose record names one
+// of ids; the first three, and how many more.
+func holdersNaming(holders []metav1.PartialObjectMetadata, ids map[ID]bool) string {
+	const most = 3
+	var names []string
+	for i := range holders {
+		if slices.ContainsFunc(ReadRecord(&holders[i]).IDs, func(id ID) bool { return ids[id] }) {
+			names = append(names, holders[i].Namespace+"/"+holders[i].Name)
+		}
+	}
+	if n := len(names) - most; n > 0 {
+		names = append(names[:most], fmt.Sprintf("and %d more", n))
+	}
+	return strings.Join(names, ", ")
+}
+
+// reportDisownUnlined reports that the lines of objects the records of holders
+// name couldn't be added; on a full index, with the remedy, as an event on the
+// CRD.
+func (t *Tracker) reportDisownUnlined(err error, holders string) {
 	t.warn("credential-use: Disown couldn't add the index lines of the objects the records name; it doesn't strip those records, and its count stays unknown",
-		"kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
+		"kind", t.gk.String(), "index", t.idx.ref(), "holders", holders, "error", err.Error())
 	if !errors.Is(err, errIndexFull) {
 		return
 	}
 	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(crd, "Warning", EventDisownIndexFull, "the index "+t.idx.ref()+
-		" can't take the lines of the objects the records name, so Disown doesn't strip those records, and held-count stays unknown: raise SharedOptions.IndexMaxLines (§7.4): "+err.Error())
+		" can't take the lines of the objects the records of "+holders+" name, so Disown doesn't strip those records, and held-count stays unknown: raise SharedOptions.IndexMaxLines, or correct a record that names what its holder doesn't use (§7.4): "+err.Error())
 }
 
 // EventDisownUnreadable (Warning, on the holder kind's CRD): Disown can't
