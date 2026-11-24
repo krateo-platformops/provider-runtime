@@ -175,18 +175,20 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 }
 
 // releaseBatch runs one batch (§6.2 R0 to R3), and requeues its objects as its
-// result says: what it decided at the time it asks for, as at a grace's end;
-// what it couldn't, and only that, with backoff, or at once, for the next
-// write loops, when ctx ended under it. A namespace's list that fails is
-// retried so too, and doesn't hold up what there is. A batch that fillAll marks, from an Add with no objects, also covers
-// every object of its namespace that holds K's finalizer for N, which
-// heldIn lists, beside the objects added to it since. A batch for a kind
-// that a Track is adding waits for that Track: it
-// goes back to the queue if the Track succeeds (Shared.endTracking, the
-// review of #114). A batch for a kind nobody tracks or is tracking is
-// dropped: a Track after start that failed and rolled back may have left
-// batches and timers for its kind, from replaying a shared cache (the
-// re-review of #109).
+// result says: those that asked, each at its time, as at a grace's end; those it
+// couldn't decide, and only those, with backoff, or at once, for the next write
+// loops, when ctx ended under it. A namespace's list that fails is retried so
+// too, and doesn't hold up what there is.
+//
+// A batch that fillAll marks, from an Add with no objects, also covers every
+// object of its namespace that holds K's finalizer for N, which heldIn lists,
+// beside the objects added to it since.
+//
+// A batch for a kind that a Track is adding waits for that Track: it goes back
+// to the queue if the Track succeeds (Shared.endTracking, the review of #114).
+// A batch for a kind nobody tracks or is tracking is dropped: a Track after
+// start that failed and rolled back may have left batches and timers for its
+// kind, from replaying a shared cache (the re-review of #109).
 func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	t := s.trackerOrPark(k, ids)
 	if t == nil {
