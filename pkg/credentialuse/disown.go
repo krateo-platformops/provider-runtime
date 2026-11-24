@@ -405,13 +405,13 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			}
 		}
 		cur, sure, err := t.idx.readSure(ctx, perName)
-		lost := Classify(err) == ClassNotFound || err == nil && !cur.complete()
+		lost := Classify(err) == ClassNotFound || err == nil && !cur.complete(perName)
 		if err != nil || lost {
 			known = false
 		}
 		switch {
 		case lost && !t.idx.isFresh():
-			t.reportIndexLost(cur)
+			t.reportIndexLost(cur, perName)
 		case err != nil:
 			t.reportDisownFailed(ctx, "read the index "+t.idx.ref(), err, "grant get on it", "")
 		}
@@ -633,20 +633,20 @@ const EventIndexLost = "CredentialUseIndexLost"
 // reportIndexLost reports an index that is missing, or that no rebuild
 // completed, while Disown is on: the records it would be rebuilt from may be
 // stripped already, so only an operator can tell that nothing else is held.
-// The event sink throttles it while cur is the same ConfigMap.
-func (t *Tracker) reportIndexLost(cur indexVersion) {
-	uid := cur.uid
+// kinds are those the switch covers: the others' objects are protected still,
+// and aren't to be touched. The event sink throttles it while cur is the same
+// ConfigMap.
+func (t *Tracker) reportIndexLost(cur indexVersion, kinds map[schema.GroupKind]bool) {
+	uid, where := cur.uid, ""
 	if uid == "" {
-		uid = "<its metadata.uid, once it exists again>"
+		uid, where = "UID", ", with its metadata.uid for UID once it exists again"
 	}
-	var kinds []string
-	for gk := range t.idx.kinds {
-		kinds = append(kinds, gk.String())
-	}
-	slices.Sort(kinds)
-	note := "the index " + t.idx.ref() + " was lost, and Disown strips the records that named its holds, so held-count stays unknown: list the objects of " +
-		strings.Join(kinds, ", ") + " labelled " + MarkerLabel(t.gk) + "=true, remove every finalizer that starts with " + t.prefix +
-		" from them, then run: kubectl annotate configmap -n " + t.idx.namespace + " " + t.idx.name + " " + AnnotationVouchedIndex + "=" + uid + " (§7.4)"
+	vouch := vouchFor(uid, kinds)
+	_, labels, _ := strings.Cut(vouch, "/")
+	note := "the index " + t.idx.ref() + " was lost, and Disown strips the records that named its holds, so held-count stays unknown: no sooner than " +
+		(t.o.TimeoutBound + t.s.landingMargin()).String() + " after the switch was last changed, list the objects of " + labels +
+		" labelled " + MarkerLabel(t.gk) + "=true, of no other kind, remove every finalizer that starts with " + t.prefix +
+		" from them, then run: kubectl annotate --overwrite configmap -n " + t.idx.namespace + " " + t.idx.name + " " + AnnotationVouchedIndex + "=" + vouch + where + " (§7.4)"
 	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(crd, "Warning", EventIndexLost, note)

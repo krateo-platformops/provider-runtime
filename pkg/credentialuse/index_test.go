@@ -42,6 +42,7 @@ type memStore struct {
 	updates      int
 	rebuilt      bool
 	vouched      string
+	uid, vouches string // the ConfigMap's uid, and AnnotationVouchedIndex
 }
 
 func (s *memStore) get(context.Context) (indexVersion, error) {
@@ -51,7 +52,7 @@ func (s *memStore) get(context.Context) (indexVersion, error) {
 	if !s.exists {
 		return indexVersion{}, apierrors.NewNotFound(configMapsGR, "cu-index")
 	}
-	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched}, nil
+	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched, uid: s.uid, vouchedIndex: s.vouches}, nil
 }
 
 func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
@@ -1296,23 +1297,37 @@ func TestARebuildUnderDisownLeavesNoMarker(t *testing.T) {
 	}
 }
 
-// An index names every hold once a rebuild completed, or an operator
-// vouched for that very ConfigMap (§7.4).
+// An index names every hold of some kinds once a rebuild completed, or an
+// operator vouched for that very ConfigMap, and for each of those kinds (§7.4).
 func TestIndexVersionComplete(t *testing.T) {
+	target := schema.GroupKind{Group: "core.krateo.io", Kind: "KubernetesTarget"}
+	secrets := map[schema.GroupKind]bool{secretGroupKind: true}
+	both := map[schema.GroupKind]bool{secretGroupKind: true, target: true}
 	for _, c := range []struct {
-		v    indexVersion
-		want bool
+		v     indexVersion
+		kinds map[schema.GroupKind]bool
+		want  bool
 	}{
-		{indexVersion{uid: "a"}, false},
-		{indexVersion{}, false}, // no uid vouches for no uid
-		{indexVersion{uid: "a", rebuilt: true}, true},
-		{indexVersion{uid: "a", vouchedIndex: "a"}, true},
-		{indexVersion{uid: "b", vouchedIndex: "a"}, false}, // restored, or lost again
-		{indexVersion{uid: "a", vouched: "a"}, false},
+		{indexVersion{uid: "a"}, secrets, false},
+		{indexVersion{}, secrets, false}, // no uid vouches for no uid
+		{indexVersion{vouchedIndex: "/Secret"}, secrets, false},
+		{indexVersion{uid: "a", rebuilt: true}, both, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, secrets, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, both, false}, // the switch was widened
+		{indexVersion{uid: "a", vouchedIndex: "a/KubernetesTarget.core.krateo.io,Secret"}, both, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/KubernetesTarget.core.krateo.io,Secret"}, secrets, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/all"}, secrets, false}, // it names no kind
+		{indexVersion{uid: "a", vouchedIndex: "a"}, secrets, false},
+		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, nil, false},
+		{indexVersion{uid: "b", vouchedIndex: "a/Secret"}, secrets, false}, // restored, or lost again
+		{indexVersion{uid: "a", vouched: "a/Secret"}, secrets, false},
 	} {
-		if got := c.v.complete(); got != c.want {
-			t.Errorf("%+v is complete: %v, want %v", c.v, got, c.want)
+		if got := c.v.complete(c.kinds); got != c.want {
+			t.Errorf("%+v is complete for %v: %v, want %v", c.v, c.kinds, got, c.want)
 		}
+	}
+	if v := vouchFor("a", both); v != "a/KubernetesTarget.core.krateo.io,Secret" {
+		t.Errorf("the vouch for both is %q", v)
 	}
 }
 

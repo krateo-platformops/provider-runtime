@@ -199,10 +199,31 @@ type indexVersion struct {
 	obj *unstructured.Unstructured
 }
 
-// complete reports whether v names every hold: a rebuild of it completed, or
-// an operator vouched for this very ConfigMap after a loss (§7.4).
-func (v indexVersion) complete() bool {
-	return v.rebuilt || v.uid != "" && v.vouchedIndex == v.uid
+// complete reports whether v names every hold of kinds: a rebuild of it
+// completed, or an operator vouched for this very ConfigMap and each of those
+// kinds after a loss (§7.4).
+func (v indexVersion) complete(kinds map[schema.GroupKind]bool) bool {
+	uid, list, _ := strings.Cut(v.vouchedIndex, "/")
+	if v.rebuilt || v.uid == "" || uid != v.uid {
+		return v.rebuilt
+	}
+	vouched := parseDisown(list).kinds
+	for gk := range kinds {
+		if !vouched[gk] {
+			return false
+		}
+	}
+	return len(kinds) > 0
+}
+
+// vouchFor is AnnotationVouchedIndex's value for kinds of the index uid.
+func vouchFor(uid string, kinds map[schema.GroupKind]bool) string {
+	var labels []string
+	for gk := range kinds {
+		labels = append(labels, kindLabel(gk))
+	}
+	slices.Sort(labels)
+	return uid + "/" + strings.Join(labels, ",")
 }
 
 // indexStore is where the index lives: the ConfigMap, through the dynamic

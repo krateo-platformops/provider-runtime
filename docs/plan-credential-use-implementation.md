@@ -1159,7 +1159,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   count `unknown`.
 - **An index lost under Disown keeps the count `unknown`** (the user's
   decision, 2026-11-23; §7.4) until an operator sets the index's
-  `credential-use.krateo.io/vouched-index` to its uid: a rebuild under the
+  `credential-use.krateo.io/vouched-index` to its uid and the kinds the
+  switch covers: a rebuild under the
   switch works from records that may be stripped, and doesn't set the
   marker, unless the kind was never tracked. The event is
   `CredentialUseIndexLost`.
@@ -1786,7 +1787,7 @@ them are recorded in the design doc's §17, "Revision 16".
    a span shorter than `max(2 × TimeoutBound, TimeoutBound +
    LandingMargin)`.
 4. **An index lost under Disown** keeps the count `unknown` until
-   `vouched-index` names its uid.
+   `vouched-index` names its uid and the kinds the switch covers.
 5. **F**: an A2 of unknown outcome is checked at once and after the margin,
    with its release batch, and a stop doesn't cut an A2 short. What remains
    needs three conditions together, accepted as a residual (§10.6.3).

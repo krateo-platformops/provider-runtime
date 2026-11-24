@@ -72,10 +72,13 @@ const (
 	// process never writes it.
 	AnnotationVouched = Domain + "/vouched"
 	// AnnotationVouchedIndex is an operator's word, after the index was lost
-	// while Disown was on, that no object carries a finalizer of the kind
-	// but those the index names (§7.4). Its value is the index ConfigMap's
-	// metadata.uid, so that it holds for that ConfigMap only: a later loss,
-	// or a restored copy, needs a new one. The process never writes it.
+	// while Disown was on, that no object of some kinds carries a finalizer of
+	// the holder kind but those the index names (§7.4). Its value is
+	// <uid>/<kinds>: the index ConfigMap's metadata.uid, so that it holds for
+	// that ConfigMap only, and a later loss, or a restored copy, needs a new
+	// one; and those kinds, as the Disown switch lists them, so that a switch
+	// that covers another kind needs a new one too. The process never writes
+	// it.
 	AnnotationVouchedIndex = Domain + "/vouched-index"
 )
 

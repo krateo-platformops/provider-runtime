@@ -1209,9 +1209,10 @@ func vouchIndex(t *testing.T, idx, uid string) {
 		if cm.Annotations == nil {
 			cm.Annotations = map[string]string{}
 		}
-		if cm.Annotations[cu.AnnotationVouchedIndex] = uid; uid == "" {
-			cm.Annotations[cu.AnnotationVouchedIndex] = string(cm.UID)
+		if uid == "" {
+			uid = string(cm.UID)
 		}
+		cm.Annotations[cu.AnnotationVouchedIndex] = uid + "/Secret"
 	})
 }
 

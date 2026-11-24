@@ -52,6 +52,57 @@ func TestALostIndexHasOneReport(t *testing.T) {
 	}
 }
 
+// The report of a lost index names the kinds the switch covers, and no other,
+// whose objects are protected still; when to list them; and the vouch, for
+// those kinds, which a switch widened to another doesn't take (§7.4).
+func TestALostIndexReportNamesTheCoveredKinds(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	o := r.options(widgetGK, ProtectedKind{GVK: secretGVK})
+	tr, err := r.s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As PerName kinds, with an index of the test's own.
+	configMap := configMapGroupKind.WithVersion("v1")
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMap, Watch: PerName}}
+	st := &memStore{exists: true, uid: "u1"}
+	tr.idx = testIndex(st, r.s.newServer())
+	tr.idx.kinds[configMapGroupKind] = true
+	pass := func(value string) (got []string) {
+		r.s.disownPass(ctx, tr, parseDisown(value))
+		for len(r.events.Events) > 0 {
+			if e := <-r.events.Events; strings.Contains(e, EventIndexLost) {
+				got = append(got, e)
+			}
+		}
+		return got
+	}
+	got := pass("Secret")
+	want := []string{"no sooner than " + (tr.o.TimeoutBound + LandingMargin).String() + " after the switch", "list the objects of Secret labelled", "of no other kind",
+		"kubectl annotate --overwrite configmap -n idx " + tr.idx.name + " " + AnnotationVouchedIndex + "=u1/Secret (§7.4)"}
+	if len(got) != 1 || strings.Contains(got[0], "ConfigMap") {
+		t.Fatalf("events %q, want one, of the Secrets only", got)
+	}
+	for _, s := range want {
+		if !strings.Contains(got[0], s) {
+			t.Errorf("the event %q doesn't say %q", got[0], s)
+		}
+	}
+	st.vouches = "u1/Secret"
+	if got := pass("Secret"); len(got) != 0 {
+		t.Errorf("vouched for: events %q", got)
+	}
+	if got := pass("all"); len(got) != 1 || !strings.Contains(got[0], "=u1/ConfigMap,Secret") {
+		t.Errorf("with the switch widened: events %q, want one, of both", got)
+	}
+	// One that is missing has no uid yet.
+	st.exists = false
+	if got := pass("all"); len(got) != 1 || !strings.Contains(got[0], "=UID/ConfigMap,Secret, with its metadata.uid for UID once it exists again") {
+		t.Errorf("of a missing index: events %q", got)
+	}
+}
+
 // One holder's record that doesn't fit in the index keeps that record only: a
 // tenant may forge one of any names. The others are stripped, theirs among the
 // names included (§7.4).

@@ -2094,14 +2094,23 @@ it finds, and leaves `credential-use.krateo.io/rebuilt` unset. An index
 without that marker keeps the count `"unknown"`, with a Warning event on the
 CRD, `CredentialUseIndexLost`, which names the steps:
 
-1. list the objects of K's protected kinds by K's marker label, which needs
-   list rights, and remove from each every finalizer with K's prefix;
+1. **no sooner than `TimeoutBound` + 60s after the switch was last changed**,
+   when an A2 of a pass from before it has landed, list the objects of the
+   kinds the switch covers, **and of no other**, by K's marker label, which
+   needs list rights, and remove from each every finalizer with K's prefix.
+   The objects of a kind the switch doesn't cover are protected still;
 2. set `credential-use.krateo.io/vouched-index` on the index ConfigMap to
-   its own `metadata.uid`.
+   `<uid>/<kinds>`, its own `metadata.uid` and those kinds as the switch
+   writes them (`Secret,KubernetesTarget.core.krateo.io`), with
+   `kubectl annotate --overwrite`: a restored copy may carry another's.
 
-The count then reads the index as complete. The value is the uid so that
-the word holds for that ConfigMap only: a later loss, or a restored copy,
-needs a new one. The process never writes it. Turning the switch off
+The count then reads the index as complete, for those kinds. The value has
+the uid so that the word holds for that ConfigMap only: a later loss, or a
+restored copy, needs a new one; and the kinds, so that a switch widened to
+another kind, whose objects nobody listed, needs a new one too. A kind once
+vouched for stays so while the switch is narrowed, or off: its later holds
+have their lines. A value without kinds vouches for none. The process never
+writes it. Turning the switch off
 lets a rebuild complete instead, from the records there are, and every
 holder's next pass adds its own lines. It also forgets the loss: an object
 whose finalizer no record names any more is then found only by its marker
@@ -5375,7 +5384,7 @@ response could swallow a drop nobody then checked. The user's decisions:
 | Every line an attempt of a prune tried to remove is read after it; a prune, once begun, runs to its end | §10.6.2 |
 | E: the lines stay until Disown has settled; a process empties the index only after its own run of zeros, and only of lines it proves free; E1 no other prune takes a line meanwhile; E2 a record's refs get their lines before it is stripped, and a full index leaves the record; E3 a dropped line of a bare object goes back | §7.4, §10.6.2, §10.7 |
 | G: the count is `"unknown"` while this process may owe a line | §7.4 |
-| An index lost under Disown: no marker from a rebuild under the switch; `"unknown"` until `vouched-index` names the ConfigMap's uid; three cases and two limits | §7.4, §10.6.5, §10.6.6 |
+| An index lost under Disown: no marker from a rebuild under the switch; `"unknown"` until `vouched-index` names the ConfigMap's uid and the kinds; three cases and two limits | §7.4, §10.6.5, §10.6.6 |
 | The landing margin: `LandingMargin`, 60s, a margin and not a proof; the span is `max(2 × TimeoutBound, TimeoutBound + LandingMargin)`; a later landing isn't covered | §7.3, §7.4, §10.6.8 |
 | F: an A2 of unknown outcome is checked at once and after the margin, with its batch; a stop doesn't cut an A2 short; every bound stated | §7.2, §10.6.2 |
 | The residual: a hold without its line needs three conditions together, shown in the model within its bound; the remedy | §10.6.3 |
