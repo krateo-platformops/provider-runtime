@@ -19,9 +19,19 @@ import (
 // each Namespace one, once.
 const maxGateReads = 16
 
-// gateReadTimeout is how long those reads may take together, in a tracker
-// (§11.3).
+// gateReadTimeout is how long those reads may take together, at most (§11.3).
 const gateReadTimeout = 5 * time.Second
+
+// gateDeadline is the context of those reads, in a tracker: it ends after
+// gateReadTimeout, or half of the time that ctx has left, if that is sooner, so
+// that ctx has time for the A1 of what they found.
+func gateDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	d := gateReadTimeout
+	if end, ok := ctx.Deadline(); ok {
+		d = min(d, time.Until(end)/2)
+	}
+	return context.WithTimeout(ctx, d)
+}
 
 // recordedGate is what gateRecorded found.
 type recordedGate struct {
@@ -44,8 +54,8 @@ type recordedGate struct {
 // has synced and lacks its object isn't held, or is gone, or its held label
 // was stripped (LabelScoped), or its index line is missing (PerName): it is
 // kept, and not read. Anything else is read live, up to maxGateReads refs a
-// pass and within gateReadTimeout, those that have waited the longest first;
-// the rest are kept, with RetryAfter.
+// pass and within gateDeadline, those that have waited the longest first; the
+// rest are kept, with RetryAfter.
 //
 // A withdrawn ref is dropped from the record, and listed as ConsentWithdrawn,
 // in one A1, under ctx; a ref that can't be read is kept, with RetryAfter; one
