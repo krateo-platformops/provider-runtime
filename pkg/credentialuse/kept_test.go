@@ -1009,6 +1009,66 @@ func TestAForgedRecordCantStarveARef(t *testing.T) {
 			}
 		}
 	})
+	t.Run("many whose reads always fail, without an answer", func(t *testing.T) {
+		r := world(t)
+		ids := fresh("", 400)
+		forgeRecord(t, r, append(slices.Clone(ids), otherSecretID()))
+		r.srv.before = func(op, kind, name string) error {
+			if op == "get" && kind == "Secret" && strings.HasPrefix(name, "a") {
+				return errors.New("no answer")
+			}
+			return nil
+		}
+		pass := 0
+		for keptRecorded(t, r) && pass < 30 {
+			pass++
+			keptPass(t, r, failingNext())
+		}
+		if want := (len(ids) + maxGateReads) / maxGateReads; pass != want { // ⌈401/16⌉
+			t.Errorf("s was dropped on pass %d (still recorded: %v), want pass %d", pass, keptRecorded(t, r), want)
+		}
+	})
+	t.Run("limit: a deadline that keeps time with the passes", func(t *testing.T) {
+		// Every other pass ends before its first answer, and the others after
+		// five. The first in line is then moved behind, as a hung one must be,
+		// and is the first again in a pass that ends at once.
+		r := world(t)
+		ids, pass := fresh("", 12), 0
+		read := cut(t, r, false, func(p int) []ID { pass = p; return ids }, func(nth int, _ string) bool {
+			return nth == map[bool]int{true: 1, false: 6}[pass%2 == 0]
+		}, 40)
+		for i, id := range ids {
+			if never := i == 5 || i == 11; (read[id.Name] == 0) != never {
+				t.Errorf("%s was read %d times in 40 passes; the limit that §11.3 documents has changed", id.Name, read[id.Name])
+			}
+		}
+	})
+	t.Run("limit: reads refused by their place in the pass, at once", func(t *testing.T) {
+		// As a client's own limiter, or transport, may. client-go's waits.
+		r := world(t)
+		ids := fresh("", 7)
+		forgeRecord(t, r, ids)
+		read := map[string]int{}
+		for range 10 {
+			nth := 0
+			r.srv.before = func(op, kind, name string) error {
+				if op != "get" || kind != "Secret" || name == "home" {
+					return nil
+				}
+				if nth++; nth > 3 {
+					return errors.New("refused")
+				}
+				read[name]++
+				return nil
+			}
+			keptPass(t, r, failingNext())
+		}
+		for i, id := range ids {
+			if (read[id.Name] > 0) != (i < 3) {
+				t.Errorf("%s was read %d times in 10 passes; the limit that §11.3 documents has changed", id.Name, read[id.Name])
+			}
+		}
+	})
 	t.Run("a withdrawn ref, with a hung one before it or behind it", func(t *testing.T) {
 		for _, before := range []bool{false, true} {
 			r := world(t)
