@@ -3388,7 +3388,8 @@ line. With any one off, in seven cases, it reaches none.
   the three cases where the late check and its batch race a holder that goes;
   the control of the sender's own prune, below, has one.
   Every search finished, within 2,000,000 schedules (the largest, 967,369, at
-  5a72b68).
+  5a72b68). That, and a5340fe, ae2012d and 7fd7022 here and in §14, are heads of
+  this change's own branch before its rebase: the history doesn't have them.
 - **What it is given:** whether the landing is within the margin, so that the
   late check comes after it, or not; and, in the cases without 3, that the
   pruner sees a record naming P.
