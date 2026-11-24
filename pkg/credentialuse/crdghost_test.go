@@ -6,6 +6,9 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -254,6 +257,154 @@ func TestAGhostsRecordKeepsNoLine(t *testing.T) {
 	if tr.recorded(secretID("ns", "s")) {
 		t.Error("a ghost's record keeps its line")
 	}
+}
+
+// perNameFakeRig is a rig of Widgets in PerName mode, whose index names ids,
+// and whose Secrets' watches the API server forbids: its per-name caches are
+// empty (§13 shape 1).
+func perNameFakeRig(t *testing.T, objs []runtime.Object, ids ...ID) (*fakeRig, *Tracker, *outage) {
+	t.Helper()
+	ctx := context.Background()
+	r := newFakeRigWith(t, SharedOptions{IndexNamespace: "idx"}, append([]runtime.Object{namespaceObject("ns"), namespaceObject("idx")}, objs...)...)
+	cm := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+		"data": map[string]any{indexDataKey: encodeIndex(linesOf(ids))}}}
+	cm.SetNamespace("idx")
+	cm.SetName(IndexName(widgetGK))
+	cm.SetAnnotations(map[string]string{AnnotationRebuilt: "true"})
+	if _, err := r.dyn.Resource(configMapGVR).Namespace("idx").Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	r.breakable("secrets").fail(errTest403)
+	out := r.breakable("widgets")
+	tr := r.trackLogged(t, &sinkLines{}, ProtectedKind{GVK: secretGVK, Watch: PerName})
+	r.run(t)
+	return r, tr, out
+}
+
+// indexedIDs are the objects the fake index names.
+func (r *fakeRig) indexedIDs(t *testing.T) []ID {
+	t.Helper()
+	cm, err := r.dyn.Resource(configMapGVR).Namespace("idx").Get(context.Background(), IndexName(widgetGK), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []ID
+	for _, l := range versionOf(cm).lines {
+		if id, ok := parseIndexLine(l); ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// In PerName mode a hold whose per-name watch is refused is in no cache, so
+// the CRD's deletion finds it through the index, as the start does, and a
+// ghost's lines go, the one of a ref that is Missing too (§10.6.2).
+func TestTheCRDsDeletionRechecksTheIndex(t *testing.T) {
+	s, missing := secretID("ns", "s"), secretID("ns", "missing")
+	r, _, out := perNameFakeRig(t, []runtime.Object{
+		heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "ghost", s, missing)}, s, missing)
+	r.runWrites(t)
+	eventually(t, "the start's recheck to read the Secret, and its batch", func() bool {
+		n := 0
+		for _, a := range r.md.Actions() {
+			if g, ok := a.(clienttesting.GetAction); ok && a.GetResource() == secretsGVR && g.GetName() == "s" {
+				n++
+			}
+		}
+		return n >= 2 && r.s.queue.Len() == 0 && !r.working(batchKey{widgetGK, "ns"})
+	})
+	if got := r.indexedIDs(t); len(got) != 2 || !r.heldBy(t, widgetGK, "ns", "s") {
+		t.Fatalf("before: the index names %v, held %v", got, r.heldBy(t, widgetGK, "ns", "s"))
+	}
+	eventually(t, "the holder's watch", func() bool { return out.watching(1) })
+	out.fail(errTest404)
+	must(r.md.Tracker().Delete(widgetsGVR, "ns", "ghost"))
+	r.removeCRD(t, widgetGK)
+	// The clock stands still: only the CRD's deletion can have queued it.
+	eventually(t, "the hold to be released", func() bool { return !r.heldBy(t, widgetGK, "ns", "s") })
+	eventually(t, "the ghost's lines to go", func() bool { return len(r.indexedIDs(t)) == 0 })
+}
+
+// heldLists are the cluster-wide lists of held Secrets made.
+func (r *fakeRig) heldLists() int {
+	n := 0
+	for _, a := range r.md.Actions() {
+		l, ok := a.(clienttesting.ListAction)
+		if ok && a.GetResource().Resource == "secrets" && a.GetNamespace() == "" && l.GetListRestrictions().Labels.String() == heldSelector() {
+			n++
+		}
+	}
+	return n
+}
+
+// One recheck of a tracker runs at a time, however often its CRD goes while a
+// list fails; one that was asked for meanwhile runs after it.
+func TestOneRecheckPerTracker(t *testing.T) {
+	r, tr, _, vanish := ghostRig(t, SharedOptions{Namespaces: []string{"ns"}}, "out", false)
+	vanish()
+	r.runWrites(t)
+	eventually(t, "the start's recheck", r.clusterHeldListed)
+	r.idle(t, batchKey{widgetGK, "out"})
+	r.forbidList.Store("secrets", true)
+	r.md.ClearActions()
+	for range 5 {
+		crdHandler{tr}.OnDelete(crdMeta(widgetGK))
+	}
+	eventually(t, "the recheck's failed list", func() bool { return r.heldLists() >= 1 })
+	time.Sleep(200 * time.Millisecond)
+	if n := r.heldLists(); n != 1 {
+		t.Errorf("%d rechecks after five deletions, want one", n)
+	}
+	r.forbidList.Delete("secrets")
+	r.md.ClearActions()
+	r.clk.Step(releaseBackoffBase)
+	eventually(t, "its retry, and the one asked for meanwhile", func() bool { return r.heldLists() >= 2 })
+	time.Sleep(200 * time.Millisecond)
+	if n := r.heldLists(); n != 2 {
+		t.Errorf("%d rechecks once the list works, want the retry and one more", n)
+	}
+	r.md.ClearActions()
+	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
+	eventually(t, "a later deletion's recheck", func() bool { return r.heldLists() == 1 })
+}
+
+// The write loops' end waits for a recheck; none starts once they are ending.
+func TestTheWriteLoopsWaitForTheRecheck(t *testing.T) {
+	r, tr, _, vanish := ghostRig(t, SharedOptions{Namespaces: []string{"ns"}}, "out", false)
+	vanish()
+	stop := r.runWrites(t)
+	eventually(t, "the start's recheck", r.clusterHeldListed)
+	r.idle(t, batchKey{widgetGK, "out"})
+	entered, release := r.gateList("secrets")
+	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
+	<-entered
+	stopped := make(chan error, 1)
+	go func() { stopped <- stop() }()
+	select {
+	case err := <-stopped:
+		t.Errorf("RunWriteLoops ended (%v) with a recheck running", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Errorf("RunWriteLoops = %v", err)
+	}
+	// As between the write loops' cancel and their end.
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.s.mu.Lock()
+	r.s.writeCtx = ended
+	r.s.mu.Unlock()
+	r.md.ClearActions()
+	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
+	time.Sleep(100 * time.Millisecond)
+	if n := r.heldLists(); n != 0 || tr.rechecking {
+		t.Errorf("%d rechecks began while the write loops were ending", n)
+	}
+	r.s.mu.Lock()
+	r.s.writeCtx = nil
+	r.s.mu.Unlock()
 }
 
 // The recheck outside the caches that a CRD's deletion starts ends with the

@@ -52,6 +52,10 @@ type Tracker struct {
 	uncached []schema.GroupKind
 	gone     bool // a failed Track dropped t
 
+	// Under Shared.mu: rechecking, a recheck that t's CRD's deletion started
+	// runs (recheckSoon); recheckAgain, another was asked for meanwhile.
+	rechecking, recheckAgain bool
+
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).
 	missing *missingRefs

@@ -193,7 +193,7 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 		return false, nil, nil
 	})
 	r.dyn = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crdOf(widgetGK), crdOf(gadgetGK))
+		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList", configMapGVR: "ConfigMapList"}, crdOf(widgetGK), crdOf(gadgetGK))
 	r.dyn.PrependReactor("create", "selfsubjectaccessreviews", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		obj := a.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured).DeepCopy()
 		verb, _, _ := unstructured.NestedString(obj.Object, "spec", "resourceAttributes", "verb")

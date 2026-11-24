@@ -154,9 +154,11 @@ func (t *Tracker) crdAbsent() bool {
 // requeueHeld enqueues the batch of every (K, N) finalizer of t on the
 // protected objects in the caches, as the write loops' start does, when t's
 // CRD goes: the holder informer delivers no more deletions, so nothing else
-// would look at a hold whose holder it missed (§10.2). Outside the caches
-// (§10.5) the recheck does it, if the write loops run; their start does
-// otherwise.
+// is certain to look at a hold whose holder it missed (§10.2). What the
+// caches can't show, the objects outside them (§10.5) and those an index
+// names, whose watch may be refused, the recheck looks at, if the write loops
+// run; their start does otherwise. It also prunes the lines that only ghosts'
+// records kept (§10.6.2).
 func (s *Shared) requeueHeld(t *Tracker) {
 	for _, p := range append(s.protectedInformers(), t.names.all()...) {
 		for _, obj := range p.inf.GetStore().List() {
@@ -170,22 +172,41 @@ func (s *Shared) requeueHeld(t *Tracker) {
 			}
 		}
 	}
-	if len(s.uncachedKinds(t)) == 0 {
-		return
+	if len(s.uncachedKinds(t)) > 0 || t.idx != nil {
+		s.recheckSoon(t)
 	}
+}
+
+// recheckSoon runs t's recheck of what the caches can't show beside the write
+// loops, if they run. One runs at a time: a recheck asked for meanwhile, as
+// while one retries a list that fails, runs once more after it.
+func (s *Shared) recheckSoon(t *Tracker) {
 	// As endTracking does: an Add only under mu, while the write loops run,
 	// so that their end waits for it.
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	ctx := s.writeCtx
 	if ctx == nil || ctx.Err() != nil {
-		s.mu.Unlock()
 		return
 	}
+	if t.rechecking {
+		t.recheckAgain = true
+		return
+	}
+	t.rechecking = true
 	s.writeWG.Add(1)
-	s.mu.Unlock()
 	go func() {
 		defer s.writeWG.Done()
-		s.recheckUncached(ctx, []*Tracker{t})
+		for {
+			s.recheckUncached(ctx, []*Tracker{t})
+			s.mu.Lock()
+			again := t.recheckAgain && ctx.Err() == nil
+			t.rechecking, t.recheckAgain = again, false
+			s.mu.Unlock()
+			if !again {
+				return
+			}
+		}
 	}()
 }
 
