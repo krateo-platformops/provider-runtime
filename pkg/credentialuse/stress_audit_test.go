@@ -36,6 +36,7 @@ type auditRun struct {
 	passes []*stPass
 	reads  []stRead
 	writes []stWrite
+	events []stEvent
 	gaps   []string
 	last   map[stObj]stVersion
 }
@@ -154,11 +155,32 @@ func (b *auditRun) a2(p *stPass, o stObj, epoch string) {
 	})
 }
 
-// acquired is a live pass that announces s and holds it.
+// deliver has process proc's Widget tracker be delivered o's latest version,
+// or, if o is gone, its removal.
+func (b *auditRun) deliver(proc int, o stObj) {
+	i := len(b.vs) - 1
+	for b.vs[i].stObj != o {
+		i--
+	}
+	v := b.vs[i]
+	e := stEvent{stFeed: stFeed{proc, "Widget", "protected"}, uid: v.uid, rv: v.rv, at: b.tick()}
+	switch o.kind {
+	case "Widget":
+		e.what = "holder"
+	case "Namespace":
+		e.stFeed, e.uid = stFeed{proc, "", "namespace"}, o.name
+	}
+	b.events = append(b.events, e)
+}
+
+// acquired is a live pass that announces s and holds it, in process 1, whose
+// informers deliver both.
 func (b *auditRun) acquired() *auditRun {
 	p := b.pass()
 	b.a1(p, auditS)
+	b.deliver(1, auditH)
 	b.a2(p, auditS, "e1")
+	b.deliver(1, auditS)
 	b.end(p, auditS)
 	return b
 }
@@ -222,7 +244,7 @@ func (b *auditRun) lostRead(p *stPass) {
 }
 
 func (b *auditRun) history() *stHistory {
-	return newStHistory(b.mode, testGrace, b.vs, b.calls, b.passes, b.reads, b.writes, b.gaps)
+	return newStHistory(stRecording{mode: b.mode, grace: testGrace, versions: b.vs, calls: b.calls, passes: b.passes, reads: b.reads, writes: b.writes, events: b.events, gaps: b.gaps})
 }
 
 // want checks that the audits find exactly classes, each with a timeline, and
@@ -823,18 +845,22 @@ func TestAuditPasses(t *testing.T) {
 			b.acquired()
 			p := b.pass()
 			b.a1(p)
+			b.deliver(1, auditH)
 			b.end(p)
 			p.refs = nil
 			b.a1(b.pass(), auditS) // a pass that never returns
+			b.deliver(1, auditH)
 			b.end(b.pass(), auditS)
 		}, []string{findHeldWithoutA2, findRecordDrop}, ""},
 		{"a live pass that skips, in a process that never wrote", func(b *auditRun) {
 			b.acquired()
+			b.deliver(2, auditH)
 			p := b.pass()
 			p.proc = 2
 			b.end(p, auditS)
 		}, []string{findHeldWithoutA2}, ""},
 		{"a live pass that skips a ref the record doesn't name", func(b *auditRun) {
+			b.deliver(1, auditH)
 			b.end(b.pass(), auditS)
 		}, []string{findHeldWithoutA2, findRecordDiffers}, ""},
 		{"an A2 before the A1 that names the ref", func(b *auditRun) {

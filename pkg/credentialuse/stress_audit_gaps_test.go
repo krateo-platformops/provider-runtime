@@ -127,7 +127,9 @@ func TestAuditGapConsent(t *testing.T) {
 		p := b.pass()
 		b.consentReads(p)
 		b.a1(p, auditC)
+		b.deliver(1, auditH)
 		b.a2(p, auditC, "e1")
+		b.deliver(1, auditC)
 		b.end(p, auditC)
 		return b
 	}
@@ -136,19 +138,49 @@ func TestAuditGapConsent(t *testing.T) {
 		b.end(b.pass(), auditC)
 		b.want(t)
 	})
-	t.Run("a live pass skips, long after the consent went", func(t *testing.T) {
+	t.Run("a live pass skips, after its informer delivered that the consent went", func(t *testing.T) {
+		b := held()
+		b.put(auditC, "uc", func(v *stVersion) { v.consent = "" })
+		b.deliver(1, auditC)
+		b.wait(2 * time.Second)
+		b.end(b.pass(), auditC)
+		b.want(t, "HELD-WITHOUT-CONSENT")
+	})
+	t.Run("the same, and the Namespace's consent isn't delivered as gone", func(t *testing.T) {
+		b := newCrossRun("")
+		b.put(nsObj("target"), "ut", func(v *stVersion) { v.consent = "ns" })
+		p := b.pass()
+		b.consentReads(p)
+		b.a1(p, auditC)
+		b.deliver(1, auditH)
+		b.a2(p, auditC, "e1")
+		b.deliver(1, auditC)
+		b.end(p, auditC)
+		b.put(nsObj("target"), "ut", func(v *stVersion) { v.consent = "" })
+		b.wait(2 * time.Second)
+		b.end(b.pass(), auditC)
+		b.want(t)
+		b.deliver(1, nsObj("target"))
+		b.wait(2 * time.Second)
+		b.end(b.pass(), auditC)
+		b.want(t, "HELD-WITHOUT-CONSENT")
+	})
+	t.Run("a live pass skips, and its informer hasn't delivered that the consent went", func(t *testing.T) {
 		b := held()
 		b.put(auditC, "uc", func(v *stVersion) { v.consent = "" })
 		b.wait(6 * time.Second)
 		b.end(b.pass(), auditC)
-		b.want(t, "HELD-WITHOUT-CONSENT")
+		b.want(t)
 	})
-	t.Run("a live pass skips, just after the consent went", func(t *testing.T) {
+	t.Run("a live pass skips before a consent that comes after it", func(t *testing.T) {
 		b := held()
 		b.put(auditC, "uc", func(v *stVersion) { v.consent = "" })
-		b.wait(time.Second)
+		b.deliver(1, auditC)
+		b.wait(2 * time.Second)
 		b.end(b.pass(), auditC)
-		b.want(t)
+		b.put(auditC, "uc", func(v *stVersion) { v.consent = "ns" })
+		b.deliver(1, auditC)
+		b.want(t, "HELD-WITHOUT-CONSENT")
 	})
 	t.Run("a drop after two reads, the last of which consents", func(t *testing.T) {
 		b := held()
@@ -229,32 +261,119 @@ func TestAuditGapUnknownRelease(t *testing.T) {
 	})
 }
 
-// A skip rests on the incarnation that was written, and on an object that
-// carries the finalizer.
+// A skip rests on what the process's own informers had delivered.
 func TestAuditGapSkip(t *testing.T) {
-	// replaced is a history whose Secret was held, deleted and released after
-	// its grace, and recreated.
-	replaced := func() *auditRun {
+	// released is a history whose Secret, held by process 1, was deleted and
+	// released after its grace, by process proc, and recreated.
+	released := func(proc int, delivered bool) *auditRun {
 		b := newAuditRun(stressPlain).acquired()
 		b.mark(auditS)
 		b.wait(testGrace)
+		from := len(b.calls)
 		b.batch()
 		b.r3()
+		for i := from; i < len(b.calls); i++ {
+			b.calls[i].proc = proc
+		}
+		if delivered {
+			b.deliver(1, auditS)
+		}
 		b.create(auditS, "u2")
 		return b
 	}
-	t.Run("long after the incarnation it wrote went", func(t *testing.T) {
-		b := replaced()
-		b.wait(6 * time.Second)
-		b.end(b.pass(), auditS)
-		b.want(t, "HELD-WITHOUT-A2")
-	})
-	t.Run("just after", func(t *testing.T) {
-		b := replaced()
-		b.wait(time.Second)
-		b.end(b.pass(), auditS)
-		b.want(t) // §6.5's window: the cache still has it
-	})
+	for _, c := range []struct {
+		name  string
+		build func() *auditRun
+		want  []string
+	}{
+		{"another process released it, and this one's informer hasn't delivered that", func() *auditRun {
+			b := released(2, false)
+			b.wait(6 * time.Second)
+			return b
+		}, nil}, // §6.5's window
+		{"its informer has delivered that", func() *auditRun {
+			b := released(2, true)
+			b.wait(time.Second)
+			return b
+		}, []string{"HELD-WITHOUT-A2"}},
+		{"its informer is just delivering that", func() *auditRun { return released(2, true) }, nil},
+		{"its informer has delivered that, and something since", func() *auditRun {
+			b := released(2, true)
+			b.put(auditS, "u2", func(v *stVersion) { b.hold(v, "x") })
+			b.deliver(1, auditS)
+			return b
+		}, []string{"HELD-WITHOUT-A2"}},
+		{"it released it itself", func() *auditRun { return released(1, false) }, []string{"HELD-WITHOUT-A2"}},
+		{"another process released it over a user, and its informer has delivered the loss", func() *auditRun {
+			b := newAuditRun(stressPlain).acquired()
+			b.batch()
+			b.r3()
+			b.deliver(1, auditS)
+			b.wait(time.Second)
+			return b
+		}, []string{"HELD-WITHOUT-A2", "RELEASED-OVER-A-USER"}},
+		{"it wrote again since", func() *auditRun {
+			b := released(2, true)
+			p := b.pass()
+			b.a2(p, auditS, "e3")
+			b.deliver(1, auditS)
+			b.end(p, auditS)
+			b.wait(time.Second)
+			return b
+		}, nil},
+		{"its informer hasn't delivered the version it works from", func() *auditRun {
+			b := newAuditRun(stressPlain).acquired()
+			b.put(auditH, "uh", nil)
+			return b
+		}, []string{"HELD-WITHOUT-A2"}},
+		{"its A2 came before its informer delivered the record", func() *auditRun {
+			b := newAuditRun(stressPlain)
+			p := b.pass()
+			b.a1(p, auditS)
+			b.a2(p, auditS, "e1")
+			b.deliver(1, auditH)
+			b.end(p, auditS)
+			return b
+		}, []string{"HELD-WITHOUT-A2"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := c.build()
+			b.end(b.pass(), auditS)
+			b.want(t, c.want...)
+		})
+	}
+}
+
+// What an A2 writes with the finalizer, and a release takes with the last of
+// them (§3).
+func TestAuditGapLabels(t *testing.T) {
+	b := newAuditRun(stressPlain)
+	p := b.pass()
+	b.a1(p, auditS)
+	b.put(auditS, "u1", func(v *stVersion) { v.badLabels = "" })
+	b.a2(p, auditS, "e1")
+	b.vs[len(b.vs)-1].badLabels = "the held label is there: false"
+	b.end(p, auditS)
+	b.want(t, "LABELS")
+
+	held := map[string]string{cu.LabelHeld: "true", cu.MarkerLabel(widgetGK): "true"}
+	for _, c := range []struct {
+		name   string
+		fins   []string
+		labels map[string]string
+		ok     bool
+	}{
+		{"held", []string{"example.com/other", auditFin}, held, true},
+		{"neither", []string{"example.com/other"}, nil, true},
+		{"no label", []string{auditFin}, nil, false},
+		{"no held label", []string{auditFin}, map[string]string{cu.MarkerLabel(widgetGK): "true"}, false},
+		{"no marker", []string{auditFin}, map[string]string{cu.LabelHeld: "true"}, false},
+		{"labels left", nil, held, false},
+	} {
+		if got := badLabels(c.fins, c.labels); (got == "") != c.ok {
+			t.Errorf("%s: %q", c.name, got)
+		}
+	}
 }
 
 // A record is exactly what the holder names, less what isn't consented.
@@ -297,6 +416,11 @@ func TestAuditGapEstablish(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			b := newAuditRun(stressPlain)
 			b.create(auditS2, "v1")
+			if c.name != "held" {
+				w := b.began(auditS)
+				b.remove(auditS)
+				b.answer(w, answerStatus, "u1")
+			}
 			b.put(auditH, "uh2", func(v *stVersion) { v.spec = "s" })
 			p := b.pass()
 			b.a1(p, auditS)
@@ -509,4 +633,3 @@ func TestAuditGapTwoWorkers(t *testing.T) {
 	b.calls[1].proc = 1
 	b.want(t)
 }
-

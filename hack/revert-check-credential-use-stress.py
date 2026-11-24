@@ -10,15 +10,15 @@ iteration each run went red at, and what the audits found. The reds over all
 the iterations run are an estimate of the share of CI runs that would see the
 mutant, as rough as their number.
 
-A mutant counts as found only if an audit found it: a line AUDIT <class>, of a
-class other than INCOMPLETE and STALE-LIST, which say that the recording, or
-the API server, can't be trusted, and H1-RECREATE, which is the API server's
-own and reds an unmutated run too: after one of those alone, the iterations
-left go on. OTHER is a red without one, as when a namespace doesn't empty;
-BUILD, PANIC and TIMEOUT aren't finds either. The baseline must pass
-REVERT_BASELINE iterations (default 3), H1-RECREATE aside, or the run is
-invalid. Each source file is restored after its mutant, and the end checks the
-tree is as it started.
+A mutant counts as found only if an audit found one of the classes it names: a
+line AUDIT <class>. OTHER is a red without one, as when a namespace doesn't
+empty, or when the only classes are others; its output is printed. BUILD,
+PANIC and TIMEOUT aren't finds either. An unmutated run may go red on the API
+server's own H1 (H1_CLASSES). A run whose every error line is of those is
+excused, and the iterations left go on; one other error line, and it isn't.
+The baseline must pass REVERT_BASELINE iterations (default 3), so excused, or
+the run is invalid. Each source file is restored after its mutant, and the end
+checks the tree is as it started.
 
 Two kinds of mutant: as a defect would be, and, where its window is a few
 milliseconds, the same with 200ms slept inside it. The second says the audit
@@ -42,8 +42,8 @@ sys.stdout.reconfigure(line_buffering=True)
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
 AQ, RE, DE, PA, VE = C + "acquire.go", C + "release.go", C + "decide.go", C + "patch.go", C + "verified.go"
-CO, IN = C + "consent.go", C + "informers.go"
-FILES = [AQ, RE, DE, PA, VE, CO, IN]
+CO, IN, SE, QU = C + "consent.go", C + "informers.go", C + "server.go", C + "queue.go"
+FILES = [AQ, RE, DE, PA, VE, CO, IN, SE, QU]
 
 NO_EPOCH_TEST = (PA, "\t\t{Op: \"test\", Path: annotation, Value: epoch},\n", "")
 NO_UID_TEST = (PA, "\t\t{Op: \"test\", Path: \"/metadata/uid\", Value: string(uid)},\n", "")
@@ -56,94 +56,111 @@ KEPT_LISTS = [(RE, "\t\"fmt\"\n\t\"time\"\n", "\t\"fmt\"\n\t\"sync\"\n\t\"time\"
               (RE, "// cachedUse is R0's reading of one object's users in the caches.\n",
                "var keptLists sync.Map\n\n// cachedUse is R0's reading of one object's users in the caches.\n")]
 LIVE_READ = "\tns, err := p.srv.Get(ctx, namespaceGroupKind, \"\", id.Namespace)\n"
+LIVE_YES = "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive"
+GRACE_END = "\treturn firstSeen.Add(ahead + grace)\n"
+SKIP = "\t\t\t\tif cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {"
+WROTE = "\t\tp.ver.wrote(%s, namespace, issued)\n\t\tp.wroteDeleting(id, namespace, out)\n\t\treturn ClassNone, out.UID, nil\n\t}\n\tvar last error\n"
+SEND_GET = "\treturn c.Get(ctx, name, metav1.GetOptions{})\n"
+A2_LABELS = "\t\t\"labels\":      map[string]string{%sk.marker: \"true\"},\n\t}}\n\tdata, err := json.Marshal(body)\n\treturn Patch{Type: types.StrategicMergePatchType, Data: data}, err\n"
+MISSING = "\t\t\t\tcase ClassNotFound:\n%s\t\t\t\t\tunfollowed = unfollowed || r.Next != nil\n\t\t\t\tcase ClassDeleting:\n"
 
-# (name, [(file, old, new), ...]): every old must occur exactly once in file.
-# A third element names the only sub-tests that can see the mutant.
+OVER, EARLY, UNREAD = "RELEASED-OVER-A-USER", "RELEASED-INSIDE-THE-GRACE", "RELEASED-WHAT-IT-HADNT-READ"
+NO_A2, NO_CONSENT, UNACCOUNTED = "HELD-WITHOUT-A2", "HELD-WITHOUT-CONSENT", "REF-UNACCOUNTED"
+DROP, DIFFERS, UNANNOUNCED = "RECORD-DROP", "RECORD-DIFFERS", "HELD-BEFORE-THE-RECORD"
+
+# (name, [(file, old, new), ...], the classes that find it): every old must
+# occur exactly once in file. A fourth element names the only sub-tests that
+# can see the mutant.
 MUTANTS = [
     # R2 ignoring deleting users.
     ("a holder being deleted is no user",
      [(DE, "\tif holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers) {\n\t\treturn false",
-       "\tif holder.GetDeletionTimestamp() != nil {\n\t\treturn false")]),
+       "\tif holder.GetDeletionTimestamp() != nil {\n\t\treturn false")], [OVER]),
     ("after the grace, users being deleted don't keep the object (R0 and R2)",
-     [(DE, "\treturn holder.GetDeletionTimestamp() != nil && IsUser(holder, p, ownerFinalizers)\n", "\treturn false\n")]),
+     [(DE, "\treturn holder.GetDeletionTimestamp() != nil && IsUser(holder, p, ownerFinalizers)\n", "\treturn false\n")], [OVER]),
     ("the same, in R2 alone",
-     [(RE, "\t\t\t\tif IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {", "\t\t\t\tif false && IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {")]),
+     [(RE, "\t\t\t\tif IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {", "\t\t\t\tif false && IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {")], [OVER]),
     # R3 without the epoch test.
-    ("R3 doesn't test the epoch", [NO_EPOCH_TEST]),
-    ("R3 doesn't test the epoch, and is 200ms late", [NO_EPOCH_TEST, LATE_R3]),
+    ("R3 doesn't test the epoch", [NO_EPOCH_TEST], [UNREAD, OVER]),
+    ("R3 doesn't test the epoch, and is 200ms late", [NO_EPOCH_TEST, LATE_R3], [UNREAD, OVER, EARLY]),
+    ("every A2 writes the same epoch", [(AQ, "\tepoch, err := p.newEpoch()\n", "\tepoch, err := \"e\", error(nil)\n")], [UNREAD, OVER]),
     # A release that skips the grace.
-    ("a release skips the grace",
-     [(DE, "\treturn firstSeen.Add(ahead + grace)\n", "\treturn firstSeen.Add(ahead)\n")]),
-    ("the grace is half as long",
-     [(DE, "\treturn firstSeen.Add(ahead + grace)\n", "\treturn firstSeen.Add(ahead + grace/2)\n")]),
+    ("a release skips the grace", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead)\n")], [EARLY]),
+    ("the grace is half as long", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace/2)\n")], [EARLY]),
+    ("a grace that never ends", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")], ["CANARY-NOT-RELEASED", "TOO-LITTLE"]),
     ("a release ignores a terminating namespace",
-     [(RE, "\t\t\t\t\tnsDeleting[ns] = m.DeletionTimestamp != nil\n", "\t\t\t\t\tnsDeleting[ns] = m == nil\n")]),
+     [(RE, "\t\t\t\t\tnsDeleting[ns] = m.DeletionTimestamp != nil\n", "\t\t\t\t\tnsDeleting[ns] = m == nil\n")], [OVER, "CANARY-NOT-KEPT"]),
+    # R2's and the gate's reads.
     ("R2 lists before R1",
      [(RE, "\tbuiltFrom := map[ID]string{} // the resourceVersion each failed release was built from\n",
        "\tbuiltFrom := map[ID]string{} // the resourceVersion each failed release was built from\n\tearly, earlyErr := p.srv.List(ctx, p.holder, n)\n"),
-      (RE, "\t\tholders, err := p.srv.List(ctx, p.holder, n)\n", "\t\tholders, err := early, earlyErr\n")]),
-    # A record drop.
-    ("A1 drops the refs of a holder being deleted",
-     [(AQ, "\trec := ReadRecord(obj)\n\tsameRecord := ", "\tif obj.GetDeletionTimestamp() != nil {\n\t\twant = nil\n\t}\n\trec := ReadRecord(obj)\n\tsameRecord := ")]),
-    # A release of the wrong incarnation.
-    ("R3 is built from a second read", [(RE, R3, REREAD + R3)]),
-    ("R3 is built from a second read, 200ms after the list",
-     [(RE, R3, "\t\t\ttime.Sleep(200 * time.Millisecond)\n" + REREAD + R3)]),
-    ("R3 tests neither the uid nor the epoch, and is 200ms late", [NO_UID_TEST, NO_EPOCH_TEST, LATE_R3,
-     (PA, "\t\treturn Patch{}, fmt.Errorf(\"credential-use: a release needs the object's uid\")", "\t\treturn Patch{}, fmt.Errorf(\"credential-use: a release needs the object's uid %s\", uid)")]),
-    # A pass that skips A2 and reports Held.
-    ("a deletion pass skips A2 and reports Held",
-     [(AQ, "\t\t\theld := false\n\t\t\tif !deleting && !added[id] {", "\t\t\theld := deleting\n\t\t\tif deleting {\n\t\t\t\ta.Held = append(a.Held, r)\n\t\t\t}\n\t\t\tif !deleting && !added[id] {")]),
-    ("a live pass skips A2 on any cached object",
-     [(AQ, "\t\t\t\tif cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {",
-       "\t\t\t\tif _, ok := p.views.Protected(id); ok {")]),
-    ("a live pass skips on a write from before the record named the ref",
-     [(VE, "\tskip := obs.Before(issued)\n", "\tskip := obs.Before(issued) || true\n")]),
-    ("a skip goes by the object's name, not its uid",
-     [(AQ, "\t\t\t\tif cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {",
-       "\t\t\t\tif _, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, types.UID(id.String()), namespace) {"),
-      (AQ, "\t\tp.ver.wrote(out.UID, namespace, issued)\n\t\tp.wroteDeleting(id, namespace, out)\n\t\treturn ClassNone, out.UID, nil\n\t}\n\tvar last error\n",
-       "\t\tp.ver.wrote(types.UID(id.String()), namespace, issued)\n\t\tp.wroteDeleting(id, namespace, out)\n\t\treturn ClassNone, out.UID, nil\n\t}\n\tvar last error\n")]),
-    # The cold review's.
+      (RE, R2, "\t\tholders, err := early, earlyErr\n")], [UNREAD, OVER]),
     ("R2 decides on the list of the batch before",
      KEPT_LISTS + [(RE, R2, R2 + "\t\tif err == nil {\n\t\t\tif old, ok := keptLists.Swap(fmt.Sprintf(\"%p/%s\", p, n), holders); ok {\n"
-                            "\t\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t\t}\n\t\t}\n")]),
+                            "\t\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t\t}\n\t\t}\n")], [OVER]),
     ("every second batch makes no list, and decides on the one before",
      KEPT_LISTS + [(RE, R2, "\t\tvar holders []metav1.PartialObjectMetadata\n\t\tvar err error\n"
                             "\t\tif old, ok := keptLists.LoadAndDelete(fmt.Sprintf(\"%p/%s\", p, n)); ok {\n"
                             "\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t} else if holders, err = p.srv.List(ctx, p.holder, n); err == nil {\n"
-                            "\t\t\tkeptLists.Store(fmt.Sprintf(\"%p/%s\", p, n), holders)\n\t\t}\n")]),
-    ("the consent gate says yes, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateHoldLive\n\t}\n" + LIVE_READ)], ("cross",)),
-    ("the consent gate says no, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateNotHeld\n\t}\n" + LIVE_READ)], ("cross",)),
-    ("the consent gate says no, whatever it read",
-     [(CO, "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive",
-       "\tif false && consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive")], ("cross",)),
-    ("the consent gate says yes, whatever it read",
-     [(CO, "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive",
-       "\tif true || consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive")], ("cross",)),
-    ("a ref that a record drops queues no release",
-     [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil {\n\t\t\tcontinue\n\t\t}\n\t\tr := ReadRecord(m)\n",
-       "\tfor _, m := range []*metav1.PartialObjectMetadata{cur} {\n\t\tif m == nil {\n\t\t\tcontinue\n\t\t}\n\t\tr := ReadRecord(m)\n")]),
+                            "\t\t\tkeptLists.Store(fmt.Sprintf(\"%p/%s\", p, n), holders)\n\t\t}\n")], [UNREAD]),
+    ("the Namespace is read at resourceVersion 0",
+     [(SE, SEND_GET, "\tvar o metav1.GetOptions\n\tif gk == namespaceGroupKind {\n\t\to.ResourceVersion = \"0\"\n\t}\n\treturn c.Get(ctx, name, o)\n")], [OVER, NO_CONSENT]),
+    ("every read is at resourceVersion 0",
+     [(SE, SEND_GET, "\treturn c.Get(ctx, name, metav1.GetOptions{ResourceVersion: \"0\"})\n")], [UNREAD, NO_CONSENT]),
+    ("one key goes to two workers", [(QU, "\tif !q.queued[k] && !q.working[k] {\n", "\tif !q.queued[k] {\n")], ["RELEASED-TWICE"]),
+    # Records.
+    ("A1 drops the refs of a holder being deleted",
+     [(AQ, "\trec := ReadRecord(obj)\n\tsameRecord := ", "\tif obj.GetDeletionTimestamp() != nil {\n\t\twant = nil\n\t}\n\trec := ReadRecord(obj)\n\tsameRecord := ")],
+     [DROP, DIFFERS, UNANNOUNCED]),
+    ("A1 keeps the refs the holder names no more",
+     [(AQ, "\trec := ReadRecord(obj)\n\tsameRecord := ", "\trec := ReadRecord(obj)\n\tif !rec.Unparseable {\n\t\twant = SortedIDs(append(want, rec.IDs...))\n\t}\n\tsameRecord := ")],
+     [DIFFERS]),
+    ("A2 comes before A1",
+     [(AQ, "\t\tadded, err := p.announce(ctx, obj, want, unheldNow, &a)\n", "\t\tadded, err := map[ID]bool{}, error(nil)\n\t\t_, _ = want, unheldNow\n")], [UNANNOUNCED]),
+    # A release of the wrong incarnation, or of more than its own.
+    ("R3 is built from a second read", [(RE, R3, REREAD + R3)], [UNREAD]),
+    ("R3 is built from a second read, 200ms after the list",
+     [(RE, R3, "\t\t\ttime.Sleep(200 * time.Millisecond)\n" + REREAD + R3)], [UNREAD, OVER, EARLY]),
+    ("R3 tests neither the uid nor the epoch, and is 200ms late", [NO_UID_TEST, NO_EPOCH_TEST, LATE_R3,
+     (PA, "\t\treturn Patch{}, fmt.Errorf(\"credential-use: a release needs the object's uid\")", "\t\treturn Patch{}, fmt.Errorf(\"credential-use: a release needs the object's uid %s\", uid)")],
+     [UNREAD, OVER, EARLY]),
+    ("R3 takes every finalizer off",
+     [(PA, "\t\tjsonPatchOp{Op: \"remove\", Path: index},\n", "\t\tjsonPatchOp{Op: \"remove\", Path: \"/metadata/finalizers\"},\n")],
+     ["FINALIZER-LOST", "UNEXPLAINED-REMOVAL"]),
+    ("an A2 takes the other kind's finalizer off",
+     [(PA, "\tdata, err := json.Marshal(body)\n\treturn Patch{Type: types.StrategicMergePatchType, Data: data}, err\n",
+       "\tif strings.Contains(k.finalizer, \".widget.\") {\n\t\tbody[\"metadata\"].(map[string]any)[\"$deleteFromPrimitiveList/finalizers\"] = []string{strings.Replace(k.finalizer, \".widget.\", \".target.\", 1)}\n\t}\n"
+       "\tdata, err := json.Marshal(body)\n\treturn Patch{Type: types.StrategicMergePatchType, Data: data}, err\n")], ["FINALIZER-LOST"], ("plain",)),
+    ("an A2 doesn't set the held label", [(PA, A2_LABELS % "LabelHeld: \"true\", ", A2_LABELS % "")], ["LABELS"]),
+    # A pass that skips A2 and reports Held.
+    ("a deletion pass skips A2 and reports Held",
+     [(AQ, "\t\t\theld := false\n\t\t\tif !deleting && !added[id] {", "\t\t\theld := deleting\n\t\t\tif deleting {\n\t\t\t\ta.Held = append(a.Held, r)\n\t\t\t}\n\t\t\tif !deleting && !added[id] {")], [NO_A2]),
+    ("a live pass skips A2 on any cached object", [(AQ, SKIP, "\t\t\t\tif _, ok := p.views.Protected(id); ok {")], [NO_A2]),
+    ("a live pass skips on a write from before the record named the ref",
+     [(VE, "\tskip := obs.Before(issued)\n", "\tskip := obs.Before(issued) || true\n")], [NO_A2]),
+    ("a skip goes by the object's name, not its uid",
+     [(AQ, SKIP, "\t\t\t\tif _, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, types.UID(id.String()), namespace) {"),
+      (AQ, WROTE % "out.UID", WROTE % "types.UID(id.String())")], [NO_A2]),
+    ("what a process wrote is dropped by no event",
+     [(VE, "func (v *verified) protectedEvent(old, current metav1.Object) {\n\tv.access()\n", "func (v *verified) protectedEvent(old, current metav1.Object) {\n\tv.access()\n\tif v != nil {\n\t\treturn\n\t}\n")],
+     [NO_A2]),
+    # The consent gate.
+    ("the consent gate says yes, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateHoldLive\n\t}\n" + LIVE_READ)], [NO_CONSENT], ("cross",)),
+    ("the consent gate says no, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateNotHeld\n\t}\n" + LIVE_READ)], [UNACCOUNTED, DROP], ("cross",)),
+    ("the consent gate says no, whatever it read", [(CO, LIVE_YES, LIVE_YES.replace("if consents", "if false && consents"))], [UNACCOUNTED, DROP], ("cross",)),
+    ("the consent gate says yes, whatever it read", [(CO, LIVE_YES, LIVE_YES.replace("if consents", "if true || consents"))], [NO_CONSENT], ("cross",)),
+    ("a cached no isn't confirmed",
+     [(CO, "\t\t\t\treturn gateHoldCached\n\t\t\t}\n", "\t\t\t\treturn gateHoldCached\n\t\t\t} else if known {\n\t\t\t\treturn gateNotHeld\n\t\t\t}\n")], [UNACCOUNTED, DROP], ("cross",)),
+    # What a pass says, and what never happens.
     ("every third acquire fails",
      [(AQ, "\t\"sync\"\n\t\"time\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n\t\"time\"\n"),
       (AQ, "// resolve keeps o as what was read for r (Resolved)", "var acquireSeq atomic.Int64\n\n// resolve keeps o as what was read for r (Resolved)"),
-      (AQ, "\tmaxDepth := p.maxDepth\n", "\tif acquireSeq.Add(1)%3 == 0 {\n\t\treturn fail(errors.New(\"mutant\"), \"Refs\")\n\t}\n\tmaxDepth := p.maxDepth\n")]),
-    ("a grace that never ends",
-     [(DE, "\treturn firstSeen.Add(ahead + grace)\n", "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")]),
-    # One for each class that had none.
-    ("an A2 takes the other kind's finalizer off (FINALIZER-LOST)",
-     [(PA, "\tdata, err := json.Marshal(body)\n\treturn Patch{Type: types.StrategicMergePatchType, Data: data}, err\n",
-       "\tif strings.Contains(k.finalizer, \".widget.\") {\n\t\tbody[\"metadata\"].(map[string]any)[\"$deleteFromPrimitiveList/finalizers\"] = []string{strings.Replace(k.finalizer, \".widget.\", \".target.\", 1)}\n\t}\n"
-       "\tdata, err := json.Marshal(body)\n\treturn Patch{Type: types.StrategicMergePatchType, Data: data}, err\n")], ("plain",)),
-    ("R3 takes every finalizer off (FINALIZER-LOST, UNEXPLAINED-REMOVAL)",
-     [(PA, "\t\tjsonPatchOp{Op: \"remove\", Path: index},\n", "\t\tjsonPatchOp{Op: \"remove\", Path: \"/metadata/finalizers\"},\n")]),
-    ("A2 comes before A1 (HELD-BEFORE-THE-RECORD)",
-     [(AQ, "\t\tadded, err := p.announce(ctx, obj, want, unheldNow, &a)\n", "\t\tadded, err := map[ID]bool{}, error(nil)\n\t\t_, _ = want, unheldNow\n")]),
-    ("a Missing ref is left out (REF-UNACCOUNTED)",
-     [(AQ, "\t\t\t\tcase ClassNotFound:\n\t\t\t\t\ta.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})\n\t\t\t\t\tunfollowed = unfollowed || r.Next != nil\n\t\t\t\tcase ClassDeleting:\n",
-       "\t\t\t\tcase ClassNotFound:\n\t\t\t\t\tunfollowed = unfollowed || r.Next != nil\n\t\t\t\tcase ClassDeleting:\n")]),
-    ("A1 keeps the refs the holder names no more (RECORD-DIFFERS)",
-     [(AQ, "\trec := ReadRecord(obj)\n\tsameRecord := ", "\trec := ReadRecord(obj)\n\tif !rec.Unparseable {\n\t\twant = SortedIDs(append(want, rec.IDs...))\n\t}\n\tsameRecord := ")]),
+      (AQ, "\tmaxDepth := p.maxDepth\n", "\tif acquireSeq.Add(1)%3 == 0 {\n\t\treturn fail(errors.New(\"mutant\"), \"Refs\")\n\t}\n\tmaxDepth := p.maxDepth\n")], ["ACQUIRE-FAILED"]),
+    ("a Missing ref is left out",
+     [(AQ, MISSING % "\t\t\t\t\ta.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})\n", MISSING % "")], [UNACCOUNTED]),
+    ("a ref that a record drops queues no release",
+     [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil {\n", "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil || m == old && cur != nil {\n")],
+     ["TOO-LITTLE", "CANARY-NOT-RELEASED"]),
 ]
 
 SUBTESTS = {
@@ -157,27 +174,38 @@ ITERATIONS = int(os.environ.get("REVERT_ITERATIONS", "20"))
 REPEATS = int(os.environ.get("REVERT_REPEATS", "3"))
 BASELINE = int(os.environ.get("REVERT_BASELINE", "3"))
 TIMEOUT = int(os.environ.get("REVERT_TIMEOUT_S", "3600"))
-NOT_FINDS = {"INCOMPLETE", "STALE-LIST", "H1-RECREATE"}
+H1_CLASSES = ("H1-RECREATE", "H1-LOST-A2")
+
+
+def errors(out):
+    """The error lines of a go test -v output, less the stress's summaries."""
+    return [m for m in re.findall(r"^\s+\S+\.go:\d+: (.*)$", out, re.M) if not re.match(r"\d+ processes, \S+, seed \d+: ", m)]
+
+
+def h1_alone(out):
+    """Every error line is an audit's, of the API server's H1, and there is one."""
+    es = errors(out)
+    return bool(es) and all(e.startswith(tuple("AUDIT " + c + ":" for c in H1_CLASSES)) for e in es)
 
 
 class Run:
     def __init__(self, returncode, out, seconds):
-        self.returncode, self.out, self.seconds, self.recreates = returncode, out, seconds, 0
+        self.returncode, self.out, self.seconds, self.excused = returncode, out, seconds, 0
         self.iterations = len(re.findall(r"^--- (?:PASS|FAIL): TestStress \(", out, re.M))
         self.classes = sorted(set(re.findall(r"AUDIT ([A-Z0-9-]+):", out)))
 
 
-def hunt(iterations):
-    """Runs the stress up to iterations times, to its first red that isn't
-    H1's recreate alone, which an unmutated run has too."""
+def hunt(iterations, classes=()):
+    """Runs the stress up to iterations times, to its first red that isn't the
+    API server's H1 alone, which an unmutated run has too."""
     total = None
     while True:
         r = stress(iterations - (total.iterations if total else 0))
         if total:
-            r.iterations, r.seconds, r.recreates = total.iterations + r.iterations, total.seconds + r.seconds, total.recreates
-        if r.returncode == 0 or r.classes != ["H1-RECREATE"] or classify(r) != "OTHER":
+            r.iterations, r.seconds, r.excused = total.iterations + r.iterations, total.seconds + r.seconds, total.excused
+        if classify(r, classes) != "OTHER" or not h1_alone(r.out):
             return r
-        r.recreates += 1
+        r.excused += 1
         if r.iterations >= iterations:
             r.returncode = 0
             return r
@@ -194,7 +222,7 @@ def stress(iterations):
     return Run(r.returncode, r.stdout + r.stderr, time.time() - began)
 
 
-def classify(r):
+def classify(r, classes):
     if r.returncode == 0:
         return "GREEN"
     if "build failed" in r.out or "[setup failed]" in r.out:
@@ -203,7 +231,7 @@ def classify(r):
         return "TIMEOUT"
     if re.search(r"^panic:|\[recovered\]|DATA RACE", r.out, re.M):
         return "PANIC"
-    if set(r.classes) - NOT_FINDS:
+    if set(r.classes) & set(classes):
         return "FOUND"
     return "OTHER"
 
@@ -257,11 +285,11 @@ signal.signal(signal.SIGINT, on_signal)
 
 ONLY = os.environ.get("REVERT_ONLY")
 CHECK_ONLY = os.environ.get("REVERT_CHECK_ONLY")
-chosen = [m[:2] for m in MUTANTS if (not ONLY or re.search(ONLY, m[0])) and (CHECK_ONLY or len(m) < 3 or WHERE in m[2])]
+chosen = [m[:3] for m in MUTANTS if (not ONLY or re.search(ONLY, m[0])) and (CHECK_ONLY or len(m) < 4 or WHERE in m[3])]
 
 if CHECK_ONLY:
     wrong = 0
-    for name, edits in chosen:
+    for name, edits, _ in chosen:
         try:
             bad = apply(edits)
             if bad:
@@ -282,11 +310,11 @@ base = hunt(BASELINE)
 if base.returncode != 0 or base.iterations != BASELINE:
     print(f"BASELINE FAILED after {base.iterations} iterations: the run is invalid\n" + base.out[-6000:])
     sys.exit(1)
-print(f"baseline passed: {BASELINE} iterations, {base.seconds / BASELINE:.0f}s each, commit {commit()}, sub-test {SUBTEST}")
+print(f"baseline passed: {BASELINE} iterations, {base.excused} of them red on H1 alone, {base.seconds / BASELINE:.0f}s each, commit {commit()}, sub-test {SUBTEST}")
 print(f"each mutant: up to {ITERATIONS} iterations, {REPEATS} times, seed {os.environ.get('REVERT_SEED') or 'fixed'}\n")
 
 totals = {}
-for name, edits in chosen:
+for name, edits, classes in chosen:
     began = utc()
     runs = []
     try:
@@ -296,21 +324,21 @@ for name, edits in chosen:
             totals["NOT-APPLIED"] = totals.get("NOT-APPLIED", 0) + 1
             continue
         for _ in range(REPEATS):
-            runs.append(hunt(ITERATIONS))
-            if classify(runs[-1]) == "BUILD":
+            runs.append(hunt(ITERATIONS, classes))
+            if classify(runs[-1], classes) == "BUILD":
                 break
     finally:
         restore_all()
-    states = [classify(r) for r in runs]
+    states = [classify(r, classes) for r in runs]
     reds = states.count("FOUND")
     ran = sum(r.iterations for r in runs)
     state = "FOUND" if reds == len(states) else "SOMETIMES" if reds else states[0] if len(set(states)) == 1 else "MIXED"
     totals[state] = totals.get(state, 0) + 1
-    print(f"{state:9} {name}")
+    print(f"{state:9} {name} (by {' or '.join(classes)})")
     for s, r in zip(states, runs):
-        print(f"          {s} at iteration {r.iterations} of {ITERATIONS}, {r.seconds:.0f}s: {' '.join(r.classes) or 'no audit'}" + (f"; H1-RECREATE alone in {r.recreates} before" if r.recreates else ""))
+        print(f"          {s} at iteration {r.iterations} of {ITERATIONS}, {r.seconds:.0f}s: {' '.join(r.classes) or 'no audit'}" + (f"; {r.excused} excused before, red on H1 alone" if r.excused else ""))
         if s in ("OTHER", "PANIC", "BUILD", "TIMEOUT"):
-            print("          " + r.out[-1500:].replace("\n", "\n          "))
+            print("          " + "\n          ".join(errors(r.out)[:6] or [r.out[-1500:]]))
     print(f"          {reds} reds in {ran} iterations" + (f": about {100 * reds / ran:.0f}% of them" if reds and ran else "") + f"; {began} to {utc()}", flush=True)
 
 print("\n" + " ".join(f"{k}={v}" for k, v in sorted(totals.items())) + f" of {len(chosen)}")

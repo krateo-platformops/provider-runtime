@@ -34,12 +34,17 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/driver"
 )
 
-// recordedKinds are the kinds the recorder watches, and whose calls it keeps.
+// recordedKinds are the kinds the recorder watches.
 var recordedKinds = map[string]schema.GroupVersionResource{
 	"Widget": cutest.WidgetGVR, "Target": cutest.TargetGVR, "Secret": cutest.SecretGVR, "Namespace": {Version: "v1", Resource: "namespaces"},
 }
 
+// kindOfResource is the kind of a resource whose calls are kept: the holder
+// kinds' CRDs too, which are called, and not watched.
 func kindOfResource(gvr schema.GroupVersionResource) string {
+	if gvr.Resource == "customresourcedefinitions" {
+		return calledCRD
+	}
 	for kind, r := range recordedKinds {
 		if r == gvr {
 			return kind
@@ -61,6 +66,7 @@ type stressRecorder struct {
 	passes   []*stPass
 	reads    []stRead
 	writes   []stWrite
+	events   []stEvent
 	gaps     []string
 	ended    map[string]bool // by kind and namespace: its watch has delivered the recording's last object
 }
@@ -174,7 +180,7 @@ func (r *stressRecorder) finish(t *testing.T) *stHistory {
 	r.wg.Wait()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return newStHistory(r.mode, testGrace, r.versions, r.calls, r.passes, r.reads, r.writes, r.gaps)
+	return newStHistory(stRecording{mode: r.mode, grace: testGrace, versions: r.versions, calls: r.calls, passes: r.passes, reads: r.reads, writes: r.writes, events: r.events, gaps: r.gaps})
 }
 
 func parseRV(s string) uint64 {
@@ -191,6 +197,7 @@ func versionOf(kind string, u *unstructured.Unstructured) stVersion {
 	}
 	v.rec, v.recBad = parseRecord(u.GetAnnotations())
 	v.spec = specOf(u)
+	v.badLabels = badLabels(u.GetFinalizers(), u.GetLabels())
 	return v
 }
 
@@ -286,6 +293,24 @@ func (r *stressRecorder) follow(proc int, kind string, c *controller) {
 	}
 }
 
+// listen records what process proc's informers deliver to its handlers, just
+// before they act on it. Call it before Track.
+func (r *stressRecorder) listen(proc int, s *cu.Shared) {
+	event := func(kind, what, uid, rv string) {
+		e := stEvent{stFeed: stFeed{proc, kind, what}, uid: uid, rv: parseRV(rv), at: time.Now()}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.events = append(r.events, e)
+	}
+	s.OnHolderEvent(func(t *cu.Tracker, m *metav1.PartialObjectMetadata) {
+		event(t.HolderKind().Kind, "holder", string(m.UID), m.ResourceVersion)
+	})
+	s.OnProtectedEvent(func(t *cu.Tracker, m *metav1.PartialObjectMetadata) {
+		event(t.HolderKind().Kind, "protected", string(m.UID), m.ResourceVersion)
+	})
+	s.OnNamespaceAct(func(n *metav1.PartialObjectMetadata) { event("", "namespace", n.Name, n.ResourceVersion) })
+}
+
 // calledBy is md, recording process proc's calls.
 func (r *stressRecorder) calledBy(proc int, md metadata.Interface) metadata.Interface {
 	return recordingMetadata{md, r, proc}
@@ -364,8 +389,14 @@ func codeOf(err error) int {
 	return int(st.Status().Code)
 }
 
+// Get records a live GET as such: one with a resourceVersion may be answered
+// from a cache, and is no R1, and no read of a Namespace or of a consent.
 func (c recordingResource) Get(ctx context.Context, name string, o metav1.GetOptions, sub ...string) (*metav1.PartialObjectMetadata, error) {
-	return c.call(ctx, stCall{op: "get"}, name, func() (*metav1.PartialObjectMetadata, error) {
+	op := "get"
+	if o.ResourceVersion != "" {
+		op = "get, not live"
+	}
+	return c.call(ctx, stCall{op: op}, name, func() (*metav1.PartialObjectMetadata, error) {
 		return c.ResourceInterface.Get(ctx, name, o, sub...)
 	})
 }

@@ -70,6 +70,7 @@ func startStressProcess(t *testing.T, rec *stressRecorder, proc int, so cu.Share
 	clients := clientsFor(t, env.Config)
 	clients.Metadata = rec.calledBy(proc, clients.Metadata)
 	p := &stressProcess{s: cu.NewShared(clients, so)}
+	rec.listen(proc, p.s)
 	kinds := stressKinds
 	if mode != stressPlain {
 		// Widgets only, which reach their Secrets through Targets (§9).
@@ -430,6 +431,48 @@ func (w *stressWorld) canaryGrace(ctx context.Context) {
 	})
 }
 
+// canaryTeardown is §1's teardown (§5): a namespace is deleted, then an object
+// in it, with one live user. It is kept past its grace, for as long as the
+// user is there, and goes with it.
+func (w *stressWorld) canaryTeardown(ctx context.Context) {
+	ns := w.canaryNamespace()
+	o, field := stObj{"Secret", ns, "s0"}, "secret"
+	if w.chained {
+		o, field = stObj{"Target", ns, "t0"}, "target"
+	}
+	uid, ok := w.canaryHeld(ctx, ns, field, o.name, o)
+	if !ok {
+		return
+	}
+	if err := env.Kube.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{}); err != nil {
+		w.t.Errorf("deleting %s: %v", ns, err)
+		return
+	}
+	_ = w.rec.deleteObject(ctx, o)
+	fin, _ := cu.FinalizerName(widgetGK, ns)
+	began := time.Now()
+	for time.Since(began) < testGrace+time.Second {
+		u, err := w.get(ctx, o)
+		if err != nil && !apierrors.IsNotFound(err) {
+			w.t.Errorf("reading %s: %v", o, err)
+			return
+		}
+		if err != nil || string(u.GetUID()) != uid || !slices.Contains(u.GetFinalizers(), fin) {
+			w.found(findNotKept, ns, o, began, fmt.Sprintf("its namespace was deleted, and then it, with one live user: it must be kept, and after %s it isn't: %v", time.Since(began), err))
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Delete(ctx, canaryHolder, metav1.DeleteOptions{}); err != nil {
+		w.t.Errorf("deleting the canary in %s: %v", ns, err)
+		return
+	}
+	w.canaryUntil(ctx, ns, o, findNotReleased, "its last user was deleted: it must go", func() (bool, string) {
+		_, err := w.get(ctx, o)
+		return apierrors.IsNotFound(err), fmt.Sprintf("%v", err)
+	})
+}
+
 // canaryWithdrawal is §11.3: a hold of another namespace's object goes when
 // its consent does, though its holder still names it.
 func (w *stressWorld) canaryWithdrawal(ctx context.Context) {
@@ -516,10 +559,7 @@ func (w *stressWorld) canaryUntil(ctx context.Context, ns string, o stObj, class
 			return true
 		}
 		if time.Since(began) > canaryTimeout {
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			w.findings = append(w.findings, stFinding{class: class, text: fmt.Sprintf("%s: %s, and it isn't so after %s: %s", o, what, canaryTimeout, state),
-				obj: o, holders: []stObj{{"Widget", ns, canaryHolder}}, from: began.Add(-5 * time.Second), to: time.Now(), zero: began})
+			w.found(class, ns, o, began, fmt.Sprintf("%s, and it isn't so after %s: %s", what, canaryTimeout, state))
 			return false
 		}
 		if i%10 == 0 {
@@ -527,6 +567,14 @@ func (w *stressWorld) canaryUntil(ctx context.Context, ns string, o stObj, class
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// found adds a canary's finding, of o and of the canary in ns.
+func (w *stressWorld) found(class, ns string, o stObj, began time.Time, text string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.findings = append(w.findings, stFinding{class: class, text: o.String() + ": " + text, obj: o, holders: []stObj{{"Widget", ns, canaryHolder}},
+		from: began.Add(-5 * time.Second), to: time.Now(), zero: began})
 }
 
 func (w *stressWorld) get(ctx context.Context, o stObj) (*unstructured.Unstructured, error) {
@@ -599,6 +647,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	stop := time.Now().Add(d)
 	var wg sync.WaitGroup
 	wg.Go(func() { w.canaryGrace(ctx) })
+	wg.Go(func() { w.canaryTeardown(ctx) })
 	if w.target != "" {
 		wg.Go(func() { w.canaryWithdrawal(ctx) })
 		// One of the target's Secrets is deleted and recreated, so that §5's
@@ -784,9 +833,6 @@ func (w *stressWorld) audit(what string, teardowns int64) {
 		if n := r.counts[f.count]; n < f.min {
 			t.Errorf("AUDIT TOO-LITTLE: %s: %d, want at least %d; %s", f.count, n, f.min, r)
 		}
-	}
-	if n := r.counts[countSkipsUnchecked]; 10*n > r.counts[countSkips] {
-		t.Errorf("AUDIT TOO-LITTLE: %s: %d, of %d checked", countSkipsUnchecked, n, r.counts[countSkips])
 	}
 }
 

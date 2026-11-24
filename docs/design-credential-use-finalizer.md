@@ -5991,26 +5991,33 @@ failure that the API server had caused (H3 below). Now:
 - **Every finalizer that goes, goes by a release, and every object that goes,
   by a release of that incarnation or by a DELETE that named it.**
 - **What a pass reports is checked:** a deletion pass holds each ref with an
-  A2 of its own. A live one may skip, if its process has written the object
-  since the A1 that named it, and the caches may still have had that
-  incarnation, and the finalizer on it, 5s before. No A2 comes before the
-  record names its object. Each reason why a ref isn't held, and each acquire
-  that stops or leaves the holder Degraded, has an answer of the API server's
-  behind it.
+  A2 of its own. A live one may skip, by §6.3 and by what its own informers had
+  delivered, which the test's hooks see: the holder's version it works from,
+  last; an A2 of its process that began after the first delivery of a record
+  that names the ref; and nothing since that drops it, delivered before the
+  pass began. No A2 comes before the record names its object. Each reason why
+  a ref isn't held, and each acquire that stops or leaves the holder Degraded,
+  has an answer of the API server's behind it, the last one the pass had.
+- **Reads that must be live are:** a GET with a resourceVersion is no R1, and
+  no read of a Namespace or a consent. And none answers less than the watch
+  had delivered before it began.
 - **Consent** (§11.3): an A2 of another namespace's object follows, in its
   pass, live reads of the Namespace and of the object, the last of which
-  consent.
+  consent; and a skip, a consent its caches may have had.
+- **One worker a key** (§10.2), **and the labels** that go with the finalizers
+  (§3).
 - **A record write drops no ref the holder still names,** except one in
   another namespace whose consent that pass read, live, as refused. And a pass
   that went through every ref leaves exactly the refs of the version it read,
   less those without consent.
 - **The owner finalizer** (§6.7): it is added by a pass that held each ref of
   the record, or read it absent after its last A2.
-- **What must happen in every run does.** Two canaries, beside the goroutines
-  and within the run's 8s: an object with one live user is deleted, and goes
-  after its grace; and a hold of another namespace's object goes with its
-  consent, though its holder still names it. And a run with too few releases,
-  holds, skips, establishments, or consenting reads, fails.
+- **What must happen in every run does.** Three canaries, beside the
+  goroutines and within the run's 8s: an object with one live user is deleted,
+  and goes after its grace; one in a namespace that was deleted first is kept
+  past it, until its user goes; and a hold of another namespace's object goes
+  with its consent, though its holder still names it. And a run with too few
+  releases, holds, skips, establishments, or consenting reads, fails.
 - **A deletion pass reads what it has just held** (I1). It is a deletion pass
   if the holder was being deleted when the pass read it. One that began live
   isn't counted there, and is in every other audit. A failed read is exempt
@@ -6028,7 +6035,19 @@ failure that the API server had caused (H3 below). Now:
 
 Each audit is tested on made-up histories, without an API server, and against
 mutants of the protocol by `hack/revert-check-credential-use-stress.py`, which
-counts the iterations each takes to be found.
+counts the iterations each takes to be found, by the classes it names.
+
+**What a green run of 300 iterations says**, as
+`hack/count-credential-use-stress.py` counts one: a defect that these audits
+can see, at envtest's timings, shows in under about 1% of iterations (95%). It
+says no more. It says nothing about stale holders (the driver reads them live);
+more than one ref per holder; lost responses, 5xx, restarts, failover, clock
+skew, or two API servers; a holder recreated under its name; liveness beyond the
+canaries; chains, PerName, Disown, or cluster-scoped kinds; events, or the
+unheld annotation; or a real cluster's rates of H1 and H3. An iteration is
+excused only if every error line of it is an audit's of the API server's own
+H1, and those are reported as rates: a change of either rate is what that count
+shows of a change to the releases.
 
 **What it can't show:**
 
@@ -6044,12 +6063,16 @@ counts the iterations each takes to be found.
   object in two steps. An A2 that lands between them succeeds, and goes with
   the object. It was seen in 25 of 10,625 removals in that probe, with no
   failed read. The stress counts it, by the version that R3's answer says its
-  tests ran on; a deletion pass's read that fails for it fails the run. The
+  tests ran on; a deletion pass's read that fails for it fails the run, under
+  its own name (`H1-LOST-A2`), on proof: the pass's A2 made the last version,
+  and every release that took it had tested an older one. The
   other half of H1, where a second release of one incarnation removes the
   next, wasn't seen there. The stress has seen it: two processes' releases of a
   Secret answered, one removed it, the test's recreate landed, and the other's
   removed the recreated one at the next revision. It fails the run, under its
-  own name (`H1-RECREATE`).
+  own name (`H1-RECREATE`), only where both releases answered, of two
+  processes, and one was in flight still when the create had been answered.
+  One process's two releases are a defect of ours (`RELEASED-TWICE`).
 - **The chained case.** A pass that followed an older version of a Target may
   drop from the record a Secret that the holder now needs (H2, open). The
   stress counts such drops and doesn't fail on them: every release after one
