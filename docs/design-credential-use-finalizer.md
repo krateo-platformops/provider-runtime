@@ -2512,8 +2512,9 @@ ref that is new, or an object recreated since, isn't held, a lost finalizer
 isn't written again, and the missing-ref prober forgets the holder (§10.3),
 since no pass of it could hold what the prober finds. **A withdrawn consent
 isn't acted on either** (§11.3): the gate runs after the refusal, so a hold
-on an object in another namespace lasts until the holder is deleted or its
-refs name no `Next`. Every fail-open pass keeps its holds so, but this one
+on an object in another namespace, made directly before the refs gained a
+`Next` or through a chain under an older build, lasts until the holder is
+deleted or its refs name no `Next`. Every fail-open pass keeps its holds so, but this one
 lasts until the provider or the object changes, not until an error passes.
 Its way out is the same as any hold's: §5's grace, or Disown (§7.4).
 
@@ -4728,9 +4729,11 @@ separate, and is written on the CRD (§7.4).
 `credentialuse_held_objects` and `credentialuse_waiting_objects` (gauges),
 `credentialuse_index_fill_ratio` (gauge, PerName and PerNamePoll),
 `credentialuse_degraded_total{reason}` (every fail-open of §8, which earlier
-revisions counted without naming), `credentialuse_refs_not_held_total`,
+revisions counted without naming; a refused chain has a reason of its own,
+`ChainsNotSupported`, §9), `credentialuse_refs_not_held_total`,
 `credentialuse_refs_conflicting_total{asked}` (refs that asked for more than
-the first ref of the same object, which wins, §9.1),
+the first ref of the same object, which wins, §9.1; `asked="next"` can't occur
+while chains are refused, §9),
 `credentialuse_consent_withdrawn_total`, `credentialuse_refs_read_denied_total`,
 `credentialuse_index_tampered_total`,
 `credentialuse_unrecorded_reads_total` (§11.9),

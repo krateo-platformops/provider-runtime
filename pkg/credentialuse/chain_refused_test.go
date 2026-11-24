@@ -136,7 +136,8 @@ func TestAcquireRefusesAChainBeforeAnyWrite(t *testing.T) {
 				}
 				want := []string(nil)
 				if hc.established {
-					want = []string{"Refs"}
+					// Its own reason, which no other failure has (§12).
+					want = []string{"ChainsNotSupported"}
 				}
 				if !slices.Equal(r.rep.degraded, want) {
 					t.Errorf("degraded reports = %v, want %v", r.rep.degraded, want)

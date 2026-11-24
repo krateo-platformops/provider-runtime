@@ -38,7 +38,8 @@ RT = "pkg/reconciler/reconcilertest/"
 RTC = RT + "credentialuse.go"
 FILES = [AQ, CH, TR, SH, RC, RTC]
 
-REFUSE = "\tif err := p.refuseChains(refs); err != nil {\n\t\treturn fail(err, \"Refs\")\n\t}\n"
+FAIL = "return fail(err, reasonChainsRefused)"
+REFUSE = "\tif err := p.refuseChains(refs); err != nil {\n\t\t" + FAIL + "\n\t}\n"
 EACH = "\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())\n\t\t}\n"
 BEFORE = "\tfor _, u := range a.Unheld {\n\t\tif err := p.refuseChains([]Ref{u.Ref}); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n"
 
@@ -72,15 +73,17 @@ MUTANTS = [
      [(REFUSE, REFUSE.replace("; err != nil {", "; err != nil && !established {"))]),
     # What the holder sees.
     ("an established holder must not connect", AQ,
-     [(REFUSE, REFUSE.replace("return fail(err, \"Refs\")", "a.Err = err\n\t\ta.MustNotConnect = true\n\t\treturn a, nil"))]),
+     [(REFUSE, REFUSE.replace(FAIL, "a.Err = err\n\t\ta.MustNotConnect = true\n\t\treturn a, nil"))]),
     ("a new holder connects", AQ,
-     [(REFUSE, REFUSE.replace("return fail(err, \"Refs\")", "a.Err = err\n\t\ta.Degraded = true\n\t\treturn a, nil"))]),
+     [(REFUSE, REFUSE.replace(FAIL, "a.Err = err\n\t\ta.Degraded = true\n\t\treturn a, nil"))]),
     ("the refusal isn't reported as degraded", AQ,
-     [(REFUSE, REFUSE.replace("return fail(err, \"Refs\")", "a.Err = err\n\t\ta.Degraded, a.MustNotConnect = established, !established\n\t\treturn a, nil"))]),
+     [(REFUSE, REFUSE.replace(FAIL, "a.Err = err\n\t\ta.Degraded, a.MustNotConnect = established, !established\n\t\treturn a, nil"))]),
+    ("the refusal has no reason of its own", AQ,
+     [(REFUSE, REFUSE.replace(FAIL, "return fail(err, \"Refs\")"))]),
     ("the refusal is Acquire's error", AQ,
-     [(REFUSE, REFUSE.replace("return fail(err, \"Refs\")", "return a, err"))]),
+     [(REFUSE, REFUSE.replace(FAIL, "return a, err"))]),
     ("a refused pass empties the record", AQ,
-     [(REFUSE, REFUSE.replace("return fail(err, \"Refs\")", "_, _ = p.announce(ctx, obj, nil, nil, &a)\n\t\treturn fail(err, \"Refs\")"))]),
+     [(REFUSE, REFUSE.replace(FAIL, "_, _ = p.announce(ctx, obj, nil, nil, &a)\n\t\t" + FAIL))]),
     ("the error doesn't name the ref", CH,
      [(EACH, EACH.replace("fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())", "ErrChainsNotSupported"))]),
     ("the error doesn't wrap the sentinel", CH, [(EACH, EACH.replace("%w", "%v"))]),
@@ -157,6 +160,7 @@ KILLERS = {
     "an established holder must not connect": {C: "TestAcquireRefusesAChainBeforeAnyWrite", R: "TestCredentialUseRefusesAChain"},
     "a new holder connects": {C: "TestAcquireRefusesAChainBeforeAnyWrite", R: "TestCredentialUseRefusesAChain"},
     "the refusal isn't reported as degraded": REFUSED,
+    "the refusal has no reason of its own": REFUSED,
     "the refusal is Acquire's error": REFUSED,
     "a refused pass empties the record": {C: "TestARefusedChainKeepsWhatItHeld", R: "TestCredentialUseRefusesAChain"},
     "the error doesn't name the ref": {C: "TestAcquireRefusesAChainBeforeAnyWrite|TestTheTrackerRefusesChains", R: "TestCredentialUseRefusesAChain"},

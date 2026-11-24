@@ -414,7 +414,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// with it, stay as they are. Refs are found inside another only by its
 	// Next, so a list that passes is the whole chain: one level, all direct.
 	if err := p.refuseChains(refs); err != nil {
-		return fail(err, "Refs")
+		return fail(err, reasonChainsRefused)
 	}
 	maxDepth := p.maxDepth
 	if maxDepth == 0 {

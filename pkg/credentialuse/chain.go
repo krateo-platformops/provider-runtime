@@ -79,6 +79,11 @@ var (
 	errNextNeedsContent = errors.New("credential-use: a ref with a Next must be of a protected kind with Content")
 )
 
+// reasonChainsRefused is the reason credentialuse_degraded_total counts a
+// refused chain under, apart from every other failure: it lasts until the
+// refs change, so nothing but the provider, or the object, clears it.
+const reasonChainsRefused = "ChainsNotSupported"
+
 // refuseChains returns ErrChainsNotSupported, naming the first of refs with a
 // Next, unless the tests have p follow chains. It looks at every ref,
 // Guaranteed ones and second refs to one object included.
