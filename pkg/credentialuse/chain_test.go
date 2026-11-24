@@ -57,7 +57,8 @@ func targetKey(name string) apimodel.Key {
 }
 
 // chainRig is a rig whose protocol follows chains, which production refuses
-// (chain_refused_test.go), and treats Target as a content kind.
+// (chain_refused_test.go), and treats Target as a content kind. A test of a
+// chain on any other rig must set followChains itself (FollowChains says why).
 func chainRig(t *testing.T) (*rig, *fakeContents) {
 	r := newRig(t)
 	fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
