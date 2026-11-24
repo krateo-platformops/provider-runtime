@@ -2,11 +2,9 @@ package credentialuse
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,8 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
-
-	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
 // A holder whose record can't be parsed counts as a user of every object held
@@ -661,25 +657,13 @@ func (r *fakeRig) secretMetaOf(ns, name string) *metav1.PartialObjectMetadata {
 	return obj.(*metav1.PartialObjectMetadata)
 }
 
-// warnings records a logger's Warn calls.
-type warnings struct {
-	logging.Logger
-	mu sync.Mutex
-	w  []string
-}
-
-func (l *warnings) Warn(msg string, kv ...any) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.w = append(l.w, fmt.Sprint(msg, kv))
-}
-
-func (l *warnings) take() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	w := l.w
-	l.w = nil
-	return w
+// take returns the warnings since the last take.
+func (w *warnings) take() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	got := w.got
+	w.got = nil
+	return got
 }
 
 // An unparseable record is logged once per holder, however often it changes,
@@ -695,7 +679,7 @@ func TestAnUnparseableRecordIsLoggedOnce(t *testing.T) {
 	world := func(t *testing.T) (*fakeRig, *Tracker, *warnings) {
 		t.Helper()
 		r := newFakeRig(t, namespaceObject("ns"))
-		log := &warnings{Logger: logging.NewNopLogger()}
+		log := &warnings{}
 		o := r.options(widgetGK)
 		o.Logger = log
 		tr, err := r.s.Track(context.Background(), o)
@@ -747,6 +731,25 @@ func TestAnUnparseableRecordIsLoggedOnce(t *testing.T) {
 		logged(t, "replaced, in one event", log, 1)
 		if len(tr.unparseable.m) != 1 {
 			t.Errorf("%d holders kept, want the one there is", len(tr.unparseable.m))
+		}
+	})
+	t.Run("one that isn't a user", func(t *testing.T) {
+		// Forget, and then the update that takes the owner finalizer: it is
+		// unparseable still, and counts as a user of nothing.
+		_, tr, log := world(t)
+		h := holderHandler{tr}
+		going := deleting(record(spoiled), time.Now())
+		h.OnAdd(going, false)
+		logged(t, "deleting, with its owner finalizer", log, 1)
+		tr.Forget(going.DeepCopy())
+		done := going.DeepCopy()
+		done.Finalizers = []string{"example.com/else"}
+		h.OnUpdate(going, done)
+		logged(t, "forgotten, and without it", log, 0)
+		h.OnAdd(done, true)
+		logged(t, "replayed", log, 0)
+		if len(tr.unparseable.m) != 0 {
+			t.Errorf("%d holders kept, want none", len(tr.unparseable.m))
 		}
 	})
 	t.Run("through the informer, and what is kept", func(t *testing.T) {

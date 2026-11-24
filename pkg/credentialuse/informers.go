@@ -306,7 +306,7 @@ func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata, gap bool)
 	}
 	// Once per holder, which its deletion or Forget forgets, and never what
 	// the record says (§4).
-	if is.Unparseable && h.t.unparseable.first(consentKey{holder: cur.UID}) {
+	if usesAll && h.t.unparseable.first(consentKey{holder: cur.UID}) {
 		h.t.warn("credential-use: a holder's record can't be parsed, so it counts as a user of everything held for its namespace, until a pass of it rewrites the record (§4)",
 			"holder", nsName(cur.Namespace, cur.Name), "kind", h.t.gk.String())
 	}

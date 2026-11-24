@@ -233,12 +233,13 @@ new key (`refs.v2`), and a reader that knows both reads both.
 
 **A record that can't be parsed counts as a user** of every protected
 object its namespace's check considers. It fails safe, and each process whose
-informer delivers it logs a warning, once per holder, with its namespace, name
-and kind, and nothing of the record. The holder's next acquire that reaches its
-last A1 overwrites it with a valid record. One that ends before it doesn't: a
-`Refs` error, a holder in the index namespace, a refused chain (§9). The record
-then stays unparseable, and keeps what it counts as used, as a paused holder's
-record does (§11.3). Until then it counts, for every object held for its
+informer delivers it, while it counts so, logs a warning, once per holder, with
+its namespace, name and kind, and nothing of the record. The holder's next
+acquire that reaches its last A1 overwrites it with a valid record. One that
+ends before it doesn't: a `Refs` error, a holder in the index namespace, a
+refused chain (§9). The record then stays unparseable, and keeps what it counts
+as used, as a paused holder's record does (§11.3). Until then it counts, for
+every object held for its
 namespace, as a holder that names it does (§5); when it stops counting as a user
 of them all, they are all checked again (§10.2).
 
@@ -852,7 +853,10 @@ of a kind that can't be mapped included; bounding what a holder's data can put
 there is the release cost's change. R0's keep is a decision as any other, so it
 ends a pending retry: its user's event runs the batch again, that of one whose
 record can't be parsed included, which queues all that the caches show as held
-for its namespace (§10.2). One user has no such event yet, and its fix is its
+for its namespace (§10.2), and so every hold R0 keeps for it. What isn't held
+isn't queued: a PerName object whose index prune failed, live and watched, and
+bare, keeps its line until the write loops' next start, or the next batch that
+names it. One user has no such event yet, and its fix is its
 own: a ghost of a kind whose CRD is gone, which the cache keeps. The protocol's
 model decides one batch (`RequeueAt` is all it reads of a schedule), and has
 none for what failed, what asked, or the backoff: those are the release loop's,
@@ -2908,6 +2912,8 @@ Its index maps each recorded ref to holders. The index serves:
     that names the object:
     - a hold for N on an object of another namespace M that the caches don't
       cover (§10.5). M's own teardown doesn't help: it queues M's batch, not N's;
+    - an object in a namespace that the caches cover, whose held label someone
+      stripped: no label-scoped cache has it (§10.1);
     - a PerName name whose watch is forbidden, or hasn't synced: the fill reads
       the watches. Once it syncs, its add queues the object's batch;
     - a holder whose record became unparseable and was repaired inside one
@@ -2921,7 +2927,10 @@ Its index maps each recorded ref to holders. The index serves:
     with users in the cache, and those with a deleting user, cost nothing more;
     the others, a deleting object with live users among them, cost what R1 and
     R2 do. Whoever can edit a holder can cause one for each pair of writes of
-    its record, or for one write and a pass of the holder, which repairs it;
+    its record, or for one write and a pass of the holder, which repairs it. An
+    object that a batch fails at is forgotten as failing by the next that keeps
+    it by R0, as for the unparseable holder (§6.2): so toggles restart its
+    backoff, and its retries go at about their rate, beside those batches;
 - **enqueueing holders when a protected object changes** (§9.2), through
   `CredentialUseSource` or `Options.Enqueue`. A label-scoped informer
   delivers an object losing its label as a deletion. That is the signature

@@ -19,10 +19,10 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
-IN, DE, DI, TR = [C + f for f in ("informers.go", "decide.go", "disown.go", "tracker.go")]
-FILES = [IN, DE, DI, TR]
+IN, DE, DI, TR, WL = [C + f for f in ("informers.go", "decide.go", "disown.go", "tracker.go", "writeloops.go")]
+FILES = [IN, DE, DI, TR, WL]
 
-LOG = "\tif is.Unparseable && h.t.unparseable.first(consentKey{holder: cur.UID}) {\n"
+LOG = "\tif usesAll && h.t.unparseable.first(consentKey{holder: cur.UID}) {\n"
 FILL = "\tif gap || usedAll && !usesAll {\n"
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
@@ -44,6 +44,8 @@ MUTANTS = [
      [("\t\th.enqueue(o, n, replaced)\n", "\t\th.enqueue(o, n, true || replaced)\n")]),
     ("the namespace is a batch of its own", IN,
      [(FILL + "\t\tids = append(ids, fillAll)\n", FILL + "\t\th.t.s.queue.Add(batchKey{h.t.gk, old.Namespace})\n")]),
+    ("the namespace's list that fails is lost", WL,
+     [("\t\t\tfail(err, fillAll)\n", "\t\t\tfail(err)\n")]),
     # What is forgotten.
     ("one that is replaced keeps its write", IN,
      [("\t\th.t.proto.written.forget(o.UID)\n", "")]),
@@ -69,9 +71,11 @@ MUTANTS = [
      [("\tt.unparseable.forget(obj.GetUID())\n", "")]),
     # The log (§4).
     ("no log", IN,
-     [(LOG, "\tif false && is.Unparseable && h.t.unparseable.first(consentKey{holder: cur.UID}) {\n")]),
+     [(LOG, "\tif false && usesAll && h.t.unparseable.first(consentKey{holder: cur.UID}) {\n")]),
+    ("a log for one that isn't a user", IN,
+     [(LOG, "\tif is.Unparseable && h.t.unparseable.first(consentKey{holder: cur.UID}) {\n")]),
     ("a log for every event", IN,
-     [(LOG, "\tif is.Unparseable {\n\t\th.t.unparseable.first(consentKey{holder: cur.UID})\n")]),
+     [(LOG, "\tif usesAll {\n\t\th.t.unparseable.first(consentKey{holder: cur.UID})\n")]),
     ("a log for any record", IN,
      [(LOG, "\tif cur != nil && h.t.unparseable.first(consentKey{holder: cur.UID}) {\n")]),
     ("the log has the record", IN,
@@ -105,6 +109,7 @@ KILLERS = {
     "one that is replaced queues the refs of both only": QUEUES,
     "any update queues the namespace": QUEUES,
     "the namespace is a batch of its own": {C: "TestARecordsChangeIsOneBatch"},
+    "the namespace's list that fails is lost": {C: "TestTogglesWhileABatchFails|TestTogglesDuringAGrace"},
     "one that is replaced keeps its turns": REPLACED,
     "one that is replaced keeps its conflicts": REPLACED,
     "one that is replaced keeps its write": REPLACED,
@@ -117,6 +122,7 @@ KILLERS = {
     "one that is gone keeps its unparseable log": LOGGED,
     "Forget keeps the unparseable log": LOGGED,
     "no log": LOGGED,
+    "a log for one that isn't a user": LOGGED,
     "a log for every event": LOGGED,
     "a log for any record": LOGGED,
     "the log has the record": LOGGED,
