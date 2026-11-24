@@ -931,9 +931,10 @@ of tests.
   owner finalizers, `Refs`, the sinks, `PollInterval` (the poll interval)
   and `TimeoutBound` (the timeout plus 30s).
 - **`AssertCredentialRefsCover(t, ctx, connecter, mg, recordingReader,
-  protected...)`** follows the refs' Next through the fixture, and hands
+  kindOptions)`** follows the refs' Next through the fixture, and hands
   Connect the objects it followed through the new
-  `credentialuse.WithResolvedObjects`.
+  `credentialuse.WithResolvedObjects`. It took the protected kinds until
+  2026-11-24, which say neither `MaxDepth` nor `Content`.
 - **A degraded pass is logged once per holder** (§8), keyed by UID, while
   it stays degraded: a pass that isn't degraded, `Forget`, or the holder's
   deletion clears it, so the next degraded pass logs again. The

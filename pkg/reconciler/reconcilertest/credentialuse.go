@@ -99,9 +99,10 @@ func (r *RecordingReader) Reset() {
 
 // AssertCredentialRefsCover checks that c's CredentialRefs names everything
 // its Connect reads for mg (docs/design-credential-use-finalizer.md §11.9):
-// a Secret, or an object of one of protected, that Connect reads and the
+// a Secret, or an object of a kind in o.Protected, that Connect reads and the
 // refs don't name is unprotected, a provider defect that only shows when a
-// namespace teardown wedges.
+// namespace teardown wedges. o is the kind's options, as the provider gives
+// them to the reconciler.
 //
 // It calls c.CredentialRefs(mg), and follows each ref's Next, as the runtime
 // does after holding the object: it reads each object a ref names through
@@ -110,15 +111,15 @@ func (r *RecordingReader) Reset() {
 // silently protects nothing (§16.2): the fixture must hold every object the
 // refs name. It then calls c.Connect(ctx, mg), with the objects it followed
 // on ctx for credentialuse.Resolved, and fails t for each read Connect made
-// through rec, a Get or a List, of a Secret or of protected, that the refs,
-// after Next, don't name. Guaranteed refs count as named.
+// through rec, a Get or a List, of a Secret or of a protected kind, that the
+// refs, after Next, don't name. Guaranteed refs count as named.
 //
 // rec must be the reader the connecter reads Secrets and protected objects
 // with; build the connecter with it. The connecter must implement
 // reconciler.CredentialRefsProvider. It returns the client Connect returned,
 // and its error, for further assertions.
 func AssertCredentialRefsCover(t testing.TB, ctx context.Context, c reconciler.ExternalConnecter, mg resource.Managed, rec *RecordingReader,
-	protected ...schema.GroupKind) (reconciler.ExternalClient, error) {
+	o credentialuse.KindOptions) (reconciler.ExternalClient, error) {
 	t.Helper()
 	p, ok := c.(reconciler.CredentialRefsProvider)
 	if !ok {
@@ -131,8 +132,8 @@ func AssertCredentialRefsCover(t testing.TB, ctx context.Context, c reconciler.E
 		return nil, nil
 	}
 	kinds := map[schema.GroupKind]bool{secretGroupKind: true}
-	for _, gk := range protected {
-		kinds[gk] = true
+	for _, pk := range o.Protected {
+		kinds[pk.GVK.GroupKind()] = true
 	}
 	named := map[credentialuse.ID]bool{}
 	resolved := map[credentialuse.ID]*unstructured.Unstructured{}

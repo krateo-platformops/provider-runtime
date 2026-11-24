@@ -84,6 +84,13 @@ func fixture(t *testing.T) (*RecordingReader, *runtime.Scheme) {
 	return NewRecordingReader(c, s), s
 }
 
+// withContent are a kind's options that protect Secrets and gvk, with Content.
+func withContent(gvk schema.GroupVersionKind) credentialuse.KindOptions {
+	return credentialuse.KindOptions{Protected: []credentialuse.ProtectedKind{
+		{GVK: corev1.SchemeGroupVersion.WithKind("Secret"), Content: true}, {GVK: gvk, Content: true},
+	}}
+}
+
 // §11.9: AssertCredentialRefsCover passes a connecter whose refs name what
 // Connect reads, a chain's end included, and fails one that reads an
 // unnamed Secret, and one whose ref resolves to nothing.
@@ -112,7 +119,7 @@ func TestAssertCredentialRefsCover(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rec, _ := fixture(t)
 			tb := &recordingTB{TB: t}
-			_, _ = AssertCredentialRefsCover(tb, context.Background(), tc.c(rec), &fake.Managed{}, rec, schema.GroupKind{Kind: "ConfigMap"})
+			_, _ = AssertCredentialRefsCover(tb, context.Background(), tc.c(rec), &fake.Managed{}, rec, withContent(corev1.SchemeGroupVersion.WithKind("ConfigMap")))
 			got := strings.Join(tb.failures, "\n")
 			switch {
 			case tc.want == "" && got != "":
