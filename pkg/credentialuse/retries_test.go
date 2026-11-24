@@ -1341,6 +1341,37 @@ func TestAnErrorThatNamesNoObjectLosesNone(t *testing.T) {
 	}
 }
 
+// And they back off as objects an error names do: they aren't settled first,
+// which would start their backoff again at every failure.
+func TestAnErrorThatNamesNoObjectBacksOff(t *testing.T) {
+	ctx := context.Background()
+	for _, named := range []bool{true, false} {
+		r, k := outside(t)
+		r.failWhile(func(string) bool { return true })
+		if !named {
+			r.s.hooks.released = func(res *ReleaseResult) { res.Failed = nil }
+		}
+		r.track(t, widgetGK)
+		r.run(t)
+		r.drain()
+		a, b := secretID("out", "a"), secretID("out", "b")
+		r.s.releaseBatch(ctx, k, []ID{a, b})
+		for n, d := range []time.Duration{1, 2, 4, 8, 16} {
+			if f := failuresOf(r.s.queue, k); f[a] != n+1 || f[b] != n+1 {
+				t.Errorf("named %v: failures %v, want %d of each", named, f, n+1)
+			}
+			r.clk.Step(d*time.Second - 1)
+			if got := r.queued(widgetGK, "out"); got != nil {
+				t.Errorf("named %v: before %ds the batch is %v", named, d, got)
+			}
+			r.clk.Step(1)
+			if got := r.next(ctx, k); !slices.Equal(got, []ID{a, b}) {
+				t.Errorf("named %v: after %ds the batch is %v, want both retried", named, d, got)
+			}
+		}
+	}
+}
+
 // A batch that fails at many objects says how many, and why the first few did.
 func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	ctx := context.Background()
