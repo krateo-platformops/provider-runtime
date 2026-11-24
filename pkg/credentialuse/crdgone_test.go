@@ -79,17 +79,23 @@ func TestReleaseWithoutAHolderKind(t *testing.T) {
 	}
 }
 
-// noHolders is asked only when the list failed.
+// noHolders is asked only when the list failed, and a release on a list isn't
+// one for want of the kind.
 func TestReleaseListsWhatThereIs(t *testing.T) {
-	r := newRig(t)
-	heldSecret(r)
-	userOf(r, "h", true)
-	r.p.noHolders = func(context.Context, error) error {
-		t.Error("asked, though the list succeeded")
-		return nil
-	}
-	if res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()}); err != nil || len(res.Released) != 0 {
-		t.Errorf("release = %v, %v; want the user's hold kept", res.Released, err)
+	for _, user := range []bool{true, false} {
+		r := newRig(t)
+		heldSecret(r)
+		if user {
+			userOf(r, "h", true)
+		}
+		r.p.noHolders = func(context.Context, error) error {
+			t.Error("asked, though the list succeeded")
+			return nil
+		}
+		r.p.releasedGone = func(id ID) { t.Errorf("the release of %s is told as one for want of the kind", id) }
+		if res, err := r.p.release(context.Background(), "ns", []ID{SecretRef("ns", "s").ID()}); err != nil || (len(res.Released) == 0) != user {
+			t.Errorf("user %v: release = %v, %v", user, res.Released, err)
+		}
 	}
 }
 
@@ -259,8 +265,9 @@ func TestNoHolders(t *testing.T) {
 			r := newFakeRig(t)
 			tr := r.track(t, widgetGK)
 			if c.err != nil {
-				r.removeCRD(t, widgetGK) // and nothing else serves the kind
+				r.removeCRD(t, widgetGK)
 			}
+			r.disc.serve("v1", "widgets", "") // only the GET tells: discovery may lag
 			r.failCRDGet(func() error { return c.err })
 			r.md.ClearActions()
 			err := tr.noHolders(ctx, errTest404)

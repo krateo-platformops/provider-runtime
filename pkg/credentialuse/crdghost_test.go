@@ -261,8 +261,8 @@ func TestAGhostsRecordKeepsNoLine(t *testing.T) {
 
 // perNameFakeRig is a rig of Widgets in PerName mode, whose index names ids,
 // and whose Secrets' watches the API server forbids: its per-name caches are
-// empty (§13 shape 1).
-func perNameFakeRig(t *testing.T, objs []runtime.Object, ids ...ID) (*fakeRig, *Tracker, *outage) {
+// empty (§13 shape 1). before, if set, runs before its Track.
+func perNameFakeRig(t *testing.T, objs []runtime.Object, before func(r *fakeRig), ids ...ID) (*fakeRig, *sinkLines, *outage) {
 	t.Helper()
 	ctx := context.Background()
 	r := newFakeRigWith(t, SharedOptions{IndexNamespace: "idx"}, append([]runtime.Object{namespaceObject("ns"), namespaceObject("idx")}, objs...)...)
@@ -275,10 +275,13 @@ func perNameFakeRig(t *testing.T, objs []runtime.Object, ids ...ID) (*fakeRig, *
 		t.Fatal(err)
 	}
 	r.breakable("secrets").fail(errTest403)
-	out := r.breakable("widgets")
-	tr := r.trackLogged(t, &sinkLines{}, ProtectedKind{GVK: secretGVK, Watch: PerName})
+	out, sink := r.breakable("widgets"), &sinkLines{}
+	if before != nil {
+		before(r)
+	}
+	r.trackLogged(t, sink, ProtectedKind{GVK: secretGVK, Watch: PerName})
 	r.run(t)
-	return r, tr, out
+	return r, sink, out
 }
 
 // indexedIDs are the objects the fake index names.
@@ -303,7 +306,7 @@ func (r *fakeRig) indexedIDs(t *testing.T) []ID {
 func TestTheCRDsDeletionRechecksTheIndex(t *testing.T) {
 	s, missing := secretID("ns", "s"), secretID("ns", "missing")
 	r, _, out := perNameFakeRig(t, []runtime.Object{
-		heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "ghost", s, missing)}, s, missing)
+		heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "ghost", s, missing)}, nil, s, missing)
 	r.runWrites(t)
 	eventually(t, "the start's recheck to read the Secret, and its batch", func() bool {
 		n := 0

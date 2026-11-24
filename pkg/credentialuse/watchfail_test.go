@@ -99,9 +99,12 @@ type outage struct {
 }
 
 // breakable lets the test fail resource.
-func (r *fakeRig) breakable(resource string) *outage {
+func (r *fakeRig) breakable(resource string) *outage { return breakableIn(&r.md.Fake, resource) }
+
+// breakableIn is breakable, of the API server that f is a client of.
+func breakableIn(f *clienttesting.Fake, resource string) *outage {
 	o := &outage{}
-	r.md.PrependReactor("list", resource, func(clienttesting.Action) (bool, runtime.Object, error) {
+	f.PrependReactor("list", resource, func(clienttesting.Action) (bool, runtime.Object, error) {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		if o.err == nil || o.listOK {
@@ -110,7 +113,7 @@ func (r *fakeRig) breakable(resource string) *outage {
 		o.tries++
 		return true, nil, o.err
 	})
-	r.md.PrependWatchReactor(resource, func(clienttesting.Action) (bool, watch.Interface, error) {
+	f.PrependWatchReactor(resource, func(clienttesting.Action) (bool, watch.Interface, error) {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		if o.err != nil {
@@ -247,6 +250,24 @@ func TestAnInformersFailureIsLoggedOnce(t *testing.T) {
 				o.heal()
 			}
 		})
+	}
+}
+
+// So is the index informer's, on the tracker's sink.
+func TestTheIndexInformersFailureIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+	var o *outage
+	r, sink, _ := perNameFakeRig(t, nil, func(r *fakeRig) { o = breakableIn(&r.dyn.Fake, "configmaps") })
+	what := r.s.trackers[widgetGK].indexInformer().what
+	for round := 1; round <= 2; round++ {
+		slowly(t, "a watch", func() bool { return o.watching(1) })
+		tries := o.failures()
+		o.fail(errTest404)
+		slowly(t, "two failed tries", func() bool { return o.failures() >= tries+2 })
+		if n := sink.warned(what+" can't list or watch", `"its kind isn't served"`); n != round {
+			t.Errorf("round %d: logged %d times, want %d: %q", round, n, round, sink.warns)
+		}
+		o.heal()
 	}
 }
 
