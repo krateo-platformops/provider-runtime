@@ -230,6 +230,8 @@ func TestDisownOfAnotherKindPrunesThisOne(t *testing.T) {
 	// Before it has settled again, which a change of the switch makes it do.
 	set("ConfigMap,Other.x.io")
 	deleteWidget(t, ns, "w")
+	r.c.enqueue(widgetNN(ns, "w")) // the pass the switch asked for may be over
+	gone(t, time.Minute, "widget w", widgetGet(ns, "w"))
 	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
 	lined(t, idx, line, false)
 }
