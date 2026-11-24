@@ -2,6 +2,7 @@ package credentialuse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
@@ -103,35 +106,83 @@ func TestR2OfAHolderKindMappedClusterScoped(t *testing.T) {
 	}
 }
 
-// With the CRD gone, the list is made, so it gets the API server's 404, which
-// is never "no users": the batch is retried, and the hold stays.
-func TestABatchOfAHolderKindMappedClusterScopedWithoutItsCRD(t *testing.T) {
+// A list that fails is never "no users", whatever the mapping: with the CRD gone,
+// the API server's 404, of a kind that is cluster-scoped now for a process that
+// mapped it namespaced, the same, or a refusal. The batch is retried, and the
+// hold stays.
+func TestABatchWhoseHolderListFails(t *testing.T) {
 	ctx := context.Background()
 	id := secretID("ns", "s")
-	r, tr, w := scopeRig(t, meta.RESTScopeRoot, heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
-	r.md.PrependReactor("list", "widgets", func(clienttesting.Action) (bool, runtime.Object, error) { return true, nil, unservedError() })
-	if _, err := tr.proto.release(ctx, "ns", []ID{id}); err == nil || !notServed(err) {
-		t.Errorf("release = %v; want the API server's 404 in its chain", err)
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: widgetGK.Group, Resource: "widgets"}, "", errors.New(
+		`User "system:serviceaccount:default:provider" cannot list resource "widgets" in API group "credentialuse.test.krateo.io" at the cluster scope`))
+	for name, c := range map[string]struct {
+		scope meta.RESTScope
+		err   error
+		is    func(error) bool
+		in    string // the namespace the list asks for
+	}{
+		"mapped cluster-scoped, the CRD gone":           {meta.RESTScopeRoot, unservedError(), notServed, ""},
+		"mapped cluster-scoped, forbidden":              {meta.RESTScopeRoot, forbidden, apierrors.IsForbidden, ""},
+		"mapped namespaced, the kind is cluster-scoped": {meta.RESTScopeNamespace, unservedError(), notServed, "ns"},
+		"mapped namespaced, forbidden":                  {meta.RESTScopeNamespace, forbidden, apierrors.IsForbidden, "ns"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, tr, w := scopeRig(t, c.scope, heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+			r.md.PrependReactor("list", "widgets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+				if a.GetNamespace() != c.in {
+					t.Errorf("a list in %q, want in %q", a.GetNamespace(), c.in)
+				}
+				return true, nil, c.err
+			})
+			if _, err := tr.proto.release(ctx, "ns", []ID{id}); err == nil || !c.is(err) {
+				t.Errorf("release = %v; want the API server's answer in its chain", err)
+			}
+			if _, err := tr.Users(ctx, SecretRef("ns", "s"), "ns"); err == nil || !c.is(err) {
+				t.Errorf("Users = %v; want the API server's answer", err)
+			}
+			k := batchKey{widgetGK, "ns"}
+			for n, d := range []time.Duration{1, 2, 4} {
+				r.s.releaseBatch(ctx, k, []ID{id})
+				if !r.heldBy(t, widgetGK, "ns", "s") {
+					t.Fatalf("released, at run %d", n+1)
+				}
+				w.mu.Lock()
+				if len(w.got) != n+1 || !strings.Contains(w.got[n], "release batch failed") {
+					t.Errorf("run %d: warnings %q; want one more", n+1, w.got)
+				}
+				w.mu.Unlock()
+				r.clk.Step(d * time.Second)
+				if got := r.queued(widgetGK, "ns"); !slices.Equal(got, []ID{id}) {
+					t.Fatalf("run %d: the queued batch is %v, want it retried", n+1, got)
+				}
+				r.drain()
+			}
+		})
 	}
-	if _, err := tr.Users(ctx, SecretRef("ns", "s"), "ns"); !notServed(err) {
-		t.Errorf("Users = %v; want the API server's 404", err)
+}
+
+// The prober doesn't list the holder kind, cluster-scoped and protected too, for
+// refs that name it with a namespace: each names no object, and backs off.
+func TestProbeOfAClusterScopedHolderKindNamedWithANamespace(t *testing.T) {
+	r, tr, _ := scopeRig(t, meta.RESTScopeRoot)
+	tr.o.ProbeInterval = time.Second
+	var ids []ID
+	for i := range probeGetLimit + 2 {
+		ids = append(ids, ID{Group: widgetGK.Group, Kind: widgetGK.Kind, Namespace: "ns", Name: fmt.Sprintf("h%d", i)})
 	}
-	k := batchKey{widgetGK, "ns"}
-	for n, d := range []time.Duration{1, 2, 4} {
-		r.s.releaseBatch(ctx, k, []ID{id})
-		if !r.heldBy(t, widgetGK, "ns", "s") {
-			t.Fatalf("released, at run %d", n+1)
+	tr.missing.set(types.NamespacedName{Name: "h"}, ids, r.clk.Now(), time.Second)
+	r.md.ClearActions()
+	for range 2 {
+		r.clk.Step(5 * time.Second)
+		tr.probe(context.Background())
+	}
+	if len(r.md.Actions()) != 0 {
+		t.Errorf("calls were made: %v", r.md.Actions())
+	}
+	for _, id := range ids {
+		if got := tr.missing.refs[id].backoff; got != 4*time.Second {
+			t.Errorf("%s backs off to %s, want 4s", id, got)
 		}
-		w.mu.Lock()
-		if len(w.got) != n+1 || !strings.Contains(w.got[n], "release batch failed") {
-			t.Errorf("run %d: warnings %q; want one more", n+1, w.got)
-		}
-		w.mu.Unlock()
-		r.clk.Step(d * time.Second)
-		if got := r.queued(widgetGK, "ns"); !slices.Equal(got, []ID{id}) {
-			t.Fatalf("run %d: the queued batch is %v, want it retried", n+1, got)
-		}
-		r.drain()
 	}
 }
 
