@@ -127,10 +127,12 @@ type protocol struct {
 	namespaceViews namespaceViews
 	// The gate of recorded refs (§11.3): protects reports whether a kind is
 	// protected, and cacheLacks whether an ID's cache covers it, has synced
-	// and lacks it. Nil ones are every kind, and never.
+	// and lacks it. Nil ones are every kind, and never. gateContext gives its
+	// live reads their context; nil is the pass's.
 	protects     func(schema.GroupKind) bool
 	cacheLacks   func(ID) bool
 	gateTurns    *gateTurns
+	gateContext  func(context.Context) (context.Context, context.CancelFunc)
 	backoff      *consentBackoff
 	reported     *reportedSet
 	unheldReads  *sharedReads
@@ -384,11 +386,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		}
 		return slices.DeleteFunc(want, unrecorded)
 	}
-	retry := func(id ID) {
-		if !recorded.retried[id] {
-			a.retryIn(p.backoff.fail(consentKey{obj.GetUID(), id}))
-		}
-	}
+	retry := func(id ID) { a.retryIn(p.backoff.fail(consentKey{obj.GetUID(), id})) }
 	// lastUnheld is the unheld list that the pass's last A1 writes.
 	lastUnheld := func() []UnheldEntry {
 		u := p.unheldEntries(found, notHeld, keepEntry, &passNow)

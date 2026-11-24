@@ -225,11 +225,14 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		protects:        t.protects,
 		cacheLacks:      t.cacheLacks,
 		gateTurns:       newGateTurns(),
-		backoff:         newConsentBackoff(o.PollInterval),
-		reported:        newReportedSet(),
-		conflicts:       newConflictSet(),
-		written:         newRecordWrites(),
-		unheldReads:     s.unheldReads,
+		gateContext:func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, gateReadTimeout)
+		},
+		backoff:     newConsentBackoff(o.PollInterval),
+		reported:    newReportedSet(),
+		conflicts:   newConflictSet(),
+		written:     newRecordWrites(),
+		unheldReads: s.unheldReads,
 		enqueueBatch: func(id ID, ns string) {
 			s.queue.Add(batchKey{gk, ns}, id)
 		},

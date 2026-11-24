@@ -760,8 +760,13 @@ func TestAForgedRecordCostsABoundedNumberOfReads(t *testing.T) {
 		}
 		// Down to the bound, all are read, and no retry is asked for.
 		forgeRecord(t, r, ids[:maxGateReads])
-		if a := keptPass(t, r, failing()); a.RetryAfter != 0 || len(r.p.gateTurns.at) != 0 {
-			t.Errorf("RetryAfter = %v with no more than one pass reads, turns %v", a.RetryAfter, r.p.gateTurns.at)
+		if a := keptPass(t, r, failing()); a.RetryAfter != 0 {
+			t.Errorf("RetryAfter = %v with no more than one pass reads", a.RetryAfter)
+		}
+		// With nothing to ask about, nothing is remembered.
+		forgeRecord(t, r, nil)
+		if keptPass(t, r, failing()); len(r.p.gateTurns.at) != 0 {
+			t.Errorf("turns = %v with nothing to ask about", r.p.gateTurns.at)
 		}
 	})
 	t.Run("the retry for the rest starts over once none is left", func(t *testing.T) {
@@ -866,10 +871,9 @@ func TestAForgedRecordCostsABoundedNumberOfReads(t *testing.T) {
 		if n := len(turns.at["u1"]); n != 20 {
 			t.Errorf("%d refs remembered, want those still asked about: 20", n)
 		}
-		turns.setFailing("u1", map[ID]bool{ids[0]: true})
 		turns.forget("u1")
-		if len(turns.at) != 0 || len(turns.fail) != 0 {
-			t.Errorf("turns = %v, %v after forget", turns.at, turns.fail)
+		if len(turns.at) != 0 {
+			t.Errorf("turns = %v after forget", turns.at)
 		}
 	})
 }
@@ -932,23 +936,33 @@ func TestAForgedRecordCantStarveARef(t *testing.T) {
 			t.Errorf("s was read on pass %d, want the third", got)
 		}
 	})
-	// cut ends ctx on the nth read of a Secret of each pass.
-	cut := func(t *testing.T, r *rig, record func(pass int) []ID, at func(nth int, name string) bool, n int) map[string]int {
+	// cut runs n passes, in each of which the gate's deadline, or with
+	// wholePass the pass's, comes on the read of a Secret that at says. It
+	// returns how often each was answered.
+	cut := func(t *testing.T, r *rig, wholePass bool, record func(pass int) []ID, at func(nth int, name string) bool, n int) map[string]int {
 		t.Helper()
 		read := map[string]int{}
 		for pass := 1; pass <= n; pass++ {
 			forgeRecord(t, r, record(pass))
 			c, end := context.WithCancel(ctx)
+			endReads := end
+			reads := c
+			if !wholePass {
+				r.p.gateContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
+					reads, endReads = context.WithCancel(ctx)
+					return reads, endReads
+				}
+			}
 			nth := 0
 			r.srv.before = func(op, kind, name string) error {
 				if op != "get" || kind != "Secret" || name == "home" {
 					return nil
 				}
 				if nth++; at(nth, name) {
-					end()
+					endReads()
 				}
-				if c.Err() != nil {
-					return c.Err()
+				if reads.Err() != nil {
+					return reads.Err()
 				}
 				read[name]++
 				return nil
@@ -956,45 +970,68 @@ func TestAForgedRecordCantStarveARef(t *testing.T) {
 			if _, err := r.p.acquire(c, r.get(t, widgetKey("ns", "h")), failingNext()); err != nil {
 				t.Fatal(err)
 			}
+			endReads()
 			end()
 		}
-		r.srv.before = nil
+		r.srv.before, r.p.gateContext = nil, nil
 		return read
 	}
-	t.Run("a pass whose ctx ends before its reads do", func(t *testing.T) {
-		// On the fourth read of each pass: three answers a pass. 19 refs is
-		// where the cut one, were it moved back, would be cut every time.
-		for _, total := range []int{19, 2*maxGateReads + 3} {
-			r := world(t)
-			ids := fresh("", total)
-			read := cut(t, r, func(int) []ID { return ids }, func(nth int, _ string) bool { return nth == 4 }, (total+3)/3)
-			for _, id := range ids {
-				if read[id.Name] == 0 {
-					t.Errorf("of %d: %s wasn't read in %d passes", total, id.Name, (total+3)/3)
+	t.Run("a deadline that comes before its reads end", func(t *testing.T) {
+		// On the fourth read of each pass: three answers a pass, however many
+		// refs there are. Were a cut read always moved back, then with 3 more
+		// than a multiple of 4 the same refs would be cut on every pass.
+		for _, wholePass := range []bool{false, true} {
+			for _, total := range []int{7, 10, maxGateReads, 19, 2*maxGateReads + 3} {
+				r := world(t)
+				ids := fresh("", total)
+				n := (total + 2) / 3
+				read := cut(t, r, wholePass, func(int) []ID { return ids }, func(nth int, _ string) bool { return nth == 4 }, n)
+				for _, id := range ids {
+					if read[id.Name] == 0 {
+						t.Errorf("of %d: %s wasn't read in %d passes", total, id.Name, n)
+					}
 				}
 			}
 		}
 	})
-	t.Run("a ref whose read takes all that ctx has", func(t *testing.T) {
-		r := world(t)
-		ids := fresh("", maxGateReads+4)
-		slow := ids[0].Name
-		read := cut(t, r, func(int) []ID { return ids }, func(_ int, name string) bool { return name == slow }, 4)
-		for _, id := range ids[1:] {
-			if read[id.Name] == 0 {
-				t.Errorf("%s wasn't read in 4 passes, of which the slow one may take all of one or two", id.Name)
+	t.Run("a ref whose read hangs", func(t *testing.T) {
+		for _, total := range []int{5, maxGateReads + 4} {
+			r := world(t)
+			ids := fresh("", total)
+			slow := ids[0].Name
+			read := cut(t, r, false, func(int) []ID { return ids }, func(_ int, name string) bool { return name == slow }, 4)
+			for _, id := range ids[1:] {
+				if read[id.Name] == 0 {
+					t.Errorf("of %d: %s wasn't read in 4 passes, of which the hung one may take all of two", total, id.Name)
+				}
 			}
 		}
 	})
-	t.Run("a withdrawn ref, with such a one behind it", func(t *testing.T) {
-		r := world(t)
-		ids := []ID{otherSecretID()}
-		for i := range maxGateReads + 4 { // all sort after s
-			ids = append(ids, SecretRef("other", fmt.Sprintf("t-%05d", i)).ID())
+	t.Run("a withdrawn ref, with a hung one before it or behind it", func(t *testing.T) {
+		for _, before := range []bool{false, true} {
+			r := world(t)
+			r.p.srv = ctxServer{r.p.srv}
+			hung := SecretRef("other", map[bool]string{true: "a", false: "t"}[before]).ID()
+			passes := cut(t, r, false, func(int) []ID { return []ID{hung, otherSecretID()} }, func(_ int, name string) bool { return name == hung.Name }, 1)
+			if recorded := keptRecorded(t, r); recorded != before {
+				t.Errorf("before %v: s recorded %v after one pass (%v)", before, recorded, passes)
+			}
+			cut(t, r, false, func(int) []ID { return []ID{hung, otherSecretID()} }, func(_ int, name string) bool { return name == hung.Name }, 1)
+			if before && keptRecorded(t, r) {
+				t.Error("s wasn't dropped by the second pass")
+			}
 		}
-		cut(t, r, func(int) []ID { return ids }, func(_ int, name string) bool { return name == ids[1].Name }, 2)
-		if keptRecorded(t, r) {
-			t.Error("s wasn't dropped by the second pass")
+	})
+	t.Run("a pass goes on after the gate's deadline", func(t *testing.T) {
+		r := world(t)
+		r.p.gateContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
+			ended, end := context.WithCancel(ctx)
+			end()
+			return ended, end
+		}
+		a := keptPass(t, r, []Ref{SecretRef("ns", "home")})
+		if a.Degraded || a.Err != nil || len(a.Held) != 1 || a.RetryAfter == 0 {
+			t.Errorf("acquire = %+v; want its own ref held, and a retry of the gate's", a)
 		}
 	})
 	t.Run("one whose A1 failed is first again", func(t *testing.T) {
@@ -1023,8 +1060,18 @@ func TestAForgedRecordCantStarveARef(t *testing.T) {
 	})
 }
 
-// TestTheBackoffOfForgedRefs: what the gate can't read leaves no more backoff
-// than the record names now (§11.3).
+// ctxServer refuses a write whose context has ended, as a client does.
+type ctxServer struct{ server }
+
+func (s ctxServer) Patch(ctx context.Context, gk schema.GroupKind, namespace, name string, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return s.server.Patch(ctx, gk, namespace, name, pt, data)
+}
+
+// TestTheBackoffOfForgedRefs: the gate has one backoff a holder, of its own,
+// whatever the record names (§11.3).
 func TestTheBackoffOfForgedRefs(t *testing.T) {
 	ctx := context.Background()
 	world := func(t *testing.T) *rig {
@@ -1052,79 +1099,74 @@ func TestTheBackoffOfForgedRefs(t *testing.T) {
 		defer r.p.backoff.mu.Unlock()
 		return len(r.p.backoff.at)
 	}
-	uid := func(t *testing.T, r *rig) types.UID { return r.get(t, widgetKey("ns", "h")).GetUID() }
-	t.Run("others on every pass", func(t *testing.T) {
+	gates := func(t *testing.T, r *rig) consentKey {
+		return consentKey{holder: r.get(t, widgetKey("ns", "h")).GetUID()}
+	}
+	own := func(t *testing.T, r *rig) consentKey {
+		k := gates(t, r)
+		k.ref = otherSecretID()
+		return k
+	}
+	var doubling []time.Duration
+	for d := time.Second; d < time.Minute; d *= 2 {
+		doubling = append(doubling, d)
+	}
+	t.Run("others on every pass, fewer and more than it reads", func(t *testing.T) {
 		r := world(t)
-		for pass := range 10 {
-			forgeRecord(t, r, append(fresh(pass, 10), otherSecretID()))
-			keptPass(t, r, failingNext())
-			if n := kept(r); n != 11 {
-				t.Fatalf("pass %d: %d backoffs kept, want 11", pass, n)
+		var got []time.Duration
+		for pass := range len(doubling) {
+			forgeRecord(t, r, append(fresh(pass, []int{10, 40}[pass%2]), otherSecretID()))
+			got = append(got, keptPass(t, r, failingNext()).RetryAfter)
+			if n := kept(r); n != 1 {
+				t.Fatalf("pass %d: %d backoffs kept, want the gate's one", pass, n)
 			}
 		}
-		// The one that stays has backed off as ever.
-		if d := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]; d != time.Minute {
-			t.Errorf("next backoff of the ref that stays = %v, want the most, 1m", d)
+		if !slices.Equal(got, doubling) {
+			t.Errorf("RetryAfter = %v, want %v", got, doubling)
 		}
 		forgeRecord(t, r, nil)
 		keptPass(t, r, failingNext())
-		if n := kept(r); n != 0 || len(r.p.gateTurns.fail) != 0 {
-			t.Errorf("%d backoffs kept, %v, with nothing to ask about", n, r.p.gateTurns.fail)
+		if n := kept(r); n != 0 {
+			t.Errorf("%d backoffs kept with nothing to ask about", n)
 		}
 	})
-	t.Run("more than a pass reads", func(t *testing.T) {
+	t.Run("a named ref keeps its own, whatever the gate asks about", func(t *testing.T) {
 		r := world(t)
-		var got []time.Duration
-		for pass := range 4 {
-			forgeRecord(t, r, append(fresh(pass, 10), otherSecretID()))
-			keptPass(t, r, failingNext())
-			forgeRecord(t, r, append(fresh(pass, 40), otherSecretID()))
-			got = append(got, keptPass(t, r, failingNext()).RetryAfter)
-			if n := kept(r); n != 1 { // the rest's
-				t.Fatalf("pass %d: %d backoffs kept, want 1", pass, n)
+		for pass := range len(doubling) {
+			forgeRecord(t, r, append(fresh(pass, []int{0, 10, 40}[pass%3]), otherSecretID()))
+			if d := keptPass(t, r, append(failingNext(), otherSecret())).RetryAfter; d != doubling[pass] {
+				t.Errorf("pass %d: RetryAfter = %v, want %v", pass, d, doubling[pass])
+			}
+			if n := kept(r); n != 2 {
+				t.Fatalf("pass %d: %d backoffs kept, want the gate's and the named ref's", pass, n)
 			}
 		}
-		// The pass that reads all resets the rest's.
-		if want := []time.Duration{time.Second, time.Second, time.Second, time.Second}; !slices.Equal(got, want) {
-			t.Errorf("RetryAfter = %v, want %v", got, want)
+		// Each is reset by what it is of: the named ref's by its own answer.
+		r.srv.before = func(op, kind, name string) error {
+			if op == "get" && kind == "Secret" && name != "s" {
+				return apierrors.NewServiceUnavailable("overloaded")
+			}
+			return nil
 		}
-		got = nil
-		for range 4 {
-			got = append(got, keptPass(t, r, failingNext()).RetryAfter)
+		if a := keptPass(t, r, []Ref{otherSecret()}); a.Degraded {
+			t.Fatalf("acquire = %+v", a)
 		}
-		if want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}; !slices.Equal(got, want) {
-			t.Errorf("RetryAfter = %v, want %v", got, want)
-		}
-	})
-	t.Run("more than a pass reads, one of them named", func(t *testing.T) {
-		r := world(t)
-		var got []time.Duration
-		for range 3 {
-			// s sorts last, so its turn comes late: the pass that names it
-			// reads it, and keeps its backoff.
-			forgeRecord(t, r, append(fresh(0, 2*maxGateReads), otherSecretID()))
-			got = append(got, keptPass(t, r, append(failingNext(), otherSecret())).RetryAfter)
-		}
-		if want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}; !slices.Equal(got, want) {
-			t.Errorf("RetryAfter = %v, want %v", got, want)
-		}
-		if d := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]; d != 8*time.Second {
-			t.Errorf("next backoff of the named ref = %v, want 8s", d)
+		if _, ok := r.p.backoff.at[own(t, r)]; ok || r.p.backoff.at[gates(t, r)] == 0 {
+			t.Errorf("backoffs = %v; want the named ref's gone, and the gate's kept", r.p.backoff.at)
 		}
 	})
-	t.Run("one that a pass doesn't get to keeps its own", func(t *testing.T) {
+	t.Run("a pass whose ctx has ended changes none", func(t *testing.T) {
 		r := world(t)
 		for range 3 {
 			keptPass(t, r, failingNext())
 		}
-		before := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]
 		ended, end := context.WithCancel(ctx)
 		end()
 		if _, err := r.p.acquire(ended, r.get(t, widgetKey("ns", "h")), failingNext()); err != nil {
 			t.Fatal(err)
 		}
-		if after := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]; before != 8*time.Second || after != before {
-			t.Errorf("next backoff = %v, was %v; want 8s still", after, before)
+		if after := r.p.backoff.at[gates(t, r)]; after != 8*time.Second {
+			t.Errorf("next backoff = %v; want 8s still", after)
 		}
 	})
 }
@@ -1337,6 +1379,12 @@ func TestCacheLacks(t *testing.T) {
 	if tr.cacheLacks(secretID("in", "absent")) {
 		t.Error("a cache that hasn't synced lacks nothing yet")
 	}
+	// The gate's reads have a deadline of their own.
+	reads, cancel := tr.proto.gateContext(ctx)
+	if d, ok := reads.Deadline(); !ok || time.Until(d) > gateReadTimeout {
+		t.Errorf("the gate's deadline is %v, %v; want %v from now", d, ok, gateReadTimeout)
+	}
+	cancel()
 	r.run(t)
 	for id, want := range map[ID]bool{
 		secretID("in", "absent"):                        true,
