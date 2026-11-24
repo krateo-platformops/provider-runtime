@@ -36,7 +36,8 @@ const modelIndexAnnotation = "entries"
 // modelIndexStore is the index over the model: an object whose lines live
 // in an annotation, written with a merge patch guarded by its
 // resourceVersion, as the ConfigMap's Update is. Each call is a step of its
-// actor's schedule, and is logged.
+// actor's schedule, and is logged. Its marker is "true": no copy of the index
+// is restored here.
 type modelIndexStore struct {
 	m   *apimodel.Model
 	a   *apimodel.Actor
@@ -84,12 +85,9 @@ func (s modelIndexStore) update(_ context.Context, cur indexVersion, lines []str
 	return v, err
 }
 
-func (s modelIndexStore) create(_ context.Context, lines []string, rebuilt bool) (indexVersion, error) {
+func (s modelIndexStore) create(_ context.Context, lines []string) (indexVersion, error) {
 	var v indexVersion
 	ann := map[string]string{modelIndexAnnotation: encodeIndex(lines)}
-	if rebuilt {
-		ann[AnnotationRebuilt] = "true"
-	}
 	err := s.a.Call(s.who+" index create", func() error {
 		if err := s.m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: ann}); err != nil {
 			return err

@@ -198,7 +198,7 @@ func (h hookIndexStore) update(ctx context.Context, cur indexVersion, lines []st
 	return v, err
 }
 
-func (h hookIndexStore) create(ctx context.Context, lines []string, rebuilt bool) (v indexVersion, err error) {
-	err = h.call(ctx, "index-create", lines, func() error { v, err = h.st.create(ctx, lines, rebuilt); return err })
+func (h hookIndexStore) create(ctx context.Context, lines []string) (v indexVersion, err error) {
+	err = h.call(ctx, "index-create", lines, func() error { v, err = h.st.create(ctx, lines); return err })
 	return v, err
 }

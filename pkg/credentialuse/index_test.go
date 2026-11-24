@@ -70,15 +70,15 @@ func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, r
 	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched}, nil
 }
 
-func (s *memStore) create(_ context.Context, lines []string, rebuilt bool) (indexVersion, error) {
+func (s *memStore) create(_ context.Context, lines []string) (indexVersion, error) {
 	if f := s.beforeCreate; f != nil {
 		f(s)
 	}
 	if s.exists {
 		return indexVersion{}, apierrors.NewAlreadyExists(configMapsGR, "cu-index")
 	}
-	s.exists, s.lines, s.rv, s.rebuilt = true, slices.Clone(lines), s.rv+1, rebuilt
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: rebuilt}, nil
+	s.exists, s.lines, s.rv, s.rebuilt = true, slices.Clone(lines), s.rv+1, false
+	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv)}, nil
 }
 
 // objServer serves Get from a map of objects, and fails the names in fail.
@@ -1643,7 +1643,7 @@ func TestAVouchedLine(t *testing.T) {
 func TestIndexWritesPreserveTheVouch(t *testing.T) {
 	cm := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "ConfigMap",
-		"metadata": map[string]any{"name": "cu-index-x", "namespace": "idx", "annotations": map[string]any{AnnotationVouched: "ns/Secret/s"}},
+		"metadata": map[string]any{"name": "cu-index-x", "namespace": "idx", "uid": "u1", "annotations": map[string]any{AnnotationVouched: "ns/Secret/s"}},
 		"data":     map[string]any{indexDataKey: ""},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cm)
@@ -1664,5 +1664,41 @@ func TestIndexWritesPreserveTheVouch(t *testing.T) {
 	}
 	if v.vouched != "ns/Secret/s" || !v.rebuilt {
 		t.Errorf("after the writes: vouched %q, rebuilt %v", v.vouched, v.rebuilt)
+	}
+	// A copy restored from a backup has another uid, and the marker and the
+	// lines of the one it copies.
+	restored := v.obj.DeepCopy()
+	restored.SetUID("u2")
+	if v := versionOf(restored); v.rebuilt || v.uid != "u2" {
+		t.Errorf("a restored copy: %+v; want no marker", v)
+	}
+	for uid, marker := range map[string]string{"u1": "true", "": "", "u2": "u1"} {
+		u := v.obj.DeepCopy()
+		u.SetUID(types.UID(uid))
+		u.SetAnnotations(map[string]string{AnnotationRebuilt: marker})
+		if versionOf(u).rebuilt {
+			t.Errorf("uid %q with the marker %q counts as rebuilt", uid, marker)
+		}
+	}
+}
+
+// A rebuild that creates the index marks it, in a second write, since the
+// marker is the uid the first one gave it; one that stops in between leaves
+// it unmarked, and so to be rebuilt (§10.6.6).
+func TestARebuildThatCreatesTheIndexMarksIt(t *testing.T) {
+	m := apimodel.New(time.Now)
+	seed(m, "ns", "s", []string{"h"}, true)
+	srv := nsServer{modelServer{m: m}, "ns"}
+	st := &memStore{}
+	ix := testIndex(st, srv)
+	if err := ix.rebuild(context.Background()); err != nil || !st.rebuilt || st.updates != 1 {
+		t.Errorf("a rebuild of a missing index: %v, marker %v, %d updates after the create; want the marker, in one", err, st.rebuilt, st.updates)
+	}
+	if ix.lost {
+		t.Error("a rebuild that creates the index asks for another")
+	}
+	st = &memStore{beforeUpdate: func(s *memStore) { s.exists = false }}
+	if err := testIndex(st, srv).rebuild(context.Background()); err == nil || st.rebuilt {
+		t.Errorf("a rebuild whose index is always deleted before the mark: %v, marker %v", err, st.rebuilt)
 	}
 }

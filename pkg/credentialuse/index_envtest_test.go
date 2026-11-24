@@ -1265,11 +1265,7 @@ func TestIndexLostUnderDisown(t *testing.T) {
 		"the CRD recreated, the index kept": {before: func(t *testing.T, idx, ns string) {
 			createSecret(t, ns, "leftover")
 			acquireAs(t, ns, "leftover")
-			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-				Data: map[string]string{"entries": secretLine(ns, "leftover") + "\n"}}
-			if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-				t.Fatal(err)
-			}
+			createIndex(t, idx, secretLine(ns, "leftover"))
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1613,7 +1609,51 @@ func indexRebuilt(t *testing.T, idx string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cm.Annotations[cu.AnnotationRebuilt] == "true"
+	return cm.Annotations[cu.AnnotationRebuilt] == string(cm.UID)
+}
+
+// An index restored from a backup isn't complete, whatever it carries: it may
+// lack the lines of holds made after the backup, whose records are gone.
+// Disown over it doesn't settle, until an operator vouches for it (§7.4,
+// §10.6.6).
+func TestARestoredIndexIsALostOne(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-restored")
+	cms := env.Kube.CoreV1().ConfigMaps(idx)
+	r := perNameRig(t, idx, disownOptions, nil)
+	if !indexRebuilt(t, idx) {
+		t.Fatal("the index of a kind never tracked isn't marked")
+	}
+	backup, err := cms.Get(ctx, widgetIndex, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.stop()
+	// Held since the backup, its record gone and its release not done yet.
+	createSecret(t, ns, "s")
+	acquireAs(t, ns, "s")
+	if err := cms.Delete(ctx, widgetIndex, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	backup.ResourceVersion, backup.UID, backup.ManagedFields = "", "", nil
+	if _, err := cms.Create(ctx, backup, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	set("all")
+	r = perNameRig(t, idx, disownOptions, nil)
+	staysUnknown(t)
+	if f := finalizersOf(t, ns, "s"); len(f) != 1 {
+		t.Errorf("the Secret's finalizers are %v, want the hold", f)
+	}
+	eventSeen(t, r, cu.EventIndexLost, cu.AnnotationVouchedIndex)
+	// The steps: the hold comes off by its marker label, and the vouch.
+	if _, err := env.Kube.CoreV1().Secrets(ns).Patch(ctx, "s", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	vouchIndex(t, idx, "")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
 }
 
 // heldBeforeTheIndex has a LabelScoped process hold Secret ns/s for Widget
@@ -1758,17 +1798,12 @@ func (l *warnLog) matching(s string) []string {
 // it, its holder being gone (§10.6.5).
 func TestIndexStartupRecheckWithoutTheWatch(t *testing.T) {
 	cutest.Require(t, env)
-	ctx := context.Background()
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-recheck-nowatch")
 	const sa = "cu-nowatch"
 	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch"})
 	createSecret(t, ns, "s")
 	acquireAs(t, ns, "s") // held for ns, by a holder that is gone
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": secretLine(ns, "s") + "\n"}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createIndex(t, idx, secretLine(ns, "s"))
 	_, c, _ := perNameProcess(t, env.AsServiceAccount("default", sa), idx, nil)
 	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
 	lined(t, idx, secretLine(ns, "s"), false)
@@ -1950,16 +1985,11 @@ func (m *deniedMetrics) get() (int, int) {
 // counted once; a readable stale hold beside it is released (§10.6.5).
 func TestIndexRecheckDoesntRetryADeniedLine(t *testing.T) {
 	cutest.Require(t, env)
-	ctx := context.Background()
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-denied")
 	createSecret(t, ns, "a-denied")
 	createSecret(t, ns, "z-held")
 	acquireAs(t, ns, "z-held")
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": secretLine(ns, "a-denied") + "\n" + secretLine(ns, "z-held") + "\n"}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createIndex(t, idx, secretLine(ns, "a-denied"), secretLine(ns, "z-held"))
 	m := &deniedMetrics{}
 	logs := &warnLog{}
 	var deniedGets atomic.Int32
@@ -2006,11 +2036,7 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch", "list", "watch"})
 	stripUnreadableRecords(t, kubeAs(t, env.AsServiceAccount("default", sa)))
 	createSecret(t, ns, "nogrant")
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": secretLine(ns, "nogrant") + "\n"}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createIndex(t, idx, secretLine(ns, "nogrant"))
 	line := secretLine(ns, "nogrant")
 	// No index write that would leave the index without the line gets
 	// through until the test has seen Disown settle over it; tried counts

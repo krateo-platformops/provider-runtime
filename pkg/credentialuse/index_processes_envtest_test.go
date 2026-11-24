@@ -30,9 +30,15 @@ func createIndex(t *testing.T, idx string, lines ...string) {
 	for _, l := range lines {
 		data += l + "\n"
 	}
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": data}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(context.Background(), cm, metav1.CreateOptions{}); err != nil {
+	ctx, cms := context.Background(), env.Kube.CoreV1().ConfigMaps(idx)
+	cm, err := cms.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx},
+		Data: map[string]string{"entries": data}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Its own uid: the marker of a completed rebuild (§10.6.6).
+	cm.Annotations = map[string]string{cu.AnnotationRebuilt: string(cm.UID)}
+	if _, err := cms.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }

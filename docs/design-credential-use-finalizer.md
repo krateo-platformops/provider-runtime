@@ -3466,12 +3466,20 @@ those lines back, records a Warning event and counts
 **A durable marker closes the crash window** (the user's decision,
 2026-11-22). The index carries `credential-use.krateo.io/rebuilt` only once
 a rebuild from the records has completed: the rebuild sets it in the same
-guarded write as its last merge, and every other create leaves it absent,
+guarded write as its last merge, and every create leaves it absent,
 an acquirer's or `Track`'s alike. `Track` and the startup recheck rebuild,
 by merging, an index without it. So a process that dies between creating
 the index and rebuilding it, or an acquirer that recreated a deleted index
 while no write loops ran, leaves no hold without its line past the next
 start.
+
+**The marker's value is the ConfigMap's own `metadata.uid`**, so a rebuild
+that creates the index sets it in a second write. A copy restored from a
+backup, by a backup tool or by `kubectl apply`, gets another uid, and may lack
+the lines of the holds made since: its marker is another ConfigMap's, so it
+isn't marked, and it is rebuilt, or is a lost one under Disown (§7.4). An
+index whose marker is `"true"`, the value before 2026-11-24, isn't marked
+either, and is rebuilt at the next start. No tag has written one.
 
 **A rebuild under Disown doesn't set the marker** (the user's decision,
 2026-11-23), unless the kind was never tracked before: the records it works

@@ -57,9 +57,11 @@ const (
 const (
 	// AnnotationRebuilt marks an index rebuilt from the records since it was
 	// created (§10.6.6): only a rebuild that completed sets it, in the same
-	// guarded write as its last merge. Track and the startup recheck rebuild
-	// an index without it, so that a process that died between creating the
-	// index and rebuilding it leaves no hold without its line.
+	// guarded write as its last merge. Its value is the ConfigMap's own
+	// metadata.uid, so that a copy restored from a backup, which may lack the
+	// lines of holds made since, isn't marked. Track and the startup recheck
+	// rebuild an index without it, so that a process that died between
+	// creating the index and rebuilding it leaves no hold without its line.
 	AnnotationRebuilt = Domain + "/rebuilt"
 	// AnnotationVouched lists the objects an operator has checked by hand
 	// to carry no finalizer of the kind, comma-separated, each written as

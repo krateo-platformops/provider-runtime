@@ -188,7 +188,7 @@ func union(a, b []string) []string {
 type indexVersion struct {
 	lines []string
 	rv    string
-	// rebuilt: the index carries AnnotationRebuilt (§10.6.6).
+	// rebuilt: the index carries AnnotationRebuilt, of its own uid (§10.6.6).
 	rebuilt bool
 	// vouched is AnnotationVouched's value, as the operator wrote it;
 	// vouchedIndex, AnnotationVouchedIndex's. uid is the ConfigMap's.
@@ -214,9 +214,9 @@ type indexStore interface {
 	// with rebuilt sets AnnotationRebuilt in the same write; without, it
 	// leaves the annotation as cur had it.
 	update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error)
-	// create creates the index with lines, carrying AnnotationRebuilt only
-	// with rebuilt.
-	create(ctx context.Context, lines []string, rebuilt bool) (indexVersion, error)
+	// create creates the index with lines, without AnnotationRebuilt, whose
+	// value is the uid it then gets.
+	create(ctx context.Context, lines []string) (indexVersion, error)
 }
 
 // configMapStore is the index ConfigMap, through the dynamic client: get,
@@ -234,9 +234,9 @@ func newConfigMapStore(dyn dynamic.Interface, namespace, name string) configMapS
 // versionOf reads an index ConfigMap.
 func versionOf(u *unstructured.Unstructured) indexVersion {
 	data, _, _ := unstructured.NestedString(u.Object, "data", indexDataKey)
-	ann := u.GetAnnotations()
-	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u, uid: string(u.GetUID()),
-		rebuilt: ann[AnnotationRebuilt] == "true", vouched: ann[AnnotationVouched], vouchedIndex: ann[AnnotationVouchedIndex]}
+	ann, uid := u.GetAnnotations(), string(u.GetUID())
+	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u, uid: uid,
+		rebuilt: uid != "" && ann[AnnotationRebuilt] == uid, vouched: ann[AnnotationVouched], vouchedIndex: ann[AnnotationVouchedIndex]}
 }
 
 func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
@@ -260,7 +260,7 @@ func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []st
 		if ann == nil {
 			ann = map[string]string{}
 		}
-		ann[AnnotationRebuilt] = "true"
+		ann[AnnotationRebuilt] = string(u.GetUID())
 		u.SetAnnotations(ann)
 	}
 	out, err := s.c.Update(ctx, u, metav1.UpdateOptions{})
@@ -270,16 +270,13 @@ func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []st
 	return versionOf(out), nil
 }
 
-func (s configMapStore) create(ctx context.Context, lines []string, rebuilt bool) (indexVersion, error) {
+func (s configMapStore) create(ctx context.Context, lines []string) (indexVersion, error) {
 	u := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata":   map[string]any{"name": s.name, "namespace": s.namespace},
 		"data":       map[string]any{indexDataKey: encodeIndex(lines)},
 	}}
-	if rebuilt {
-		u.SetAnnotations(map[string]string{AnnotationRebuilt: "true"})
-	}
 	out, err := s.c.Create(ctx, u, metav1.CreateOptions{})
 	if err != nil {
 		return indexVersion{}, err
@@ -538,7 +535,7 @@ func (ix *index) add(ctx context.Context, ids []ID) error { return ix.merge(ctx,
 
 // merge is add; with rebuilt, it is a rebuild's last merge, and sets
 // AnnotationRebuilt in the same guarded write (§10.6.6), writing even when
-// no line is new.
+// no line is new. One that creates the index sets it in a second write.
 func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 	lines := linesOf(slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return lineErr(id) != nil }))
 	var last error
@@ -550,7 +547,7 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 			if err := ix.fits(lines, 0); err != nil {
 				return err
 			}
-			v, err := ix.store.create(ctx, lines, rebuilt)
+			v, err := ix.store.create(ctx, lines)
 			if Classify(err) == ClassAlreadyExists {
 				last = err
 				continue
@@ -559,9 +556,12 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 				return ix.writeErr("creating", err)
 			}
 			ix.saw(v)
-			if !rebuilt {
-				ix.markLost()
+			if rebuilt {
+				// The marker is the uid it just got: the next attempt sets it.
+				last = errors.New("the index was created, and its marker isn't set")
+				continue
 			}
+			ix.markLost()
 			return nil
 		default:
 			return fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
@@ -1467,7 +1467,7 @@ func (t *Tracker) setupIndex(ctx context.Context) error {
 		ix.setFresh(false)
 	case ClassNotFound:
 		// Created without the marker: only the rebuild below sets it.
-		switch _, err := ix.store.create(ctx, nil, false); {
+		switch _, err := ix.store.create(ctx, nil); {
 		case Classify(err) == ClassAlreadyExists:
 			ix.setFresh(false)
 		case err != nil:

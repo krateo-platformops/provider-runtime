@@ -85,8 +85,8 @@ func (r runningStore) get(ctx context.Context) (indexVersion, error) { return r.
 func (r runningStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
 	return r.now().update(ctx, cur, lines, rebuilt)
 }
-func (r runningStore) create(ctx context.Context, lines []string, rebuilt bool) (indexVersion, error) {
-	return r.now().create(ctx, lines, rebuilt)
+func (r runningStore) create(ctx context.Context, lines []string) (indexVersion, error) {
+	return r.now().create(ctx, lines)
 }
 
 // runningServer is a loggingServer for whichever actor is running.
