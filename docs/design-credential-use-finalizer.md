@@ -2992,9 +2992,9 @@ those it doesn't alike, so a withdrawal of one it doesn't name may take it up to
 ⌈m/16⌉ poll intervals for m of them, and then §5's grace. A holder that names
 the ref reads it on every pass. Whoever edits the holder sets m: 4,000 forged
 refs that were there first make it about 250 poll intervals, over four hours at
-one minute; and about 8,000, over five days, if they are of a protected kind
-that no cache covers and whose reads hang. A holder whose passes fail is paced by its controller's error
-backoff instead.
+one minute; and at most about 4,000, under three days, if they are of a
+protected kind that no cache covers and whose reads hang. A holder whose passes
+fail is paced by its controller's error backoff instead.
 
 **The gate runs on every pass** (M1), for every held cross-namespace ref,
 not only before A2:
@@ -3116,8 +3116,10 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
   takes neither the pass nor the A1 of what the others found. **But it takes up
   to those 5s of the passes of that holder that meet it**, of every one with 16
   refs to read or fewer, for as long as it hangs and the record names it.
-  Whoever can edit a holder can have it so, where a protected kind hangs that
-  no cache covers; they can't make one hang;
+  Whoever can edit a holder can have it so, where reads of a protected kind
+  hang: with many made-up names, if no cache covers the kind there; or with one
+  existing object that a cache has without consent, which is read live too, and
+  costs the 5s as well. They can't make one hang;
 - those that have waited the longest go first, always, in memory: a ref starts
   to wait when a pass first asks about it, and again when it is read. So a ref
   is read **within ⌈m/16⌉ passes that aren't cut**, where m is how many refs,
@@ -3127,10 +3129,12 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
   there: with m of 17 to 32 it costs one more pass. A read counts once it is
   answered, a failure included. One that the deadline cuts keeps its place, so
   it is first in the next pass, with the whole deadline; if that isn't enough for
-  it, it goes behind the others. So a rotation of k refs whose reads hang costs
-  about 2k passes. A withdrawn ref whose A1 wasn't written is first again. A pass reads
-  the refs it names itself where the gate didn't, as it always did, under its
-  own context: one of them that hangs takes the pass, as on any pass;
+  it, it goes behind the others. So every pass that reads anything moves at
+  least one ref behind the others, or drops it: a rotation of k refs whose reads
+  hang costs at most 2k passes, and never more than m in all. A withdrawn ref
+  whose A1 wasn't written is first again. A pass reads the refs it names itself
+  where the gate didn't, as it always did, under its own context: one of them
+  that hangs takes the pass, as on any pass;
 - **for what a pass asked about and doesn't know**, refs it couldn't read or
   didn't get to, `RetryAfter` asks for the next, with one backoff a holder, the
   gate's own: 1s, doubling up to the poll interval, back to 1s once a pass knows

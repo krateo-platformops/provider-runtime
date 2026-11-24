@@ -1051,6 +1051,25 @@ func TestAForgedRecordCantStarveARef(t *testing.T) {
 			t.Errorf("acquire = %+v; want its own ref held, and a retry of the gate's", a)
 		}
 	})
+	t.Run("a deadline that has passed before the first read", func(t *testing.T) {
+		r := world(t)
+		ids := fresh("", 2)
+		forgeRecord(t, r, ids)
+		r.p.gateContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
+			ended, end := context.WithCancel(ctx)
+			end()
+			return ended, end
+		}
+		r.srv.calls = nil
+		keptPass(t, r, failingNext())
+		if n := countCalls(r.srv.calls, "get Secret/"+ids[0].Name); n != 0 {
+			t.Errorf("%d reads of the first in line; want none", n)
+		}
+		uid := r.get(t, widgetKey("ns", "h")).GetUID()
+		if got := r.p.gateTurns.next(uid, ids, 1); got[0] != ids[0] {
+			t.Errorf("%v is the first in line after it, want %v still", got[0], ids[0])
+		}
+	})
 	t.Run("one whose A1 failed is first again", func(t *testing.T) {
 		r := world(t)
 		ids := fresh("", 3*maxGateReads)
