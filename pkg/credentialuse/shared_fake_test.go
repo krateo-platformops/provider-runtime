@@ -155,6 +155,14 @@ func crdOf(gk schema.GroupKind) *unstructured.Unstructured {
 	return u
 }
 
+// crdMeta is gk's CRD as the metadata client reads it: the two fake clients
+// don't share their objects.
+func crdMeta(gk schema.GroupKind) *metav1.PartialObjectMetadata {
+	m := &metav1.PartialObjectMetadata{TypeMeta: metav1.TypeMeta{APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition"}}
+	m.Name, m.ResourceVersion = crdOf(gk).GetName(), "7"
+	return m
+}
+
 func newFakeRig(t *testing.T, objs ...runtime.Object) *fakeRig {
 	t.Helper()
 	return newFakeRigWith(t, SharedOptions{}, objs...)
@@ -176,7 +184,7 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 	if err := metav1.AddMetaToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	r.md = metadatafake.NewSimpleMetadataClient(scheme, objs...)
+	r.md = metadatafake.NewSimpleMetadataClient(scheme, append([]runtime.Object{crdMeta(widgetGK), crdMeta(gadgetGK)}, objs...)...)
 	r.md.PrependReactor("list", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		if _, ok := r.forbidList.Load(a.GetResource().Resource); ok {
 			return true, nil, apierrors.NewForbidden(a.GetResource().GroupResource(), "", errors.New("credential-use test: forbidden"))

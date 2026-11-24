@@ -173,6 +173,12 @@ type protocol struct {
 	// never.
 	disownLive func(context.Context) (disownSet, error)
 
+	// noHolders answers for R2's list of holders that failed with listErr:
+	// nil when the holder kind is gone, so that there are none (§6.4), and
+	// otherwise the batch's error. It must read live, and is called after
+	// R1's reads. nil knows of no kind that is gone.
+	noHolders func(ctx context.Context, listErr error) error
+
 	// lines keeps the index's lines for the PerName kinds (§10.6.2): the
 	// line before each A2, and the live check after it. Nil keeps none.
 	lines lineKeeper

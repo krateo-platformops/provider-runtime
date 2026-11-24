@@ -272,7 +272,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		if len(decidable) == 0 {
 			break
 		}
-		holders, err := p.srv.List(ctx, p.holder, n)
+		holders, err := p.listHolders(ctx, n)
 		if err != nil {
 			fail(fmt.Errorf("credential-use: listing %s in %s: %w", p.holder, n, err))
 			for _, r := range decidable {
@@ -348,6 +348,16 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		todo = next
 	}
 	return res, errors.Join(errs...)
+}
+
+// listHolders is R2's list of the holder kind in n, or an empty one when it
+// fails because the kind is gone, and its holders with it (noHolders, §6.4).
+func (p *protocol) listHolders(ctx context.Context, n string) ([]metav1.PartialObjectMetadata, error) {
+	holders, err := p.srv.List(ctx, p.holder, n)
+	if err != nil && p.noHolders != nil {
+		return nil, p.noHolders(ctx, err)
+	}
+	return holders, err
 }
 
 // cachedUse is R0's reading of one object's users in the caches.

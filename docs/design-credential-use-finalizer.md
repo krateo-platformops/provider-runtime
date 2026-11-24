@@ -535,6 +535,13 @@ gone: only their conflicts are told apart, any other error fails the call. The
 package deletes nothing. What it can't cover is a holder's own write, which the
 reconciler makes ("A holder kind that isn't served", below).
 
+**A holder kind's CRD is gone by the same rule.** R2's list of a holder kind
+that isn't served is a 404 that names nothing, or the mapper's no match, and
+says nothing of the holders. The GET of the CRD that it leads to (§6.4, "The
+holder kind itself gone") is a read, and its 404 is taken for the CRD's absence
+only when it is NotFound as above, and the object it names is that CRD: the
+name the tracker was given, in `apiextensions.k8s.io`.
+
 **A namespaced kind's object named without a namespace can't exist**, so it is
 NotFound, as a cluster-scoped holder's data may name one: the scope is the
 mapping's, and no call is made, since that 404 would name nothing. A2 finds it
@@ -597,7 +604,7 @@ While a kind isn't served:
 | the consent gate (§11.3) | unknown: a hold is kept, a new one waits, and the pass requeues |
 | the prober (§10.3) | can't tell: the ref's backoff stays as it is |
 | R1, R3, the epoch's repair | undecided: the batch is retried with backoff, and nothing is reported bare |
-| R2, when the **holder** kind isn't served | the list fails, and the batch is retried. It is never "no users": a live CRD read could tell, and isn't made yet |
+| R2, when the **holder** kind isn't served | the list fails, which is never "no users". A live GET of the CRD tells: it is gone, and so are the holders, or the batch is retried (§6.4) |
 | the index's checks (§10.6) | the line is kept, or put back, and the check is retried |
 | the janitor | retried with backoff |
 | Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or what it can't read as a whole (a LabelScoped kind, the holders, or the index): its kind isn't served. A strip that fails is left for the next pass, and so is the record that names the object. A switch that can't be read fails the hold |
@@ -665,8 +672,9 @@ steps 4 and 7) fails with nothing written, and is taken for done: the pass logs
 that the object is deleted, and doesn't requeue. The read after A1 (§6.2
 A1, L2), and the one that begins a pass, when they are live, end the pass as for
 an object that is gone, without connecting. Either way the holder keeps the
-finalizer and the record it had; R2's list of holders fails, so nothing is
-released meanwhile; and once the kind is served again, the informer's relist or
+finalizer and the record it had; R2's list of holders fails and its CRD exists,
+since the holder does, so nothing is released meanwhile; and once the kind is
+served again, the informer's relist or
 resync reconciles the holder again, which finishes. What `Forget` drops in
 memory, the holder's Missing refs, the next pass finds again. With several API
 servers, which stop and start serving a kind at different times, the informer
@@ -899,7 +907,11 @@ for the set of protected objects pending there (R7). For each pending P:
   make **one** live, paginated, metadata-only list of K in N
   (`PartialObjectMetadataList`, no resourceVersion, so it is a consistent
   read), with no label or version selector. For each P, compute its users
-  and its deleting users (§6.1), and apply §5's table.
+  and its deleting users (§6.1), and apply §5's table. If the list fails
+  because K isn't served, one live GET of K's CRD tells whether K is gone,
+  and its holders with it: the list is then empty (§6.4, "The holder kind
+  itself gone"). Any other failure keeps every hold, and the batch is
+  retried.
 - **R3. Release** each P the table says to release, with one JSON patch:
 
   ```json
@@ -1322,6 +1334,69 @@ that a later pass will hold again, and the damage needs P deleted inside the
 window. A test pins both the window and the write of the pass that closes
 it.
 
+**The holder kind itself gone** (the user's decision, 2026-11-24, after
+probes found the wedge). A CRD's deletion removes its custom resources first,
+so when K's CRD is gone, so are K's holders, and no hold of K has a user. But
+R2 can't list a kind that isn't served: its list is a 404 for as long as that
+lasts. A hold that outlived its holder, as when the process was a standby then,
+would stay, and its Secret, or its namespace, with it, until someone ran
+`DisownPrefix` (§7.4). So when R2's list fails with a 404 status, or the mapper
+finds no match for K, the releaser makes **one live GET of K's CRD**, by the
+name its tracker was given, with no resourceVersion:
+
+- **The API server's answer that it doesn't exist**, a 404 Status that names
+  the CRD: the list is empty. R3 then runs as ever, with its tests.
+- **The CRD, one being deleted included, or any error**, a 403 or a 404 of any
+  other form among them: every hold stays, and the batch is retried as after
+  any failed list. The error says what to grant.
+
+*The list's 404 is never the evidence.* An API server answers it for a K that
+exists while its CRD informer lags, or the version isn't served, or the scope
+differs, or the names aren't accepted yet
+(`apiextensions-apiserver@v0.37.2/pkg/apiserver/customresource_handler.go:257-305`);
+the GET finds the CRD then. *The GET is*: without a resourceVersion it is
+served from etcd, not from the watch cache
+(`k8s.io/apiserver@v0.37.2/pkg/storage/cacher/delegator.go:110-114`), so it is
+consistent whichever API server answers, and whether or not it lags.
+
+*The proof above holds with the GET's time tC in place of the list's tL.* It
+uses of the list that it comes after every R1, and that it shows every holder
+that exists then; the GET comes after it, and shows there is none. So an A2
+that landed before tG is of a holder that is gone by tC, and no user; one that
+lands between tG and tR breaks R3, and the next round asks again; one after tR
+adds the finalizer back. **A CRD created again** between the GET and R3 is
+these same cases: its new holders are those a list just before them misses too.
+A skip rests on the same two (below). It never matters which process did what,
+so two processes are no different (§6.8). The model searches it, with the GET
+moved before R1 as its control, which it must find unsafe. A mapper that finds
+K under another resource is no evidence of anything: the CRD that is gone isn't
+K's any more.
+
+*Accepted limits.* "The CRD is gone" implies "no holders" through the API
+server's own cleanup, and "this CRD" is K through the tracker. Each limit is a
+hold released under a holder that exists; §5's loss follows only if P is being
+deleted, or is before that holder's next pass. `DisownPrefix` accepts the first
+two as well.
+
+| Limit | When | Remedy |
+|---|---|---|
+| Instances left behind a CRD that is gone | Its cleanup finalizer was stripped by hand, or it was deleted while not established: the cleanup deletes instances only of an established CRD (`apiextensions-apiserver@v0.37.2/pkg/controller/finalizer/crd_finalizer.go:144-170`). Nobody can read them. If the CRD returns, they do, and each one's next pass holds P again | Don't strip `customresourcecleanup.apiextensions.k8s.io`. Delete the holders first |
+| An instance a stale API server creates after the cleanup's last check | Several API servers, one of them behind by more than the cleanup: its own source has a TODO for it (`crd_finalizer.go:235`). The instance is readable only through that server, until it catches up | None is needed once it has caught up: the instance is the row above's |
+| K's CRD replaced by one of another plural while a process tracks the first, whose mapper hasn't noticed, or whose discovery is of an API server that lags | K's tracker can't work after that in any case: its resource is fixed at `Track` (§7.3). A mapper that has noticed keeps the holds | Restart every process of the kind when its plural changes, before the new CRD has holders |
+| K moved from its CRD to an aggregated API server, while a process tracks it, and that server answers the list with a 404 | As above | As above |
+
+*And what it doesn't cover*, where a hold stays, and `DisownPrefix` remains the
+remedy:
+
+- **the GET is refused**, as when an uninstall takes the RBAC first: take it
+  last, after the CRD, and once the kind's holds are gone (§13);
+- **no process tracks K any more**, or the process started after the CRD went:
+  `Track` needs the CRD (§7.3);
+- **R1 fails**, for a protected kind that is gone too, or whose grant is;
+- **K's index is lost with the CRD** (§10.6.6). It can't be rebuilt without a
+  list of holders, so a hold that no informer showed is in no record and no
+  line. Give `DisownPrefix` the protected kinds then, not the index.
+
 The only things that can still remove the finalizer while H's record names
 P are:
 
@@ -1331,9 +1406,10 @@ P are:
 - third parties, which drop the `written` entry through the informer
   (§10.2), within the cache's lag.
 
-**What the proof assumes.** R1's GET, R2's Namespace GET and R2's list are
-consistent reads, and A2 is a write. **The API server tests and removes in one
-step**, which it doesn't (H1 and H3, above). No decision rests on a cache. Caches
+**What the proof assumes.** R1's GET, R2's Namespace GET, R2's list and the
+GET of the CRD are consistent reads, and A2 is a write. **The API server tests
+and removes in one step**, which it doesn't (H1 and H3, above). No decision
+rests on a cache. Caches
 serve only the fast paths (R0, and the `written` skip), and both are safe
 when stale. A stale R0 that sees a user already gone only delays the
 release to the next event. The skip rests on a delivery time, which can
@@ -2227,7 +2303,10 @@ stripped anyway.
 **Disown with no holder kind, for a deleted CRD** (L5). When the holder CRD
 is gone, its objects are gone too: a CRD's deletion removes its custom
 resources first. But finalizers with its prefix may remain on protected
-objects. `credentialuse.DisownPrefix(ctx, clients, DisownPrefixOptions{Holder,
+objects. A process that still tracks the kind releases them itself, through
+R2's GET of the CRD (§6.4, "The holder kind itself gone"), as long as its
+grants last. `DisownPrefix` is for when none does: it was uninstalled, or
+restarted, after the CRD went, or its RBAC went first. `credentialuse.DisownPrefix(ctx, clients, DisownPrefixOptions{Holder,
 Protected, Index, Names, DryRun})` (§7.1) needs no holder kind and no switch. It
 lists the protected kinds live by K's marker label, removes every finalizer
 with the prefix `credential-use.<kind>.<group>/` and its epoch, and removes
@@ -4830,8 +4909,8 @@ the interface by a type assertion, silently records none of these metrics.
 **An informer that can't list or watch is a warning**, since what it caches
 then goes stale in silence (the CRD and RBAC probes, 2026-11-24). The core
 sets its own watch error handler, to fail a start on a 403, which takes
-client-go's log away, so it logs instead: once per informer and cause, as the
-API server's reason, however often the reflector retries, and again after the
+client-go's log away, so it logs instead: once per informer and cause, the
+error's class, however often the reflector retries, and again after the
 informer has watched again. A list alone isn't that: with `watch` refused, the
 reflector lists at every retry.
 
@@ -4861,7 +4940,7 @@ remove the finalizers it holds there. That is a new wedge.
 | the same | `list`, `watch` | the label-scoped informer |
 | namespaces | `get`, `list`, `watch` | §5's live `deletionTimestamp` check; the metadata-only informer that sees consent on Namespaces (§11.3) |
 | the holder kind | `get`, `list`, `watch`, `patch`, `update` | the holder informer, R2's consistent list, A1 (patch), and `Forget` in the finalizer-removal Update and on its own (update) (L8) |
-| customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; the one-time settings and index pointer, the count fields, written only on change, and the removal of a stale `disown-settled` before a hold, without which that hold fails (§7.3, §7.4, §10.6) |
+| customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; R2's GET of a CRD that is gone (§6.4); the one-time settings and index pointer, the count fields, written only on change, and the removal of a stale `disown-settled` before a hold, without which that hold fails (§6.4, §7.3, §7.4, §10.6) |
 | configmaps, by `resourceNames` (PerName and PerNamePoll: the kind's index) | `get`, `update`, `patch`, and `watch` in PerName mode | §10.6 |
 | configmaps, in the index namespace (`krateo-credential-use`) | `create` (it can't be scoped by name) | the tracker creates the index (§10.6.7). The namespace itself is installer's; providers never create it, and admission limits what may be written there (§10.6.1) |
 | events | `create`, `patch` | §12 |
@@ -4885,6 +4964,14 @@ when they change, a stale flag's removal, and the settings and the PerName
 index pointer once. A CRD write makes the
 API server rebuild its OpenAPI, which is why nothing else writes the
 CRD.
+
+**An uninstall takes these grants last** (2026-11-24). Holds that outlive
+their holders are released by the running provider, after its CRD has gone
+too (§6.4), and it needs every grant above for it, the CRD's `get` included:
+a name in `resourceNames` grants it whether or not the CRD exists. So delete
+the CRDs, wait until `credentialuse_held_objects` is 0, then remove the
+provider and its RBAC. In another order, a Secret may keep its finalizer until
+`DisownPrefix` strips it (§7.4).
 
 **LabelScoped exposes every Secret.** Its informer needs `list` and
 `watch` on Secrets cluster-wide, with no name restriction. The tracker's

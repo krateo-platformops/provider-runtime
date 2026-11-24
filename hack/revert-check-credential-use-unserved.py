@@ -171,7 +171,7 @@ MUTANTS = [
     ("the epoch's repair takes it for gone", RL,
      [("c != ClassStateChanged && c != ClassNotFound {", "c != ClassStateChanged && c != ClassNotFound && c != ClassOther {")]),
     ("a holder list that fails so has no users", RL,
-     [("\t\tholders, err := p.srv.List(ctx, p.holder, n)\n\t\tif err != nil {", "\t\tholders, err := p.srv.List(ctx, p.holder, n)\n\t\tif err != nil && Classify(err) != ClassOther {")]),
+     [("\t\tholders, err := p.listHolders(ctx, n)\n\t\tif err != nil {", "\t\tholders, err := p.listHolders(ctx, n)\n\t\tif err != nil && Classify(err) != ClassOther {")]),
     ("the index takes it for bare", IX,
      [("\tcase ClassNotFound:\n\t\tix.readable(id)\n\t\treturn carriesNot\n", "\tcase ClassNotFound, ClassOther:\n\t\tix.readable(id)\n\t\treturn carriesNot\n")]),
     ("the startup recheck takes it for gone", IX,
