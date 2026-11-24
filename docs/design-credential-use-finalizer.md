@@ -3345,8 +3345,9 @@ and 15s at most; and the kill must come in the same 15s.
   doesn't reach it with no kill, or one before the removal or after the
   prune; with the switch set outside that gap, or the index read outside it;
   or, with one Disown process, with the A2 landing before the pass. **With
-  both, the last isn't searched yet**: the case holds only one of the two
-  processes' passes until the A2 has landed.
+  both, the last isn't searched yet**: until 2026-11-24 its case held only one
+  of the two processes' passes until the A2 had landed. Each such case now
+  checks that itself.
 - **Its bound:** with one Disown process, every schedule with at most two
   preemptions; with both, at most one. **It takes two things as given**, as
   §14 states them: the landing margin, and a prune's bound. The dying

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,15 +47,27 @@ type killCase struct {
 	// freshHolders: the prune's holder cache shows every record there is.
 	freshHolders bool
 	// senderLives: the holder's pass is another process's, which lives, and
-	// makes its check. landsFirst: no Disown pass starts before the A2 has
-	// landed, if one was sent.
+	// makes its check. landsFirst: no Disown pass of any process starts before
+	// the A2 has landed, if one is ever sent; a schedule where one does is an
+	// earlyPass, which fails the search.
 	senderLives, landsFirst bool
+	// early is the process whose passes landsFirst doesn't hold: a control of
+	// earlyPass.
+	early string
 	// recordsFirst: a pass strips the records before the objects, as it once
 	// did.
 	recordsFirst bool
 	// b: no pass strips a record while a prune that began before its
 	// process's first pass under the switch may go on.
 	b bool
+}
+
+// earlyPass is the error of a schedule in which process who started a Disown
+// pass before the A2 had landed, in a case that says none does.
+type earlyPass struct{ who string }
+
+func (e earlyPass) Error() string {
+	return "a Disown pass of " + e.who + " started before the A2 had landed"
 }
 
 // procServer is a server of a process that may die.
@@ -142,10 +155,41 @@ func (s procStore) update(ctx context.Context, cur indexVersion, lines []string,
 
 // killStats is what a search of a case saw: how many schedules had the process
 // die, had a record stripped, settled, and had P held under a settled flag,
-// and one such log.
+// and a log of each of the first shapes of those.
 type killStats struct {
 	Died, Strips, Settles, Violations int
-	Sample                            string
+	Shapes                            killShapes
+}
+
+// killShapes counts the violating schedules by shape, the order of what the
+// processes did, and keeps a log of each of the first maxShapes.
+type killShapes struct {
+	count map[string]int
+	logs  map[string]string
+	order []string
+}
+
+const maxShapes = 5
+
+// add counts a schedule with log, of which steps are the shape.
+func (k *killShapes) add(steps []string, log string) {
+	shape := strings.Join(steps, ", ")
+	if k.count == nil {
+		k.count, k.logs = map[string]int{}, map[string]string{}
+	}
+	if k.count[shape]++; k.count[shape] == 1 && len(k.order) < maxShapes {
+		k.order = append(k.order, shape)
+		k.logs[shape] = log
+	}
+}
+
+func (k killShapes) String() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d shapes", len(k.count))
+	for _, shape := range k.order {
+		fmt.Fprintf(&b, "\n  %d schedules: %s\n    one: %s", k.count[shape], shape, k.logs[shape])
+	}
+	return b.String()
 }
 
 // killScenario is case c's scenario, recording what it sees in st.
@@ -166,7 +210,9 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 		m := apimodel.New(s.Clock.Now)
 		var crdAnn map[string]string
 		var fins []string
-		var bad error
+		var bad, early error
+		// steps is what the processes did, the shape of the schedule.
+		var steps []string
 		settled, stripped := false, false
 		m.OnEvent = func(ev apimodel.Event) {
 			switch ev.Key {
@@ -232,6 +278,9 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 		}
 		// disown is a process's Disown loop.
 		disown := func(a *apimodel.Actor, who string, gone *bool, rounds int) {
+			if c.landsFirst && who != c.early && !landed && (!acquired || sent != nil) {
+				a.Wait("landed", time.Time{}, func() bool { return landed || acquired && sent == nil })
+			}
 			srv, ix := server(a, who, gone), procIndex(a, who, gone, nil, nil)
 			ix.keptLive = func(context.Context) (disownSet, error) {
 				if *gone {
@@ -256,6 +305,10 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 				if *gone {
 					return
 				}
+				if c.landsFirst && early == nil && !landed && (!acquired || sent != nil) {
+					early = earlyPass{who}
+				}
+				steps = append(steps, who+" passes")
 				start := readCRD(a, "crd at the start")
 				startStep := step
 				if first == 0 {
@@ -313,6 +366,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 						if patch, ok := disownHolderPatch(&holders[i], set); ok && !hold {
 							if _, err := srv.Patch(ctx, widgetGK, "ns", holders[i].Name, types.MergePatchType, patch); err == nil {
 								stripped = true
+								steps = append(steps, who+" strips the record")
 							}
 						}
 					}
@@ -322,6 +376,9 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 				}
 				if sec != nil {
 					_, removed, err := stripDisowned(ctx, srv, secretGroupKind, widgetGK, sec)
+					if removed > 0 {
+						steps = append(steps, who+" strips P")
+					}
 					count += max(0, removed-listed)
 					if err != nil {
 						lined, hold = false, true // not free, and named still
@@ -368,11 +425,9 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 					}
 					step++
 					on = true
+					steps = append(steps, "the switch is set")
 					return patchModelCRD(m, "", map[string]any{AnnotationDisown: "all"})
 				})
-			}
-			if c.landsFirst && !landed && (!acquired || sent != nil) {
-				a.Wait("landed", time.Time{}, func() bool { return landed || acquired && sent == nil })
 			}
 		}
 		sender := &dead
@@ -415,6 +470,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 				landed = true
 				clear(inFlight)
 				log = append(log, "net A2 lands")
+				steps = append(steps, "the A2 lands")
 				return err
 			})
 		})
@@ -425,6 +481,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 			die := func() {
 				dead, window = true, false
 				log = append(log, "killed")
+				steps = append(steps, "the pruner's process is killed")
 			}
 			srv := server(a, "pruner", &dead)
 			pr := newProtocol(srv, noViews{}, newVerified(widgetGK), newFirstSight(), a.Clock(), testGrace)
@@ -442,6 +499,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 					if n == 1 {
 						window = false
 					}
+					steps = append(steps, "the pruner writes the index")
 				})
 			if c.freshHolders {
 				ix.recorded = func(ID) bool {
@@ -501,6 +559,9 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 		if err := s.Run(); err != nil {
 			return err
 		}
+		if early != nil {
+			return early
+		}
 		if dead {
 			st.Died++
 		}
@@ -512,9 +573,7 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 		}
 		if bad != nil {
 			st.Violations++
-			if st.Sample == "" {
-				st.Sample = bad.Error()
-			}
+			st.Shapes.add(steps, bad.Error())
 		}
 		return nil
 	}
@@ -532,9 +591,14 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 // With the records stripped before the objects, an A2 that lands before the
 // pass is enough, if the same kill falls between the pass's two strips.
 //
+// A case in which the A2 lands before the pass checks that itself: in each, a
+// pass of any process that starts before fails the search, and "early/..."
+// shows that check fire for each process that passes.
+//
 // With one Disown process the clean cases are searched to two preemptions,
 // the "one off" ones to one in CI; with two, "both", to one, the "one off"
-// ones under CREDENTIALUSE_MODEL_DEEP only. What needs more isn't covered.
+// ones, and B with the A2 landing before the pass, under
+// CREDENTIALUSE_MODEL_DEEP only. What needs more isn't covered.
 func TestModelKillInAPrune(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
@@ -563,13 +627,13 @@ func TestModelKillInAPrune(t *testing.T) {
 				bound = 2
 			}
 			if c.same && c.other {
-				if bound = 1; !c.b && modelBound(0, 1) == 0 {
+				if bound = 1; (!c.b || c.landsFirst) && modelBound(0, 1) == 0 {
 					t.Skip("searched under CREDENTIALUSE_MODEL_DEEP only")
 				}
 			}
 			st := exhaust(t, bound, func(st *killStats) func(*apimodel.Sched) error { return killScenario(c, st) }, func(st *killStats) {
 				if st.Violations != 0 {
-					t.Errorf("%d schedules have the hold under a settled flag: %s", st.Violations, st.Sample)
+					t.Errorf("%d schedules have the hold under a settled flag: %s", st.Violations, st.Shapes)
 				}
 			})
 			if st.Settles == 0 || st.Strips == 0 || st.Died == 0 && c.at != "" {
@@ -604,6 +668,33 @@ func TestModelKillInAPrune(t *testing.T) {
 		first := w
 		first.at, first.landsFirst = "read after", true
 		clean(t, "one off/"+name+"/lands before the pass", first)
+		if w.same && w.other {
+			b := first
+			b.b = true
+			clean(t, "B/"+name+"/lands before the pass", b)
+		}
+		var passes []string // the processes that pass in the case
+		if w.same {
+			passes = append(passes, "disown", "restarted")
+		}
+		if w.other {
+			passes = append(passes, "other")
+		}
+		for _, who := range passes {
+			c := first
+			c.early = who
+			t.Run("early/"+name+"/"+who, func(t *testing.T) {
+				if !reachable(t, 1, func(s *apimodel.Sched) error {
+					err := killScenario(c, &killStats{})(s)
+					if errors.Is(err, earlyPass{who}) {
+						return errReached
+					}
+					return err
+				}) {
+					t.Errorf("no schedule has a pass of %s start before the A2 landed: the check can't fire", who)
+				}
+			})
+		}
 		if w.same {
 			first.recordsFirst = true
 			reached(t, "reached/"+name+"/lands before the pass, records first", first)
