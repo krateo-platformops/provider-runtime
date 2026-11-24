@@ -3282,7 +3282,8 @@ ways (lost and killed within the margin, lost and landing past it, killed
 before the check, lost and killed before it), it reaches P held without its
 line. With any one off, in seven cases, it reaches none.
 
-- **Its bound:** every schedule with at most three preemptions, and two in
+- **Its bound** (under `CREDENTIALUSE_MODEL_DEEP`; CI's is in §14): every
+  schedule with at most three preemptions, and two in
   the two cases where the late check and its batch race a holder that goes.
   Every search finished, within 2,000,000 schedules.
 - **What it is given:** whether the landing is within the margin, so that the
@@ -4372,7 +4373,17 @@ on krateo-057:
   landing margin**, that a hold whose pass read the switch before the run's
   first pass has landed, or failed, by its last; and **a prune's bound**, that
   a prune begun before the run's first pass has ended by then, its re-add
-  included. A control per rule checks that the model sees what it is for.
+  included. A control per rule checks that the model sees what it is for, and
+  stops at the first schedule that does.
+- **The bounds of the index's and Disown's models.** CI searches every
+  schedule with one preemption less than `CREDENTIALUSE_MODEL_DEEP=1` does,
+  which is the bound §10.6.3 states: the flag, 2 with two processes and 3 with
+  one (DEEP 3); the late hold, 2, and 1 with the late check and a holder that
+  goes (DEEP 3 and 2); Disown over the index, 1 (DEEP 2). **A search with one
+  preemption is no evidence for a case that needs two**: in "off and on" and
+  "narrowed and widened", and in the controls "a run over a changed CRD" and
+  "a pruner whose CRD cache is behind", the violation or the landing needs
+  one or two, so only DEEP covers what those controls guard.
 - **The flag** (§7.4): a switch turned off and on again while nothing runs
   isn't settled by the old flag; no A2 under a stale flag, its removal
   refused included; a run starts over when the CRD changes between its

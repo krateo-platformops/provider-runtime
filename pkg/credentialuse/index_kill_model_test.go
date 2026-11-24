@@ -511,16 +511,19 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 
 // TestModelKillInAPrune: a process killed between its prune's removal and
 // its re-add, the switch set and the index read by a Disown pass between the
-// prune's read of the switch and its removal, and an A2 landing after that
-// pass has read its object, leave a hold that Disown settles over, whichever
-// process that pass was of, and whether or not the sender lives: one schedule
-// shows it. Without the kill there, or the switch or the read there, or with
-// the A2 landing before the first pass, it doesn't; nor, anywhere, if no pass
-// strips a record until every prune begun before its process's first pass has
-// ended.
+// prune's read of the switch and its removal, and an object held past that
+// pass, leave a hold that Disown settles over, whichever process that pass was
+// of, and whether or not the sender lives: one schedule shows it. The object
+// is held past the pass by an A2 that lands after the pass has read it, or,
+// the A2 having landed before, by the pass's own death, of the same kill,
+// between its strip of the record and its strip of the object. Without the
+// kill there, or the switch or the read there, it doesn't; nor, anywhere, if
+// no pass strips a record until every prune begun before its process's first
+// pass has ended.
 //
-// With two Disown processes the searches are for one preemption, or for none
-// in CI's bound: what needs more there isn't covered.
+// With one Disown process the clean cases are searched to two preemptions,
+// the "one off" ones to one in CI; with two, "both", to one, the "one off"
+// ones under CREDENTIALUSE_MODEL_DEEP only. What needs more isn't covered.
 func TestModelKillInAPrune(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
@@ -545,8 +548,13 @@ func TestModelKillInAPrune(t *testing.T) {
 	clean := func(t *testing.T, name string, c killCase) {
 		t.Run(name, func(t *testing.T) {
 			bound := modelBound(1, 2)
+			if c.b {
+				bound = 2
+			}
 			if c.same && c.other {
-				bound = modelBound(0, 1)
+				if bound = 1; !c.b && modelBound(0, 1) == 0 {
+					t.Skip("searched under CREDENTIALUSE_MODEL_DEEP only")
+				}
 			}
 			st := exhaust(t, bound, func(st *killStats) func(*apimodel.Sched) error { return killScenario(c, st) }, func(st *killStats) {
 				if st.Violations != 0 {
@@ -578,10 +586,16 @@ func TestModelKillInAPrune(t *testing.T) {
 			"killed after the prune":    {at: "end"},
 			"switch outside":            {at: "read after", switchOutside: true},
 			"index read outside":        {at: "read after", readOutside: true},
-			"lands before the pass":     {at: "read after", landsFirst: true},
 		} {
 			off.same, off.other = w.same, w.other
 			clean(t, "one off/"+name+"/"+title, off)
+		}
+		first := w
+		first.at, first.landsFirst = "read after", true
+		if w.same {
+			reached(t, "reached/"+name+"/lands before the pass, which dies too", first)
+		} else {
+			clean(t, "one off/"+name+"/lands before the pass", first)
 		}
 	}
 }
