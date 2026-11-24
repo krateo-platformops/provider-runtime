@@ -23,9 +23,12 @@ import (
 // switch is set, turned off and on again, widened, or narrowed and widened.
 //
 // The process holds, makes its late checks and runs Disown over one index;
-// another process releases, and prunes with a cache that shows no record. As
-// in the flag's model, no Disown pass learns of the switch but by its live
-// reads, and the landing margin is taken as given.
+// another process releases, and prunes with a holder cache that shows no
+// record, and a CRD cache that shows the switch as it is (staleCRD: as off).
+// As in the flag's model, no Disown pass learns of the switch but by its live
+// reads, and the landing margin is taken as given; so is a prune's bound,
+// which is shorter: a pass that may settle starts once every prune begun
+// before the run's first pass has ended.
 
 // disownIndexCase is one script of the operator's, and one way of an A2.
 type disownIndexCase struct {
@@ -44,6 +47,18 @@ type disownIndexCase struct {
 	// the switch after it; a count doesn't wait for what the process owes; a
 	// run goes on over a changed CRD.
 	emptyEarly, noLines, noLive, noUnsure, noVersion bool
+	// staleCRD: the pruner's CRD cache never shows the switch.
+	staleCRD bool
+}
+
+// preemptions is the bound c is searched within: 2, and 1 with two or more of
+// the network, the late check and the holder's deletion, whose schedules with
+// 2 are too many.
+func (c disownIndexCase) preemptions() int {
+	if c.killed || !c.lost && !c.unnamed {
+		return 2
+	}
+	return 1
 }
 
 // runningStore is a modelIndexStore for whichever actor is running.
@@ -90,17 +105,18 @@ func (r runningServer) List(ctx context.Context, gk schema.GroupKind, namespace 
 func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample string, settles, lands int) {
 	t.Helper()
 	const passes, rounds = 2, 5
+	records := 0
 	ctx := context.Background()
 	p := SecretRef("ns", "s").ID()
 	kinds := map[schema.GroupKind]bool{secretGroupKind: true}
 	prefix, _ := FinalizerPrefix(widgetGK)
-	res := apimodel.Explore(apimodel.Bounds{Preemptions: 2, MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
+	res := apimodel.Explore(apimodel.Bounds{Preemptions: c.preemptions(), MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
 		var log []string
 		m := apimodel.New(s.Clock.Now)
 		var crdAnn map[string]string
 		var fins []string
 		var bad error
-		settled, landed := false, false
+		settled, landed, sawRecord := false, false, false
 		m.OnEvent = func(ev apimodel.Event) {
 			switch ev.Key {
 			case modelCRDKey:
@@ -177,7 +193,8 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 		// step counts what reads the switch, for the margin: inFlight are the
 		// steps at which the holds not yet landed read it.
 		step := 0
-		inFlight := map[int]bool{}
+		// pruning are those at which the prunes not yet done began.
+		inFlight, pruning := map[int]bool{}, map[int]bool{}
 		var sent []byte
 		sentLanded, acquired := false, false
 		recorded := func() bool {
@@ -187,9 +204,23 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 		// batch is a release batch of P, and its prune over bx.
 		batch := func(a *apimodel.Actor, bx *index) {
 			pr := newProtocol(srv, noViews{}, newVerified(widgetGK), newFirstSight(), a.Clock(), testGrace)
-			if r, err := pr.release(ctx, "ns", []ID{p}); err == nil {
-				_ = bx.prune(ctx, bx.prunable(r.Bare))
+			r, err := pr.release(ctx, "ns", []ID{p})
+			if err != nil {
+				return
 			}
+			bx.keptCached = func(gk schema.GroupKind) bool {
+				if c.staleCRD {
+					return false
+				}
+				crd, err := m.Get(modelCRDKey)
+				must(err)
+				return keptKinds(crd.Annotations).covers(gk)
+			}
+			step++
+			at := step
+			pruning[at] = true
+			_ = bx.prune(ctx, bx.prunable(r.Bare))
+			delete(pruning, at)
 		}
 
 		s.Go("operator", 0, func(a *apimodel.Actor) {
@@ -214,6 +245,11 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 								return false
 							}
 						}
+						for at := range pruning {
+							if at < runStart {
+								return false
+							}
+						}
 						return true
 					})
 				}
@@ -232,7 +268,10 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 				}
 				known, count, lined := true, 0, false
 				if set.covers(secretGroupKind) {
-					holders, _ := srv.List(ctx, widgetGK, "")
+					// The model's List is of one namespace, and "" of none of
+					// them: the holder's is every one there is.
+					holders, _ := srv.List(ctx, widgetGK, "ns")
+					sawRecord = sawRecord || slices.ContainsFunc(holders, func(h metav1.PartialObjectMetadata) bool { return recordsDisowned(&h, set) })
 					named := false
 					for i := range holders {
 						if recordsDisowned(&holders[i], set) {
@@ -427,6 +466,9 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 		if settled {
 			settles++
 		}
+		if sawRecord {
+			records++
+		}
 		if landed {
 			lands++
 		}
@@ -450,7 +492,10 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 	if !res.Finished && len(res.Failures) == 0 {
 		t.Errorf("the search didn't finish: %d runs", res.Runs)
 	}
-	t.Logf("%+v: %d schedules, %d settled after the hold landed, %d had it land, %d had it under a settled flag", c, res.Runs, settles, lands, violations)
+	if records == 0 {
+		t.Error("no schedule had Disown see a record")
+	}
+	t.Logf("%+v: %d preemptions, %d schedules, %d had Disown see a record, %d settled after the hold landed, %d had it land, %d had it under a settled flag", c, c.preemptions(), res.Runs, records, settles, lands, violations)
 	return violations, sample, settles, lands
 }
 
@@ -505,6 +550,7 @@ func TestModelIndexDisown(t *testing.T) {
 		"a prune that doesn't read the switch": {switches: []string{"all"}, lost: true, killed: true, noLive: true},
 		"a count that waits for nothing owed":  {switches: []string{"all"}, lost: true, unnamed: true, noUnsure: true},
 		"a run over a changed CRD":             {initial: "all", switches: []string{"", "all"}, noVersion: true},
+		"a pruner whose CRD cache is behind":   {switches: []string{"all"}, lost: true, killed: true, staleCRD: true},
 	} {
 		t.Run("control/"+name, func(t *testing.T) {
 			if v, _, _, _ := exploreDisownIndex(t, c); v == 0 {
