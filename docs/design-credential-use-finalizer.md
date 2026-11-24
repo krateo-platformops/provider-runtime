@@ -804,8 +804,8 @@ Of the holder kind's version:
 - **A declared version that isn't served** is refused by `Track` (§7.3). One that
   stops being served is as a holder kind that isn't (above), though others are:
   A1 fails, so a new holder doesn't connect and an established one is Degraded;
-  R2's list fails, which is never "no users", so holds are kept; Disown's count
-  stays unknown. The process must restart with a version that is served, as its
+  R2's list fails, which is never "no users", and the kind's CRD is there (§6.4),
+  so holds are kept; Disown's count stays unknown. The process must restart with a version that is served, as its
   runtime must anyway.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
@@ -1401,8 +1401,9 @@ says that it isn't served. Discovery isn't a consistent read, so it is never
 the evidence: the GET is.
 
 - *Not the mapper.* controller-runtime's doesn't look again at a kind it knows
-  (§6.2); one that did would have given the list the new resource. A mapper that
-  finds K under another resource is a veto too, and costs no request.
+  (§6.2); one that did would have given the list the new resource, if that serves
+  the declared version. A mapper that finds K under another resource, at any
+  version, is a veto too, and costs no request.
 - *The group's own document, not the list of groups:* just after a group's
   **first** CRD is established the API server serves its objects and this
   document, through the CRD's own handlers, before it has the group's

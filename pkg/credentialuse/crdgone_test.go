@@ -21,6 +21,30 @@ import (
 
 // A holder kind whose CRD is gone (§6.4, "The holder kind itself gone").
 
+// A kind tracked at a version that isn't the mapper's (§6.2): its list's 404,
+// at that version, keeps the hold while the CRD is there, and releases it once
+// it is gone.
+func TestAKindThatIsGoneAtItsDeclaredVersion(t *testing.T) {
+	r := holderVersionRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	tr := trackDeclared(t, r)
+	r.md.PrependReactor("list", "widgets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errTest404
+	})
+	release := func() error {
+		_, err := tr.proto.release(context.Background(), "ns", []ID{secretID("ns", "s")})
+		return err
+	}
+	r.md.ClearActions()
+	if err := release(); err == nil || !r.heldBy(t, widgetGK, "ns", "s") {
+		t.Errorf("with the CRD there: %v; want an error, and the hold kept", err)
+	}
+	r.removeCRD(t, widgetGK)
+	if err := release(); err != nil || r.heldBy(t, widgetGK, "ns", "s") {
+		t.Errorf("with the CRD gone: %v; want the hold released", err)
+	}
+	r.onlyDeclared(t, "list")
+}
+
 // R2 without a list of holders asks noHolders, once, after every R1 and the
 // list; its answer is an empty list, or the batch's error, with every hold
 // kept. Without it, as in the model, the list's failure is the error.
