@@ -130,32 +130,51 @@ var livePageTime = listPageTime
 
 // listLive is liveList on clients cl, for DisownPrefix, which has no Shared.
 func listLive(ctx context.Context, cl Clients, gk schema.GroupKind, namespace, selector string) ([]metav1.PartialObjectMetadata, error) {
+	var out []metav1.PartialObjectMetadata
+	err := eachPage(ctx, cl, gk, namespace, selector, func(items []metav1.PartialObjectMetadata) { out = append(out, items...) })
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// eachPage gives do each page of such a list, as it comes.
+func eachPage(ctx context.Context, cl Clients, gk schema.GroupKind, namespace, selector string, do func([]metav1.PartialObjectMetadata)) error {
 	m, err := cl.Mapper.RESTMapping(gk)
 	if err != nil {
-		return nil, fmt.Errorf("credential-use: mapping %s: %w", gk, err)
+		return fmt.Errorf("credential-use: mapping %s: %w", gk, err)
 	}
-	return listResource(ctx, cl, gk, m.Resource, namespace, selector)
+	return eachPageOf(ctx, cl, gk, m.Resource, namespace, selector, do)
 }
 
 // listResource is listLive of gvr, gk's resource.
 func listResource(ctx context.Context, cl Clients, gk schema.GroupKind, gvr schema.GroupVersionResource, namespace, selector string) ([]metav1.PartialObjectMetadata, error) {
+	var out []metav1.PartialObjectMetadata
+	err := eachPageOf(ctx, cl, gk, gvr, namespace, selector, func(items []metav1.PartialObjectMetadata) { out = append(out, items...) })
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// eachPageOf is eachPage of gvr, gk's resource.
+func eachPageOf(ctx context.Context, cl Clients, gk schema.GroupKind, gvr schema.GroupVersionResource, namespace, selector string, do func([]metav1.PartialObjectMetadata)) error {
 	if !pathSegment(namespace) {
-		return nil, nil // it can't exist
+		return nil // it can't exist
 	}
 	var c metadata.ResourceInterface = cl.Metadata.Resource(gvr)
 	if namespace != "" {
 		c = cl.Metadata.Resource(gvr).Namespace(namespace)
 	}
-	var out []metav1.PartialObjectMetadata
 	opts := metav1.ListOptions{LabelSelector: selector, Limit: listPageSize}
 	for {
 		l, err := listPage(ctx, livePageTime, c, opts)
 		if err != nil {
-			return nil, fmt.Errorf("credential-use: listing %s with %q outside the caches: %w", gk, selector, err)
+			return fmt.Errorf("credential-use: listing %s with %q outside the caches: %w", gk, selector, err)
 		}
-		out = append(out, l.Items...)
+		do(l.Items)
 		if l.Continue == "" {
-			return out, nil
+			return nil
 		}
 		opts.Continue = l.Continue
 	}
@@ -194,6 +213,8 @@ func (s *Shared) liveHeldIn(ctx context.Context, t *Tracker, n string) ([]ID, er
 //   - for the PerName kinds, the batch of every (K, N) finalizer on every
 //     object the index names, read with a GET each, and the prune of the
 //     lines that name objects without one (recheckIndex, §10.6.5);
+//   - what the queue dropped of their names while no write loops ran
+//     (collapsedPart);
 //   - every object that carries a kind's marker label but not the held
 //     label, for the janitor (§10.1): the caches select by the held label,
 //     so a third party that strips it and leaves a marker leaves an object
@@ -255,6 +276,9 @@ type recheckPart struct {
 
 func (s *Shared) recheckParts(ts []*Tracker) []recheckPart {
 	var parts []recheckPart
+	if p, ok := s.collapsedPart(ts); ok {
+		parts = append(parts, p)
+	}
 	for _, t := range ts {
 		for _, gk := range sweepKinds(t) {
 			parts = append(parts, recheckPart{[]*Tracker{t}, func(ctx context.Context) error { return s.sweepMarkers(ctx, t, gk) }})
@@ -280,6 +304,84 @@ func (s *Shared) recheckParts(ts []*Tracker) []recheckPart {
 		parts = append(parts, recheckPart{byKind[gk], func(ctx context.Context) error { return s.recheckHeld(ctx, gk, byKind[gk]) }})
 	}
 	return parts
+}
+
+// collapsedPart makes up for the names of ts' kinds that the queue dropped while no
+// write loops ran, if it dropped any (§6.2). What the caches show held, what is held
+// outside them with its label, and what the index names, the start's rescan and the
+// other parts find whatever was dropped. This one queues what the cached holders of
+// the collapsed namespaces name now; and every object of a LabelScoped kind that
+// carries a finalizer of ts for one of them, its labels stripped or not, from one
+// list of each such kind's metadata in every namespace, a page at a time. Lost is a
+// name that no record has any more, of a kind that isn't in Protected. The collapses
+// are settled once all the lists succeeded: write loops that end before that leave
+// them to the next.
+func (s *Shared) collapsedPart(ts []*Tracker) (recheckPart, bool) {
+	var with []*Tracker
+	var keys []batchKey
+	var kinds []schema.GroupKind
+	for _, t := range ts {
+		ks := s.queue.collapsedKeys(t.gk)
+		if len(ks) == 0 {
+			continue
+		}
+		with, keys = append(with, t), append(keys, ks...)
+		for _, gk := range sweepKinds(t) {
+			if !slices.Contains(kinds, gk) {
+				kinds = append(kinds, gk)
+			}
+		}
+		t.warn("credential-use: while no write loops ran, more names waited for a release than are kept, and these namespaces' were dropped: the objects held for them are looked for with a list of every object of each protected kind",
+			"kind", t.gk.String(), "namespaces", len(ks), "kept", maxStandbyNames)
+	}
+	if len(with) == 0 {
+		return recheckPart{}, false
+	}
+	collapsed := map[batchKey]bool{}
+	for _, k := range keys {
+		collapsed[k] = true
+	}
+	records, done := false, map[schema.GroupKind]bool{}
+	return recheckPart{with, func(ctx context.Context) error {
+		if !records {
+			for _, t := range with {
+				for _, obj := range t.holders.GetStore().List() {
+					if m, ok := metadataOf(obj); ok && collapsed[batchKey{t.gk, m.Namespace}] {
+						t.addNamed(m.Namespace, ReadRecord(m).IDs)
+					}
+				}
+			}
+			records = true
+		}
+		var errs []error
+		for _, gk := range kinds {
+			if done[gk] {
+				continue
+			}
+			err := eachPage(ctx, s.c, gk, "", "", func(items []metav1.PartialObjectMetadata) {
+				for i := range items {
+					m := &items[i]
+					id := ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name}
+					for _, t := range with {
+						for n := range holds(t, m) {
+							if k := (batchKey{t.gk, n}); collapsed[k] {
+								s.queue.AddHeld(k, id)
+							}
+						}
+					}
+				}
+			})
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			done[gk] = true
+		}
+		if len(errs) == 0 {
+			s.queue.settleCollapsed(keys...)
+		}
+		return errors.Join(errs...)
+	}}, true
 }
 
 // recheckHeld enqueues the batch of every (K, N) finalizer of ts on every held

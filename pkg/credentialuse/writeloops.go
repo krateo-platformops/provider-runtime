@@ -63,7 +63,9 @@ var errWriteLoopsRunning = errors.New("credential-use: RunWriteLoops is already 
 // Beside it, when SharedOptions.Namespaces restricts the caches, one live
 // list per protected kind finds the held objects outside them and enqueues
 // their batches too (§10.5); and each index is read live, with a GET of
-// each object it names, for the PerName kinds (§10.6.5).
+// each object it names, for the PerName kinds (§10.6.5). If the queue dropped
+// names while no write loops ran, one more list for each LabelScoped kind, of
+// every object, finds what they were for (collapsedPart).
 // The informers may have started long before this process was elected, so
 // this covers what they saw before then, and a leader that died between a
 // holder's Forget and R3 (§7.5, M1 of the review of revision 16).
@@ -99,6 +101,7 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		t.startQuiet()
 	}
 	s.mu.Unlock()
+	s.queue.setDraining(true)
 	defer func() {
 		// Ending ctx under mu stops endTracking from starting a recheck
 		// (it adds to writeWG only under mu while ctx is live), so the Wait
@@ -129,6 +132,7 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 			t.clearUncached()
 		}
 		s.waits.clear()
+		s.queue.setDraining(false)
 		s.mu.Lock()
 		s.writeCtx = nil
 		s.mu.Unlock()

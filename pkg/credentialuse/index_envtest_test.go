@@ -354,6 +354,64 @@ func TestIndexRestartBetweenForgetAndR3(t *testing.T) {
 	lined(t, idx, secretLine(ns, "s"), false)
 }
 
+// A process that waits for election, whose queue a flood collapsed, finds what is
+// held in PerName mode by the index, once elected: here an object that lost its
+// labels, whose holder went while no process ran.
+func TestAnElectionAfterAFloodReleasesWhatTheIndexNames(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-flood")
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	r := perNameRig(t, idx, nil, nil)
+	r.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "s", "w")
+	r.stop()
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Patch(ctx, "w", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deleteWidget(t, ns, "w")
+	gone(t, time.Minute, "widget w", widgetGet(ns, "w"))
+	if _, err := env.Kube.CoreV1().Secrets(ns).Patch(ctx, "s", types.MergePatchType, []byte(`{"metadata":{"labels":null}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	lined(t, idx, secretLine(ns, "s"), true)
+
+	resetPublished(t, cutest.WidgetGVR)
+	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	o := widgetOptions(newController(t).enqueue)
+	o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
+	perName(&o)
+	if _, err := s.Track(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	runningInformers(t, s)
+	s.Flood(widgetGK, ns, 80000)
+	if n := s.Collapsed(widgetGK); n != 1 {
+		t.Fatalf("%d namespaces collapsed, want the flood's", n)
+	}
+	if err := heldFor(ns, "s", ns)(); err != nil {
+		t.Fatalf("before the election: %v", err)
+	}
+	wctx, stop := context.WithCancel(ctx)
+	errc := make(chan error, 1)
+	go func() { errc <- s.RunWriteLoops(wctx) }()
+	t.Cleanup(func() {
+		stop()
+		if err := <-errc; err != nil {
+			t.Errorf("RunWriteLoops: %v", err)
+		}
+	})
+	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
+	lined(t, idx, secretLine(ns, "s"), false)
+	cutest.Eventually(t, time.Minute, func() error {
+		if n := s.Collapsed(widgetGK); n != 0 {
+			return fmt.Errorf("%d namespaces are still to be made up for: %w", n, cutest.ErrNotYet)
+		}
+		return nil
+	})
+}
+
 // failingConnect fails every Connect, as a provider whose external system is
 // unreachable: the holder never gets its owner finalizer.
 func failingConnect(context.Context, types.NamespacedName, cu.Ref) error {
