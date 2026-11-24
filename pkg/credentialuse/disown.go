@@ -106,13 +106,23 @@ func (t *Tracker) crdCached() map[string]string {
 	return m.Annotations
 }
 
-// crdLive is the CRD's annotations, read live: none when it is gone.
-func (t *Tracker) crdLive(ctx context.Context) (map[string]string, error) {
+// crdMeta is the CRD's metadata, read live: nil when it is gone. A pass's hold
+// and the index read the switch through it.
+func (t *Tracker) crdMeta(ctx context.Context) (*metav1.PartialObjectMetadata, error) {
 	m, err := t.s.c.Metadata.Resource(crdGVR).Get(ctx, t.crdName, metav1.GetOptions{})
 	if Classify(err) == ClassNotFound {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// crdLive is the CRD's annotations, read live: none when it is gone.
+func (t *Tracker) crdLive(ctx context.Context) (map[string]string, error) {
+	m, err := t.crdMeta(ctx)
+	if err != nil || m == nil {
 		return nil, err
 	}
 	return m.Annotations, nil
@@ -167,11 +177,8 @@ func (t *Tracker) disownLive(ctx context.Context) (disownSet, error) {
 // flag that says nothing is held, should that value come back (§7.4). One it
 // can't remove fails the pass: no A2.
 func (t *Tracker) disownForHold(ctx context.Context) (disownSet, error) {
-	m, err := t.s.c.Metadata.Resource(crdGVR).Get(ctx, t.crdName, metav1.GetOptions{})
-	if Classify(err) == ClassNotFound {
-		return disownSet{}, nil
-	}
-	if err != nil {
+	m, err := t.crdMeta(ctx)
+	if err != nil || m == nil {
 		return disownSet{}, err
 	}
 	if staleSettled(m.Annotations) {
