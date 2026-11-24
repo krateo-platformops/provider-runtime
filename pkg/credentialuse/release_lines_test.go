@@ -189,30 +189,40 @@ func TestTheRestIsInItsBatchsOrder(t *testing.T) {
 	}
 }
 
-// Each of two objects whose release meets a change is read again in its own turn,
-// however long the turn has taken: put back, it would lose which resourceVersion its
-// patch was built from.
+// Each of three objects whose release meets a change is read again in its own turn,
+// however long that takes: put back, it would lose which resourceVersion its patch was
+// built from. The first of its sort would be read past the turn's time in any case, so
+// the third is the one that shows it: the turn's time is over when its second read
+// comes, and wasn't at its first.
 func TestAConflictsReadIsItsTurnsPastItsTime(t *testing.T) {
 	r := newRig(t)
-	r.p.turnTime = 1
-	known, other := secretID("ns", "known"), secretID("ns", "other")
-	for _, id := range []ID{known, other} {
+	r.p.turnTime = 2 * time.Second
+	ids := []ID{secretID("ns", "a"), secretID("ns", "b"), secretID("ns", "c")}
+	for _, id := range ids {
 		addHeld(r, id)
 	}
-	r.p.known = func(_ string, id ID) bool { return id == known }
-	changed := map[string]bool{}
-	r.srv.before = func(op, _, name string) error {
-		if op != "patch" || changed[name] {
-			return nil
+	changed, reads := map[string]bool{}, map[string]int{}
+	r.p.srv = hookServer{server: r.srv, before: func(_ context.Context, c Call) error {
+		switch {
+		case c.Op == "patch" && !changed[c.Name]:
+			changed[c.Name] = true
+			_, err := r.m.Patch(secretKey("ns", c.Name), types.MergePatchType, []byte(fmt.Sprintf(`{"metadata":{"finalizers":[%q,"example.com/other"]}}`, fNS)))
+			must(err)
+		case c.Op == "get":
+			if reads[c.Name]++; reads[c.Name] == 2 {
+				time.Sleep(1100 * time.Millisecond)
+			}
 		}
-		changed[name] = true
-		_, err := r.m.Patch(secretKey("ns", name), types.MergePatchType, []byte(fmt.Sprintf(`{"metadata":{"finalizers":[%q,"example.com/other"]}}`, fNS)))
-		must(err)
 		return nil
+	}}
+	res, err := r.p.release(context.Background(), "ns", ids)
+	if err != nil || len(res.Released) != 3 || len(res.Rest) != 0 {
+		t.Errorf("released %v, rest %v, %v; want all three released", res.Released, res.Rest, err)
 	}
-	res, err := r.p.release(context.Background(), "ns", []ID{known, other})
-	if err != nil || len(res.Released) != 2 || len(res.Rest) != 0 {
-		t.Errorf("released %v, rest %v, %v; want both released", res.Released, res.Rest, err)
+	for _, id := range ids {
+		if reads[id.Name] != 2 {
+			t.Errorf("%s was read %d times, want twice", id, reads[id.Name])
+		}
 	}
 }
 
