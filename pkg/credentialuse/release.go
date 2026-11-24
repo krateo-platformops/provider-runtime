@@ -90,19 +90,29 @@ type ReleaseResult struct {
 	// Failed are the objects the batch couldn't decide, each for an error it
 	// returns: the caller retries them, and only them, with backoff.
 	Failed []ID
-	// RequeueAt, when set, is when the objects that aren't Failed must be
-	// looked at again: the end of a grace, or a restored epoch's recheck. It is
-	// absolute, the deadline
-	// itself rather than a duration from some reading of the clock, so the
-	// requeue lands exactly on it (docs/credential-use-model-reduction.md
-	// §10.2). A time already past means at once: it is the batch's now.
+	// Asked are the objects that must be looked at again, and when each: at the
+	// end of its grace, or for its restored epoch's recheck. Nothing else of
+	// the batch is.
+	Asked []Asked
+	// RequeueAt, when set, is the soonest of Asked's times. They are absolute,
+	// the deadline itself rather than a duration from some reading of the
+	// clock, so the requeue lands exactly on it
+	// (docs/credential-use-model-reduction.md §10.2). A time already past means
+	// at once: it is the batch's now.
 	RequeueAt time.Time
 }
 
-func (r *ReleaseResult) requeueAt(now, at time.Time) {
+// Asked is an object a batch must look at again, and when.
+type Asked struct {
+	ID ID
+	At time.Time
+}
+
+func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
 	if at.Before(now) {
 		at = now
 	}
+	r.Asked = append(r.Asked, Asked{id, at})
 	if r.RequeueAt.IsZero() || at.Before(r.RequeueAt) {
 		r.RequeueAt = at
 	}
@@ -189,7 +199,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 					continue
 				}
 				now := p.clock.Now()
-				res.requeueAt(now, now.Add(p.epochRequeue()))
+				res.requeueAt(now, now.Add(p.epochRequeue()), id)
 				continue
 			}
 			r := r1Read{id: id, meta: m}
@@ -199,7 +209,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				// Inside the grace, in a namespace last seen live, with users:
 				// nothing to decide until the grace ends (§6.2 R1).
 				if u := cachedUsers[id]; now.Before(r.graceEnd) && len(u.users) > 0 && !p.namespaceDeletingCached(id.Namespace) {
-					res.requeueAt(now, r.graceEnd)
+					res.requeueAt(now, r.graceEnd, id)
 					res.Kept = append(res.Kept, Kept{P: id, Why: KeptGrace, GraceEnd: r.graceEnd, Users: u.users, DeletingUsers: u.deletingUsers})
 					continue
 				}
@@ -290,7 +300,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				}
 				continue
 			case WaitForGrace:
-				res.requeueAt(now, r.graceEnd)
+				res.requeueAt(now, r.graceEnd, r.id)
 				kept.Why = KeptGrace
 				res.Kept = append(res.Kept, kept)
 				continue

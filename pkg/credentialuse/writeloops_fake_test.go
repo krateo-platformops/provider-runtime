@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clienttesting "k8s.io/client-go/testing"
+	testingclock "k8s.io/utils/clock/testing"
 )
 
 var (
@@ -273,13 +274,14 @@ func (r *fakeRig) working(k batchKey) bool {
 }
 
 // A batch that fails is retried after its backoff, on the queue's clock;
-// the backoff doubles per (K, N) to its cap, and a success resets it.
+// the backoff doubles per object to its cap, and a success starts it again.
 func TestReleaseLoopBacksOff(t *testing.T) {
-	var b batchBackoff
-	k := batchKey{widgetGK, "ns"}
+	clk := testingclock.NewFakeClock(time.Now())
+	q, k, id := newBatchQueue(clk), batchKey{widgetGK, "ns"}, secretID("ns", "s")
 	var got []time.Duration
 	for range 11 {
-		got = append(got, b.fail(k))
+		got = append(got, q.Fail(k, id))
+		clk.Step(got[len(got)-1])
 	}
 	want := []time.Duration{1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300}
 	for i := range want {
@@ -288,8 +290,8 @@ func TestReleaseLoopBacksOff(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("backoff = %v, want %v", got, want)
 	}
-	b.settle(k)
-	if d := b.fail(k); d != time.Second {
+	q.Settle(k, id)
+	if d := q.Fail(k, id); d != time.Second {
 		t.Errorf("after a success, backoff = %s, want 1s", d)
 	}
 

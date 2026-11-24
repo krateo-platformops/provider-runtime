@@ -214,7 +214,7 @@ func (s *Shared) recheckUncached(ctx context.Context, ts []*Tracker) {
 			failed = append(failed, p)
 			for _, t := range p.ts {
 				t.warn("credential-use: the recheck of the held objects outside the caches failed; it is retried",
-					"kind", t.gk.String(), "retryIn", d.String(), "error", err.Error())
+					"kind", t.gk.String(), "retryIn", d.String(), "error", errorSample(err))
 			}
 		}
 		if left = failed; len(left) == 0 {

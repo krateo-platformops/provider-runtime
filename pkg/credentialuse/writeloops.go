@@ -23,9 +23,10 @@ const (
 	// batches moving without crowding the API server, and the queue never
 	// gives one key to two workers.
 	releaseWorkers = 2
-	// releaseBackoffBase and releaseBackoffMax bound the backoff of a batch
-	// that failed (§6.2): it doubles from the base, per (K, N), and resets
-	// when the batch succeeds.
+	// releaseBackoffBase and releaseBackoffMax bound the backoff of an object
+	// a batch failed at (§6.2): it doubles from the base at each of its retries
+	// that fails, and starts again once a batch decides the object. The
+	// startup recheck's, and the index's checks', are bounded by them too.
 	releaseBackoffBase = time.Second
 	releaseBackoffMax  = 5 * time.Minute
 )
@@ -189,6 +190,7 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	t := s.trackerOrPark(k, ids)
 	if t == nil {
+		s.queue.Settle(k, ids...) // dropped, or parked: nothing to remember
 		return
 	}
 	fill := len(ids) == 0 || slices.Contains(ids, fillAll)
@@ -226,11 +228,17 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	decided := slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return failed[id] })
 	t.keptUncached(decided, res.Kept)
 	if fill && !failed[fillAll] {
-		s.backoff.settle(k, fillAll)
+		s.queue.Settle(k, fillAll)
 	}
-	s.backoff.settle(k, decided...)
-	if !res.RequeueAt.IsZero() { // which an object it decided asked for
-		s.queue.AddAfter(k, res.RequeueAt.Sub(s.clock.Now()), decided...)
+	s.queue.Settle(k, decided...)
+	// Each at its own time, and never with no objects, which asks for the whole
+	// namespace.
+	at := map[time.Time][]ID{}
+	for _, a := range res.Asked {
+		at[a.At] = append(at[a.At], a.ID)
+	}
+	for t, ids := range at {
+		s.queue.AddAfter(k, t.Sub(s.clock.Now()), ids...)
 	}
 	if len(errs) > 0 {
 		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), errors.Join(errs...))
@@ -238,17 +246,40 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 }
 
 // retryBatch requeues objects ids of batch k after err: at once, for the next
-// write loops, when ctx ended under it; otherwise with backoff, in k's one
-// pending retry.
+// write loops, when ctx ended under it; otherwise each with its own backoff.
 func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []ID, err error) {
 	if ctx.Err() != nil {
 		s.queue.Add(k, ids...)
 		return
 	}
-	d := s.backoff.fail(k, ids...)
+	retryIn := "as scheduled before"
+	if d := s.queue.Fail(k, ids...); d > 0 {
+		retryIn = d.String()
+	}
 	t.warn("credential-use: a release batch failed; what failed of it is retried with backoff",
-		"kind", t.gk.String(), "namespace", k.Namespace, "objects", len(ids), "retryIn", d.String(), "error", err.Error())
-	s.queue.Retry(k, d, ids...)
+		"kind", t.gk.String(), "namespace", k.Namespace, "objects", len(ids), "retryIn", retryIn, "error", errorSample(err))
+}
+
+// maxLoggedErrors and maxLoggedBytes bound what a log line has of a joined
+// error, which has a line for each object that failed.
+const (
+	maxLoggedErrors = 3
+	maxLoggedBytes  = 2000
+)
+
+// errorSample is err's first few lines, and how many more it has.
+func errorSample(err error) string {
+	lines := strings.SplitN(err.Error(), "\n", maxLoggedErrors+1)
+	var more string
+	if len(lines) > maxLoggedErrors {
+		more = fmt.Sprintf("\nand %d more", 1+strings.Count(lines[maxLoggedErrors], "\n"))
+		lines = lines[:maxLoggedErrors]
+	}
+	text := strings.Join(lines, "\n")
+	if len(text) > maxLoggedBytes {
+		text = strings.ToValidUTF8(text[:maxLoggedBytes], "") + "..."
+	}
+	return text + more
 }
 
 // heldIn returns the protected objects that carry t's finalizer for holder
@@ -273,66 +304,6 @@ func (s *Shared) heldIn(ctx context.Context, t *Tracker, n string) ([]ID, error)
 		}
 	}
 	return SortedIDs(out), err
-}
-
-// batchBackoff is the release loop's per-(K, N) failure backoff. It starts
-// again once every object that failed has been decided, so batches of a
-// namespace's other objects, which succeed, don't keep one that always fails
-// at the base delay.
-type batchBackoff struct {
-	mu       sync.Mutex
-	failures map[batchKey]*batchFailures
-}
-
-// batchFailures are one key's failures in a row, and the objects of them not
-// decided since: fillAll stands for the namespace's list.
-type batchFailures struct {
-	n   int
-	ids map[ID]bool
-}
-
-// fail counts one failure of k's batch, at objects ids, and returns the delay
-// of its retry.
-func (b *batchBackoff) fail(k batchKey, ids ...ID) time.Duration {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.failures == nil {
-		b.failures = map[batchKey]*batchFailures{}
-	}
-	f := b.failures[k]
-	if f == nil {
-		f = &batchFailures{ids: map[ID]bool{}}
-		b.failures[k] = f
-	}
-	for _, id := range ids {
-		f.ids[id] = true
-	}
-	n := f.n
-	f.n++
-	d := releaseBackoffBase
-	for range n {
-		d *= 2
-		if d >= releaseBackoffMax {
-			return releaseBackoffMax
-		}
-	}
-	return d
-}
-
-// settle records that ids of k's batch were decided.
-func (b *batchBackoff) settle(k batchKey, ids ...ID) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	f := b.failures[k]
-	if f == nil {
-		return
-	}
-	for _, id := range ids {
-		delete(f.ids, id)
-	}
-	if len(f.ids) == 0 {
-		delete(b.failures, k)
-	}
 }
 
 // The events of §12 that the release loop records: WaitingForCredentialUsers

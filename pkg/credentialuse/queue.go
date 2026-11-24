@@ -34,8 +34,8 @@ type batchKey struct {
 // timer's function while holding a lock of its own, as the fake clock of
 // k8s.io/utils does under Step, and that function takes mu; so calling the
 // clock under mu would order the two locks both ways (D1 of the review of
-// #109). AddAfter therefore registers a timer in two steps, and ShutDown
-// stops the timers after releasing mu.
+// #109). AddAfter and Fail therefore register a timer in two steps, and Settle
+// and ShutDown stop timers after releasing mu.
 type batchQueue struct {
 	clock clock.WithDelayedExecution
 
@@ -45,8 +45,9 @@ type batchQueue struct {
 	ready   []batchKey               // keys waiting to be taken, in order
 	queued  map[batchKey]bool        // in ready
 	working map[batchKey]bool        // taken, not yet done
-	timers  map[*queueTimer]bool     // AddAfter's and Retry's timers neither fired nor stopped
-	retries map[batchKey]*queueTimer // each key's pending retry, in timers too
+	timers  map[*queueTimer]bool     // AddAfter's and Fail's timers neither fired nor stopped
+	failing map[batchKey]map[ID]*failure
+	backoff func(failures int) time.Duration // backoffAfter, but for tests
 	stopped bool
 }
 
@@ -57,7 +58,8 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 		queued:  map[batchKey]bool{},
 		working: map[batchKey]bool{},
 		timers:  map[*queueTimer]bool{},
-		retries: map[batchKey]*queueTimer{},
+		failing: map[batchKey]map[ID]*failure{},
+		backoff: backoffAfter,
 	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
@@ -102,14 +104,22 @@ func (q *batchQueue) addLocked(k batchKey, ids []ID) {
 	}
 }
 
-// A queueTimer is one AddAfter, or a key's pending retry. It is in the queue's
-// timers from before the clock is asked for a timer until the timer fires, or
-// ShutDown or a sooner retry takes it; t is set once the clock has returned
-// it.
+// A queueTimer is one AddAfter, or the pending retry of the objects that one
+// Fail gave the same delay. It is in the queue's timers from before the clock
+// is asked for a timer until the timer fires, ShutDown takes it, or everything
+// it would retry is decided; t is set once the clock has returned it.
 type queueTimer struct {
-	t   clock.Timer
-	ids []ID
-	at  time.Time // a retry's: when it is due
+	t     clock.Timer
+	ids   []ID
+	retry bool
+	left  int // a retry's objects that still wait for it
+}
+
+// A failure is an object that a batch of a key failed at, and none decided
+// since: how often in a row its retries failed, and the one it waits for.
+type failure struct {
+	n     int
+	waits *queueTimer
 }
 
 // AddAfter adds k's batch, covering ids, once d has passed on the queue's
@@ -134,44 +144,87 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 	q.arm(k, d, e)
 }
 
-// Retry adds k's batch, covering ids, once d has passed, as AddAfter does,
-// except that a key has one pending retry: ids join the one it has, which
-// keeps the sooner of the two times. So a key whose batches keep failing,
-// however often events queue them, is retried once per backoff. A pending
-// retry isn't AddAfter's: a grace's end is its own. A d of zero or less adds
-// at once.
-func (q *batchQueue) Retry(k batchKey, d time.Duration, ids ...ID) {
-	if d <= 0 {
-		q.Add(k, ids...)
-		return
-	}
-	if len(ids) == 0 {
-		ids = []ID{fillAll}
-	}
-	e := &queueTimer{ids: slices.Clone(ids), at: q.clock.Now().Add(d)}
+// Fail schedules the retry of ids, which k's batch failed at: each object on a
+// backoff of its own, from releaseBackoffBase, doubling at each retry that
+// fails, to releaseBackoffMax. So one that fails for good puts off no other.
+// An object that already waits for its retry keeps it, and isn't counted
+// again: what failed was a run an event queued. Objects of one Fail that get
+// the same delay share its timer, so there are never more timers than objects.
+// It returns the soonest delay it gave, or 0 if all of them were waiting. After
+// ShutDown it does nothing. Fail and Settle are for the worker of k's batch,
+// one at a time: a Settle forgets a Fail, so what one decided mustn't race what
+// another failed at.
+func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
 	q.mu.Lock()
 	if q.stopped {
 		q.mu.Unlock()
-		return
+		return 0
 	}
-	var later clock.Timer
-	if old := q.retries[k]; old != nil {
-		e.ids = slices.Compact(SortedIDs(append(e.ids, old.ids...)))
-		if !e.at.Before(old.at) {
-			old.ids = e.ids
-			q.mu.Unlock()
-			return
+	m := q.failing[k]
+	if m == nil {
+		m = map[ID]*failure{}
+		q.failing[k] = m
+	}
+	timers := map[time.Duration]*queueTimer{}
+	for _, id := range ids {
+		f := m[id]
+		if f == nil {
+			f = &failure{}
+			m[id] = f
 		}
-		delete(q.timers, old)
-		later = old.t
+		if f.waits != nil {
+			continue
+		}
+		d := q.backoff(f.n)
+		f.n++
+		e := timers[d]
+		if e == nil {
+			e = &queueTimer{retry: true}
+			timers[d] = e
+			q.timers[e] = true
+		}
+		e.ids = append(e.ids, id)
+		e.left++
+		f.waits = e
 	}
-	q.timers[e] = true
-	q.retries[k] = e
 	q.mu.Unlock()
-	if later != nil {
-		later.Stop()
+	for d, e := range timers {
+		if soonest == 0 || d < soonest {
+			soonest = d
+		}
+		q.arm(k, d, e)
 	}
-	q.arm(k, d, e)
+	return soonest
+}
+
+// Settle records that ids of k's batch were decided: what they waited for, and
+// how often they had failed, is forgotten.
+func (q *batchQueue) Settle(k batchKey, ids ...ID) {
+	var stop []clock.Timer
+	q.mu.Lock()
+	m := q.failing[k]
+	for _, id := range ids {
+		f := m[id]
+		if f == nil {
+			continue
+		}
+		delete(m, id)
+		if e := f.waits; e != nil {
+			if e.left--; e.left == 0 {
+				delete(q.timers, e)
+				if e.t != nil {
+					stop = append(stop, e.t)
+				}
+			}
+		}
+	}
+	if m != nil && len(m) == 0 {
+		delete(q.failing, k)
+	}
+	q.mu.Unlock()
+	for _, t := range stop {
+		t.Stop()
+	}
 }
 
 // arm asks the clock for e's timer, which adds k's batch. e is in timers.
@@ -183,10 +236,18 @@ func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 			return
 		}
 		delete(q.timers, e)
-		if q.retries[k] == e {
-			delete(q.retries, k)
+		ids := e.ids
+		if e.retry {
+			ids = nil
+			for _, id := range e.ids {
+				// Not one decided since, which may have failed again.
+				if f := q.failing[k][id]; f != nil && f.waits == e {
+					f.waits = nil
+					ids = append(ids, id)
+				}
+			}
 		}
-		q.addLocked(k, e.ids)
+		q.addLocked(k, ids)
 	})
 
 	q.mu.Lock()
@@ -196,9 +257,9 @@ func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 	}
 	q.mu.Unlock()
 	if !live {
-		// It fired already, or ShutDown or a sooner retry took it before it
-		// had a timer to stop: either way it is no longer the queue's, and
-		// stopping it is harmless if it fired.
+		// It fired already, or ShutDown or a Settle took it before it had a
+		// timer to stop: either way it is no longer the queue's, and stopping
+		// it is harmless if it fired.
 		t.Stop()
 	}
 }
@@ -262,7 +323,7 @@ func (q *batchQueue) ShutDown() {
 		}
 	}
 	clear(q.timers)
-	clear(q.retries)
+	clear(q.failing)
 	q.ready, q.pending = nil, map[batchKey]map[ID]bool{}
 	clear(q.queued)
 	q.cond.Broadcast()

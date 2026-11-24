@@ -188,7 +188,7 @@ MUTANTS = [
     ("a key added during work isn't queued again", "queue.go",
      [("\tif _, again := q.pending[k]; again && !q.queued[k] && !q.stopped {", "\tif false {")]),
     ("ShutDown leaves the timers running", "queue.go",
-     [("\tfor _, t := range stop {\n\t\tt.Stop()\n\t}\n", "")]),
+     [("\tq.cond.Broadcast()\n\tq.mu.Unlock()\n\tfor _, t := range stop {\n\t\tt.Stop()\n\t}\n", "\tq.cond.Broadcast()\n\tq.mu.Unlock()\n\t_ = stop\n")]),
     ("AddAfter calls the clock under the queue's lock", "queue.go",
      [("\tt := q.clock.AfterFunc(", "\tq.mu.Lock()\n\tt := q.clock.AfterFunc("),
       ("\t})\n\n\tq.mu.Lock()\n\tlive := q.timers[e]\n", "\t})\n\n\tlive := q.timers[e]\n")]),

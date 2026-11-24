@@ -801,12 +801,20 @@ the janitor's patch.
 couldn't decide, and those alone are requeued with backoff; the rest are done,
 or looked at again at the time they asked for, as at a grace's end. So an
 object that fails for good, as of a kind that isn't served, delays no other.
-A (K, N) has **one pending retry**: objects that fail while it waits join it,
-at the sooner of the two times, so a batch that events run often doesn't pile
-up timers. The backoff starts again once everything that failed has been
-decided, not at any batch of the namespace that succeeds. A namespace's live
-list (§10.5) that fails for one kind is retried so too, and doesn't hold up the
-kinds that could be listed.
+**The backoff is the object's**, per (K, N): 1s, doubling to 5 minutes at each
+of its retries that fails, and forgotten when a batch decides it. It has one
+pending retry: failing again before that, in a batch an event queued, neither
+moves nor lengthens it. Objects that fail together, as often, share a timer, so
+failures set no more timers than objects that fail. (A grace's end is asked for
+at each batch that finds it, and each sets a timer of its own: they end with
+the grace.) A namespace's live list (§10.5) that fails for one kind is retried
+so too, as a whole, deciding what it can list again, and doesn't hold up the
+kinds that could be listed. An object that fails stays in memory, and is read
+again every 5 minutes, for as long as it fails: it isn't dropped when no record
+names it any more, since a hold may still be there. A time a batch asks for, a
+grace's end or a repaired epoch's recheck, is for the object that asked, each at
+its own time, not for the rest of the batch, and waits for no backoff. The log line of a failed batch has the first few
+errors, and how many more there are.
 
 **The releaser** works on one holder kind K and one namespace N at a time,
 for the set of protected objects pending there (R7). For each pending P:

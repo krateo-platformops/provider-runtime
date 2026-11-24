@@ -198,11 +198,9 @@ type Shared struct {
 	// unheldReads is the shared live read of unheld hops (§9.4).
 	unheldReads *sharedReads
 	// janitor queues protected objects whose labels the janitor may clean
-	// (§10.1); janitorState and backoff are the janitor's and the release
-	// loop's memory across attempts.
+	// (§10.1); janitorState is the janitor's memory across attempts.
 	janitor      workqueue.TypedRateLimitingInterface[ID]
 	janitorState janitorState
-	backoff      batchBackoff
 
 	namespaces cache.SharedIndexInformer
 	nsLW       *listWatch

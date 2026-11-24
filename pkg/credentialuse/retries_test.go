@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/utils/clock"
 	testingclock "k8s.io/utils/clock/testing"
 )
 
@@ -29,21 +30,35 @@ func (ix *index) recheck(ctx context.Context, enqueue func(id ID, n string)) err
 	return ix.recheckRest(ctx, map[ID]bool{}, enqueue)
 }
 
-// timersOf is what q's timers of k hold: the pending retry's objects, and
-// the others', and how many there are.
+// timersOf is what of k waits for a retry, and how many timers q has.
 func timersOf(q *batchQueue, k batchKey) (retry []ID, timers int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if e := q.retries[k]; e != nil {
-		retry = e.ids
+	for id, f := range q.failing[k] {
+		if f.waits != nil {
+			retry = append(retry, id)
+		}
 	}
-	return retry, len(q.timers)
+	return SortedIDs(retry), len(q.timers)
 }
 
-func TestRetryIsOnePerKey(t *testing.T) {
+// failuresOf is how often in a row each object of k failed.
+func failuresOf(q *batchQueue, k batchKey) map[ID]int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := map[ID]int{}
+	for id, f := range q.failing[k] {
+		out[id] = f.n
+	}
+	return out
+}
+
+func TestFailKeepsOneRetryPerObject(t *testing.T) {
 	clk := testingclock.NewFakeClock(time.Now())
-	q := newBatchQueue(clk)
+	q := newBatchQueue(nil)
+	q.clock = &unlockedClock{FakeClock: clk, t: t, q: q}
 	other := batchKey{widgetGK, "other"}
+	a, b, c := idOf("a"), idOf("b"), idOf("c")
 	take := func(want ...ID) {
 		t.Helper()
 		if q.Len() != 1 {
@@ -55,60 +70,168 @@ func TestRetryIsOnePerKey(t *testing.T) {
 			t.Fatalf("Get = %v %v, want %v", k, ids, want)
 		}
 	}
-	// A later one joins; a sooner one takes over, with what there was.
-	q.Retry(batchNS, 4*time.Second, idOf("a"))
-	q.Retry(batchNS, 8*time.Second, idOf("b"))
-	if _, n := timersOf(q, batchNS); n != 1 {
-		t.Fatalf("%d timers for two retries of one key, want 1", n)
+	timers := func(want int) {
+		t.Helper()
+		if _, n := timersOf(q, batchNS); n != want {
+			t.Fatalf("%d timers, want %d", n, want)
+		}
+	}
+	// Those that fail together wait together; each, once.
+	if d := q.Fail(batchNS, a, b, a); d != time.Second {
+		t.Errorf("the first delay is %s, want 1s", d)
+	}
+	timers(1)
+	if d := q.Fail(batchNS, b, a); d != 0 {
+		t.Errorf("objects that wait were given %s", d)
+	}
+	timers(1)
+	clk.Step(time.Second)
+	take(a, b)
+	timers(0)
+	// Each on its own count: the soonest is returned.
+	if d := q.Fail(batchNS, a, c); d != time.Second {
+		t.Errorf("the soonest delay is %s, want 1s", d)
+	}
+	timers(2)
+	clk.Step(time.Second)
+	take(c)
+	// A grace's end is another timer, and another key's failures its own.
+	q.AddAfter(batchNS, 3*time.Second, b)
+	q.Fail(other, a)
+	if got := failuresOf(q, batchNS); got[a] != 2 || got[b] != 1 || got[c] != 1 || len(got) != 3 {
+		t.Errorf("failures %v, want a twice, b and c once", got)
 	}
 	clk.Step(time.Second)
-	q.Retry(batchNS, time.Second, idOf("c"), idOf("a"))
-	if ids, n := timersOf(q, batchNS); n != 1 || !slices.Equal(ids, []ID{idOf("a"), idOf("b"), idOf("c")}) {
-		t.Fatalf("%d timers, the retry's objects %v; want one, with a, b and c", n, ids)
+	if k, ids, _ := q.Get(context.Background()); k != batchNS || !slices.Equal(ids, []ID{a}) {
+		t.Fatalf("Get = %v %v, want the second retry of a, 2s after its first", k, ids)
 	}
-	clk.Step(time.Second)
-	take(idOf("a"), idOf("b"), idOf("c"))
-	clk.Step(time.Minute)
-	if q.Len() != 0 {
-		t.Fatal("the retry that was taken over added a batch too")
+	// While its batch runs, a fails again, and something else adds it again:
+	// both hold.
+	q.Add(batchNS, a)
+	if d := q.Fail(batchNS, a); d != 4*time.Second {
+		t.Errorf("the third delay is %s, want 4s", d)
 	}
-	// Another key's, and a grace's, are their own.
-	q.Retry(batchNS, time.Second, idOf("a"))
-	q.AddAfter(batchNS, 2*time.Second, idOf("g"))
-	q.Retry(other, time.Minute)
-	if _, n := timersOf(q, batchNS); n != 3 {
-		t.Errorf("%d timers, want three", n)
+	q.Done(batchNS)
+	if k, ids, _ := q.Get(context.Background()); k != other || !slices.Equal(ids, []ID{a}) {
+		t.Fatalf("Get = %v %v, want the other key's", k, ids)
 	}
-	if ids, _ := timersOf(q, other); !slices.Equal(ids, []ID{fillAll}) {
-		t.Errorf("a retry with no objects covers %v, want the namespace", ids)
-	}
-	clk.Step(time.Second)
-	take(idOf("a"))
-	clk.Step(time.Second)
-	take(idOf("g"))
-	// At once.
-	q.Retry(batchNS, 0, idOf("z"))
-	take(idOf("z"))
+	q.Done(other)
+	take(a)
+	// What is decided is forgotten, with its timer, unless others wait for it.
+	q.Fail(batchNS, c, b) // both once before: 2s
+	timers(3)             // a's, theirs, and the grace's end
+	q.Settle(batchNS, c)
+	timers(3)
+	q.Settle(batchNS, b, c, idOf("never"))
+	timers(2)
+	// One that failed, was decided, and failed again isn't retried at the old
+	// time, shared with another that still waits for it.
+	d1, d2 := idOf("d1"), idOf("d2")
+	q.Settle(batchNS, a)
+	q.Fail(batchNS, d1, d2) // 1s
+	q.Settle(batchNS, d2)
+	clk.Step(500 * time.Millisecond)
+	q.Fail(batchNS, d2)
+	clk.Step(500 * time.Millisecond)
+	take(d1)
+	clk.Step(500 * time.Millisecond)
+	take(d2)
+	clk.Step(500 * time.Millisecond)
+	take(b) // the grace's end
+	// ShutDown ends it all.
+	q.Fail(batchNS, a, d1)
 	q.ShutDown()
-	if ids, n := timersOf(q, other); n != 0 || ids != nil || clk.HasWaiters() {
-		t.Errorf("after ShutDown, %d timers, a retry of %v, waiters %v", n, ids, clk.HasWaiters())
+	if ids, n := timersOf(q, batchNS); n != 0 || ids != nil || clk.HasWaiters() || len(q.failing) != 0 {
+		t.Errorf("after ShutDown, %d timers, %v waiting, waiters %v", n, ids, clk.HasWaiters())
 	}
-	q.Retry(batchNS, time.Second, idOf("a"))
-	if _, n := timersOf(q, batchNS); n != 0 || clk.HasWaiters() {
-		t.Error("a Retry after ShutDown set a timer")
+	if d := q.Fail(batchNS, a); d != 0 || clk.HasWaiters() || len(q.failing) != 0 {
+		t.Errorf("a Fail after ShutDown returned %s", d)
 	}
 }
 
-// Retry races the timers it replaces, the workers and ShutDown: no deadlock
-// against a clock that fires under its own lock (D1 of #109), no object lost,
-// and never two pending retries of one key.
-func TestRetryUnderStress(t *testing.T) {
-	const keys, adders, each = 3, 4, 1500
-	clk := testingclock.NewFakeClock(time.Now())
+// Fail and Settle race the timers, the workers and ShutDown, on a clock that
+// fires under its own lock (D1 of #109), and on the real one: no deadlock, no
+// object lost, and no more timers than objects that wait.
+func TestFailUnderStress(t *testing.T) {
+	t.Run("a clock that fires under its lock", func(t *testing.T) {
+		clk := testingclock.NewFakeClock(time.Now())
+		stressQueue(t, clk, func() { clk.Step(50 * time.Microsecond) })
+		if clk.HasWaiters() {
+			t.Error("a timer outlived ShutDown")
+		}
+	})
+	t.Run("the real clock", func(t *testing.T) { stressQueue(t, clock.RealClock{}, nil) })
+}
+
+func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
+	const keys, adders, each = 3, 4, 1200
 	q := newBatchQueue(clk)
+	unit := 50 * time.Microsecond
+	q.backoff = func(n int) time.Duration { return time.Duration(1+n%5) * unit }
 	key := func(i int) batchKey { return batchKey{widgetGK, fmt.Sprintf("ns%d", i%keys)} }
+
+	// A one-off object is added, or failed, once, and is in some later batch.
+	// A shared one is added again and again, also while its batch is worked on,
+	// whose worker fails it or decides it: the last addition, or failure, began
+	// before some batch that has it was taken. (Fail and Settle of one object
+	// are its worker's alone, as in the release loop: a Settle that raced
+	// another's Fail would forget it.) A settled one fails and is settled; it
+	// owes nothing.
 	var mu sync.Mutex
-	owed := map[batchKey]map[ID]int{} // additions not followed by a batch that began after them
+	var now int64                      // a tick for each thing that happens
+	owed := map[batchKey]map[ID]bool{} // one-off objects not yet in a batch
+	began, taken := map[ID]int64{}, map[ID]int64{}
+	owe := func(k batchKey, id ID) {
+		mu.Lock()
+		defer mu.Unlock()
+		if owed[k] == nil {
+			owed[k] = map[ID]bool{}
+		}
+		owed[k][id] = true
+	}
+	begin := func(id ID) {
+		mu.Lock()
+		defer mu.Unlock()
+		now++
+		began[id] = now
+	}
+	lost := func() (out []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		for k, m := range owed {
+			for id := range m {
+				out = append(out, fmt.Sprint(k, id))
+			}
+		}
+		for id, at := range began {
+			if taken[id] < at {
+				out = append(out, fmt.Sprintf("%s, added at %d, last taken at %d", id, at, taken[id]))
+			}
+		}
+		return out
+	}
+	invariant := func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		waiting, left, retries := 0, 0, 0
+		for _, m := range q.failing {
+			for _, f := range m {
+				if f.waits != nil {
+					waiting++
+				}
+			}
+		}
+		for e := range q.timers {
+			if e.retry {
+				retries++
+				left += e.left
+			}
+		}
+		if left != waiting || retries > waiting {
+			t.Errorf("%d retry timers for %d objects, %d wait", retries, left, waiting)
+		}
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -119,16 +242,30 @@ func TestRetryUnderStress(t *testing.T) {
 			workers.Add(1)
 			go func() {
 				defer workers.Done()
-				for {
+				for turn := 0; ; turn++ {
 					k, ids, ok := q.Get(ctx)
 					if !ok {
 						return
 					}
 					mu.Lock()
+					now++
 					for _, id := range ids {
 						delete(owed[k], id)
+						taken[id] = now
 					}
 					mu.Unlock()
+					time.Sleep(20 * time.Microsecond) // a batch takes time
+					var failed, decided []ID
+					for i, id := range ids {
+						if strings.HasPrefix(id.Name, "shared") && (turn+i)%3 == 0 {
+							begin(id)
+							failed = append(failed, id)
+						} else {
+							decided = append(decided, id)
+						}
+					}
+					q.Settle(k, decided...)
+					q.Fail(k, failed...)
 					q.Done(k)
 				}
 			}()
@@ -142,7 +279,11 @@ func TestRetryUnderStress(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					clk.Step(time.Millisecond)
+					if step == nil {
+						time.Sleep(unit)
+					} else {
+						step()
+					}
 				}
 			}
 		}()
@@ -151,119 +292,88 @@ func TestRetryUnderStress(t *testing.T) {
 			go func() {
 				defer adding.Done()
 				for i := range each {
-					k, id := key(i), idOf(fmt.Sprintf("o%d-%d", a, i))
-					mu.Lock()
-					if owed[k] == nil {
-						owed[k] = map[ID]int{}
-					}
-					owed[k][id]++
-					mu.Unlock()
-					switch i % 5 {
+					k := key(i)
+					one := idOf(fmt.Sprintf("one%d-%d", a, i))
+					shared := idOf(fmt.Sprintf("shared%d-%d", a, i%keys)) // of one key, and one adder
+					switch i % 6 {
 					case 0:
-						q.AddAfter(k, time.Duration(i%7)*time.Millisecond, id)
-					default:
-						q.Retry(k, time.Duration(i%11)*time.Millisecond, id)
+						owe(k, one)
+						q.AddAfter(k, time.Duration(i%7)*unit, one)
+					case 1, 2:
+						owe(k, one)
+						q.Fail(k, one)
+					case 3:
+						begin(shared)
+						q.Add(k, shared)
+					case 4:
+						begin(shared)
+						q.AddAfter(k, time.Duration(i%7)*unit, shared)
+					case 5:
+						id := idOf(fmt.Sprintf("settled%d-%d", a, i%40))
+						q.Fail(k, id)
+						q.Settle(k, id)
 					}
 					if i%50 == 0 {
-						q.mu.Lock()
-						n := 0
-						for e := range q.timers {
-							if !e.at.IsZero() {
-								n++
-							}
-						}
-						if n > keys || n != len(q.retries) {
-							t.Errorf("%d pending retries of %d keys, %d known", n, keys, len(q.retries))
-						}
-						q.mu.Unlock()
+						invariant()
 					}
 				}
 			}()
 		}
 		adding.Wait()
-		close(stop)
-		stepping.Wait()
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			clk.Step(time.Second)
-			mu.Lock()
-			left := 0
-			for _, m := range owed {
-				left += len(m)
-			}
-			mu.Unlock()
-			if left == 0 {
-				break
-			}
+		// The workers fail the shared objects now and then: it ends once none
+		// is owed at some moment, and stays so while nothing is added.
+		deadline := time.Now().Add(30 * time.Second)
+		for len(lost()) > 0 && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}
-		mu.Lock()
-		for k, m := range owed {
-			if len(m) != 0 {
-				t.Errorf("%d objects of %v were never in a batch", len(m), k)
-			}
+		if l := lost(); len(l) > 0 {
+			t.Errorf("%d lost, the first %v", len(l), l[0])
 		}
-		mu.Unlock()
-		// ShutDown against retries and their timers.
+		invariant()
+
+		// ShutDown against failures and their timers.
 		var last sync.WaitGroup
-		last.Add(3)
+		last.Add(2)
 		go func() {
 			defer last.Done()
 			for i := range 500 {
-				q.Retry(key(i), time.Duration(1+(500-i)%9)*time.Millisecond, idOf("x"))
-			}
-		}()
-		go func() {
-			defer last.Done()
-			for range 200 {
-				clk.Step(time.Millisecond)
+				q.Fail(key(i), idOf(fmt.Sprintf("x%d", i)))
+				if i%3 == 0 {
+					q.Settle(key(i), idOf(fmt.Sprintf("x%d", i)))
+				}
 			}
 		}()
 		go func() { defer last.Done(); time.Sleep(time.Millisecond); q.ShutDown() }()
 		last.Wait()
+		close(stop)
+		stepping.Wait()
 		cancel()
 		workers.Wait()
 	}()
 	select {
 	case <-done:
-	case <-time.After(90 * time.Second):
+	case <-time.After(120 * time.Second):
 		t.Fatal("deadlocked")
-	}
-	if clk.HasWaiters() {
-		t.Error("a timer outlived ShutDown")
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.timers) != 0 || len(q.retries) != 0 {
-		t.Errorf("%d timers and %d retries after ShutDown", len(q.timers), len(q.retries))
+	if len(q.timers) != 0 || len(q.failing) != 0 {
+		t.Errorf("%d timers and %d keys with failures after ShutDown", len(q.timers), len(q.failing))
 	}
 }
 
-// The backoff starts again once everything that failed is decided, not at any
-// batch of the namespace that succeeds.
-func TestBackoffLastsWhileAnObjectFails(t *testing.T) {
-	var b batchBackoff
-	k := batchKey{widgetGK, "ns"}
-	fails, other := secretID("ns", "fails"), secretID("ns", "other")
-	for _, want := range []time.Duration{1, 2, 4} {
-		if d := b.fail(k, fails); d != want*time.Second {
-			t.Errorf("backoff %s, want %ds", d, want)
-		}
-		b.settle(k, other)
-	}
-	b.fail(k, fails, fillAll)
-	b.settle(k, fails)
-	if d := b.fail(k, other); d != 16*time.Second {
-		t.Errorf("with the namespace's list failing, backoff %s, want 16s", d)
-	}
-	b.settle(batchKey{widgetGK, "elsewhere"}, other, fillAll)
-	b.settle(k, other, fillAll)
-	if d := b.fail(k, fails); d != time.Second {
-		t.Errorf("after everything was decided, backoff %s, want 1s", d)
-	}
-	b.settle(k, fails)
-	if len(b.failures) != 0 {
-		t.Errorf("%d keys remembered, want none", len(b.failures))
+// A batch of a kind that is no longer tracked is dropped, and what it remembered
+// with it.
+func TestADroppedBatchForgetsItsFailures(t *testing.T) {
+	r := newFakeRig(t)
+	k := batchKey{widgetGK, "ns"} // nobody tracks it
+	r.s.queue.Fail(k, secretID("ns", "s"), secretID("ns", "t"))
+	r.clk.Step(releaseBackoffBase)
+	got, ids, _ := r.s.queue.Get(context.Background())
+	r.s.releaseBatch(context.Background(), got, ids)
+	r.s.queue.Done(got)
+	if f := failuresOf(r.s.queue, k); len(f) != 0 || len(r.s.queue.failing) != 0 || r.queueTimers() != 0 {
+		t.Errorf("failures %v, %d timers; want none", f, r.queueTimers())
 	}
 }
 
@@ -374,18 +484,6 @@ func (r *fakeRig) failingGets(name string) (on *atomic.Bool) {
 	return on
 }
 
-// failuresOf is how many times in a row k's batch failed, and at what that
-// wasn't decided since.
-func failuresOf(b *batchBackoff, k batchKey) (int, []ID) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	f := b.failures[k]
-	if f == nil {
-		return 0, nil
-	}
-	return f.n, SortedIDs(keysOf(f.ids))
-}
-
 // An object that can't be read is retried with backoff, in its key's one
 // pending retry, however often its batch runs; the rest of its batch isn't
 // retried with it, and is looked at again when it is due: here, at the end of
@@ -415,7 +513,7 @@ func TestAFailingObjectIsRetriedAlone(t *testing.T) {
 	var atGrace []ID
 	r.s.queue.mu.Lock()
 	for e := range r.s.queue.timers {
-		if e.at.IsZero() {
+		if !e.retry {
 			atGrace = append(atGrace, e.ids...)
 		}
 	}
@@ -433,8 +531,8 @@ func TestAFailingObjectIsRetriedAlone(t *testing.T) {
 	// Other batches of the namespace, which succeed, don't start the backoff
 	// again.
 	r.s.releaseBatch(ctx, k, []ID{secretID("ns", "free")})
-	if n, ids := failuresOf(&r.s.backoff, k); n != 21 || !slices.Equal(ids, []ID{secretID("ns", "fails")}) {
-		t.Errorf("%d failures, at %v; want 21, at the Secret that can't be read", n, ids)
+	if f := failuresOf(r.s.queue, k); len(f) != 1 || f[secretID("ns", "fails")] != 1 {
+		t.Errorf("failures %v; want one, of the Secret that can't be read: it waited for its retry", f)
 	}
 	// The retry, in its time. (The released Secret's event may add it too.)
 	r.clk.Step(releaseBackoffBase)
@@ -446,8 +544,8 @@ func TestAFailingObjectIsRetriedAlone(t *testing.T) {
 	got, ids, _ := r.s.queue.Get(ctx)
 	r.s.releaseBatch(ctx, got, ids)
 	r.s.queue.Done(got)
-	if n, _ := failuresOf(&r.s.backoff, k); n != 0 || hasFinalizer(r.secretMeta(t, "ns", "fails"), fWidgetNS) {
-		t.Errorf("%d failures remembered, want the Secret released and none", n)
+	if f := failuresOf(r.s.queue, k); len(f) != 0 || hasFinalizer(r.secretMeta(t, "ns", "fails"), fWidgetNS) {
+		t.Errorf("failures %v remembered, want the Secret released and none", f)
 	}
 }
 
@@ -567,14 +665,16 @@ func TestAKindThatCantBeListedStopsNoOther(t *testing.T) {
 		if retry, _ := timersOf(r.s.queue, k); !slices.Equal(retry, []ID{fillAll}) {
 			t.Errorf("the retry covers %v, want the namespace's list alone", retry)
 		}
-		r.s.releaseBatch(context.Background(), k, []ID{fillAll})
-		if n, ids := failuresOf(&r.s.backoff, k); n != 2 || !slices.Equal(ids, []ID{fillAll}) {
-			t.Errorf("%d failures, at %v; want two, at the namespace's list", n, ids)
+		r.clk.Step(releaseBackoffBase)
+		r.next(context.Background(), k)
+		if f := failuresOf(r.s.queue, k); len(f) != 1 || f[fillAll] != 2 {
+			t.Errorf("failures %v; want two, of the namespace's list", f)
 		}
 		failing.Store(false)
-		r.s.releaseBatch(context.Background(), k, []ID{fillAll})
-		if n, ids := failuresOf(&r.s.backoff, k); n != 0 {
-			t.Errorf("%d failures remembered, at %v, once the list succeeded", n, ids)
+		r.clk.Step(2 * releaseBackoffBase)
+		r.next(context.Background(), k)
+		if f := failuresOf(r.s.queue, k); len(f) != 0 {
+			t.Errorf("failures %v remembered once the list succeeded", f)
 		}
 	})
 	t.Run("the startup recheck of an index", func(t *testing.T) {
@@ -678,6 +778,280 @@ func TestTheIndexsRecheckRetriesWhatFailed(t *testing.T) {
 	gets, err = try()
 	if err != nil || !slices.Equal(gets, []ID{fails}) || !slices.Equal(enqueued, []ID{fails}) {
 		t.Errorf("the third try read %v and enqueued %v, %v; want the one that had failed", gets, enqueued, err)
+	}
+}
+
+// The rules the review of 9db7909 and the release-cost proposal asked for, by
+// what the queue holds at which time.
+
+// failWhile fails the GETs of the Secrets that fails says.
+func (r *fakeRig) failWhile(fails func(name string) bool) {
+	r.s.hooks.wrapServer = func(srv server) server {
+		return hookServer{server: srv, before: func(_ context.Context, c Call) error {
+			if c.Op == "get" && c.GK == secretGroupKind && fails(c.Name) {
+				return unservedError()
+			}
+			return nil
+		}}
+	}
+}
+
+// next takes what is queued for k, runs it, and returns it.
+func (r *fakeRig) next(ctx context.Context, k batchKey) []ID {
+	ids := r.queued(k.Holder, k.Namespace)
+	if ids == nil {
+		return nil
+	}
+	got, ids, _ := r.s.queue.Get(ctx)
+	r.s.releaseBatch(ctx, got, ids)
+	r.s.queue.Done(got)
+	return ids
+}
+
+// outside is a rig whose namespace "out" no cache covers, so that nothing but
+// batches and their timers queues there.
+func outside(t *testing.T, objs ...runtime.Object) (*fakeRig, batchKey) {
+	t.Helper()
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, append(objs, namespaceObject("in"), namespaceObject("out"))...)
+	return r, batchKey{widgetGK, "out"}
+}
+
+// One object that fails for good doesn't put another's first failure off: it
+// is retried after 1s, however long the other's backoff is.
+func TestAnHonestFailureBesideAPermanentOne(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t, heldObject(secretGVK, "out", "honest", "u1", widgetGK, "out"), heldObject(secretGVK, "out", "forged", "u2", widgetGK, "out"))
+	honestFails := true
+	r.failWhile(func(name string) bool { return name == "forged" || name == "honest" && honestFails })
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	forged, honest := secretID("out", "forged"), secretID("out", "honest")
+	r.s.releaseBatch(ctx, k, []ID{forged})
+	for range 11 { // to the longest backoff
+		r.clk.Step(releaseBackoffMax)
+		if got := r.next(ctx, k); !slices.Equal(got, []ID{forged}) {
+			t.Fatalf("the retry's batch is %v", got)
+		}
+	}
+	r.clk.Step(time.Minute)
+	r.s.releaseBatch(ctx, k, []ID{forged, honest})
+	r.clk.Step(releaseBackoffBase)
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{honest}) {
+		t.Fatalf("after 1s the batch is %v, want the honest one alone", got)
+	}
+	r.next(ctx, k)
+	r.clk.Step(2*releaseBackoffBase - 1)
+	if got := r.queued(widgetGK, "out"); got != nil {
+		t.Errorf("before its second backoff ends, the batch is %v", got)
+	}
+	honestFails = false
+	r.clk.Step(1)
+	if got := r.next(ctx, k); !slices.Equal(got, []ID{honest}) || r.heldBy(t, widgetGK, "out", "honest") {
+		t.Errorf("the second retry's batch is %v, want the honest one, released", got)
+	}
+	// The other's retry is where it was: 5 minutes after its last.
+	r.clk.Step(releaseBackoffMax - time.Minute - 3*releaseBackoffBase - 1)
+	if got := r.queued(widgetGK, "out"); got != nil {
+		t.Errorf("before its backoff ends, the batch is %v", got)
+	}
+	r.clk.Step(1)
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{forged}) {
+		t.Errorf("the batch is %v, want the other's retry", got)
+	}
+}
+
+// A grace's end never waits for a backoff: not its own namespace's, nor that of
+// the very batch that asks for it.
+func TestAGracesEndBesideAPermanentFailure(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t, holderObject("out", "h", secretID("out", "grace")))
+	r.failWhile(func(name string) bool { return name == "forged" })
+	r.setRefs("h", SecretRef("out", "grace"))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	forged, grace := secretID("out", "forged"), secretID("out", "grace")
+	r.s.releaseBatch(ctx, k, []ID{forged})
+	for range 11 {
+		r.clk.Step(releaseBackoffMax)
+		r.next(ctx, k)
+	}
+	if err := r.md.Tracker().Add(deleting(heldObject(secretGVK, "out", "grace", "u1", widgetGK, "out"), r.clk.Now())); err != nil {
+		t.Fatal(err)
+	}
+	r.s.releaseBatch(ctx, k, []ID{forged, grace})
+	r.clk.Step(DefaultDeletionGrace - 1)
+	if got := r.queued(widgetGK, "out"); got != nil {
+		t.Errorf("inside the grace the batch is %v", got)
+	}
+	r.clk.Step(1)
+	if got := r.next(ctx, k); !slices.Equal(got, []ID{grace}) || r.heldBy(t, widgetGK, "out", "grace") {
+		t.Errorf("at the grace's end the batch is %v, want the object, released", got)
+	}
+}
+
+// A holder edited to name one object after another that can't be read: each is
+// retried on its own backoff, and one named long ago isn't retried sooner.
+func TestFreshNamesThatKeepFailing(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t)
+	r.failWhile(func(string) bool { return true })
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	old := secretID("out", "old")
+	r.s.releaseBatch(ctx, k, []ID{old})
+	oldRuns := 0
+	for i := range 600 { // ten minutes, one fresh name a second
+		r.s.releaseBatch(ctx, k, []ID{secretID("out", fmt.Sprintf("n%d", i))})
+		r.clk.Step(time.Second)
+		for got := r.next(ctx, k); got != nil; got = r.next(ctx, k) {
+			if slices.Contains(got, old) {
+				oldRuns++
+			}
+		}
+	}
+	// 1, 2, 4, ..., 256: nine within 511s, and the next 300s later.
+	if oldRuns != 9 {
+		t.Errorf("the old name was retried %d times in ten minutes, want 9", oldRuns)
+	}
+}
+
+// What an event runs meanwhile isn't a retry: it doesn't lengthen the backoff.
+func TestEventsDontLengthenTheBackoff(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t)
+	r.failWhile(func(string) bool { return true })
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	id := secretID("out", "s")
+	for _, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		for range 10 {
+			r.s.releaseBatch(ctx, k, []ID{id})
+		}
+		r.clk.Step(want - 1)
+		if got := r.queued(widgetGK, "out"); got != nil {
+			t.Fatalf("before %s the batch is %v", want, got)
+		}
+		r.clk.Step(1)
+		if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{id}) {
+			t.Fatalf("after %s the batch is %v, want the retry", want, got)
+		}
+		// The worker takes it, and it fails again below.
+		got, _, _ := r.s.queue.Get(ctx)
+		r.s.queue.Done(got)
+	}
+}
+
+// A grace's end runs what asked for it again, not the rest of its batch.
+func TestOnlyWhatAskedIsLookedAtAgain(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t, deleting(heldObject(secretGVK, "out", "grace", "u1", widgetGK, "out"), time.Now()),
+		heldObject(secretGVK, "out", "used", "u2", widgetGK, "out"),
+		holderObject("out", "h", secretID("out", "grace"), secretID("out", "used")))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "free"), secretID("out", "grace"), secretID("out", "used")})
+	r.clk.Step(DefaultDeletionGrace)
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{secretID("out", "grace")}) {
+		t.Errorf("at the grace's end the batch is %v, want the object in its grace alone", got)
+	}
+	// Two graces, each at its own end.
+	r, k = outside(t, deleting(heldObject(secretGVK, "out", "g1", "u1", widgetGK, "out"), time.Now().Add(-2*time.Second)),
+		deleting(heldObject(secretGVK, "out", "g2", "u2", widgetGK, "out"), time.Now()),
+		holderObject("out", "h", secretID("out", "g1"), secretID("out", "g2")))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	// A grace begins when the deletion is first seen.
+	proto := r.s.trackerList()[0].proto
+	if _, err := proto.release(ctx, "out", []ID{secretID("out", "g1")}); err != nil {
+		t.Fatal(err)
+	}
+	r.clk.Step(2 * time.Second)
+	res, err := proto.release(ctx, "out", []ID{secretID("out", "g1"), secretID("out", "g2")})
+	if err != nil || len(res.Asked) != 2 || !res.Asked[0].At.Before(res.Asked[1].At) || !res.RequeueAt.Equal(res.Asked[0].At) {
+		t.Fatalf("asked %+v, the soonest %s, %v; want each at its own time", res.Asked, res.RequeueAt, err)
+	}
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "g1"), secretID("out", "g2")})
+	r.clk.Step(res.Asked[0].At.Sub(r.clk.Now()))
+	if got := r.next(ctx, k); !slices.Equal(got, []ID{secretID("out", "g1")}) {
+		t.Errorf("at the first grace's end the batch is %v, want its object alone", got)
+	}
+	r.clk.Step(res.Asked[1].At.Sub(r.clk.Now()))
+	if got := r.next(ctx, k); !slices.Equal(got, []ID{secretID("out", "g2")}) {
+		t.Errorf("at the second grace's end the batch is %v, want its object alone", got)
+	}
+	// A repaired epoch's recheck too.
+	o := heldObject(secretGVK, "out", "epoch", "u3", widgetGK, "out")
+	delete(o.Annotations, mustFinalizer(widgetGK, "out"))
+	r, k = outside(t, o, heldObject(secretGVK, "out", "used", "u2", widgetGK, "out"), holderObject("out", "h", secretID("out", "used")))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "epoch"), secretID("out", "used")})
+	r.clk.Step(restoredEpochRequeue)
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{secretID("out", "epoch")}) {
+		t.Errorf("at the repaired epoch's recheck the batch is %v, want its object alone", got)
+	}
+}
+
+// The write loops' stop, under a batch that decided some: the next ones get
+// what failed, at once, and no more; and the backoff isn't counted.
+func TestAStoppedBatchLeavesWhatFailed(t *testing.T) {
+	r, k := outside(t, heldObject(secretGVK, "out", "free", "u1", widgetGK, "out"), heldObject(secretGVK, "out", "fails", "u2", widgetGK, "out"))
+	r.failWhile(func(name string) bool { return name == "fails" })
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "fails"), secretID("out", "free")})
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{secretID("out", "fails")}) {
+		t.Errorf("the next write loops' batch is %v, want what failed", got)
+	}
+	if n := r.queueTimers(); n != 0 {
+		t.Errorf("%d timers, want none", n)
+	}
+	if r.heldBy(t, widgetGK, "out", "free") {
+		t.Error("what could be decided wasn't")
+	}
+}
+
+// A batch that fails at many objects says how many, and why the first few did.
+func TestAFailedBatchsLogIsBounded(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t)
+	r.failWhile(func(string) bool { return true })
+	w := &warnings{}
+	o := r.options(widgetGK)
+	o.Logger = w
+	if _, err := r.s.Track(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	r.drain()
+	var ids []ID
+	for i := range 500 {
+		ids = append(ids, secretID("out", fmt.Sprintf("a-name-of-some-length-%03d", i)))
+	}
+	r.s.releaseBatch(ctx, k, ids)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.got) != 1 || len(w.got[0]) > 4096 || !strings.Contains(w.got[0], "500") || !strings.Contains(w.got[0], "a-name-of-some-length-000") || strings.Contains(w.got[0], "a-name-of-some-length-400") {
+		t.Errorf("%d warnings, the first of %d bytes; want one, of 500 objects, with the first few errors", len(w.got), len(strings.Join(w.got, "")))
+	}
+	if !strings.Contains(w.got[0], "and 497 more") {
+		t.Errorf("%q doesn't say how many more there are", w.got[0])
+	}
+	if got := errorSample(errors.New(strings.Repeat("é", 5000))); len(got) > maxLoggedBytes+3 || !strings.HasSuffix(got, "é...") {
+		t.Errorf("a long error is cut to %d bytes, ending %q", len(got), got[max(0, len(got)-8):])
+	}
+	if got := errorSample(errors.Join(errors.New("a"), errors.New("b"), errors.New("c"))); got != "a\nb\nc" {
+		t.Errorf("a short error is %q", got)
 	}
 }
 
