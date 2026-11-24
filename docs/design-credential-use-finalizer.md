@@ -5976,8 +5976,10 @@ failure that the API server had caused (H3 below). Now:
   since a batch runs on one. It has its own reading of records, users and
   consent.
 - **Every release is judged at the moment it lands**, whether the object is
-  being deleted or not, and whatever becomes of it. It must apply to exactly
-  what its batch's R1 read: the same incarnation, no A2 since. And §5's table
+  being deleted or not, and whatever becomes of it. R1 is the batch's last read
+  of the object before the patch, and R2's whole list, and the Namespace's read,
+  must come between the two. The patch must apply to exactly what R1 read: the
+  same incarnation, no A2 since. And §5's table
   must allow it, for the users (§6.1) the watch had at R2's revision, or whose
   A2 on that incarnation had landed when the release did: §6.4 says the second
   are among the first, so a list read too early is caught. A user that had
@@ -5990,10 +5992,25 @@ failure that the API server had caused (H3 below). Now:
   by a release of that incarnation or by a DELETE that named it.**
 - **What a pass reports is checked:** a deletion pass holds each ref with an
   A2 of its own. A live one may skip, if its process has written the object
-  since the A1 that named it. No A2 comes before the record names its object.
-  A ref is Missing only if a read of the pass said so.
+  since the A1 that named it, and the caches may still have had that
+  incarnation, and the finalizer on it, 5s before. No A2 comes before the
+  record names its object. Each reason why a ref isn't held, and each acquire
+  that stops or leaves the holder Degraded, has an answer of the API server's
+  behind it.
+- **Consent** (§11.3): an A2 of another namespace's object follows, in its
+  pass, live reads of the Namespace and of the object, the last of which
+  consent.
 - **A record write drops no ref the holder still names,** except one in
-  another namespace whose consent that pass read, live, as refused.
+  another namespace whose consent that pass read, live, as refused. And a pass
+  that went through every ref leaves exactly the refs of the version it read,
+  less those without consent.
+- **The owner finalizer** (§6.7): it is added by a pass that held each ref of
+  the record, or read it absent after its last A2.
+- **What must happen in every run does.** Two canaries, beside the goroutines
+  and within the run's 8s: an object with one live user is deleted, and goes
+  after its grace; and a hold of another namespace's object goes with its
+  consent, though its holder still names it. And a run with too few releases,
+  holds, skips, establishments, or consenting reads, fails.
 - **A deletion pass reads what it has just held** (I1). It is a deletion pass
   if the holder was being deleted when the pass read it. One that began live
   isn't counted there, and is in every other audit. A failed read is exempt
@@ -6005,8 +6022,9 @@ failure that the API server had caused (H3 below). Now:
   exempt by the error's text, or by how the holder is when it is read again.
   A DELETE whose answer is lost names no incarnation, so it exempts nothing,
   and fails the run by itself.
-- **On a failure it prints** what it found, and the timeline around it:
-  versions, calls, passes, releases and DELETEs.
+- **On a failure it prints** what it found, and the timeline around it, by
+  revision: versions, calls, with what each list had, passes, releases and
+  DELETEs.
 
 Each audit is tested on made-up histories, without an API server, and against
 mutants of the protocol by `hack/revert-check-credential-use-stress.py`, which
@@ -6028,8 +6046,10 @@ counts the iterations each takes to be found.
   failed read. The stress counts it, by the version that R3's answer says its
   tests ran on; a deletion pass's read that fails for it fails the run. The
   other half of H1, where a second release of one incarnation removes the
-  next, wasn't seen there. It would fail the run, as a removal that nothing
-  explains.
+  next, wasn't seen there. The stress has seen it: two processes' releases of a
+  Secret answered, one removed it, the test's recreate landed, and the other's
+  removed the recreated one at the next revision. It fails the run, under its
+  own name (`H1-RECREATE`).
 - **The chained case.** A pass that followed an older version of a Target may
   drop from the record a Secret that the holder now needs (H2, open). The
   stress counts such drops and doesn't fail on them: every release after one
@@ -6037,8 +6057,12 @@ counts the iterations each takes to be found.
 - **A wrong release that its own races hide.** A defect whose window is a few
   milliseconds is found at the rate at which the stress's operations fall in
   it, so one green run says little of it.
-- **The way to `AddFinalizer`** (§6.7), the index (§10.6), Disown, a restart
-  and a lost response: other tests', and the model's.
+- **A cross-namespace hold whose target's namespace is being deleted:** no
+  target namespace is. Its Secrets are.
+- **`BeforeEstablish` left out:** a holder here has one ref, so its A2's own
+  404 is confirmed by the read that §6.7 asks for.
+- **The index** (§10.6), Disown, a restart and a lost response: other tests',
+  and the model's.
 - **A real cluster's rates.** envtest has one etcd, which doesn't sync its
   writes, and no latency to it.
 

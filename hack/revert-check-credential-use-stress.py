@@ -12,9 +12,11 @@ mutant, as rough as their number.
 
 A mutant counts as found only if an audit found it: a line AUDIT <class>, of a
 class other than INCOMPLETE and STALE-LIST, which say that the recording, or
-the API server, can't be trusted. OTHER is a red without one, as when a
-namespace doesn't empty; BUILD, PANIC and TIMEOUT aren't finds either. The
-baseline must pass REVERT_BASELINE iterations (default 3) or the run is
+the API server, can't be trusted, and H1-RECREATE, which is the API server's
+own and reds an unmutated run too: after one of those alone, the iterations
+left go on. OTHER is a red without one, as when a namespace doesn't empty;
+BUILD, PANIC and TIMEOUT aren't finds either. The baseline must pass
+REVERT_BASELINE iterations (default 3), H1-RECREATE aside, or the run is
 invalid. Each source file is restored after its mutant, and the end checks the
 tree is as it started.
 
@@ -25,7 +27,8 @@ can see it, and nothing of how often CI would.
 Usage, on a VM (the envtests need KUBEBUILDER_ASSETS):
   python3 hack/revert-check-credential-use-stress.py > hack/revert-check-credential-use-stress.txt
 
-REVERT_SUBTEST is plain (default), cross or chained. REVERT_SEED is passed on
+REVERT_SUBTEST is plain (default), cross or chained; a mutant of the consent
+gate runs in cross alone. REVERT_SEED is passed on
 as CREDENTIALUSE_STRESS_SEED (default: CI's fixed seed; vary for others).
 REVERT_ONLY, a regular expression, runs only the mutants whose names it
 matches. REVERT_TIMEOUT_S bounds each go test (default 3600).
@@ -39,7 +42,8 @@ sys.stdout.reconfigure(line_buffering=True)
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
 AQ, RE, DE, PA, VE = C + "acquire.go", C + "release.go", C + "decide.go", C + "patch.go", C + "verified.go"
-FILES = [AQ, RE, DE, PA, VE]
+CO, IN = C + "consent.go", C + "informers.go"
+FILES = [AQ, RE, DE, PA, VE, CO, IN]
 
 NO_EPOCH_TEST = (PA, "\t\t{Op: \"test\", Path: annotation, Value: epoch},\n", "")
 NO_UID_TEST = (PA, "\t\t{Op: \"test\", Path: \"/metadata/uid\", Value: string(uid)},\n", "")
@@ -47,8 +51,14 @@ R3 = "\t\t\tpt, err := ReleasePatch(r.meta, p.holder, n)\n"
 LATE_R3 = (RE, R3, "\t\t\ttime.Sleep(200 * time.Millisecond)\n" + R3)
 REREAD = ("\t\t\tif again, err := p.srv.Get(ctx, r.id.GroupKind(), r.id.Namespace, r.id.Name); err == nil && hasFinalizer(again, f) {\n"
           "\t\t\t\tr.meta = again\n\t\t\t}\n")
+R2 = "\t\tholders, err := p.srv.List(ctx, p.holder, n)\n"
+KEPT_LISTS = [(RE, "\t\"fmt\"\n\t\"time\"\n", "\t\"fmt\"\n\t\"sync\"\n\t\"time\"\n"),
+              (RE, "// cachedUse is R0's reading of one object's users in the caches.\n",
+               "var keptLists sync.Map\n\n// cachedUse is R0's reading of one object's users in the caches.\n")]
+LIVE_READ = "\tns, err := p.srv.Get(ctx, namespaceGroupKind, \"\", id.Namespace)\n"
 
 # (name, [(file, old, new), ...]): every old must occur exactly once in file.
+# A third element names the only sub-tests that can see the mutant.
 MUTANTS = [
     # R2 ignoring deleting users.
     ("a holder being deleted is no user",
@@ -89,6 +99,51 @@ MUTANTS = [
        "\t\t\t\tif _, ok := p.views.Protected(id); ok {")]),
     ("a live pass skips on a write from before the record named the ref",
      [(VE, "\tskip := obs.Before(issued)\n", "\tskip := obs.Before(issued) || true\n")]),
+    ("a skip goes by the object's name, not its uid",
+     [(AQ, "\t\t\t\tif cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {",
+       "\t\t\t\tif _, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, types.UID(id.String()), namespace) {"),
+      (AQ, "\t\tp.ver.wrote(out.UID, namespace, issued)\n\t\tp.wroteDeleting(id, namespace, out)\n\t\treturn ClassNone, out.UID, nil\n\t}\n\tvar last error\n",
+       "\t\tp.ver.wrote(types.UID(id.String()), namespace, issued)\n\t\tp.wroteDeleting(id, namespace, out)\n\t\treturn ClassNone, out.UID, nil\n\t}\n\tvar last error\n")]),
+    # The cold review's.
+    ("R2 decides on the list of the batch before",
+     KEPT_LISTS + [(RE, R2, R2 + "\t\tif err == nil {\n\t\t\tif old, ok := keptLists.Swap(fmt.Sprintf(\"%p/%s\", p, n), holders); ok {\n"
+                            "\t\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t\t}\n\t\t}\n")]),
+    ("every second batch makes no list, and decides on the one before",
+     KEPT_LISTS + [(RE, R2, "\t\tvar holders []metav1.PartialObjectMetadata\n\t\tvar err error\n"
+                            "\t\tif old, ok := keptLists.LoadAndDelete(fmt.Sprintf(\"%p/%s\", p, n)); ok {\n"
+                            "\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t} else if holders, err = p.srv.List(ctx, p.holder, n); err == nil {\n"
+                            "\t\t\tkeptLists.Store(fmt.Sprintf(\"%p/%s\", p, n), holders)\n\t\t}\n")]),
+    ("the consent gate says yes, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateHoldLive\n\t}\n" + LIVE_READ)], ("cross",)),
+    ("the consent gate says no, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateNotHeld\n\t}\n" + LIVE_READ)], ("cross",)),
+    ("the consent gate says no, whatever it read",
+     [(CO, "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive",
+       "\tif false && consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive")], ("cross",)),
+    ("the consent gate says yes, whatever it read",
+     [(CO, "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive",
+       "\tif true || consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive")], ("cross",)),
+    ("a ref that a record drops queues no release",
+     [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil {\n\t\t\tcontinue\n\t\t}\n\t\tr := ReadRecord(m)\n",
+       "\tfor _, m := range []*metav1.PartialObjectMetadata{cur} {\n\t\tif m == nil {\n\t\t\tcontinue\n\t\t}\n\t\tr := ReadRecord(m)\n")]),
+    ("every third acquire fails",
+     [(AQ, "\t\"sync\"\n\t\"time\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n\t\"time\"\n"),
+      (AQ, "// resolve keeps o as what was read for r (Resolved)", "var acquireSeq atomic.Int64\n\n// resolve keeps o as what was read for r (Resolved)"),
+      (AQ, "\tmaxDepth := p.maxDepth\n", "\tif acquireSeq.Add(1)%3 == 0 {\n\t\treturn fail(errors.New(\"mutant\"), \"Refs\")\n\t}\n\tmaxDepth := p.maxDepth\n")]),
+    ("a grace that never ends",
+     [(DE, "\treturn firstSeen.Add(ahead + grace)\n", "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")]),
+    # One for each class that had none.
+    ("an A2 takes the other kind's finalizer off (FINALIZER-LOST)",
+     [(PA, "\tdata, err := json.Marshal(body)\n\treturn Patch{Type: types.StrategicMergePatchType, Data: data}, err\n",
+       "\tif strings.Contains(k.finalizer, \".widget.\") {\n\t\tbody[\"metadata\"].(map[string]any)[\"$deleteFromPrimitiveList/finalizers\"] = []string{strings.Replace(k.finalizer, \".widget.\", \".target.\", 1)}\n\t}\n"
+       "\tdata, err := json.Marshal(body)\n\treturn Patch{Type: types.StrategicMergePatchType, Data: data}, err\n")], ("plain",)),
+    ("R3 takes every finalizer off (FINALIZER-LOST, UNEXPLAINED-REMOVAL)",
+     [(PA, "\t\tjsonPatchOp{Op: \"remove\", Path: index},\n", "\t\tjsonPatchOp{Op: \"remove\", Path: \"/metadata/finalizers\"},\n")]),
+    ("A2 comes before A1 (HELD-BEFORE-THE-RECORD)",
+     [(AQ, "\t\tadded, err := p.announce(ctx, obj, want, unheldNow, &a)\n", "\t\tadded, err := map[ID]bool{}, error(nil)\n\t\t_, _ = want, unheldNow\n")]),
+    ("a Missing ref is left out (REF-UNACCOUNTED)",
+     [(AQ, "\t\t\t\tcase ClassNotFound:\n\t\t\t\t\ta.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})\n\t\t\t\t\tunfollowed = unfollowed || r.Next != nil\n\t\t\t\tcase ClassDeleting:\n",
+       "\t\t\t\tcase ClassNotFound:\n\t\t\t\t\tunfollowed = unfollowed || r.Next != nil\n\t\t\t\tcase ClassDeleting:\n")]),
+    ("A1 keeps the refs the holder names no more (RECORD-DIFFERS)",
+     [(AQ, "\trec := ReadRecord(obj)\n\tsameRecord := ", "\trec := ReadRecord(obj)\n\tif !rec.Unparseable {\n\t\twant = SortedIDs(append(want, rec.IDs...))\n\t}\n\tsameRecord := ")]),
 ]
 
 SUBTESTS = {
@@ -96,19 +151,37 @@ SUBTESTS = {
     "cross": "^2_processes,_cross-namespace_refs_whose_consent_toggles$",
     "chained": "^2_processes,_Widgets_through_Targets$",
 }
-SUBTEST = SUBTESTS[os.environ.get("REVERT_SUBTEST", "plain")]
+WHERE = os.environ.get("REVERT_SUBTEST", "plain")
+SUBTEST = SUBTESTS[WHERE]
 ITERATIONS = int(os.environ.get("REVERT_ITERATIONS", "20"))
 REPEATS = int(os.environ.get("REVERT_REPEATS", "3"))
 BASELINE = int(os.environ.get("REVERT_BASELINE", "3"))
 TIMEOUT = int(os.environ.get("REVERT_TIMEOUT_S", "3600"))
-NOT_FINDS = {"INCOMPLETE", "STALE-LIST"}
+NOT_FINDS = {"INCOMPLETE", "STALE-LIST", "H1-RECREATE"}
 
 
 class Run:
     def __init__(self, returncode, out, seconds):
-        self.returncode, self.out, self.seconds = returncode, out, seconds
+        self.returncode, self.out, self.seconds, self.recreates = returncode, out, seconds, 0
         self.iterations = len(re.findall(r"^--- (?:PASS|FAIL): TestStress \(", out, re.M))
         self.classes = sorted(set(re.findall(r"AUDIT ([A-Z0-9-]+):", out)))
+
+
+def hunt(iterations):
+    """Runs the stress up to iterations times, to its first red that isn't
+    H1's recreate alone, which an unmutated run has too."""
+    total = None
+    while True:
+        r = stress(iterations - (total.iterations if total else 0))
+        if total:
+            r.iterations, r.seconds, r.recreates = total.iterations + r.iterations, total.seconds + r.seconds, total.recreates
+        if r.returncode == 0 or r.classes != ["H1-RECREATE"] or classify(r) != "OTHER":
+            return r
+        r.recreates += 1
+        if r.iterations >= iterations:
+            r.returncode = 0
+            return r
+        total = r
 
 
 def stress(iterations):
@@ -183,9 +256,10 @@ signal.signal(signal.SIGTERM, on_signal)
 signal.signal(signal.SIGINT, on_signal)
 
 ONLY = os.environ.get("REVERT_ONLY")
-chosen = [m for m in MUTANTS if not ONLY or re.search(ONLY, m[0])]
+CHECK_ONLY = os.environ.get("REVERT_CHECK_ONLY")
+chosen = [m[:2] for m in MUTANTS if (not ONLY or re.search(ONLY, m[0])) and (CHECK_ONLY or len(m) < 3 or WHERE in m[2])]
 
-if os.environ.get("REVERT_CHECK_ONLY"):
+if CHECK_ONLY:
     wrong = 0
     for name, edits in chosen:
         try:
@@ -204,7 +278,7 @@ if os.environ.get("REVERT_CHECK_ONLY"):
 
 if not os.environ.get("KUBEBUILDER_ASSETS"):
     sys.exit("KUBEBUILDER_ASSETS is not set: the envtests need it")
-base = stress(BASELINE)
+base = hunt(BASELINE)
 if base.returncode != 0 or base.iterations != BASELINE:
     print(f"BASELINE FAILED after {base.iterations} iterations: the run is invalid\n" + base.out[-6000:])
     sys.exit(1)
@@ -222,7 +296,7 @@ for name, edits in chosen:
             totals["NOT-APPLIED"] = totals.get("NOT-APPLIED", 0) + 1
             continue
         for _ in range(REPEATS):
-            runs.append(stress(ITERATIONS))
+            runs.append(hunt(ITERATIONS))
             if classify(runs[-1]) == "BUILD":
                 break
     finally:
@@ -234,7 +308,7 @@ for name, edits in chosen:
     totals[state] = totals.get(state, 0) + 1
     print(f"{state:9} {name}")
     for s, r in zip(states, runs):
-        print(f"          {s} at iteration {r.iterations} of {ITERATIONS}, {r.seconds:.0f}s: {' '.join(r.classes) or 'no audit'}")
+        print(f"          {s} at iteration {r.iterations} of {ITERATIONS}, {r.seconds:.0f}s: {' '.join(r.classes) or 'no audit'}" + (f"; H1-RECREATE alone in {r.recreates} before" if r.recreates else ""))
         if s in ("OTHER", "PANIC", "BUILD", "TIMEOUT"):
             print("          " + r.out[-1500:].replace("\n", "\n          "))
     print(f"          {reds} reds in {ran} iterations" + (f": about {100 * reds / ran:.0f}% of them" if reds and ran else "") + f"; {began} to {utc()}", flush=True)

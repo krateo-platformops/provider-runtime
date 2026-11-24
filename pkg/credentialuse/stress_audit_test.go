@@ -180,7 +180,14 @@ func (b *auditRun) list() { b.listBy(2, "9") }
 
 // listBy is a list of the holders on goroutine g of process proc.
 func (b *auditRun) listBy(proc int, g string) {
-	b.call(stCall{proc: proc, g: g, op: "list", obj: stObj{"Widget", "ns", ""}}, func(c *stCall) { c.rv = b.rv })
+	b.call(stCall{proc: proc, g: g, op: "list", obj: stObj{"Widget", "ns", ""}}, func(c *stCall) {
+		c.rv = b.rv
+		for o, v := range b.last {
+			if o.kind == "Widget" && o.ns == "ns" {
+				c.items = append(c.items, stItem{name: o.name, uid: v.uid, rv: v.rv, deleting: v.deleting, owner: v.owner(), rec: v.rec, recBad: v.recBad})
+			}
+		}
+	})
 }
 
 func (b *auditRun) batch() {
@@ -340,7 +347,59 @@ func TestAuditReleases(t *testing.T) {
 			b.acquired()
 			b.r1()
 			b.r3()
+		}, []string{findReleasedUnread, findReleasedOverUser}},
+		{"no list, and no user", func(b *auditRun) {
+			b.acquired()
+			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			b.r1()
+			b.r3()
 		}, []string{findReleasedUnread}},
+		{"a read after the list", func(b *auditRun) {
+			b.acquired()
+			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			b.batch()
+			b.r1()
+			b.r3()
+		}, []string{findReleasedUnread}},
+		{"another object's read between its own and the list", func(b *auditRun) {
+			b.acquired()
+			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			b.r1()
+			b.call(stCall{op: "get", obj: auditS2}, func(c *stCall) { c.rv, c.uid = 1, "v1" })
+			b.list()
+			b.call(stCall{op: "r3", obj: auditS2, fin: auditFin, err: "not found", notFound: true}, func(*stCall) {})
+			b.call(stCall{op: "get", obj: auditS2, err: "not found", notFound: true}, func(*stCall) {})
+			b.r3()
+		}, nil},
+		{"a list in two pages", func(b *auditRun) {
+			b.acquired()
+			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			b.batch()
+			b.calls[len(b.calls)-1].more = true
+			b.call(stCall{op: "list", obj: stObj{"Widget", "ns", ""}, continued: true}, func(c *stCall) { c.rv = b.rv })
+			b.r3()
+		}, nil},
+		{"half a list", func(b *auditRun) {
+			b.acquired()
+			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			b.batch()
+			b.calls[len(b.calls)-1].continued = true
+			b.r3()
+		}, []string{findReleasedUnread}},
+		{"a list that lacks a holder", func(b *auditRun) {
+			b.acquired()
+			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			b.batch()
+			b.calls[len(b.calls)-1].items = nil
+			b.r3()
+		}, []string{findStaleList}},
+		{"a list with an older version of a holder", func(b *auditRun) {
+			b.acquired()
+			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			b.batch()
+			b.calls[len(b.calls)-1].items[0].rv--
+			b.r3()
+		}, []string{findStaleList}},
 		{"a deleting object with no users, inside the grace", func(b *auditRun) {
 			b.acquired()
 			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
@@ -616,7 +675,7 @@ func TestAuditReads(t *testing.T) {
 			b.call(stCall{op: "r3", obj: auditS, fin: auditFin, rv: 102, uid: "u0", deleting: true}, func(c *stCall) {})
 			c := &b.calls[len(b.calls)-1]
 			c.start = b.calls[0].start
-		}, []string{findIncomplete, findReleasedUnread, findLostRead}},
+		}, []string{findIncomplete, findIncomplete, findLostRead}}, // it has neither version nor removal in the watch
 		{"a release of the name in its life, of unknown outcome", func(b *auditRun) {
 			h3(b)
 			b.call(stCall{op: "r3", obj: auditS, fin: auditFin, err: "connection refused", unknown: true}, func(c *stCall) {})
@@ -766,7 +825,7 @@ func TestAuditPasses(t *testing.T) {
 			b.a1(p)
 			b.end(p)
 			p.refs = nil
-			b.a1(p, auditS)
+			b.a1(b.pass(), auditS) // a pass that never returns
 			b.end(b.pass(), auditS)
 		}, []string{findHeldWithoutA2, findRecordDrop}, ""},
 		{"a live pass that skips, in a process that never wrote", func(b *auditRun) {
@@ -777,7 +836,7 @@ func TestAuditPasses(t *testing.T) {
 		}, []string{findHeldWithoutA2}, ""},
 		{"a live pass that skips a ref the record doesn't name", func(b *auditRun) {
 			b.end(b.pass(), auditS)
-		}, []string{findHeldWithoutA2}, ""},
+		}, []string{findHeldWithoutA2, findRecordDiffers}, ""},
 		{"an A2 before the A1 that names the ref", func(b *auditRun) {
 			p := b.pass()
 			b.a2(p, auditS, "e1")
@@ -788,10 +847,53 @@ func TestAuditPasses(t *testing.T) {
 			b.acquired()
 			b.end(b.pass())
 		}, []string{findUnreported}, ""},
-		{"a pass that must not connect", func(b *auditRun) {
+		{"a pass that must not connect, as its A2 was refused", func(b *auditRun) {
 			b.acquired()
 			p := b.pass()
-			p.mustNot = true
+			b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, code: 422, refused: true})
+			p.mustNot, p.acqErr, p.unheld[auditS] = true, "being deleted", string(cu.ReasonDeleting)
+			b.end(p)
+		}, nil, ""},
+		{"a Degraded deletion pass, as its A2 was refused", func(b *auditRun) {
+			b.acquired()
+			p := b.deletion()
+			b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, code: 422, refused: true})
+			p.degraded, p.acqErr, p.unheld[auditS] = true, "being deleted", string(cu.ReasonDeleting)
+			b.end(p)
+		}, nil, countDegraded},
+		{"a pass whose A1 conflicted", func(b *auditRun) {
+			b.acquired()
+			p := b.pass()
+			b.refused(p, stCall{op: "a1", obj: auditH, code: 409})
+			p.conflict = true
+			b.end(p)
+		}, nil, ""},
+		{"a pass whose holder was gone", func(b *auditRun) {
+			b.acquired()
+			p := b.pass()
+			b.refused(p, stCall{op: "a1", obj: auditH, code: 404, notFound: true})
+			p.mustNot, p.acqErr = true, "not found"
+			b.end(p)
+		}, nil, ""},
+		{"a pass whose call had no answer", func(b *auditRun) {
+			b.acquired()
+			p := b.pass()
+			b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, unknown: true})
+			p.degraded, p.acqErr = true, "connection reset"
+			b.end(p)
+		}, nil, countAPIErrors},
+		{"a pass whose patch was refused with a 404, of an object that is there", func(b *auditRun) {
+			b.acquired()
+			p := b.pass()
+			b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, code: 404, notFound: true})
+			b.call(stCall{proc: 1, g: "5", pass: p.id, op: "get", obj: auditS}, func(c *stCall) { c.from(b.last[auditS]) })
+			p.degraded, p.acqErr = true, "the object is there"
+			b.end(p)
+		}, nil, ""},
+		{"a pass that its controller's stop cut", func(b *auditRun) {
+			b.acquired()
+			p := b.pass()
+			p.degraded, p.acqErr, p.cut = true, "context canceled", true
 			b.end(p)
 		}, nil, ""},
 		{"a ref that is Missing, and no read says so", func(b *auditRun) {
@@ -825,18 +927,20 @@ func TestAuditRecords(t *testing.T) {
 		b := newAuditRun(stressPlain).acquired()
 		p := b.deletion()
 		b.a1(p)
-		p.unheld[auditS] = "x"
-		b.end(p)
-		b.want(t, findRecordDrop)
+		b.a2(p, auditS, "e2")
+		b.end(p, auditS)
+		b.want(t, findRecordDrop, findRecordDiffers)
 	})
 	t.Run("a ref the holder names no more", func(t *testing.T) {
 		b := newAuditRun(stressPlain).acquired()
+		b.create(auditS2, "v1")
 		b.put(auditH, "uh", func(v *stVersion) { v.spec = "s2" })
 		p := b.pass()
 		b.a1(p, auditS2)
-		p.mustNot = true
-		b.end(p)
-		b.want(t)
+		b.a2(p, auditS2, "e2")
+		b.end(p, auditS2)
+		r := b.want(t)
+		wantCount(t, r, countRecords, 2)
 	})
 	t.Run("Forget, in the write that removes the owner finalizer", func(t *testing.T) {
 		b := newAuditRun(stressPlain).acquired()
@@ -846,7 +950,7 @@ func TestAuditRecords(t *testing.T) {
 	for _, c := range []struct {
 		consent string
 		want    []string
-	}{{"", nil}, {"other, ns", []string{findRecordDrop}}} {
+	}{{"", nil}, {"other, ns", []string{findRecordDrop, findUnreported}}} {
 		t.Run(fmt.Sprintf("a ref in another namespace, whose consent is %q", c.consent), func(t *testing.T) {
 			b := newAuditRun(stressCross)
 			other := stObj{"Secret", "target", "c"}
@@ -872,8 +976,8 @@ func TestAuditRecords(t *testing.T) {
 		b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "t", []stObj{target, auditS} })
 		p := b.pass()
 		b.a1(p, target)
-		p.mustNot = true
-		b.end(p)
+		b.a2(p, target, "e1")
+		b.end(p, target)
 		r := b.want(t)
 		wantCount(t, r, countDrops, 1)
 	})

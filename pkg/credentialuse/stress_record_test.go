@@ -245,7 +245,7 @@ func (r *stressRecorder) follow(proc int, kind string, c *controller) {
 		p := ctx.Value(stressPassKey{}).(*stPass)
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		p.done = time.Now()
+		p.done, p.cut = time.Now(), ctx.Err() != nil
 		p.unheld = map[stObj]string{}
 		a := res.Acquired
 		for _, ref := range a.Held {
@@ -332,7 +332,8 @@ func (c recordingResource) call(ctx context.Context, sc stCall, name string, f f
 	out, err := f()
 	sc.end = time.Now()
 	if err != nil {
-		sc.err, sc.notFound, sc.unknown = err.Error(), apierrors.IsNotFound(err), !answered(err)
+		sc.err, sc.notFound, sc.unknown, sc.code = err.Error(), apierrors.IsNotFound(err), !answered(err), codeOf(err)
+		sc.refused = sc.op == "a2" && sc.code == http.StatusUnprocessableEntity && strings.Contains(sc.err, "no new finalizers can be added if the object is being deleted")
 	} else {
 		sc.rv, sc.uid, sc.deleting, sc.fins = parseRV(out.ResourceVersion), string(out.UID), out.DeletionTimestamp != nil, slices.Clone(out.Finalizers)
 		sc.epochs, sc.consent = epochsOf(out.Finalizers, out.Annotations), out.Annotations[cu.AnnotationAllowHoldersFrom]
@@ -350,8 +351,17 @@ func (r *stressRecorder) add(c stCall) {
 // answered reports whether err is the API server's refusal: the call did
 // nothing. A 5xx, a timeout, or no status at all, may have landed.
 func answered(err error) bool {
+	code := codeOf(err)
+	return code >= 400 && code < http.StatusInternalServerError
+}
+
+// codeOf is the HTTP code err carries, or 0.
+func codeOf(err error) int {
 	var st apierrors.APIStatus
-	return errors.As(err, &st) && st.Status().Code >= 400 && st.Status().Code < http.StatusInternalServerError
+	if !errors.As(err, &st) {
+		return 0
+	}
+	return int(st.Status().Code)
 }
 
 func (c recordingResource) Get(ctx context.Context, name string, o metav1.GetOptions, sub ...string) (*metav1.PartialObjectMetadata, error) {
@@ -367,17 +377,26 @@ func (c recordingResource) Patch(ctx context.Context, name string, pt types.Patc
 }
 
 // List records a list's revision: that of the state it answers, in etcd's
-// order, when it is a consistent read, as R2's is.
+// order, when it is a consistent read, as R2's is; and, of a namespace's
+// holders, its items.
 func (c recordingResource) List(ctx context.Context, o metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
-	sc := stCall{op: "list", proc: c.proc, g: goroutine(), pass: passID(ctx), obj: c.obj, start: time.Now()}
+	sc := stCall{op: "list", proc: c.proc, g: goroutine(), pass: passID(ctx), obj: c.obj, start: time.Now(), continued: o.Continue != ""}
 	out, err := c.ResourceInterface.List(ctx, o)
 	sc.end = time.Now()
 	if err != nil {
-		sc.err, sc.unknown = err.Error(), !answered(err)
+		sc.err, sc.unknown, sc.code = err.Error(), !answered(err), codeOf(err)
 	} else {
-		sc.rv = parseRV(out.ResourceVersion)
+		sc.rv, sc.more = parseRV(out.ResourceVersion), out.Continue != ""
+		if c.obj.ns != "" && (c.obj.kind == "Widget" || c.obj.kind == "Target") {
+			for i := range out.Items {
+				m := &out.Items[i]
+				it := stItem{name: m.Name, uid: string(m.UID), rv: parseRV(m.ResourceVersion), deleting: m.DeletionTimestamp != nil, owner: slices.Contains(m.Finalizers, ownerFinalizer)}
+				it.rec, it.recBad = parseRecord(m.Annotations)
+				sc.items = append(sc.items, it)
+			}
+		}
 	}
-	if o.ResourceVersion != "" || o.LabelSelector != "" {
+	if o.ResourceVersion != "" || o.LabelSelector != "" || o.FieldSelector != "" {
 		sc.op = "list, not consistent or not whole"
 	}
 	c.r.add(sc)
@@ -408,8 +427,8 @@ func patchOf(pt types.PatchType, data []byte) stCall {
 				c.tested = value
 			case o.Op == "remove" && strings.HasPrefix(o.Path, annotations):
 				c.fin = key
-			case o.Op == "remove" && strings.HasPrefix(o.Path, finalizers):
-				c.op = "r3"
+			case o.Op == "remove" && strings.HasPrefix(o.Path+"/", finalizers):
+				c.op = "r3" // one entry of the list, or all of it
 			}
 		}
 		return c

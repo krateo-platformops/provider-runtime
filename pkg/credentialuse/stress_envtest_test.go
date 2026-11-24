@@ -185,12 +185,16 @@ type stressWorld struct {
 	// target, in the cross mode: a namespace whose Secrets the holders
 	// also name, whose consent a goroutine toggles (§11.3).
 	target string
+	// outside: every hold is outside the caches, so no pass skips (§10.5).
+	outside bool
 
-	mu      sync.Mutex
-	nss     []string
-	holders map[string][]stressHolder // by namespace
-	seq     atomic.Int64
-	ops     atomic.Int64
+	mu       sync.Mutex
+	nss      []string
+	canaries []string                  // the canaries' namespaces
+	holders  map[string][]stressHolder // by namespace
+	findings []stFinding               // the canaries'
+	seq      atomic.Int64
+	ops      atomic.Int64
 }
 
 type stressHolder struct {
@@ -403,6 +407,132 @@ func (w *stressWorld) teardown(ctx context.Context, ns string) error {
 	}
 }
 
+// A canary makes something that must happen in every run happen, out of the
+// other goroutines' way, beside them: a bug that means "never" is else seen
+// only by what the run doesn't have.
+//
+// canaryGrace is U5 (§5): an object is deleted in a live namespace with one
+// live user, and is released over it after the grace.
+func (w *stressWorld) canaryGrace(ctx context.Context) {
+	ns := w.canaryNamespace()
+	o, field := stObj{"Secret", ns, "s0"}, "secret"
+	if w.chained {
+		o, field = stObj{"Target", ns, "t0"}, "target"
+	}
+	uid, ok := w.canaryHeld(ctx, ns, field, o.name, o)
+	if !ok {
+		return
+	}
+	_ = w.rec.deleteObject(ctx, o)
+	w.canaryUntil(ctx, ns, o, findNotReleased, "it was deleted, with one live user: it must go after its grace", func() (bool, string) {
+		u, err := w.get(ctx, o)
+		return apierrors.IsNotFound(err) || err == nil && string(u.GetUID()) != uid, fmt.Sprintf("%v", err)
+	})
+}
+
+// canaryWithdrawal is §11.3: a hold of another namespace's object goes when
+// its consent does, though its holder still names it.
+func (w *stressWorld) canaryWithdrawal(ctx context.Context) {
+	ns := w.canaryNamespace()
+	o := stObj{"Secret", w.target, "canary"}
+	consent := func(v any) bool {
+		data, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{cu.AnnotationAllowHoldersFrom: v}}})
+		_, err := env.Kube.CoreV1().Secrets(o.ns).Patch(ctx, o.name, types.MergePatchType, data, metav1.PatchOptions{})
+		if err != nil {
+			w.t.Errorf("setting the consent of %s: %v", o, err)
+		}
+		return err == nil
+	}
+	if err := w.rec.createSecret(ctx, o.ns, o.name); err != nil {
+		w.t.Errorf("creating %s: %v", o, err)
+		return
+	}
+	if !consent(ns) {
+		return
+	}
+	if _, ok := w.canaryHeld(ctx, ns, "secret", o.ns+"/"+o.name, o); !ok || !consent(nil) {
+		return
+	}
+	w.canaryUntil(ctx, ns, o, findNotReleased, "its consent was withdrawn: its hold must go", func() (bool, string) {
+		u, err := w.get(ctx, o)
+		fin, _ := cu.FinalizerName(widgetGK, ns)
+		return err == nil && !slices.Contains(u.GetFinalizers(), fin), fmt.Sprintf("%v", err)
+	})
+}
+
+const canaryHolder = "hcanary"
+
+// canaryNamespace is a namespace only a canary uses, which the end tears down
+// as the others.
+func (w *stressWorld) canaryNamespace() string {
+	ns := w.newNamespace()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.canaries = append(w.canaries, ns)
+	w.holders[ns] = []stressHolder{{0, canaryHolder}}
+	return ns
+}
+
+// canaryHeld creates a Widget that names o, waits until it is established and
+// o is held for it, and returns o's uid.
+func (w *stressWorld) canaryHeld(ctx context.Context, ns, field, ref string, o stObj) (string, bool) {
+	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{field: ref}}}
+	u.SetGroupVersionKind(cutest.WidgetGVK)
+	u.SetNamespace(ns)
+	u.SetName(canaryHolder)
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Create(ctx, u, metav1.CreateOptions{}); err != nil {
+		w.t.Errorf("creating the canary in %s: %v", ns, err)
+		return "", false
+	}
+	fin, _ := cu.FinalizerName(widgetGK, ns)
+	uid := ""
+	ok := w.canaryUntil(ctx, ns, o, findNotHeld, "its holder must be established, and it held", func() (bool, string) {
+		held, err := w.get(ctx, o)
+		if err != nil {
+			return false, err.Error()
+		}
+		holder, err := w.get(ctx, stObj{"Widget", ns, canaryHolder})
+		if err != nil {
+			return false, err.Error()
+		}
+		uid = string(held.GetUID())
+		return slices.Contains(held.GetFinalizers(), fin) && slices.Contains(holder.GetFinalizers(), ownerFinalizer),
+			fmt.Sprintf("finalizers %v; the holder's %v", held.GetFinalizers(), holder.GetFinalizers())
+	})
+	return uid, ok
+}
+
+// canaryTimeout is how long a canary waits: many times the grace, the
+// prober's interval and a batch's first backoffs.
+const canaryTimeout = 30 * time.Second
+
+// canaryUntil waits until done, enqueuing the canary's holder each second as
+// a poll interval would. If it isn't in time, it is a finding.
+func (w *stressWorld) canaryUntil(ctx context.Context, ns string, o stObj, class, what string, done func() (bool, string)) bool {
+	began := time.Now()
+	for i := 0; ; i++ {
+		ok, state := done()
+		if ok {
+			return true
+		}
+		if time.Since(began) > canaryTimeout {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			w.findings = append(w.findings, stFinding{class: class, text: fmt.Sprintf("%s: %s, and it isn't so after %s: %s", o, what, canaryTimeout, state),
+				obj: o, holders: []stObj{{"Widget", ns, canaryHolder}}, from: began.Add(-5 * time.Second), to: time.Now(), zero: began})
+			return false
+		}
+		if i%10 == 0 {
+			w.enqueue(0, ns, canaryHolder)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (w *stressWorld) get(ctx context.Context, o stObj) (*unstructured.Unstructured, error) {
+	return env.Dynamic.Resource(recordedKinds[o.kind]).Namespace(o.ns).Get(ctx, o.name, metav1.GetOptions{})
+}
+
 // empty reports whether ns has no holders and no Secrets left.
 func (w *stressWorld) empty(ctx context.Context, ns string) (bool, error) {
 	for _, k := range stressKinds {
@@ -447,7 +577,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	})
 	seed := stressSeed(t)
 	rec := startRecorder(t, mode)
-	w := &stressWorld{t: t, rec: rec, holders: map[string][]stressHolder{}, chained: chained}
+	w := &stressWorld{t: t, rec: rec, holders: map[string][]stressHolder{}, chained: chained, outside: len(so.Namespaces) > 0}
 	for i := range n {
 		w.procs = append(w.procs, startStressProcess(t, rec, i+1, so, mode))
 	}
@@ -468,6 +598,22 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	ctx := context.Background()
 	stop := time.Now().Add(d)
 	var wg sync.WaitGroup
+	wg.Go(func() { w.canaryGrace(ctx) })
+	if w.target != "" {
+		wg.Go(func() { w.canaryWithdrawal(ctx) })
+		// One of the target's Secrets is deleted and recreated, so that §5's
+		// rows for an object being deleted see holders of other namespaces.
+		wg.Go(func() {
+			rng := rand.New(rand.NewPCG(seed+77, uint64(n)))
+			for time.Now().Before(stop) {
+				time.Sleep(time.Duration(500+rng.IntN(1000)) * time.Millisecond)
+				w.deleteSecret(ctx, w.target, "c0")
+				time.Sleep(time.Duration(rng.IntN(500)) * time.Millisecond)
+				_ = rec.createSecret(ctx, w.target, "c0")
+				w.ops.Add(2)
+			}
+		})
+	}
 	for i := range 4 {
 		wg.Add(1)
 		go func() {
@@ -539,7 +685,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	// The end: every holder goes; then no Secret keeps a credential-use
 	// finalizer, since none has a user.
 	w.mu.Lock()
-	nss := slices.Clone(w.nss)
+	nss := slices.Concat(w.nss, w.canaries)
 	w.mu.Unlock()
 	for _, ns := range nss {
 		w.mu.Lock()
@@ -615,7 +761,10 @@ func (w *stressWorld) audit(what string, teardowns int64) {
 	r := h.audit()
 	t.Logf("%s: %d operations, %d namespace teardowns, %d passes; %s", what, w.ops.Load(), teardowns, passes, r)
 	printed := map[string]int{}
-	for _, f := range r.findings {
+	w.mu.Lock()
+	findings := slices.Concat(w.findings, r.findings)
+	w.mu.Unlock()
+	for _, f := range findings {
 		if printed[f.class]++; printed[f.class] <= maxFindings {
 			t.Errorf("AUDIT %s: %s\n%s", f.class, f.text, h.timeline(f))
 		}
@@ -631,8 +780,13 @@ func (w *stressWorld) audit(what string, teardowns int64) {
 		t.Errorf("the stress did too little: %d operations, %d passes and %d namespace teardowns; want at least 100, 100 and 1",
 			w.ops.Load(), passes, teardowns)
 	}
-	if r.counts[countReleases] < 10 || r.counts[countHeldByA2] < 10 || r.counts[countRemovals] < 10 {
-		t.Errorf("the audits had too little to look at: %s; want at least 10 releases judged, 10 deletion passes' holds and 10 removals", r)
+	for _, f := range h.floors(w.outside) {
+		if n := r.counts[f.count]; n < f.min {
+			t.Errorf("AUDIT TOO-LITTLE: %s: %d, want at least %d; %s", f.count, n, f.min, r)
+		}
+	}
+	if n := r.counts[countSkipsUnchecked]; 10*n > r.counts[countSkips] {
+		t.Errorf("AUDIT TOO-LITTLE: %s: %d, of %d checked", countSkipsUnchecked, n, r.counts[countSkips])
 	}
 }
 

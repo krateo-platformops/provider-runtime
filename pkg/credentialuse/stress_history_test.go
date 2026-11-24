@@ -207,17 +207,38 @@ type stCall struct {
 	fin        string
 	start, end time.Time
 	err        string // the answer's error, or ""
+	code       int    // its HTTP code, or 0
 	notFound   bool
-	unknown    bool   // the call failed without an answer, or with a 5xx: it may have landed
-	rv         uint64 // the answer's; a list's revision
-	uid        string
-	deleting   bool
-	fins       []string
-	epochs     map[string]string
-	consent    string
-	testedUID  string // r3: the uid and the epoch it tests
-	tested     string
-	wrote      string // a2: the epoch it writes
+	// refused: an A2 refused since the object is being deleted and lacks the
+	// finalizer (§6.2, class (a)).
+	refused bool
+	unknown bool // the call failed without an answer, or with a 5xx: it may have landed
+	// items are the holders a list answered; continued and more: it is a
+	// page after the first, and isn't the last.
+	items           []stItem
+	continued, more bool
+	rv              uint64 // the answer's; a list's revision
+	uid             string
+	deleting        bool
+	fins            []string
+	epochs          map[string]string
+	consent         string
+	testedUID       string // r3: the uid and the epoch it tests
+	tested          string
+	wrote           string // a2: the epoch it writes
+}
+
+// A stItem is one holder of a list's answer.
+type stItem struct {
+	name, uid       string
+	rv              uint64
+	deleting, owner bool
+	rec             []stObj
+	recBad          bool
+}
+
+func (i stItem) String() string {
+	return fmt.Sprintf("%s(rv=%d uid=%s deleting=%v owner=%v)", i.name, i.rv, short(i.uid), i.deleting, i.owner)
 }
 
 func (c stCall) ok() bool { return c.err == "" }
@@ -246,7 +267,7 @@ func (c stCall) String() string {
 	case c.err != "":
 		return s + " -> " + c.err
 	case c.op == "list":
-		return s + fmt.Sprintf(" -> revision %d", c.rv)
+		return s + fmt.Sprintf(" -> revision %d, %d holders", c.rv, len(c.items))
 	}
 	s += fmt.Sprintf(" -> rv=%d uid=%s", c.rv, short(c.uid))
 	if c.deleting {
@@ -279,7 +300,11 @@ type stPass struct {
 	conflict bool   // its A1 conflicted: the acquire stopped there
 	acqErr   string // the acquire's own error
 	err      string // the pass's
+	cut      bool   // its controller was stopping: nothing is learnt from it
 }
+
+// stopped: the acquire didn't go through all of the holder's refs.
+func (p *stPass) stopped() bool { return p.mustNot || p.conflict || p.acqErr != "" }
 
 func (p stPass) String() string {
 	s := fmt.Sprintf("p%d pass %d of %s rv=%d deleting=%v", p.proc, p.id, p.holder, p.rv, p.deleting)
@@ -343,10 +368,14 @@ func (w stWrite) String() string {
 
 // The classes of what the audits find.
 const (
-	// findIncomplete: the recording can't be trusted, so nor can a green.
+	// findIncomplete: the recording can't be trusted, so nor can a green. A
+	// DELETE or a create of the test's that fails with a 5xx, or without an
+	// answer, is one, by design: what it did isn't known. A call of a process
+	// that its stop cuts short isn't: by then everything is released.
 	findIncomplete = "INCOMPLETE"
-	// findStaleList: a release's list answered an older state than the
-	// watch had already delivered: the API server broke the premise.
+	// findStaleList: a release's list answered something else than the watch
+	// has at its revision, or an older state than the watch had already
+	// delivered: the API server broke the premise.
 	findStaleList = "STALE-LIST"
 	// findReleasedOverUser: a release of an object with a user, which §5's
 	// table keeps.
@@ -361,6 +390,10 @@ const (
 	// findUnexplainedRemoval: an object went, and neither a release of this
 	// incarnation nor a DELETE of the test's that named it took it.
 	findUnexplainedRemoval = "UNEXPLAINED-REMOVAL"
+	// findRecreate: the API server's second release of one incarnation took
+	// the next one (§14, H1's other half). It fails the run, under its own
+	// name: it isn't the package's.
+	findRecreate = "H1-RECREATE"
 	// findLostRead: a deletion pass failed to read what it had held.
 	findLostRead = "LOST-READ"
 	// findHeldWithoutA2: a pass reported a ref held, and neither an A2 of
@@ -372,8 +405,25 @@ const (
 	// findUnreported: a pass that may connect says nothing, or something no
 	// answer supports, of a ref its holder names.
 	findUnreported = "REF-UNACCOUNTED"
+	// findHeldUnconsented: a pass held an object in another namespace, and
+	// its own live reads of its consent don't allow it (§11.3); or it skipped,
+	// and the consent had been gone for long.
+	findHeldUnconsented = "HELD-WITHOUT-CONSENT"
+	// findAcquireFailed: a pass's acquire stopped, or left the holder
+	// Degraded, and no answer of the API server's explains it.
+	findAcquireFailed = "ACQUIRE-FAILED"
 	// findRecordDrop: a record write dropped a ref the holder still names.
 	findRecordDrop = "RECORD-DROP"
+	// findRecordDiffers: a pass that went through every ref left a record
+	// that isn't exactly what the holder names, less what isn't consented.
+	findRecordDiffers = "RECORD-DIFFERS"
+	// findEstablished: a holder got its owner finalizer, and a ref of its
+	// record was neither held nor found absent by its pass (§6.7).
+	findEstablished = "ESTABLISHED-UNHELD"
+	// findNotHeld and findNotReleased are the canaries': what must happen in
+	// every run didn't (stress_envtest_test.go).
+	findNotHeld     = "CANARY-NOT-HELD"
+	findNotReleased = "CANARY-NOT-RELEASED"
 )
 
 // A stFinding is something a run must not have done.
@@ -410,7 +460,40 @@ const (
 	countHolderGone     = "failed reads after the holder was gone"
 	countDrops          = "chained: record drops behind a Target"
 	countUnknown        = "finalizers gone with a release of unknown outcome"
+	countCrossHolds     = "cross-namespace A2s after a consenting read"
+	countWithdrawn      = "cross-namespace holds released, and their holder still names them"
+	countRecords        = "records compared"
+	countEstablished    = "establishments checked"
+	countDegraded       = "deletion passes Degraded, on an object being deleted without their finalizer"
+	countAPIErrors      = "acquires stopped by a 5xx or a lost answer"
 )
+
+// A stFloor is the least a run must have of a count. The runs on file have
+// three times as much or more, or the canaries make it happen once.
+type stFloor struct {
+	count string
+	min   int
+}
+
+// floors are a run's: a bug that means "never" shows in nothing else. outside:
+// every hold is outside the caches, where no pass skips.
+func (h *stHistory) floors(outside bool) []stFloor {
+	fs := []stFloor{{countReleases, 10}, {countReleasesLive, 1}, {countReleasesUsers, 1}, {countHeldByA2, 10}, {countRemovals, 10}, {countEstablished, 5}}
+	if !outside {
+		fs = append(fs, stFloor{countSkips, 10})
+	}
+	if h.mode != stressChained {
+		fs = append(fs, stFloor{countRecords, 50})
+	}
+	if h.mode == stressCross {
+		fs = append(fs, stFloor{countCrossHolds, 5}, stFloor{countWithdrawn, 1})
+	}
+	return fs
+}
+
+// cacheWindow is how far behind the watch a process's caches may be, for
+// the audits that a lag must not fail.
+const cacheWindow = 5 * time.Second
 
 func (r *stReport) String() string {
 	var parts []string
@@ -422,16 +505,6 @@ func (r *stReport) String() string {
 
 func (r *stReport) find(f stFinding) { r.findings = append(r.findings, f) }
 
-func (r *stReport) has(class string) int {
-	n := 0
-	for _, f := range r.findings {
-		if f.class == class {
-			n++
-		}
-	}
-	return n
-}
-
 // A stHistory is a run's record.
 type stHistory struct {
 	mode    stressMode
@@ -440,6 +513,7 @@ type stHistory struct {
 	holders map[string][]stObj    // by kind and namespace: see holderKey
 	calls   []stCall              // by end
 	byObj   map[stObj][]int       // the calls on each object
+	byPass  map[int64][]int       // the calls of each pass
 	passes  map[int64]*stPass
 	reads   []stRead
 	writes  map[stObj][]stWrite
@@ -450,7 +524,7 @@ func holderKey(kind, ns string) string { return kind + "/" + ns }
 
 func newStHistory(mode stressMode, grace time.Duration, vs []stVersion, calls []stCall, passes []*stPass, reads []stRead, writes []stWrite, gaps []string) *stHistory {
 	h := &stHistory{mode: mode, grace: grace, objs: map[stObj][]stVersion{}, holders: map[string][]stObj{}, byObj: map[stObj][]int{},
-		passes: map[int64]*stPass{}, reads: reads, writes: map[stObj][]stWrite{}, gaps: gaps}
+		byPass: map[int64][]int{}, passes: map[int64]*stPass{}, reads: reads, writes: map[stObj][]stWrite{}, gaps: gaps}
 	for _, v := range vs {
 		if _, ok := h.objs[v.stObj]; !ok && h.holderKind(v.kind) {
 			k := holderKey(v.kind, v.ns)
@@ -465,6 +539,9 @@ func newStHistory(mode stressMode, grace time.Duration, vs []stVersion, calls []
 	slices.SortStableFunc(h.calls, func(a, b stCall) int { return a.end.Compare(b.end) })
 	for i, c := range h.calls {
 		h.byObj[c.obj] = append(h.byObj[c.obj], i)
+		if c.pass != 0 {
+			h.byPass[c.pass] = append(h.byPass[c.pass], i)
+		}
 	}
 	for _, p := range passes {
 		h.passes[p.id] = p
@@ -543,6 +620,17 @@ func (h *stHistory) callsOn(o stObj, f func(c stCall) bool) []stCall {
 	return out
 }
 
+// callsOf are p's calls that f accepts, in order.
+func (h *stHistory) callsOf(p *stPass, f func(c stCall) bool) []stCall {
+	var out []stCall
+	for _, i := range h.byPass[p.id] {
+		if f(h.calls[i]) {
+			out = append(out, h.calls[i])
+		}
+	}
+	return out
+}
+
 // audit runs every audit.
 func (h *stHistory) audit() *stReport {
 	r := &stReport{counts: map[string]int{}}
@@ -552,6 +640,7 @@ func (h *stHistory) audit() *stReport {
 	h.auditRemovals(r)
 	h.auditPasses(r)
 	h.auditRecords(r)
+	h.auditEstablished(r)
 	h.auditReads(r)
 	slices.SortStableFunc(r.findings, func(a, b stFinding) int {
 		return cmp.Or(cmp.Compare(a.class, b.class), a.zero.Compare(b.zero), cmp.Compare(a.text, b.text))
@@ -604,35 +693,41 @@ func (h *stHistory) auditCompleteness(r *stReport) {
 	}
 }
 
-// A stBatch is what a release patch's batch read last, before it.
+// A stBatch is what a release patch was decided on.
 type stBatch struct {
 	list, r1, ns          stCall
 	hasList, hasR1, hasNS bool
 }
 
-// batchOf finds, on the goroutine of the R3 at index i, R2's list of the
-// holders, and before it R2's GET of the Namespace and R1's GET of the
-// object: of the batch's last round.
+// batchOf finds, on the goroutine of the R3 at index i, R1: the object's last
+// GET that answered, before the patch. And between the two, R2: a whole list
+// of the holders, and the Namespace's GET. A batch reads all its objects
+// before its one list, so the three aren't next to each other. A list from
+// before R1 is an older round's, or an older batch's, and doesn't count.
 func (h *stHistory) batchOf(i int) stBatch {
 	var b stBatch
 	c := h.calls[i]
 	kind, n, _ := holderOfFinalizer(c.fin)
+	paging := false // b.list's earlier pages are still to come
 	for j := i - 1; j >= 0 && !b.hasR1; j-- {
 		d := h.calls[j]
 		if d.proc != c.proc || d.g != c.g || d.pass != 0 || d.end.After(c.start) || !d.ok() && !d.notFound {
 			continue
 		}
 		switch {
-		case !b.hasList:
-			if d.op == "list" && d.obj == (stObj{kind, n, ""}) && d.ok() {
-				b.list, b.hasList = d, true
-			}
 		case d.op == "get" && d.obj == c.obj && d.ok():
 			b.r1, b.hasR1 = d, true
 		case d.op == "get" && d.obj == nsObj(c.obj.ns) && !b.hasNS:
 			b.ns, b.hasNS = d, true
+		case d.op != "list" || d.obj != (stObj{kind, n, ""}) || !d.ok():
+		case paging && d.more && d.rv == b.list.rv:
+			b.list.items = slices.Concat(d.items, b.list.items)
+			b.list.start, paging = d.start, d.continued
+		case !b.hasList && !paging && !d.more:
+			b.list, b.hasList, paging = d, true, d.continued
 		}
 	}
+	b.hasList = b.hasList && !paging
 	return b
 }
 
@@ -681,12 +776,32 @@ func (h *stHistory) auditReleases(r *stReport) {
 		if c.op != "r3" || !c.ok() {
 			continue
 		}
-		r.counts[countReleases]++
-		h.judge(r, i)
+		// The version the patch applied to, and the revision it landed at.
+		var on stVersion
+		var landed uint64
+		var ok bool
+		if c.removal() {
+			on, ok = h.version(c.obj, c.rv)
+			if d, gone := h.removal(c.obj, c.uid); gone {
+				landed = d.rv
+			}
+		} else {
+			on, ok = h.state(c.obj, c.rv-1)
+			landed = c.rv
+		}
+		if !ok || landed == 0 {
+			r.find(stFinding{class: findIncomplete, text: fmt.Sprintf("%s: the watch doesn't have the version it applied to (%v), or its landing (%d)", c, ok, landed),
+				obj: c.obj, from: c.start.Add(-5 * time.Second), to: c.end.Add(2 * time.Second), zero: c.end})
+			continue
+		}
+		h.judge(r, i, on, landed)
 	}
 }
 
-func (h *stHistory) judge(r *stReport, i int) {
+// judge judges the R3 at index i, which applied to version on, and landed at
+// revision landed.
+func (h *stHistory) judge(r *stReport, i int, on stVersion, landed uint64) {
+	r.counts[countReleases]++
 	c := h.calls[i]
 	b := h.batchOf(i)
 	from := c.start.Add(-5 * time.Second)
@@ -699,29 +814,18 @@ func (h *stHistory) judge(r *stReport, i int) {
 		find(findReleasedUnread, nil, "it removed a finalizer that isn't a holder kind's")
 		return
 	}
-	if !b.hasList || !b.hasR1 {
-		find(findReleasedUnread, nil, "its batch read the object %v, and then listed the holders %v", b.hasR1, b.hasList)
+	if !b.hasR1 {
+		find(findReleasedUnread, nil, "its goroutine never read the object")
 		return
 	}
 	if b.r1.start.Add(-time.Second).Before(from) {
 		from = b.r1.start.Add(-time.Second)
 	}
-
-	// The version the patch applied to, and the revision it landed at.
-	var on stVersion
-	var landed uint64
-	if c.removal() {
-		on, ok = h.version(c.obj, c.rv)
-		if d, gone := h.removal(c.obj, c.uid); gone {
-			landed = d.rv
-		}
-	} else {
-		on, ok = h.state(c.obj, c.rv-1)
-		landed = c.rv
+	if !b.hasList {
+		find(findReleasedUnread, nil, "no whole list of the holders lies between its last read of the object and it")
 	}
-	if !ok || landed == 0 {
-		find(findIncomplete, nil, "the watch doesn't have the version it applied to (%v), or its landing (%d)", ok, landed)
-		return
+	if c.obj.ns != n {
+		h.countWithdrawn(r, c.obj, kind, n, landed)
 	}
 
 	// It applied to what R1 read.
@@ -743,14 +847,14 @@ func (h *stHistory) judge(r *stReport, i int) {
 	// The users (§6.1).
 	var users, deleting, seen []stObj
 	for _, o := range h.holders[holderKey(kind, n)] {
-		for _, v := range h.objs[o] {
-			if v.at.Before(b.list.start) && v.rv > b.list.rv {
-				find(findStaleList, []stObj{o}, "the watch had delivered %s before the list, of revision %d, began", v, b.list.rv)
-			}
-		}
 		user, del := false, false
-		if v, ok := h.state(o, b.list.rv); ok && v.user(c.obj) {
-			user, del = true, v.deleting
+		if b.hasList {
+			if why := h.listDiffers(b.list, o); why != "" {
+				find(findStaleList, []stObj{o}, "%s", why)
+			}
+			if v, ok := h.state(o, b.list.rv); ok && v.user(c.obj) {
+				user, del = true, v.deleting
+			}
 		}
 		if v, ok := h.state(o, landed-1); ok && v.user(c.obj) {
 			if first, ok := h.run(v, c.obj); ok {
@@ -799,10 +903,48 @@ func (h *stHistory) judge(r *stReport, i int) {
 	}
 }
 
+// listDiffers is how list l's answer differs, for holder o, from what the
+// watch has at its revision, or had before it began; or "".
+func (h *stHistory) listDiffers(l stCall, o stObj) string {
+	for _, v := range h.objs[o] {
+		if v.at.Before(l.start) && v.rv > l.rv {
+			return fmt.Sprintf("the watch had delivered %s before the list, of revision %d, began", v, l.rv)
+		}
+	}
+	v, exists := h.state(o, l.rv)
+	i := slices.IndexFunc(l.items, func(i stItem) bool { return i.name == o.name })
+	switch {
+	case exists != (i >= 0):
+		return fmt.Sprintf("at the list's revision %d the watch has %s there: %v; the list: %v", l.rv, o, exists, i >= 0)
+	case exists && (l.items[i].rv != v.rv || l.items[i].uid != v.uid):
+		return fmt.Sprintf("at the list's revision %d the watch has %s; the list: %s", l.rv, v, l.items[i])
+	}
+	return ""
+}
+
+// countWithdrawn counts the release, landed at revision landed, of another
+// namespace's object p, if a holder still names it and its record, which did,
+// doesn't any more: its consent was withdrawn.
+func (h *stHistory) countWithdrawn(r *stReport, p stObj, kind, n string, landed uint64) {
+	for _, o := range h.holders[holderKey(kind, n)] {
+		v, ok := h.state(o, landed-1)
+		if !ok || v.names(p) || !slices.Contains(refsOf(h.mode, n, v.spec), p) {
+			continue
+		}
+		if slices.ContainsFunc(h.objs[o], func(w stVersion) bool { return w.uid == v.uid && w.rv < v.rv && w.names(p) }) {
+			r.counts[countWithdrawn]++
+			return
+		}
+	}
+}
+
 // auditFinalizers: a credential-use finalizer leaves an object that stays
 // only by a release that answered with that very version. So neither an A2,
-// nor anything else of the package, dropped one.
+// nor anything else of the package, dropped one. A release of unknown outcome
+// explains a loss too, if it was built for that very hold and began before
+// it, and only one; and is then judged as any other.
 func (h *stHistory) auditFinalizers(r *stReport) {
+	explained := map[int]bool{}
 	for o, vs := range h.objs {
 		if !h.protectedKind(o.kind) {
 			continue
@@ -819,8 +961,13 @@ func (h *stHistory) auditFinalizers(r *stReport) {
 				if len(h.callsOn(o, func(c stCall) bool { return c.op == "r3" && c.ok() && c.fin == f && c.rv == cur.rv })) > 0 {
 					continue
 				}
-				if len(h.callsOn(o, func(c stCall) bool { return c.op == "r3" && c.unknown && c.fin == f })) > 0 {
+				if i := slices.IndexFunc(h.byObj[o], func(i int) bool {
+					c := h.calls[i]
+					return c.op == "r3" && c.unknown && c.fin == f && c.testedUID == prev.uid && c.tested == prev.epochs[f] && c.start.Before(cur.at) && !explained[i]
+				}); i >= 0 {
+					explained[h.byObj[o][i]] = true
 					r.counts[countUnknown]++
+					h.judge(r, h.byObj[o][i], prev, cur.rv)
 					continue
 				}
 				r.find(stFinding{class: findFinalizerLost, text: fmt.Sprintf("%s went between %s and %s, and no release did it", f, prev, cur),
@@ -901,7 +1048,12 @@ func (h *stHistory) auditRemovals(r *stReport) {
 			held := credentialUse(d.fins)
 			if !d.deleting {
 				if ok, why := h.removedByDELETE(d); !ok {
-					find("it wasn't being deleted, and %s%s", why, h.otherReleases(d))
+					if c, recreate := h.recreate(d); recreate {
+						r.find(stFinding{class: findRecreate, text: fmt.Sprintf("%s: it wasn't being deleted, and %s; a second release of the incarnation before it was in flight: %s", d, why, c),
+							obj: o, from: d.at.Add(-2 * time.Second), to: d.at.Add(500 * time.Millisecond), zero: d.at})
+						continue
+					}
+					find("it wasn't being deleted, and %s", why)
 					continue
 				}
 				if len(held) > 0 {
@@ -931,16 +1083,28 @@ func (h *stHistory) auditRemovals(r *stReport) {
 	}
 }
 
-// otherReleases tells of releases of other incarnations of d's name, which
-// H1's recreate could be.
-func (h *stHistory) otherReleases(d stVersion) string {
-	rs := h.callsOn(d.stObj, func(c stCall) bool {
-		return c.op == "r3" && c.uid != d.uid && (c.ok() || c.unknown) && c.start.Before(d.at) && c.end.After(h.createBegan(d.stObj, d.uid))
-	})
-	if len(rs) == 0 {
-		return ""
+// recreate reports whether removal d has the whole shape of H1's recreate: a
+// release that answered, of the incarnation just before this one, was in
+// flight while d lived; that incarnation had gone already; and another
+// release that answered had taken it.
+func (h *stHistory) recreate(d stVersion) (stCall, bool) {
+	began := h.createBegan(d.stObj, d.uid)
+	if began.IsZero() {
+		return stCall{}, false
 	}
-	return fmt.Sprintf("; a release of another incarnation ran in its life, which may have taken it (H1's recreate): %s", rs[0])
+	last := stVersion{} // the removal before d
+	for _, v := range h.objs[d.stObj] {
+		if v.gone && v.rv < d.rv {
+			last = v
+		}
+	}
+	rs := h.callsOn(d.stObj, func(c stCall) bool { return c.removal() && c.uid == last.uid })
+	for _, c := range rs {
+		if len(rs) > 1 && c.start.Before(d.at) && c.end.After(began) {
+			return c, true
+		}
+	}
+	return stCall{}, false
 }
 
 // createBegan is a lower bound of when incarnation uid came to be: when the
@@ -959,10 +1123,19 @@ func (h *stHistory) createBegan(o stObj, uid string) time.Time {
 // A2 of its own. One that began live may skip, against a write its process
 // issued after the record named the ref (§6.3). A pass that began live and
 // met its holder's deletion is checked as a live one: it isn't left out.
+//
+// Of a ref in another namespace, every A2 follows, in its pass, live reads of
+// the Namespace and of the object whose answers consent (§11.3). A skip makes
+// no read, rightly: a cached yes serves.
+//
+// A reason why a ref isn't held, and the acquire's own failure, must each
+// have an answer of the API server's behind it. And a pass that went through
+// every ref leaves a record that names exactly the refs of the version it
+// read, less those without consent.
 func (h *stHistory) auditPasses(r *stReport) {
 	for _, id := range slices.Sorted(maps.Keys(h.passes)) {
 		p := h.passes[id]
-		if !p.read || p.done.IsZero() {
+		if !p.read || p.done.IsZero() || p.cut {
 			continue
 		}
 		if p.deleting {
@@ -981,6 +1154,16 @@ func (h *stHistory) auditPasses(r *stReport) {
 		mine := func(o stObj, f func(c stCall) bool) bool {
 			return len(h.callsOn(o, func(c stCall) bool { return c.pass == p.id && f(c) })) > 0
 		}
+		for _, a2 := range h.callsOf(p, func(c stCall) bool { return c.op == "a2" && c.ok() && c.obj.ns != n }) {
+			switch read, consents := h.consentRead(p, a2.obj, a2.start); {
+			case !read:
+				find(findHeldUnconsented, a2.obj, "the pass wrote A2 on it, and read no consent of it before: %s", a2)
+			case !consents:
+				find(findHeldUnconsented, a2.obj, "the pass wrote A2 on it, after a read that refuses: %s", a2)
+			default:
+				r.counts[countCrossHolds]++
+			}
+		}
 		for _, o := range p.held {
 			a2s := h.callsOn(o, func(c stCall) bool { return c.pass == p.id && c.op == "a2" && c.ok() && c.fin == fin })
 			if len(a2s) > 0 {
@@ -996,8 +1179,7 @@ func (h *stHistory) auditPasses(r *stReport) {
 				}
 				continue
 			}
-			unread := func(c stCall) bool { return c.op == "get" && !c.ok() && !c.notFound }
-			if o.ns != n && (mine(o, unread) || mine(nsObj(o.ns), unread)) {
+			if o.ns != n && h.unreadable(p, o) {
 				continue // its consent couldn't be read: the hold is kept (§11.3)
 			}
 			if p.deleting {
@@ -1006,20 +1188,138 @@ func (h *stHistory) auditPasses(r *stReport) {
 			}
 			h.checkSkip(r, p, o, fin, find)
 		}
-		if p.mustNot || p.conflict || p.acqErr != "" {
-			continue // the acquire stopped, and says so
-		}
-		for _, o := range p.refs {
-			why, unheld := p.unheld[o]
-			switch {
-			case slices.Contains(p.held, o):
-			case !unheld:
-				find(findUnreported, o, "the holder names it, and the pass neither holds it nor says why not")
-			case why == string(cu.ReasonMissing) && !mine(o, func(c stCall) bool { return c.notFound }) && !mine(nsObj(o.ns), func(c stCall) bool { return c.notFound }):
-				find(findUnreported, o, "it is Missing, and no read of the pass answered so")
+		for o, why := range p.unheld {
+			ok := false
+			switch cu.Reason(why) {
+			case cu.ReasonMissing:
+				notFound := func(c stCall) bool { return c.notFound }
+				ok = mine(o, notFound) || mine(nsObj(o.ns), notFound)
+			case cu.ReasonDeleting:
+				ok = mine(o, func(c stCall) bool { return c.refused })
+			case cu.ReasonNotConsented, cu.ReasonConsentWithdrawn:
+				read, consents := h.consentRead(p, o, p.done)
+				ok = read && !consents
+			case cu.ReasonConsentUnreadable:
+				ok = h.unreadable(p, o)
+			}
+			if !ok {
+				find(findUnreported, o, "it is %s, and no answer to the pass says so", why)
 			}
 		}
+		h.checkStopped(r, p, find)
+		if p.stopped() {
+			continue
+		}
+		for _, o := range p.refs {
+			if _, unheld := p.unheld[o]; !unheld && !slices.Contains(p.held, o) {
+				find(findUnreported, o, "the holder names it, and the pass neither holds it nor says why not")
+			}
+		}
+		h.checkRecord(r, p, find)
 	}
+}
+
+// consentRead reports whether p read, live, the Namespace's and the object's
+// consent of o before t, and whether the last answers to it consent.
+func (h *stHistory) consentRead(p *stPass, o stObj, t time.Time) (read, consents bool) {
+	var ns, obj stCall
+	for _, c := range h.callsOf(p, func(c stCall) bool { return c.op == "get" && c.ok() && !c.end.After(t) }) {
+		switch c.obj {
+		case nsObj(o.ns):
+			ns = c
+		case o:
+			obj = c
+		}
+	}
+	if ns.op == "" || obj.op == "" {
+		return false, false
+	}
+	return true, consented(obj.consent, ns.consent, p.holder.ns)
+}
+
+// unreadable: a read of o's consent by p failed, and not with a NotFound.
+func (h *stHistory) unreadable(p *stPass, o stObj) bool {
+	return len(h.callsOf(p, func(c stCall) bool {
+		return c.op == "get" && !c.ok() && !c.notFound && (c.obj == o || c.obj == nsObj(o.ns))
+	})) > 0
+}
+
+// checkStopped: a pass whose acquire stopped, or left the holder Degraded,
+// was answered something that explains it: a conflict; that the object is
+// being deleted without the finalizer; that the holder is gone; or nothing,
+// or a 5xx, which is counted. In a chained run, the read of a held Target's
+// content is made by a client that isn't recorded.
+func (h *stHistory) checkStopped(r *stReport, p *stPass, find func(class string, o stObj, f string, a ...any)) {
+	if !p.stopped() && !p.degraded {
+		return
+	}
+	var refused, unknown, explained bool
+	// A patch answered with a 404, and the read that confirms it finds the
+	// object, recreated between the two: an ordinary error (§6.2).
+	for _, c := range h.callsOf(p, func(c stCall) bool { return c.op == "a2" && c.notFound }) {
+		explained = explained || len(h.callsOf(p, func(g stCall) bool { return g.op == "get" && g.ok() && g.obj == c.obj && !g.start.Before(c.end) })) > 0
+	}
+	for _, c := range h.callsOf(p, func(c stCall) bool { return !c.ok() }) {
+		refused = refused || c.refused
+		unknown = unknown || c.unknown
+		switch {
+		case p.conflict:
+			explained = explained || c.op == "a1" && c.code == 409
+		default:
+			explained = explained || c.refused || c.unknown || c.op == "a1" && c.notFound || c.op == "a2" && c.code == 409
+		}
+	}
+	switch {
+	case !explained && h.mode == stressChained && strings.HasPrefix(p.acqErr, "credential-use: reading "):
+	case !explained:
+		find(findAcquireFailed, p.holder, "nothing the API server answered it explains that it stopped, or is Degraded")
+	case unknown && !refused:
+		r.counts[countAPIErrors]++
+	case refused && p.deleting:
+		r.counts[countDegraded]++
+	}
+}
+
+// checkRecord: p went through every ref, so the record it left, its last
+// A1's or the one it found, names exactly the refs of the version it read,
+// less those whose consent refuses. A Missing ref, and one being deleted,
+// stay. Only where every consent could be read; and not in a chained run,
+// whose record names more (§9).
+func (h *stHistory) checkRecord(r *stReport, p *stPass, find func(class string, o stObj, f string, a ...any)) {
+	if h.mode == stressChained {
+		return
+	}
+	var want []stObj
+	for _, o := range p.refs {
+		if o.ns != p.holder.ns && h.unreadable(p, o) {
+			return
+		}
+		switch cu.Reason(p.unheld[o]) {
+		case cu.ReasonNotConsented, cu.ReasonConsentWithdrawn:
+		default:
+			want = append(want, o)
+		}
+	}
+	v, ok := h.version(p.holder, h.lastRead(p))
+	if !ok {
+		find(findIncomplete, p.holder, "the watch doesn't have the version it left, rv=%d", h.lastRead(p))
+		return
+	}
+	if v.recBad || len(v.rec) != len(want) || slices.ContainsFunc(want, func(o stObj) bool { return !slices.Contains(v.rec, o) }) {
+		find(findRecordDiffers, p.holder, "the holder it read names %v, and the record it left is %v: %s", want, v.rec, v)
+		return
+	}
+	r.counts[countRecords]++
+}
+
+// lastRead is the resourceVersion of the holder as p last had it: its last
+// A1's, or the one it read.
+func (h *stHistory) lastRead(p *stPass) uint64 {
+	rv := p.rv
+	for _, c := range h.callsOf(p, func(c stCall) bool { return c.op == "a1" && c.ok() && c.obj == p.holder }) {
+		rv = c.rv
+	}
+	return rv
 }
 
 // announced: the record named o before p's A2 on it: in the version p read,
@@ -1036,7 +1336,10 @@ func (h *stHistory) announced(p *stPass, o stObj, a2 stCall) bool {
 
 // checkSkip checks a live pass's hold without an A2: the version the pass
 // worked from names the ref, and its process had a successful A2 on it that
-// began after the A1 that began the run of versions naming it (§6.3).
+// began after the A1 that began the run of versions naming it (§6.3). That
+// A2 wrote an incarnation that the process's caches may still have had; the
+// object carried the finalizer in some version they may have had; and so did
+// its consent, of another namespace's. The caches may be cacheWindow behind.
 func (h *stHistory) checkSkip(r *stReport, p *stPass, o stObj, fin string, find func(class string, o stObj, f string, a ...any)) {
 	v, ok := h.version(p.holder, p.rv)
 	if !ok {
@@ -1053,13 +1356,54 @@ func (h *stHistory) checkSkip(r *stReport, p *stPass, o stObj, fin string, find 
 		r.counts[countSkipsUnchecked]++
 		return
 	}
-	if len(h.callsOn(o, func(c stCall) bool {
+	from := p.began.Add(-cacheWindow)
+	a2s := h.callsOn(o, func(c stCall) bool {
 		return c.proc == p.proc && c.op == "a2" && c.ok() && c.fin == fin && c.start.After(a1s[0].start) && c.start.Before(p.done)
-	})) == 0 {
+	})
+	if len(a2s) == 0 {
 		find(findHeldWithoutA2, o, "it skips A2, and its process wrote none since the record named it, at %s", first)
 		return
 	}
+	if !slices.ContainsFunc(a2s, func(c stCall) bool {
+		d, gone := h.removal(o, c.uid)
+		return !gone || !d.at.Before(from)
+	}) {
+		find(findHeldWithoutA2, o, "it skips A2, and every incarnation its process wrote had gone %s before it began: the last: %s", cacheWindow, a2s[len(a2s)-1])
+		return
+	}
+	if !h.during(from, p.done, []stObj{o}, func(vs []stVersion) bool { return slices.Contains(vs[0].fins, fin) }) {
+		find(findHeldWithoutA2, o, "it skips A2, and no version since %s before it began carries the finalizer", cacheWindow)
+		return
+	}
+	if o.ns != p.holder.ns && !h.during(from, p.done, []stObj{o, nsObj(o.ns)}, func(vs []stVersion) bool {
+		return consented(vs[0].consent, vs[1].consent, p.holder.ns)
+	}) {
+		find(findHeldUnconsented, o, "it skips A2, and its consent has been gone since %s before it began", cacheWindow)
+		return
+	}
 	r.counts[countSkips]++
+}
+
+// during reports whether f held, of the versions of objs together, at some
+// time from from to to, by when the watch delivered them. They all existed
+// then.
+func (h *stHistory) during(from, to time.Time, objs []stObj, f func(vs []stVersion) bool) bool {
+	var all []stVersion
+	for _, o := range objs {
+		all = append(all, h.objs[o]...)
+	}
+	slices.SortStableFunc(all, func(a, b stVersion) int { return cmp.Compare(a.rv, b.rv) })
+	now := make([]stVersion, len(objs))
+	for i, v := range all {
+		now[slices.Index(objs, v.stObj)] = v
+		if v.at.After(to) || i+1 < len(all) && all[i+1].at.Before(from) {
+			continue
+		}
+		if !slices.ContainsFunc(now, func(v stVersion) bool { return v.uid == "" || v.gone }) && f(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // auditRecords: no record write drops a ref the holder still names, and none
@@ -1114,16 +1458,85 @@ func (h *stHistory) behindTarget(v stVersion, p stObj) bool {
 // its answers refuse it.
 func (h *stHistory) refusedConsent(holder stObj, v stVersion, p stObj) bool {
 	for _, w := range h.callsOn(holder, func(c stCall) bool { return c.op == "a1" && c.ok() && c.rv == v.rv && c.pass != 0 }) {
-		get := func(c stCall) bool { return c.pass == w.pass && c.op == "get" && c.ok() }
-		for _, n := range h.callsOn(nsObj(p.ns), get) {
-			for _, s := range h.callsOn(p, get) {
-				if !consented(s.consent, n.consent, holder.ns) {
-					return true
-				}
+		if by := h.passes[w.pass]; by != nil {
+			if read, consents := h.consentRead(by, p, w.start); read && !consents {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+// auditEstablished is §6.7: when a holder gets its owner finalizer, each ref
+// its record names has been written by an A2 of its pass, or skipped one that
+// auditPasses checks, or been found absent by a read of that pass that came
+// after its last A2; or, in another namespace, without consent by one. The
+// pass is one that worked from the version the finalizer was added to.
+func (h *stHistory) auditEstablished(r *stReport) {
+	byHolder := map[stObj][]*stPass{}
+	for _, id := range slices.Sorted(maps.Keys(h.passes)) {
+		p := h.passes[id]
+		byHolder[p.holder] = append(byHolder[p.holder], p)
+	}
+	for o, vs := range h.objs {
+		if !h.holderKind(o.kind) {
+			continue
+		}
+		for i := 1; i < len(vs); i++ {
+			prev, cur := vs[i-1], vs[i]
+			if prev.gone || cur.gone || prev.uid != cur.uid || prev.owner() || !cur.owner() {
+				continue
+			}
+			var problems []string
+			ok := false
+			for _, p := range byHolder[o] {
+				if !p.read || p.uid != cur.uid || p.deleting || p.mustNot || p.conflict || h.lastRead(p) != prev.rv {
+					continue
+				}
+				why := h.unestablished(p, cur)
+				if why == "" {
+					ok = true
+					break
+				}
+				problems = append(problems, fmt.Sprintf("%s: %s", p, why))
+			}
+			if ok {
+				r.counts[countEstablished]++
+				continue
+			}
+			text := "no pass worked from it"
+			if len(problems) > 0 {
+				text = strings.Join(problems, "; ")
+			}
+			r.find(stFinding{class: findEstablished, text: fmt.Sprintf("%s -> %s: %s", prev, cur, text),
+				obj: o, holders: []stObj{o}, from: cur.at.Add(-5 * time.Second), to: cur.at.Add(2 * time.Second), zero: cur.at})
+		}
+	}
+}
+
+// unestablished is why p may not establish its holder as version cur, or "".
+func (h *stHistory) unestablished(p *stPass, cur stVersion) string {
+	if cur.recBad {
+		return "its record can't be parsed"
+	}
+	var lastA2 time.Time
+	for _, c := range h.callsOf(p, func(c stCall) bool { return c.op == "a2" }) {
+		lastA2 = c.end
+	}
+	for _, ref := range cur.rec {
+		if slices.Contains(p.held, ref) || len(h.callsOf(p, func(c stCall) bool { return c.op == "a2" && c.ok() && c.obj == ref })) > 0 {
+			continue
+		}
+		absent := len(h.callsOf(p, func(c stCall) bool {
+			return c.op == "get" && c.notFound && (c.obj == ref || c.obj == nsObj(ref.ns)) && !c.start.Before(lastA2)
+		})) > 0
+		read, consents := h.consentRead(p, ref, p.done)
+		if absent || ref.ns != p.holder.ns && read && !consents {
+			continue
+		}
+		return fmt.Sprintf("%s is neither held nor found absent after the pass's last A2", ref)
+	}
+	return ""
 }
 
 // auditReads is §14's I1: a pass that began as a deletion pass reads what it
@@ -1216,20 +1629,26 @@ func (h *stHistory) exempt(f stRead, d stVersion, fin string) (bool, string) {
 const maxTimeline = 400
 
 // timeline is everything recorded of finding f's object, its namespace and
-// its holders, in f's window; and the object's namespace and whole life in
-// versions, so that a finding can be told from its print alone.
+// its holders, in f's window, with the revision of each write and read first:
+// that is the order, and the times are when the test saw them. Whatever the
+// window, it has the object's whole life in versions, its create, its
+// holders' versions and their A1s, so that a finding can be told from its
+// print alone.
 func (h *stHistory) timeline(f stFinding) string {
 	type line struct {
-		at time.Time
-		s  string
+		at   time.Time
+		rv   uint64
+		keep bool
+		s    string
 	}
 	var ls []line
 	in := func(t time.Time) bool { return !t.Before(f.from) && !t.After(f.to) }
-	add := func(at time.Time, always bool, s string, a ...any) {
+	addRV := func(at time.Time, rv uint64, always bool, s string, a ...any) {
 		if always || in(at) {
-			ls = append(ls, line{at, fmt.Sprintf(s, a...)})
+			ls = append(ls, line{at, rv, always, fmt.Sprintf(s, a...)})
 		}
 	}
+	add := func(at time.Time, s string, a ...any) { addRV(at, 0, false, s, a...) }
 	uids := map[string]bool{}
 	for _, v := range h.objs[f.obj] {
 		if in(v.at) {
@@ -1251,42 +1670,69 @@ func (h *stHistory) timeline(f stFinding) string {
 	objs = slices.Compact(objs)
 	for _, o := range objs {
 		for _, v := range h.objs[o] {
-			add(v.at, o == f.obj && uids[v.uid] || o.kind == "Namespace" || slices.Contains(f.holders, o), "watch   %s", v)
+			addRV(v.at, v.rv, o == f.obj && uids[v.uid] || o.kind == "Namespace" || slices.Contains(f.holders, o), "watch   %s", v)
 		}
 		for _, w := range h.writes[o] {
-			add(w.start, false, "began   %s", w.op+" of "+w.obj.String()+" by the test")
-			add(w.end, false, "answer  %s (began %s earlier)", w, w.end.Sub(w.start).Round(time.Microsecond))
+			add(w.start, "began   %s", w.op+" of "+w.obj.String()+" by the test")
+			addRV(w.end, w.rv, w.op == "create" && o == f.obj && uids[w.uid], "answer  %s (began %s earlier)", w, w.end.Sub(w.start).Round(time.Microsecond))
 		}
 	}
+	lists := map[string]bool{} // the namespaces whose holders' lists matter
+	for _, o := range objs {
+		if o.kind == "Namespace" {
+			lists[o.name] = true
+		}
+	}
+	for _, c := range h.callsOn(f.obj, func(c stCall) bool { return c.op == "r3" && in(c.end) }) {
+		_, n, _ := holderOfFinalizer(c.fin)
+		lists[n] = true
+	}
 	for _, c := range h.calls {
-		batch := c.op == "list" && slices.ContainsFunc(objs, func(o stObj) bool { return h.holderKind(c.obj.kind) && o.kind == "Namespace" && o.name == c.obj.ns })
-		if batch || slices.Contains(objs, c.obj) {
-			add(c.end, false, "call    %s (began %s earlier)", c, c.end.Sub(c.start).Round(time.Microsecond))
+		if c.op == "list" && h.holderKind(c.obj.kind) && lists[c.obj.ns] {
+			var naming []stItem
+			for _, i := range c.items {
+				if i.recBad || slices.Contains(i.rec, f.obj) {
+					naming = append(naming, i)
+				}
+			}
+			addRV(c.end, c.rv, false, "call    %s (began %s earlier), whose records name %s: %v", c, c.end.Sub(c.start).Round(time.Microsecond), f.obj, naming)
+		} else if slices.Contains(objs, c.obj) {
+			addRV(c.end, c.rv, c.op == "a1" && c.ok() && slices.Contains(f.holders, c.obj), "call    %s (began %s earlier)", c, c.end.Sub(c.start).Round(time.Microsecond))
 		}
 	}
 	for _, p := range h.passes {
 		if !slices.Contains(f.holders, p.holder) {
 			continue
 		}
-		add(p.began, false, "pass    p%d pass %d of %s begins, on rv=%d deleting=%v", p.proc, p.id, p.holder, p.rv, p.deleting)
+		add(p.began, "pass    p%d pass %d of %s begins, on rv=%d deleting=%v", p.proc, p.id, p.holder, p.rv, p.deleting)
 		if !p.done.IsZero() {
-			add(p.done, false, "pass    %s", p)
+			add(p.done, "pass    %s", p)
 		}
 	}
 	for _, rd := range h.reads {
 		if rd.obj == f.obj || slices.Contains(f.holders, rd.holder) {
-			add(rd.start, false, "read    pass %d of %s reads %s", rd.pass, rd.holder, rd.obj)
-			add(rd.end, false, "read    pass %d of %s read %s: %s", rd.pass, rd.holder, rd.obj, rd.err)
+			add(rd.start, "read    pass %d of %s reads %s", rd.pass, rd.holder, rd.obj)
+			add(rd.end, "read    pass %d of %s read %s: %s", rd.pass, rd.holder, rd.obj, rd.err)
 		}
 	}
 	slices.SortStableFunc(ls, func(a, b line) int { return a.at.Compare(b.at) })
 	var b strings.Builder
 	if n := len(ls) - maxTimeline; n > 0 {
-		fmt.Fprintf(&b, "    (%d earlier lines left out)\n", n)
-		ls = ls[n:]
+		fmt.Fprintf(&b, "    (the %d earliest lines that aren't kept are left out)\n", n)
+		ls = slices.DeleteFunc(ls, func(l line) bool {
+			if l.keep || n == 0 {
+				return false
+			}
+			n--
+			return true
+		})
 	}
 	for _, l := range ls {
-		fmt.Fprintf(&b, "    %+10.1fms  %s\n", float64(l.at.Sub(f.zero).Microseconds())/1000, l.s)
+		rv := ""
+		if l.rv != 0 {
+			rv = fmt.Sprintf("rv=%d", l.rv)
+		}
+		fmt.Fprintf(&b, "    %-12s %+10.1fms  %s\n", rv, float64(l.at.Sub(f.zero).Microseconds())/1000, l.s)
 	}
 	return b.String()
 }
