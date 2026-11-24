@@ -106,8 +106,9 @@ type Options struct {
 	// Holder is the kind the caller reconciles, at the version it reads and
 	// writes it at: the tracker writes the record through that version too;
 	// empty, the one the mapper answers with at Track. If the CRD serves
-	// several versions, its conversions must keep every label and annotation,
-	// and every field for Disown's strip (§6.2).
+	// several versions, its conversions must keep every label and annotation at
+	// each version that any process of the kind declares, since each lists the
+	// holders at its own, and every field for Disown's strip (§6.2).
 	Holder schema.GroupVersionKind
 	// OwnerFinalizers are the accepted owner finalizers on holders: a holder
 	// carrying any of them is established (§6.1). Two during a rename.

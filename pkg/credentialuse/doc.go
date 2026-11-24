@@ -54,8 +54,9 @@
 // them without losing a field, a label or an annotation: a hold is metadata,
 // written through one of them. With the conversion strategy None, that means
 // equal schemas. Otherwise a hold drops fields of the object, or is never
-// released. The holder kind's must keep labels and annotations, or its record is
-// lost, and fields, for Disown (§6.2).
+// released. The holder kind's must keep labels and annotations, at each version a
+// process of the kind declares, or its record is lost, and fields, for Disown
+// (§6.2).
 //
 // # Dependencies
 //

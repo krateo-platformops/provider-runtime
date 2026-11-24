@@ -82,8 +82,9 @@ func TestA1KeepsWhatTheHoldersOwnVersionHas(t *testing.T) {
 
 // With a webhook that drops annotations, the record survives A1 where the
 // declared version is the storage one. Where it isn't, nothing can keep it, and
-// today's pass doesn't say so: it reports its ref held, with no record, so R2
-// finds no user and the hold is released (§6.2).
+// the pass doesn't say so: it reports its ref held, with no record, so R2 finds no
+// user and the hold is released. Neither does a process that lists at another
+// version find one (§6.2).
 func TestARecordAConversionDrops(t *testing.T) {
 	cutest.Require(t, env)
 	for i, c := range []struct {
@@ -102,6 +103,12 @@ func TestARecordAConversionDrops(t *testing.T) {
 			users, err := tr.Users(context.Background(), cu.SecretRef(p.ns, "creds"), p.ns)
 			if err != nil || (len(users) == 1) != c.kept {
 				t.Errorf("Users = %v, %v; want the holder: %v", users, err, c.kept)
+			}
+			// A process at the other version doesn't see the record either way,
+			// and releases: each version a process lists at must keep it (§6.2).
+			others, err := trackedAt(t, p, "v1").Users(context.Background(), cu.SecretRef(p.ns, "creds"), p.ns)
+			if err != nil || len(others) != 0 {
+				t.Errorf("the process at v1 sees %v, %v; want no user, as its version shows none", others, err)
 			}
 		})
 	}
@@ -186,6 +193,6 @@ func TestPremiseListWithAnUnconvertibleObject(t *testing.T) {
 		}
 	}
 	if failed == 0 {
-		t.Log("CONVERT no list failed: the API server answered from what it had converted before")
+		t.Error("no list failed: none had to convert the object, so the test shows nothing (P22)")
 	}
 }

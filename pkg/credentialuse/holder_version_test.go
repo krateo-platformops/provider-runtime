@@ -110,6 +110,7 @@ func TestR2ListsTheHoldersDeclaredVersion(t *testing.T) {
 	if !hasFinalizer(r.secretMeta(t, "ns", "s"), fWidgetNS) {
 		t.Error("R2 missed the user, and the hold was released")
 	}
+	r.md.ClearActions() // so that the list counted below is Users' own
 	users, err := tr.Users(ctx, SecretRef("ns", "s"), "ns")
 	if err != nil || len(users) != 1 {
 		t.Errorf("Users = %v, %v; want the holder", users, err)

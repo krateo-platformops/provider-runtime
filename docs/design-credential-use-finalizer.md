@@ -646,8 +646,8 @@ group that its first discovery didn't have, and then answers with that one:
 `Track` asks for the declared version, so in such a process the mapper's version
 is the declared one (controller-runtime v0.25.2
 `pkg/client/apiutil/restmapper.go:160-215`). Two processes can then use two
-versions of one kind. Nothing here needs them to agree: they write the same
-metadata, if the conversions keep it.
+versions of one kind. Nothing here needs them to agree, if the conversions keep
+the metadata they write.
 
 A patch of metadata can still change the rest of the object. The API server
 decodes the stored object at the request's version, and encodes it back at the
@@ -684,17 +684,35 @@ a version lacks. With the conversion strategy `None`, that means equal schemas.
     the epoch. Where the label is dropped too, a LabelScoped kind's list at the
     mapper's version doesn't find the object, and Disown neither strips nor
     counts it: remove the finalizer by hand.
-- **On the holder kind**, only the declared version matters, as it does for the
-  controller's own writes. If that isn't the storage version, and the conversion
-  drops annotations, A1's record isn't stored: the pass goes on to A2 and reports
-  its refs held, the release loop finds no record that names them, and releases.
-  The protection is undone, silently (`TestARecordAConversionDrops`). Such a
-  webhook drops every other annotation of the holder at each of its controller's
-  writes, too.
-- **Our code could tell,** cheaply: a write's response is the object as stored
-  and converted back. An A2's or a restore's without the epoch just written, or
-  an A1's without the record, names the conversion (or a mutating webhook) at
-  once. Not built.
+- **On the holder kind**, the conversions must keep the record, an annotation, **at
+  every version that any process of the kind writes or lists it at**: each process
+  writes and lists at its own declared one. Where one drops annotations, A1's
+  record isn't stored (a declared version that isn't the storage one), or another
+  process's list, at its own version, shows the holder without it. Either way that
+  release loop finds no record that names the refs, and releases, while the pass
+  went on to A2 and reported them held. The protection is undone, silently
+  (`TestARecordAConversionDrops`). Such a webhook drops every other annotation of
+  the holder, too, at each write through that version.
+
+**Limits, of a conversion and of a mutating webhook or policy alike.** The API
+server accepts a write, and stores it as they leave it; the package doesn't
+compare the answer with what it wrote. So, whatever the kind:
+
+- *A record, or an A2's finalizer, that isn't stored* leaves the ref unprotected,
+  and the pass reports it held (above).
+- *An epoch that isn't stored* leaves a hold that is never released (above).
+- *The held label, if it isn't stored:* no informer sees P. A LabelScoped kind's
+  passes write A2 each time; P deleted with live users isn't released when its
+  grace ends, until an event of a holder queues its batch; a restart's rescan
+  doesn't find it; and Disown, which counts by the marker label, can settle with
+  the finalizer still there, where that label is dropped too.
+- *A finalizer that a policy puts back* after R3, but not its epoch: R3's write
+  queues the batch again, R1 restores the epoch, R3 removes the finalizer, and so
+  on, as fast as the API server answers. The backoff bounds failures, and none of
+  these fails.
+
+We know of nothing that edits these keys. A comparison of each write with its
+answer is designed, and not in this release.
 
 | Conversion | Patched through | A field only the storage version has |
 |---|---|---|
@@ -712,8 +730,9 @@ Of the holder kind's version:
   per version (§3), share the finalizers and the records (§6.8). A1 is written by
   the process whose pass it is, at its version, which is its runtime's, so each
   controller's holders go through their own. R2 in any of them lists every
-  holder of the kind, whatever its version: the record and the finalizers are
-  metadata. One `Shared` tracks a holder kind at one version.
+  holder of the kind, whatever its version, *at its own*: so every one of their
+  versions must show the record and the finalizers (above). One `Shared` tracks a
+  holder kind at one version.
 - **Disown's strip is the exception.** Any process strips every holder's record,
   another version's too, through its own version. Where the versions don't
   round-trip, that drops fields, and no version is known to be the holder's.
@@ -1163,6 +1182,9 @@ reconciling any holder. Part by part:
   *own* observation of the record (§6.3). Another process's writes never
   let it skip. N processes therefore write at least as often as one would:
   after a restart, up to N A2s per (P, K, N).
+- **The holder kind's version** may differ between them (§6.2): each writes and
+  lists the holders at its own. Every one of those versions must keep the record,
+  or one process's release loop doesn't see another's users.
 - **Release** (R0 to R3). R3's JSON-patch tests serialize any number of
   releasers. A losing releaser re-reads from R1.
 - **The index** (§10.6). Every write is guarded and merges on conflict. The
