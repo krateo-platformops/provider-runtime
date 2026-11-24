@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -347,7 +348,7 @@ func exploreLate(t *testing.T, c lateCase) (r lateResult) {
 		if err := s.Run(); err != nil {
 			return err
 		}
-		if i := slices.IndexFunc(log, func(e string) bool { return e == "rel update []" }); i >= 0 {
+		if i := slices.IndexFunc(log, func(e string) bool { return e == "rel update []" || c.own && strings.HasSuffix(e, " update []") }); i >= 0 {
 			for j, e := range log {
 				if j > i && (e == "net A2 lands" || e == fmt.Sprintf("acq patch %s s", types.StrategicMergePatchType)) {
 					r.pruned++
