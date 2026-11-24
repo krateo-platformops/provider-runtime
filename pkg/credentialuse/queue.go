@@ -51,8 +51,8 @@ type batchQueue struct {
 	backoff func(failures int) time.Duration // backoffAfter, but for tests
 	stopped bool
 
-	// afterAdd, if set, runs after each Add, outside mu: a test's, as of a
-	// worker that takes the batch at once.
+	// afterAdd, if set, runs after each Add, outside mu, and not after what a
+	// timer adds: a test's, as of a worker that takes the batch at once.
 	afterAdd func(k batchKey)
 }
 

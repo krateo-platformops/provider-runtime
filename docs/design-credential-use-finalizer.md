@@ -3303,7 +3303,8 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
   - **a kind no longer in `Protected`** while records still name it: it isn't
     asked about at all. Disown it first (§7.4), or protect it again;
 - the rest are read live, **at most 16 a pass**, so at most 16 GETs of objects
-  and 16 of Namespaces, each Namespace once, **and within 5s together**, or half
+  and 16 of Namespaces, each Namespace once (a name that can't exist, §6.2, is
+  one of the 16, and has no GET of its own), **and within 5s together**, or half
   of what the pass's context has left, if that is sooner: a deadline of the
   gate's own, which a client's rate limit isn't told: a read that has no turn
   yet waits for it, and the deadline cuts the wait, where client-go's limiter
@@ -3360,34 +3361,34 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
 of a record queues one batch, of every name in the old and the new one (§10.2),
 in every watch mode, and R0 settles only names that the caches have. So the
 process that runs the write loops makes a GET of each of the others, one after
-the other, where the caches cover them too: it grows with the record, 4,000 for
-a change that puts 4,000 such names there, and 8,000 for one that replaces them
-all. The changes that come while a batch waits cost one batch together, of
-every name of all of them. 4,000 GETs in a row, at about 2ms each (against an
+the other, where the caches cover them too, but none of a name that can't exist
+(§6.2). It grows with the record, 4,000 for a change that puts 4,000 made-up
+names there, and 8,000 for one that replaces them all. The changes that come
+while a batch waits cost one batch together, of every name of all of them. 4,000
+GETs in a row, at about 2ms each (against an
 envtest, 2026-11-24), hold one of the two workers for 8s, and for longer where
 the client's rate limit is lower; beside R0's own work, which grows with the
 square of the names.
 
 **That is once only where each GET finds its object, or that there is none, and
-nothing asks for the batch again.** A batch that fails is retried whole, after
-1s, doubling up to 5 minutes, for as long as it fails, and whatever the record
-says by then. It fails at a GET, and whoever writes the record can name what
-always does: a kind that can't be mapped, or an object outside a `resourceNames`
-grant. It fails too at the holders' list, the Namespace of an object that is
-being deleted, an epoch's restore, R3, an object that kept changing under 5
-releases, the index's prune, or, of a whole namespace, the list of what is held.
-One that waits for the grace of one of its
-objects, or that restored an epoch, runs whole again as well. So each change may
-cost m GETs every 5 minutes: a run that fails arms a timer of its own, and joins
-none, so c changes whose batches ran apart are c of them, until two fire
-together. And the backoff counts runs: ten in a short outage put the next retry
-at 5 minutes. A restart forgets them, and reads the names that the records have
+nothing asks for it again.** What a batch fails at is read again, and only that
+(§6.2): each object after 1s, doubling up to 5 minutes, for as long as it fails,
+and whatever the record says by then. A batch fails at an object's GET, and
+whoever writes the record can name what always fails: a kind that can't be
+mapped, or an object outside a `resourceNames` grant. So m such names cost m
+tries every 5 minutes, beside those of the batches that changes queue. It fails
+too at the Namespace of an object that is being deleted, an epoch's restore, R3,
+or an object that kept changing under 5 releases, each for that object; at the
+holders' list, for all that it was to decide; at the index's prune, for those
+whose lines it was to prune; and at the list of what a whole namespace holds, for
+that list. One that waits for its grace, or whose epoch was restored, is looked
+at again alone. A restart forgets them, and reads the names that the records have
 then. A standby's queue, though, keeps every name of every change until it is
 elected.
 
-It was so before the gate, and it is the release loop's to bound, in changes
-apart from this: a retry of what failed or asked for it, and no more, and
-batches in bounded turns.
+It was so before the gate, and how much a batch takes in one turn, and what a
+holder's data can keep in memory, is the release loop's to bound, apart from
+this.
 
 **The gate adds to it:** an A1 that drops refs is a change of the record. Its
 batch has the names of the one holder's record as it was, which the new one's

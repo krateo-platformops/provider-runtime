@@ -493,8 +493,7 @@ func TestAForgedRecordsReads(t *testing.T) {
 					t.Errorf("the gate made %d GETs of forged refs in one pass, want at most %d", most, tc.perPass)
 				}
 				if names != tc.forged || oftenest > changes {
-					// A batch that fails at one object is retried whole, as by a
-					// 5xx, and reads them all again.
+					// What a batch fails at, as by a 5xx, is read again.
 					t.Errorf("the release loop read %d forged names, one of them %d times, want %d, each once for each of %d changes of the record; batches that failed, and were retried: %q",
 						names, oftenest, tc.forged, changes, logs.matching("a release batch failed"))
 				}

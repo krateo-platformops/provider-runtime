@@ -103,7 +103,7 @@ MUTANTS = [
     ("a holder with nothing reported is kept", CF,
      [("\tif len(c.m[holder]) == 0 {\n\t\tdelete(c.m, holder)\n\t}\n", "")]),
     ("only a pass that ends forgets", AQ,
-     [("\t\t\tmetAll()\n\t\t\tu := p.unheldEntries", "\t\t\tu := p.unheldEntries")]),
+     [("\t\t\tmetAll()\n\t\t\tu := lastUnheld()", "\t\t\tu := lastUnheld()")]),
     ("only a pass whose last level leads nowhere forgets", AQ,
      [("\t\tlevel = slices.DeleteFunc(next, met)\n\t}\n\tmetAll()\n", "\t\tlevel = slices.DeleteFunc(next, met)\n\t}\n")]),
     ("a pass that couldn't follow a hop forgets", AQ,

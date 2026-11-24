@@ -1715,7 +1715,7 @@ func TestAKeptRefInTheHoldersNamespaceIsKept(t *testing.T) {
 }
 
 // secretGets runs the one batch that waits, of the namespace ns, and returns
-// how many GETs of Secrets in other it makes.
+// how many GETs of Secrets it makes.
 func (r *fakeRig) secretGets(t *testing.T, tr *Tracker, whole bool) int {
 	t.Helper()
 	if n := r.s.queue.Len(); n != 1 {
@@ -1729,18 +1729,56 @@ func (r *fakeRig) secretGets(t *testing.T, tr *Tracker, whole bool) int {
 		t.Fatal(err)
 	}
 	r.s.queue.Done(k)
+	return r.gotSecrets()
+}
+
+// gotSecrets is how many GETs of Secrets were made since the last ClearActions.
+func (r *fakeRig) gotSecrets() int {
 	n := 0
 	for _, a := range r.md.Actions() {
-		if a.GetVerb() == "get" && a.GetResource().Resource == "secrets" && a.GetNamespace() == "other" {
+		if a.GetVerb() == "get" && a.GetResource().Resource == "secrets" {
 			n++
 		}
 	}
 	return n
 }
 
+// TestTheGateOfNamesThatCantExist: each is one of a pass's reads, and has no
+// GET of its own (§6.2, §11.3).
+func TestTheGateOfNamesThatCantExist(t *testing.T) {
+	ctx := context.Background()
+	names := manySecrets("other", 4)
+	for i := range maxGateReads { // all sort before them
+		names = append(names, secretID("other", fmt.Sprintf("a/%02d", i)))
+	}
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"ns"}}, namespaceObject("ns"), namespaceObject("other"), holderObject("ns", "h", names...))
+	o := r.options(widgetGK)
+	o.Refs = func(metav1.Object) ([]Ref, error) { return nil, errors.New("no refs") }
+	tr, err := r.s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	for pass, want := range []int{0, 4} {
+		obj, err := r.md.Tracker().Get(widgetsGVR, "ns", "h")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := obj.(*metav1.PartialObjectMetadata).DeepCopy()
+		r.md.ClearActions()
+		if a, err := tr.Acquire(ctx, h); err != nil || len(a.Unheld) != 0 || len(ReadRecord(h).IDs) != len(names) {
+			t.Fatalf("pass %d: Acquire = %+v, %v, record of %d; want all kept", pass, a, err, len(ReadRecord(h).IDs))
+		}
+		if n := r.gotSecrets(); n != want {
+			t.Errorf("pass %d: %d GETs of Secrets, want %d", pass, n, want)
+		}
+	}
+}
+
 // TestARecordChangesReads: a record's change costs the release loop one GET of
-// each name of the old and the new record that no cache has, whatever the
-// watch mode: more than the gate reads in a pass (§10.2, §11.3).
+// each name of the old and the new record that no cache has and that can exist
+// (§6.2), whatever the watch mode: more than the gate reads in a pass (§10.2,
+// §11.3).
 func TestARecordChangesReads(t *testing.T) {
 	const m = 100
 	forged := manySecrets("other", m)
@@ -1770,6 +1808,10 @@ func TestARecordChangesReads(t *testing.T) {
 			if n := r.secretGets(t, tr, !perName); n != m {
 				t.Errorf("%d GETs for a record that lost one of %d names, want one of each", n, m)
 			}
+			h.OnUpdate(record(forged...), record(append(slices.Clone(forged), secretID("other", "a/b"), secretID("o/ther", "b"), secretID("", "c"))...))
+			if n := r.secretGets(t, tr, !perName); n != m {
+				t.Errorf("%d GETs for a record of %d names, and 3 that can't exist, want one of each of the %d", n, m, m)
+			}
 			for range 50 {
 				h.OnUpdate(record(forged...), record(forged[1:]...))
 				h.OnUpdate(record(forged[1:]...), record(forged...))
@@ -1783,7 +1825,8 @@ func TestARecordChangesReads(t *testing.T) {
 
 // TestARecordsChangeIsOneBatch: what a holder's event queues is one batch,
 // however soon a worker takes it, so a name in both records is read once
-// (§10.2, §11.3).
+// (§10.2, §11.3). It sees what is queued by Add, as an event's is, not by a
+// timer.
 func TestARecordsChangeIsOneBatch(t *testing.T) {
 	const m = 4000
 	forged := manySecrets("other", m)
@@ -1905,10 +1948,10 @@ func TestTheGatesDropsReads(t *testing.T) {
 	}
 }
 
-// TestABatchThatFailsReadsAllAgain: a batch that fails at one name is retried
-// whole, for as long as it fails, so a record that names one that can't be
-// read costs its other names' GETs at every retry (§11.3).
-func TestABatchThatFailsReadsAllAgain(t *testing.T) {
+// TestABatchThatFailsReadsWhatFailedAgain: a record that names one that can't
+// be read costs a GET of that one at every retry, and none of its others
+// (§6.2, §11.3).
+func TestABatchThatFailsReadsWhatFailedAgain(t *testing.T) {
 	const m = 20
 	r := newFakeRigWith(t, SharedOptions{}, namespaceObject("ns"), namespaceObject("other"))
 	bad := SecretRef("other", "refused").ID()
@@ -1923,9 +1966,9 @@ func TestABatchThatFailsReadsAllAgain(t *testing.T) {
 	r.drain()
 	forged := manySecrets("other", m)
 	holderHandler{tr}.OnUpdate(holderObject("ns", "h"), holderObject("ns", "h", append(slices.Clone(forged), bad)...))
-	for try := range 3 {
-		if n := r.secretGets(t, tr, true); n != m+1 {
-			t.Errorf("try %d: %d GETs, want all %d names'", try, n, m+1)
+	for try, want := range []int{m + 1, 1, 1} {
+		if n := r.secretGets(t, tr, true); n != want {
+			t.Errorf("try %d: %d GETs, want %d", try, n, want)
 		}
 		if n := r.queueTimers(); n != 1 {
 			t.Fatalf("try %d: %d retries wait, want one", try, n)
