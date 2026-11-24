@@ -56,7 +56,7 @@ func TestATurnsWorkDoesntGrowWithWhatWaits(t *testing.T) {
 // A held Secret whose last holder goes, behind 5,000 names of its own key, is
 // released in the next turn.
 func TestAHeldObjectDoesntWaitBehindAFlood(t *testing.T) {
-	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "held", "u1", widgetGK, "ns"), holderObject("ns", "h", secretID("ns", "held")))
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "held", "u1", widgetGK, "ns"), holderObject("ns", "h", secretID("ns", "held"), secretID("ns", "missing")))
 	l := r.log()
 	r.track(t, widgetGK)
 	gate := make(chan struct{})
@@ -67,7 +67,8 @@ func TestAHeldObjectDoesntWaitBehindAFlood(t *testing.T) {
 	eventually(t, "the Secret's batch", queued)
 	r.drain()
 	close(gate)
-	eventually(t, "the holder's batch", queued)
+	named := []ID{held, secretID("ns", "missing")}
+	eventually(t, "what the holder names to be queued, and no more", func() bool { return slices.Equal(r.queued(widgetGK, "ns"), named) })
 	r.drain()
 
 	r.s.queue.Add(k, someIDs("ns", "absent", 5000)...)
@@ -151,6 +152,19 @@ func TestTheQueuesLines(t *testing.T) {
 		q.Done(k)
 	}
 	want("then", after, names[1024:])
+
+	// One taken by one line, and added again, is taken at its new place, not at its
+	// old one in the other line.
+	q = newBatchQueue(testingclock.NewFakeClock(time.Now()))
+	q.Add(k, names[:1500]...)
+	q.Add(k, x)
+	q.Add(k, names[1500:]...)
+	q.AddHeld(k, x)
+	get(q)
+	q.Done(k)
+	q.Add(k, x)
+	want("one added again", get(q), names[1024:2048])
+	q.Done(k)
 
 	// A namespace's list is of the held line, and so is what it found.
 	q, _ = setup()

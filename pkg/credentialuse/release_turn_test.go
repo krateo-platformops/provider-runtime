@@ -64,25 +64,34 @@ func TestAKeysTurnIsBounded(t *testing.T) {
 	}
 }
 
-// What is added before each turn, and an object's being added again, also while
-// its key is worked on, don't move one that waits.
+// What is added before each turn, and under it, doesn't move one that waits, and
+// neither does its being added again, also while its key is worked on.
 func TestWhatIsAddedDoesntDelayWhatWaits(t *testing.T) {
-	r, _, l := quiet(t)
-	k := batchKey{widgetGK, "out"}
-	old := secretID("out", "z")
-	r.s.queue.Add(k, someIDs("out", "a", 100)...)
-	r.s.queue.Add(k, old)
-	l.setBefore(func(_ context.Context, c Call) error {
-		r.s.queue.Add(k, old) // while its key is worked on
-		return nil
-	})
-	got := readIn(r, l, old, 20, func(turn int) {
+	for _, again := range []bool{false, true} {
+		r, _, l := quiet(t)
+		k := batchKey{widgetGK, "out"}
+		old := secretID("out", "z")
+		// The names added sort before it, as an edited holder's may.
+		r.s.queue.Add(k, someIDs("out", "a", 100)...)
 		r.s.queue.Add(k, old)
-		// These sort before it, as an edited holder's names may.
-		r.s.queue.Add(k, someIDs("out", fmt.Sprintf("b%02d-", turn), 64)...)
-	})
-	if got != 2 {
-		t.Errorf("the 101st object was read in turn %d (0 is never), want 2", got)
+		turns := 0
+		l.setBefore(func(_ context.Context, c Call) error {
+			if again {
+				r.s.queue.Add(k, old)
+			}
+			r.s.queue.Add(k, someIDs("out", fmt.Sprintf("c%02d-", turns), 64)...)
+			return nil
+		})
+		got := readIn(r, l, old, 20, func(turn int) {
+			turns = turn
+			if again {
+				r.s.queue.Add(k, old)
+			}
+			r.s.queue.Add(k, someIDs("out", fmt.Sprintf("b%02d-", turn), 64)...)
+		})
+		if got != 2 {
+			t.Errorf("added again %v: the 101st object was read in turn %d (0 is never), want 2", again, got)
+		}
 	}
 }
 
