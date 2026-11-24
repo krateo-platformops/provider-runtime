@@ -484,6 +484,14 @@ func recreated(procs []int, inFlight bool, f func(b *auditRun)) *auditRun {
 	return b
 }
 
+// follow is an A1 of a pass of the holder, which changes nothing: a write of
+// another object, that bounds what came before it.
+func (b *auditRun) follow() {
+	p := b.pass()
+	b.a1(p)
+	b.end(p)
+}
+
 // H1's recreate has a class of its own: two processes' releases of one
 // incarnation answered, and the next one went while the second was in flight.
 // One process's two releases are a bug of ours, and anything less than the
@@ -507,7 +515,27 @@ func TestAuditGapRecreate(t *testing.T) {
 		{"one process, twice", []int{2, 2}, true, nil, []string{"RELEASED-TWICE", "UNEXPLAINED-REMOVAL"}},
 		{"one release", []int{2}, true, nil, []string{"UNEXPLAINED-REMOVAL"}},
 		{"both had ended before the create", []int{1, 2}, false, nil, []string{"UNEXPLAINED-REMOVAL"}},
-		{"a third release overlaps the next one's life", []int{1, 2, 3}, true, nil, []string{"UNEXPLAINED-REMOVAL"}},
+		{"a third process released the incarnation before it too", []int{1, 2, 3}, true, nil, []string{"H1-RECREATE"}},
+		{"one of the two processes released it twice", []int{1, 2, 2}, true, nil, []string{"RELEASED-TWICE", "UNEXPLAINED-REMOVAL"}},
+		{"a third release, which may have landed", []int{1, 2}, true, func(b *auditRun) {
+			b.call(stCall{proc: 3, g: "12", op: "r3", obj: auditS, fin: auditFin, testedUID: "u1", tested: "e1", err: "connection reset", unknown: true}, func(*stCall) {})
+		}, []string{"UNEXPLAINED-REMOVAL"}},
+		{"a third release, of the next one's own hold", []int{1, 2}, true, func(b *auditRun) {
+			b.put(auditS, "u2", func(v *stVersion) { b.hold(v, "e2") })
+			b.call(stCall{proc: 3, g: "12", op: "get", obj: auditS}, func(c *stCall) { c.from(b.last[auditS]) })
+			b.listBy(3, "12")
+			b.call(stCall{proc: 3, g: "12", op: "r3", obj: auditS, fin: auditFin, testedUID: "u2", tested: "e2"}, func(c *stCall) {
+				c.from(b.put(auditS, "u2", func(v *stVersion) { v.fins, v.epochs = nil, nil }))
+			})
+		}, []string{"UNEXPLAINED-REMOVAL"}},
+		{"another write of ours", []int{1, 2}, true, func(b *auditRun) {
+			b.call(stCall{proc: 3, g: "13", op: "application/json-patch+json", obj: auditS}, func(c *stCall) { c.from(b.put(auditS, "u2", nil)) })
+		}, []string{"UNEXPLAINED-REMOVAL"}},
+		{"an A2 that left its finalizer", []int{1, 2}, true, func(b *auditRun) {
+			b.call(stCall{proc: 3, g: "13", op: "a2", obj: auditS, fin: auditFin, wrote: "e2"}, func(c *stCall) {
+				c.from(b.put(auditS, "u2", func(v *stVersion) { b.hold(v, "e2") }))
+			})
+		}, []string{"H1-RECREATE"}},
 		{"and a DELETE of the test's found nothing", []int{1, 2}, true, func(b *auditRun) {
 			b.answer(b.began(auditS), answerNotFound, "")
 		}, []string{"H1-RECREATE"}},
@@ -516,14 +544,35 @@ func TestAuditGapRecreate(t *testing.T) {
 		}, []string{"INCOMPLETE", "UNEXPLAINED-REMOVAL"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			recreated(c.procs, c.inFlight, c.f).want(t, c.want...)
+			b := recreated(c.procs, c.inFlight, c.f)
+			b.follow()
+			b.want(t, c.want...)
 		})
 	}
+	t.Run("the first pair fails, and another holds", func(t *testing.T) {
+		// The release that took u1 ended after the create began, and before it
+		// landed; and a write followed it, before the other took u2.
+		b := recreated([]int{1, 2}, true, func(b *auditRun) { b.follow() })
+		for i := range b.writes {
+			if w := &b.writes[i]; w.uid == "u2" {
+				w.start = b.calls[0].start
+			}
+		}
+		b.follow()
+		b.want(t, "H1-RECREATE")
+	})
+	t.Run("a DELETE that may have landed, whose client gave up before the create", func(t *testing.T) {
+		c := recreated([]int{1, 2}, true, nil)
+		c.writes = append([]stWrite{{op: "DELETE", obj: auditS, start: c.calls[0].start, end: c.calls[0].start, answer: answerUnknown}}, c.writes...)
+		c.follow()
+		c.want(t, "INCOMPLETE", "UNEXPLAINED-REMOVAL")
+	})
 	// The create's answer may come before the late release's, as above, or
 	// after it.
 	t.Run("the create's answer comes last", func(t *testing.T) {
 		b := recreated([]int{1, 2}, true, nil)
 		late := b.calls[len(b.calls)-1]
+		b.follow()
 		for i := range b.writes {
 			if w := &b.writes[i]; w.uid == "u2" {
 				if !w.end.Before(late.end) {
@@ -566,18 +615,25 @@ func TestAuditGapRecreateEnd(t *testing.T) {
 		}
 		if gap > 0 {
 			b.wait(gap)
-			p := b.pass()
-			b.a1(p)
-			b.end(p)
+			b.follow()
 		}
 		return b
 	}
-	r := late(nil, time.Millisecond).want(t, "H1-RECREATE")
-	wantCount(t, r, "H1: recreates unbounded", 0)
-	r = late(nil, time.Second).want(t, "H1-RECREATE")
-	wantCount(t, r, "H1: recreates unbounded", 1)
-	r = late(nil, 0).want(t, "H1-RECREATE")
-	wantCount(t, r, "H1: recreates unbounded", 1)
+	late(nil, time.Millisecond).want(t, "H1-RECREATE")
+	late(nil, time.Second).want(t, "H1-RECREATE-UNBOUNDED")
+	late(nil, 0).want(t, "H1-RECREATE-UNBOUNDED")
+	// What bounds it has to have been answered within the bound: till then,
+	// its revision may be later.
+	b := late(nil, time.Millisecond)
+	b.calls[len(b.calls)-1].end = b.at.Add(time.Second)
+	b.want(t, "H1-RECREATE-UNBOUNDED")
+	// A page after the first is of the first's revision.
+	b = late(nil, 0)
+	b.listBy(3, "12")
+	b.calls[len(b.calls)-1].continued = true
+	b.calls[len(b.calls)-1].rv = b.vs[0].rv
+	b.follow()
+	b.want(t, "H1-RECREATE")
 	late(func(b *auditRun) {
 		p := b.pass()
 		b.a1(p)
@@ -623,6 +679,26 @@ func TestAuditGapLag(t *testing.T) {
 			b.wait(10 * time.Second)
 		}, nil},
 		{"the process stopped", func(b *auditRun) { b.wait(4 * time.Second) }, nil},
+		{"it was gone before it had to be", func(b *auditRun) {
+			b.wait(time.Second)
+			b.remove(auditH)
+			b.wait(10 * time.Second)
+		}, nil}, // a relist delivers no more of it
+		{"a held object, and a deletion of it with an old revision", func(b *auditRun) {
+			deliver(b)
+			w := b.began(auditS)
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+			for _, k := range []string{"Widget", "Target"} {
+				b.events = append(b.events, stEvent{stFeed: stFeed{1, k, "protected"}, uid: "u1", rv: b.rv, at: b.tick()})
+			}
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e1") })
+			b.remove(auditS)
+			b.answer(w, answerStatus, "u1")
+			for _, k := range []string{"Widget", "Target"} {
+				b.events = append(b.events, stEvent{stFeed: stFeed{1, k, "protected"}, uid: "u1", rv: b.vs[len(b.vs)-3].rv, at: b.tick()})
+			}
+			b.wait(10 * time.Second)
+		}, nil}, // a relist's tombstone
 		{"a held object", func(b *auditRun) {
 			deliver(b)
 			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
@@ -733,6 +809,29 @@ func TestAuditGapStaleRead(t *testing.T) {
 	b.remove(auditS)
 	b.answer(w, answerStatus, "u1")
 	b.want(t) // it may have gone before the read, and the watch be late
+
+	// The same, with a hold between (H3): the watch is late by two versions.
+	gone := func(f func(b *auditRun)) *auditRun {
+		b := newAuditRun(stressPlain)
+		w := b.began(auditS)
+		b.call(stCall{op: "get", obj: auditS, err: "not found", notFound: true}, func(*stCall) {})
+		if f != nil {
+			f(b)
+		}
+		p := b.pass()
+		b.a1(p, auditS)
+		b.a2(p, auditS, "e1")
+		b.end(p, auditS)
+		b.remove(auditS)
+		b.answer(w, answerStatus, "u1")
+		return b
+	}
+	gone(nil).want(t, "STALE-READ") // the A2 began after the read, and held it
+	b = gone(nil)
+	for i := range b.calls[1:] {
+		b.calls[i+1].start = b.calls[0].start // it may have begun before
+	}
+	b.want(t)
 }
 
 // What explains a pass that stopped is what it was answered last.
@@ -782,6 +881,11 @@ func TestAuditGapLostA2(t *testing.T) {
 	r := lost(func(read, _ stVersion) uint64 { return read.rv }).want(t, "H1-LOST-A2")
 	wantCount(t, r, countLostA2, 1)
 	lost(func(_, last stVersion) uint64 { return last.rv }).want(t, "LOST-READ", "RELEASED-OVER-A-USER", "RELEASED-WHAT-IT-HADNT-READ")
+
+	// A release of unknown outcome may have taken it without testing the epoch.
+	b := lost(func(read, _ stVersion) uint64 { return read.rv })
+	b.call(stCall{op: "r3", obj: auditS, fin: auditFin, testedUID: "u1", err: "connection reset", unknown: true}, func(*stCall) {})
+	b.want(t, "LOST-READ")
 }
 
 // A release of unknown outcome may have taken the last finalizer, and the
