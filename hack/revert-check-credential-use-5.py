@@ -48,8 +48,8 @@ MUTANTS = [
        '\tif false && cachedOK && p.cachedYes(obj, id) {')]),
     ('a cached no drops without a live read', 'kept.go',
      [('\t\tfound := p.liveConsentIn(reads, obj, id, namespaces)\n',
-       '\t\tfound, known := gateNotHeld, false\n\t\tif p.namespaceViews != nil {\n\t\t\t_, known = p.namespaceViews.NamespaceConsent(id.Namespace)\n\t\t}\n'
-       '\t\tif _, cached := p.views.Protected(id); !cached || !known {\n\t\t\tfound = p.liveConsentIn(reads, obj, id, namespaces)\n\t\t}\n')]),
+       '\t\tfound, has := gateNotHeld, false\n\t\tif p.namespaceViews != nil {\n\t\t\t_, has = p.namespaceViews.NamespaceConsent(id.Namespace)\n\t\t}\n'
+       '\t\tif _, cached := p.views.Protected(id); !cached || !has {\n\t\t\tfound = p.liveConsentIn(reads, obj, id, namespaces)\n\t\t}\n')]),
     ('a deleting holder reads consent from the cache', 'acquire.go',
      [('\t\t\t\tg = p.gate(ctx, obj, id, rec0.Names(id) && !deleting)',
        '\t\t\t\tg = p.gate(ctx, obj, id, rec0.Names(id))')]),
