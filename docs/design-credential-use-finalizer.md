@@ -701,8 +701,8 @@ compare the answer with what it wrote. So, whatever the kind:
 - *A record, or an A2's finalizer, that isn't stored* leaves the ref unprotected,
   and the pass reports it held (above).
 - *An epoch that isn't stored* leaves a hold that is never released (above).
-- *The held label, if it isn't stored:* no informer sees P. A LabelScoped kind's
-  passes write A2 each time; P deleted with live users isn't released when its
+- *The held label, if it isn't stored, of a LabelScoped kind* (a PerName watch sees
+  the object without it): no informer sees P. Its passes write A2 each time; P deleted with live users isn't released when its
   grace ends, until an event of a holder queues its batch; a restart's rescan
   doesn't find it; and Disown, which counts by the marker label, can settle with
   the finalizer still there, where that label is dropped too.

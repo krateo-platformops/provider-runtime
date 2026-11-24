@@ -142,10 +142,11 @@ func TestProcessesOnTwoVersionsOfOneHolderKind(t *testing.T) {
 func TestPremiseListWithAnUnconvertibleObject(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
+	const unconvertible = "bad can't be converted"
 	var fails atomic.Bool
 	p := newPruneRig(t, "HolderConvert", "v1", roundTrips(t, func(u *unstructured.Unstructured) error {
 		if fails.Load() && u.GetName() == "bad" {
-			return errors.New("bad can't be converted")
+			return errors.New(unconvertible)
 		}
 		return nil
 	}))
@@ -185,7 +186,9 @@ func TestPremiseListWithAnUnconvertibleObject(t *testing.T) {
 		answer := strings.Join(names, " ")
 		if err != nil {
 			answer = "error: " + err.Error()
-			failed++
+			if strings.Contains(answer, unconvertible) { // not a timeout, which shows nothing
+				failed++
+			}
 		}
 		t.Logf("CONVERT list %d, resourceVersion %q: %s", i, rv, answer)
 		if err == nil && !hasString(names, "bad") {
@@ -193,6 +196,6 @@ func TestPremiseListWithAnUnconvertibleObject(t *testing.T) {
 		}
 	}
 	if failed == 0 {
-		t.Error("no list failed: none had to convert the object, so the test shows nothing (P22)")
+		t.Errorf("no list failed with %q: none had to convert the object, so the test shows nothing (P22)", unconvertible)
 	}
 }
