@@ -31,9 +31,16 @@ type UnheldEntry struct {
 	Since  time.Time `json:"since,omitzero"`
 	// Count is the number of entries left out, on the More entry only.
 	Count int `json:"count,omitempty"`
+	// Unmet is how many of Count are of released holds whose refs no pass
+	// meets (§11.3), on the More entry only: a pass counts the refs it does
+	// meet anew, and can't count these.
+	Unmet int `json:"unmet,omitempty"`
 
 	// listed: the entry was in the annotation the pass found. Not written.
 	listed bool
+	// unmet: the entry is one that Unmet counts, if it is left out. Not
+	// written.
+	unmet bool
 }
 
 // unheldRef is how the annotation names a ref: <namespace>/<Kind>/<name>,
@@ -72,12 +79,13 @@ func encodeUnheld(entries []UnheldEntry) (*string, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	already := 0
+	already, unmet := 0, 0
 	es := slices.DeleteFunc(slices.Clone(entries), func(e UnheldEntry) bool {
 		if e.Reason != unheldMore {
 			return false
 		}
 		already += e.Count
+		unmet += e.Unmet
 		return true
 	})
 	rank := func(e UnheldEntry) int {
@@ -111,9 +119,14 @@ func encodeUnheld(entries []UnheldEntry) (*string, error) {
 		})
 		shown := min(len(es), maxUnheld-1)
 		more := already + len(es) - shown
+		for _, e := range es[shown:] {
+			if e.unmet {
+				unmet++
+			}
+		}
 		es = es[:shown]
 		slices.SortStableFunc(es, order)
-		es = append(es, UnheldEntry{Ref: "…", Reason: unheldMore, Count: more})
+		es = append(es, UnheldEntry{Ref: "…", Reason: unheldMore, Count: more, Unmet: unmet})
 	} else {
 		slices.SortStableFunc(es, order)
 	}
