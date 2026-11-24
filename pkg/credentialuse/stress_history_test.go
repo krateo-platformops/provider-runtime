@@ -396,8 +396,8 @@ type stReport struct {
 // The counts. A run that checked next to nothing proves nothing.
 const (
 	countReleases       = "releases judged"
-	countReleasesLive   = "of objects not being deleted"
-	countReleasesUsers  = "over live users, after the grace"
+	countReleasesLive   = "releases judged, of objects not being deleted"
+	countReleasesUsers  = "releases judged, over live users after the grace"
 	countDeletionPasses = "deletion passes"
 	countHeldByA2       = "deletion passes' holds backed by their own A2"
 	countSkips          = "skips checked"
