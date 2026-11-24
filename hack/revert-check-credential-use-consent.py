@@ -138,7 +138,7 @@ MUTANTS = [
     ("the folded that the pass met stay in the count", KE,
      [("\t\t\t\tif refs[ref] {\n", "\t\t\t\tif false && refs[ref] {\n")]),
     ("a folded entry of the gate's isn't counted", KE,
-     [("\t\tout[i].unmet = released(out[i])\n", "")]),
+     [("\t\tout[i].unmet = released(out[i])\n", "\t\t_ = released(out[i])\n")]),
     ("a folded entry of the last A1's isn't counted", KE,
      [("\t\t\te.unmet = true\n", "")]),
     ("More doesn't carry what is unmet", UN,
