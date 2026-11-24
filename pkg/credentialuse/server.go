@@ -128,10 +128,18 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 // selector and no resourceVersion: each page is a consistent read, and the
 // continue token keeps the pages at the first page's revision.
 // A namespace that can't exist has none, and any namespace none of a
-// cluster-scoped kind.
+// cluster-scoped kind. But the holder kind's, in a namespace, is an error if
+// it is mapped cluster-scoped: the mapping is kept while the process lives, so
+// the kind may be namespaced by now, with holders there, and R2 releases what
+// has none (§6.2).
 func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace string) ([]metav1.PartialObjectMetadata, error) {
-	if _, namespaced, err := s.resource(gk); err == nil && namespace != "" && (!namespaced || !pathSegment(namespace)) {
-		return nil, nil
+	if _, namespaced, err := s.resource(gk); err == nil && namespace != "" {
+		if !namespaced && gk == s.holder.GroupKind() {
+			return nil, fmt.Errorf("credential-use: the holder kind %s is mapped cluster-scoped, so its holders in namespace %q can't be listed: if it is namespaced now, restart", gk, namespace)
+		}
+		if !namespaced || !pathSegment(namespace) {
+			return nil, nil
+		}
 	}
 	c, err := s.client(gk, namespace)
 	if err != nil {

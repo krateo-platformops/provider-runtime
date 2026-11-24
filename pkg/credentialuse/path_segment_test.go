@@ -134,11 +134,17 @@ func TestANameNoObjectCanHave(t *testing.T) {
 			t.Errorf("a list in %q made the calls %q", ns, a)
 		}
 	}
-	// Nor is anything of a cluster-scoped kind in a namespace.
-	for _, srv := range []clientServer{s, ofThings} {
-		if l, err := srv.List(ctx, thing.GroupKind(), "a"); err != nil || len(l) != 0 {
-			t.Errorf("a list of a cluster-scoped kind in a namespace: %v, %v; want none", l, err)
-		}
+	// Nor is anything of a cluster-scoped kind in a namespace; but the holder
+	// kind's may have been mapped before it was namespaced, so it is an error,
+	// never "none".
+	if l, err := s.List(ctx, thing.GroupKind(), "a"); err != nil || len(l) != 0 {
+		t.Errorf("a list of a cluster-scoped kind in a namespace: %v, %v; want none", l, err)
+	}
+	if l, err := ofThings.List(ctx, thing.GroupKind(), "a"); err == nil || Classify(err) != ClassOther {
+		t.Errorf("a list of a cluster-scoped holder kind in a namespace: %v, %v; want an error", l, err)
+	}
+	if l, err := ofSecrets.List(ctx, thing.GroupKind(), "a"); err != nil || len(l) != 0 {
+		t.Errorf("a list of another kind than the holder's, cluster-scoped, in a namespace: %v, %v; want none", l, err)
 	}
 	if a := took(); len(a) != 0 {
 		t.Errorf("a list of a cluster-scoped kind in a namespace made the calls %q", a)
