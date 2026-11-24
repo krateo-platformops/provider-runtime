@@ -32,6 +32,17 @@ import (
 // pass has landed, or failed. And a prune's bound (pruneBound), which is
 // shorter: it starts once every prune begun before the run's first pass has
 // ended, its check and its re-add included.
+//
+// What is cut, so that the searches finish, and what that leaves out:
+//
+//   - A pass's read of the CRD, its decision and its write are one step: a
+//     write of the CRD between them is the flag's model's.
+//   - No pass starts with the switch off: it would do nothing.
+//   - The releaser deletes the holder (unnamed) and then runs its batch: no
+//     batch of it runs before the deletion.
+//   - It also makes the process's late check, after its batch: the late
+//     check doesn't race that batch's prune, which is TestModelLateHold's.
+//   - Four Disown passes, one holder's pass, one batch.
 
 // disownIndexCase is one script of the operator's, and one way of an A2.
 type disownIndexCase struct {
@@ -52,14 +63,12 @@ type disownIndexCase struct {
 	emptyEarly, noLines, noBefore, noAfter, noUnsure, noVersion bool
 }
 
-// preemptions is the bound c is searched within: 2, and 1 with two or more of
-// the network, the late check and the holder's deletion, whose schedules with
-// 2 are too many.
-func (c disownIndexCase) preemptions() int {
-	if c.killed || !c.lost && !c.unnamed {
-		return 2
-	}
-	return 1
+// disownIndexStats is what a search of a case saw: how many schedules settled
+// after the hold had landed, had it land, had a pass see a record, and had P
+// held under a settled flag, and one such log.
+type disownIndexStats struct {
+	Settles, Lands, Records, Violations int
+	Sample                              string
 }
 
 // runningStore is a modelIndexStore for whichever actor is running.
@@ -100,28 +109,78 @@ func (r runningServer) List(ctx context.Context, gk schema.GroupKind, namespace 
 	return r.now().List(ctx, gk, namespace)
 }
 
-// exploreDisownIndex searches every schedule of case c, and returns how many
-// had P held under a settled flag, one such log, how many settled after the
-// hold had landed, and how many had it land.
-func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample string, settles, lands int) {
-	t.Helper()
-	const passes, rounds = 2, 5
-	records := 0
+// patchModelCRD merge-patches the model's CRD's annotations, guarded by rv if
+// set.
+func patchModelCRD(m *apimodel.Model, rv string, ann map[string]any) error {
+	meta := map[string]any{"annotations": ann}
+	if rv != "" {
+		meta["resourceVersion"] = rv
+	}
+	data, err := json.Marshal(map[string]any{"metadata": meta})
+	must(err)
+	_, err = m.Patch(modelCRDKey, types.MergePatchType, data)
+	return err
+}
+
+// countStep is the end of a pass that counted cur under set, in one step: the
+// read of the CRD, the decision, and the write. It reports whether the pass
+// settled, and whether it is of set's switch still.
+func countStep(a *apimodel.Actor, m *apimodel.Model, d *disownState, set disownSet, startRV, cur string, passes int, noVersion bool) (done, same bool) {
+	_ = a.Call("count", func() error {
+		crd, err := m.Get(modelCRDKey)
+		if err != nil {
+			return err
+		}
+		if parseDisown(crd.Annotations[AnnotationDisown]).key() != set.key() {
+			d.zeros = 0
+			return nil
+		}
+		same = true
+		d.startRV = startRV
+		if noVersion {
+			d.startRV, d.rv = "", crd.ResourceVersion
+		}
+		settled, write := d.decide(crd.Annotations, crd.ResourceVersion, cur, passes)
+		d.rv = crd.ResourceVersion
+		if write {
+			var value any
+			if settled {
+				value = crd.Annotations[AnnotationDisown]
+			}
+			if err := patchModelCRD(m, crd.ResourceVersion, map[string]any{AnnotationHeldCount: cur, AnnotationDisownSettled: value}); err != nil {
+				return err
+			}
+			now, err := m.Get(modelCRDKey)
+			if err != nil {
+				return err
+			}
+			d.rv = now.ResourceVersion
+		}
+		done = settled
+		return nil
+	})
+	return done, same
+}
+
+// disownIndexScenario is case c's scenario, recording what it sees in st.
+func disownIndexScenario(c disownIndexCase, st *disownIndexStats) func(s *apimodel.Sched) error {
+	const passes, rounds = 2, 4
 	ctx := context.Background()
 	p := SecretRef("ns", "s").ID()
 	kinds := map[schema.GroupKind]bool{secretGroupKind: true}
 	prefix, _ := FinalizerPrefix(widgetGK)
-	res := apimodel.Explore(apimodel.Bounds{Preemptions: c.preemptions(), MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
+	return func(s *apimodel.Sched) error {
 		var log []string
 		m := apimodel.New(s.Clock.Now)
 		var crdAnn map[string]string
 		var fins []string
 		var bad error
-		settled, landed, sawRecord := false, false, false
+		settled, landed, sawRecord, switchOn := false, false, false, false
 		m.OnEvent = func(ev apimodel.Event) {
 			switch ev.Key {
 			case modelCRDKey:
 				crdAnn = ev.Obj.Annotations
+				switchOn = parseDisown(crdAnn[AnnotationDisown]).on()
 				log = append(log, fmt.Sprintf("CRD %v", crdAnn))
 			case secretKey("ns", "s"):
 				fins = ev.Obj.Finalizers
@@ -156,16 +215,6 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 		must(err)
 		d.rv = crd0.ResourceVersion
 
-		patchCRD := func(rv string, ann map[string]any) error {
-			meta := map[string]any{"annotations": ann}
-			if rv != "" {
-				meta["resourceVersion"] = rv
-			}
-			data, err := json.Marshal(map[string]any{"metadata": meta})
-			must(err)
-			_, err = m.Patch(modelCRDKey, types.MergePatchType, data)
-			return err
-		}
 		readCRD := func(a *apimodel.Actor, label string) *metav1.PartialObjectMetadata {
 			var crd *metav1.PartialObjectMetadata
 			must(a.Call(label, func() error {
@@ -185,22 +234,31 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 			v, err := ix.store.get(ctx)
 			return err == nil && slices.Contains(v.lines, line)
 		}
+		ix.keptLive = keptLive
 		// later is past every backoff and margin before it.
 		hour := 0
 		later := func() time.Time {
 			hour += 24
 			return time.Now().Add(time.Duration(hour) * time.Hour)
 		}
-		// step counts what reads the switch, for the margin: inFlight are the
-		// steps at which the holds not yet landed read it.
+		// step counts what reads the switch, for the two givens: inFlight are
+		// the steps at which the holds not yet landed read it; pruning, those
+		// at which the prunes not yet done began.
 		step := 0
-		// pruning are those at which the prunes not yet done began.
 		inFlight, pruning := map[int]bool{}, map[int]bool{}
 		var sent []byte
-		sentLanded, acquired := false, false
-		recorded := func() bool {
-			h, err := m.Get(widgetKey("ns", "h"))
-			return err == nil && ReadRecord(h).Present
+		sentLanded, acquired, operated := false, false, false
+		// mustWait reports whether a pass of the run that began at runStart
+		// waits for either given, as its Wait's condition has it.
+		mustWait := func(runStart int) bool {
+			for _, ats := range []map[int]bool{inFlight, pruning} {
+				for at := range ats {
+					if at < runStart {
+						return true
+					}
+				}
+			}
+			return false
 		}
 		// batch is a release batch of P, and its prune over bx.
 		batch := func(a *apimodel.Actor, bx *index) {
@@ -224,14 +282,19 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 					if v != "" {
 						value = v
 					}
-					return patchCRD("", map[string]any{AnnotationDisown: value})
+					return patchModelCRD(m, "", map[string]any{AnnotationDisown: value})
 				})
 			}
+			operated = true
 		})
 		s.Go("disown", 0, func(a *apimodel.Actor) {
 			runStart := 0
 			for range rounds {
-				if d.zeros == passes-1 {
+				// A wait that is over is no step of the schedule.
+				if !switchOn && !operated {
+					a.Wait("switch", time.Time{}, func() bool { return switchOn || operated })
+				}
+				if d.zeros == passes-1 && mustWait(runStart) {
 					a.Wait("margin", time.Time{}, func() bool {
 						for at := range inFlight {
 							if at < runStart {
@@ -264,12 +327,11 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 					// The model's List is of one namespace, and "" of none of
 					// them: the holder's is every one there is.
 					holders, _ := srv.List(ctx, widgetGK, "ns")
-					sawRecord = sawRecord || slices.ContainsFunc(holders, func(h metav1.PartialObjectMetadata) bool { return recordsDisowned(&h, set) })
 					named := false
 					for i := range holders {
 						if recordsDisowned(&holders[i], set) {
 							count++
-							named = true
+							named, sawRecord = true, true
 						}
 					}
 					if err := ix.recheckTick(ctx, later()); err != nil {
@@ -318,39 +380,12 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 				} else {
 					d.zeros = 0
 				}
-				crd := readCRD(a, "crd")
 				step++
-				if parseDisown(crd.Annotations[AnnotationDisown]).key() != set.key() {
-					d.zeros = 0
-					continue
-				}
-				d.startRV = start.ResourceVersion
-				if c.noVersion {
-					d.startRV, d.rv = "", crd.ResourceVersion
-				}
-				done, write := d.decide(crd.Annotations, crd.ResourceVersion, cur, passes)
+				done, same := countStep(a, m, d, set, start.ResourceVersion, cur, passes, c.noVersion)
 				if d.zeros == 1 {
 					runStart = startStep // the run's first pass is this one
 				}
-				d.rv = crd.ResourceVersion
-				if write {
-					var value any
-					if done {
-						value = crd.Annotations[AnnotationDisown]
-					}
-					if err := a.Call("write the count", func() error {
-						step++
-						if err := patchCRD(crd.ResourceVersion, map[string]any{AnnotationHeldCount: cur, AnnotationDisownSettled: value}); err != nil {
-							return err
-						}
-						now, err := m.Get(modelCRDKey)
-						d.rv = now.ResourceVersion
-						return err
-					}); err != nil {
-						continue
-					}
-				}
-				if !lined || !done && !c.emptyEarly {
+				if !same || !lined || !done && !c.emptyEarly {
 					continue
 				}
 				if sec, err := srv.Get(ctx, secretGroupKind, "ns", "s"); err == nil && countPrefix(sec.Finalizers, prefix) == 0 {
@@ -382,7 +417,7 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 				if staleSettled(crd.Annotations) {
 					if err := a.Call("clear the flag", func() error {
 						step++
-						return patchCRD(crd.ResourceVersion, map[string]any{AnnotationDisownSettled: nil})
+						return patchModelCRD(m, crd.ResourceVersion, map[string]any{AnnotationDisownSettled: nil})
 					}); err != nil {
 						return disownSet{}, err
 					}
@@ -413,38 +448,18 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 				})
 			})
 		}
-		if !c.killed {
-			// The late check, once the margin is over, by when the A2 has
-			// landed; as late as the schedule has it.
-			s.Go("ticks", 0, func(a *apimodel.Actor) {
-				a.Wait("margin over", time.Time{}, func() bool { return acquired && (sent == nil || sentLanded) })
-				owed := false
-				ix.lateTick(later(), func(ID, string) { owed = true })
-				for range 3 {
-					if err := ix.recheckTick(ctx, later()); err == nil {
-						break
-					}
-				}
-				if owed {
-					batch(a, ix)
-				}
+		s.Go("releaser", 0, func(a *apimodel.Actor) {
+			a.Wait("batch", time.Time{}, func() bool {
+				h, err := m.Get(widgetKey("ns", "h"))
+				return c.unnamed && err == nil && h.Annotations[AnnotationRefs] != "" || acquired
 			})
-		}
-		if c.unnamed {
-			// The holder never got its owner finalizer, and goes.
-			s.Go("deleter", 0, func(a *apimodel.Actor) {
-				a.Wait("announced", time.Time{}, func() bool { return recorded() || acquired })
+			if c.unnamed {
+				// The holder never got its owner finalizer, and goes.
 				_ = a.Call("delete h", func() error {
 					log = append(log, "holder gone")
 					return m.Delete(widgetKey("ns", "h"))
 				})
-			})
-		}
-		s.Go("releaser", 0, func(a *apimodel.Actor) {
-			a.Wait("batch", time.Time{}, func() bool {
-				_, err := m.Get(widgetKey("ns", "h"))
-				return err != nil || acquired
-			})
+			}
 			bx := modelIndex(m, a, "rel", &log)
 			reads := 0 // of the switch by its one prune, before and after
 			bx.keptLive = func(ctx context.Context) (disownSet, error) {
@@ -454,25 +469,40 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 				return keptLive(ctx)
 			}
 			batch(a, bx)
+			if c.killed || !c.lost {
+				return
+			}
+			// The process's late check, once the margin is over, by when the
+			// A2 has landed; as late as the schedule has it.
+			a.Wait("margin over", time.Time{}, func() bool { return acquired && (sent == nil || sentLanded) })
+			owed := false
+			ix.lateTick(later(), func(ID, string) { owed = true })
+			for range 3 {
+				if err := ix.recheckTick(ctx, later()); err == nil {
+					break
+				}
+			}
+			if owed {
+				batch(a, ix)
+			}
 		})
-		ix.keptLive = keptLive
 
 		if err := s.Run(); err != nil {
 			return err
 		}
 		if settled {
-			settles++
+			st.Settles++
 		}
 		if sawRecord {
-			records++
+			st.Records++
 		}
 		if landed {
-			lands++
+			st.Lands++
 		}
 		if bad != nil {
-			violations++
-			if sample == "" {
-				sample = bad.Error()
+			st.Violations++
+			if st.Sample == "" {
+				st.Sample = bad.Error()
 			}
 		}
 		if c.killed {
@@ -482,18 +512,7 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 			return fmt.Errorf("%w; log %q", err, log)
 		}
 		return nil
-	})
-	for _, f := range res.Failures {
-		t.Errorf("%v\n  schedule: %s", f.Err, f.Trace)
 	}
-	if !res.Finished && len(res.Failures) == 0 {
-		t.Errorf("the search didn't finish: %d runs", res.Runs)
-	}
-	if records == 0 {
-		t.Error("no schedule had Disown see a record")
-	}
-	t.Logf("%+v: %d preemptions, %d schedules, %d had Disown see a record, %d settled after the hold landed, %d had it land, %d had it under a settled flag", c, c.preemptions(), res.Runs, records, settles, lands, violations)
-	return violations, sample, settles, lands
 }
 
 // TestModelIndexDisown: Disown settles in PerName mode only with nothing
@@ -501,10 +520,35 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 // narrowed and widened again; whether the A2 of a pass that read it off is
 // answered or not; and whether its holder is gone, which lets a prune take its
 // line before it lands. A sender that is killed leaves its holder's record,
-// and Disown lines what that names. Without any one rule it doesn't.
+// and Disown lines what that names. Without any one rule it doesn't: each
+// control stops at the first schedule that shows it.
 func TestModelIndexDisown(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
+	}
+	for name, c := range map[string]disownIndexCase{
+		"emptied in every pass":                {switches: []string{"all"}, lost: true, killed: true, emptyEarly: true},
+		"records stripped without their lines": {switches: []string{"all"}, lost: true, killed: true, noLines: true},
+		"a prune with no read after it":        {switches: []string{"all"}, lost: true, killed: true, noAfter: true},
+		"a count that waits for nothing owed":  {switches: []string{"all"}, lost: true, unnamed: true, noUnsure: true},
+		"a run over a changed CRD":             {initial: "all", switches: []string{"", "all"}, noVersion: true},
+		// With no read before the removal either.
+		"a pruner whose CRD cache is behind": {switches: []string{"all"}, lost: true, killed: true, noBefore: true},
+	} {
+		t.Run("control/"+name, func(t *testing.T) {
+			if !reachable(t, 2, func(s *apimodel.Sched) error {
+				st := &disownIndexStats{}
+				if err := disownIndexScenario(c, st)(s); err != nil && st.Violations == 0 {
+					return err
+				}
+				if st.Violations > 0 {
+					return errReached
+				}
+				return nil
+			}) {
+				t.Error("no schedule has the hold under a settled flag: the model doesn't see what the rule is for")
+			}
+		})
 	}
 	scripts := map[string]disownIndexCase{
 		"set":                  {switches: []string{"all"}},
@@ -531,29 +575,17 @@ func TestModelIndexDisown(t *testing.T) {
 			cc := c
 			cc.lost, cc.killed, cc.unnamed = w.lost, w.killed, w.unnamed
 			t.Run(script+"/"+way, func(t *testing.T) {
-				v, sample, settles, lands := exploreDisownIndex(t, cc)
-				if v != 0 {
-					t.Errorf("%d schedules have the hold under a settled flag: %s", v, sample)
-				}
-				if settles == 0 || lands == 0 {
-					t.Errorf("%d schedules settled after the hold landed, and it landed in %d; want both reached", settles, lands)
+				st := exhaust(t, modelBound(1, 2), func(st *disownIndexStats) func(*apimodel.Sched) error {
+					return disownIndexScenario(cc, st)
+				}, func(st *disownIndexStats) {
+					if st.Violations != 0 {
+						t.Errorf("%d schedules have the hold under a settled flag: %s", st.Violations, st.Sample)
+					}
+				})
+				if st.Settles == 0 || st.Lands == 0 || st.Records == 0 {
+					t.Errorf("%d schedules settled after the hold landed, it landed in %d, and %d had a pass see a record; want all reached", st.Settles, st.Lands, st.Records)
 				}
 			})
 		}
-	}
-	for name, c := range map[string]disownIndexCase{
-		"emptied in every pass":                {switches: []string{"all"}, lost: true, killed: true, emptyEarly: true},
-		"records stripped without their lines": {switches: []string{"all"}, lost: true, killed: true, noLines: true},
-		"a prune with no read after it":        {switches: []string{"all"}, lost: true, killed: true, noAfter: true},
-		"a count that waits for nothing owed":  {switches: []string{"all"}, lost: true, unnamed: true, noUnsure: true},
-		"a run over a changed CRD":             {initial: "all", switches: []string{"", "all"}, noVersion: true},
-		// With no read before the removal either.
-		"a pruner whose CRD cache is behind": {switches: []string{"all"}, lost: true, killed: true, noBefore: true},
-	} {
-		t.Run("control/"+name, func(t *testing.T) {
-			if v, _, _, _ := exploreDisownIndex(t, c); v == 0 {
-				t.Error("no schedule has the hold under a settled flag: the model doesn't see what the rule is for")
-			}
-		})
 	}
 }

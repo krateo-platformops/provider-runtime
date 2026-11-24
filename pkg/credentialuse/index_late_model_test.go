@@ -61,24 +61,13 @@ func TestModelIndexDrops(t *testing.T) {
 				seq := m.LastSeq()
 				var ix *index
 				handDone := false
-				// undelivered reports whether the informer has a version of
-				// the index to deliver.
-				undelivered := func() bool {
-					n := 0
-					m.EachEventAfter(seq, func(ev *apimodel.Event) {
-						if ev.Key == modelIndexKey {
-							n++
-						}
-					})
-					return n > 0
-				}
-				pending := func() int {
-					if ix == nil {
-						return 0
+				// versions are the index's made since, and delivered the
+				// informer's of them.
+				versions, delivered := 0, 0
+				m.OnEvent = func(ev apimodel.Event) {
+					if ev.Key == modelIndexKey {
+						versions++
 					}
-					ix.mu.Lock()
-					defer ix.mu.Unlock()
-					return len(ix.pending)
 				}
 				s.Go("pruner", 0, func(a *apimodel.Actor) {
 					ix = modelIndex(m, a, "prune", &log)
@@ -89,8 +78,8 @@ func TestModelIndexDrops(t *testing.T) {
 					// The write loops' ticks, each far past the last one's
 					// backoff: none of them depends on the real clock.
 					for now := s.Clock.Now(); ; now = now.Add(24 * time.Hour) {
-						a.Wait("tick", time.Time{}, func() bool { return pending() > 0 || handDone && !undelivered() })
-						if pending() == 0 {
+						a.Wait("tick", time.Time{}, func() bool { return len(ix.pending) > 0 || handDone && delivered == versions })
+						if len(ix.pending) == 0 {
 							return
 						}
 						_ = ix.recheckTick(context.Background(), now)
@@ -109,12 +98,13 @@ func TestModelIndexDrops(t *testing.T) {
 				s.Go("informer", apimodel.Daemon, func(a *apimodel.Actor) {
 					old := indexVersion{lines: []string{p.String()}}
 					for {
-						a.Wait("deliver", time.Time{}, func() bool { return ix != nil && undelivered() })
+						a.Wait("deliver", time.Time{}, func() bool { return ix != nil && delivered < versions })
 						for _, ev := range m.EventsAfter(seq) {
 							seq = ev.Seq
 							if ev.Key != modelIndexKey {
 								continue
 							}
+							delivered++
 							cur := modelIndexStore{}.version(&ev.Obj)
 							ix.observed(&old, cur)
 							old = cur
@@ -163,12 +153,12 @@ func (c lateCase) lateChecks() bool { return c.lost && !c.killedBeforeCheck && !
 
 // preemptions is the bound c is searched within: 3, and 2 with the late check
 // and its batch racing a holder that goes, whose schedules with 3 are past
-// 2,000,000.
+// 2,000,000; one less of each in CI.
 func (c lateCase) preemptions() int {
 	if c.lateChecks() && c.unnamed {
-		return 2
+		return modelBound(1, 2)
 	}
-	return 3
+	return modelBound(2, 3)
 }
 
 // senderServer is the sender's server: a lost A2 is sent, and lands when the
@@ -240,10 +230,6 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 			}
 			_ = ix.prune(context.Background(), ix.prunable(r.Bare))
 		}
-		recorded := func() bool {
-			h, err := m.Get(widgetKey("ns", "h"))
-			return err == nil && ReadRecord(h).Present
-		}
 		s.Go("acquirer", 0, func(a *apimodel.Actor) {
 			defer func() { acquired = true }()
 			log1 := loggingServer{modelServer{m, a}, "acq", &log}
@@ -272,7 +258,10 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 		if c.unnamed {
 			// The holder never got its owner finalizer, and goes.
 			s.Go("deleter", 0, func(a *apimodel.Actor) {
-				a.Wait("announced", time.Time{}, func() bool { return recorded() || acquired })
+				a.Wait("announced", time.Time{}, func() bool {
+					h, err := m.Get(widgetKey("ns", "h"))
+					return err == nil && h.Annotations[AnnotationRefs] != "" || acquired
+				})
 				_ = a.Call("delete h", func() error {
 					log = append(log, "holder gone")
 					return m.Delete(widgetKey("ns", "h"))

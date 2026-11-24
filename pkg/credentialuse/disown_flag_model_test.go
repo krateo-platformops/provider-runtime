@@ -38,6 +38,15 @@ type flagCase struct {
 	noClear, noVersion bool
 }
 
+// preemptions is the bound c is searched within: 3, and in CI 2 with two
+// processes.
+func (c flagCase) preemptions() int {
+	if c.processes > 1 {
+		return modelBound(2, 3)
+	}
+	return 3
+}
+
 // exploreFlag searches every schedule of case c, and returns how many had a
 // hold under a settled flag, one such log, and how many saw one settle and
 // one hold land.
@@ -47,7 +56,7 @@ func exploreFlag(t *testing.T, c flagCase) (violations int, sample string, settl
 	secret := secretKey("ns", "s")
 	f, _ := FinalizerName(widgetGK, "ns")
 	prefix, _ := FinalizerPrefix(widgetGK)
-	res := apimodel.Explore(apimodel.Bounds{Preemptions: 3, MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
+	res := apimodel.Explore(apimodel.Bounds{Preemptions: c.preemptions(), MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
 		var log []string
 		m := apimodel.New(s.Clock.Now)
 		seed(m, "ns", "s", nil, false)
@@ -248,7 +257,7 @@ func exploreFlag(t *testing.T, c flagCase) (violations int, sample string, settl
 	if !res.Finished {
 		t.Errorf("the search didn't finish: %d runs", res.Runs)
 	}
-	t.Logf("%+v: %d schedules, %d settled, %d had a hold land, %d had one under a settled flag", c, res.Runs, settles, lands, violations)
+	t.Logf("%+v: %d preemptions, %d schedules, %d settled, %d had a hold land, %d had one under a settled flag", c, c.preemptions(), res.Runs, settles, lands, violations)
 	return violations, sample, settles, lands
 }
 

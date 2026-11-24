@@ -2,7 +2,6 @@ package credentialuse
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -127,17 +126,28 @@ func (s procStore) update(ctx context.Context, cur indexVersion, lines []string,
 	return v, err
 }
 
-// exploreKill searches every schedule of case c, and returns how many had P
-// held under a settled flag, one such log, and how many had the process die.
-func exploreKill(t *testing.T, c killCase) (violations int, sample string, died int) {
-	t.Helper()
-	const passes, rounds = 2, 4
+// killStats is what a search of a case saw: how many schedules had the process
+// die, had a record stripped, settled, and had P held under a settled flag,
+// and one such log.
+type killStats struct {
+	Died, Strips, Settles, Violations int
+	Sample                            string
+}
+
+// killScenario is case c's scenario, recording what it sees in st.
+func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
+	const passes = 2
+	// A pass that strips, and a run of zeros; with B, one that strips nothing
+	// before it.
+	rounds := passes + 1
+	if c.b {
+		rounds++
+	}
 	ctx := context.Background()
 	p := SecretRef("ns", "s").ID()
 	kinds := map[schema.GroupKind]bool{secretGroupKind: true}
 	prefix, _ := FinalizerPrefix(widgetGK)
-	settles, strips := 0, 0
-	res := apimodel.Explore(apimodel.Bounds{Preemptions: 2, MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
+	return func(s *apimodel.Sched) error {
 		var log []string
 		m := apimodel.New(s.Clock.Now)
 		var crdAnn map[string]string
@@ -175,6 +185,14 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 		step, pruneAt := 0, 0
 		pruning := func(before int) bool { return pruneAt > 0 && !pruneDone && !dead && pruneAt < before }
 		inFlight := map[int]bool{}
+		holding := func(before int) bool {
+			for at := range inFlight {
+				if at < before {
+					return true
+				}
+			}
+			return false
+		}
 		var sent []byte
 		readCRD := func(a *apimodel.Actor, label string) *metav1.PartialObjectMetadata {
 			var crd *metav1.PartialObjectMetadata
@@ -185,16 +203,6 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 				return err
 			}))
 			return crd
-		}
-		patchCRD := func(rv string, ann map[string]any) error {
-			meta := map[string]any{"annotations": ann}
-			if rv != "" {
-				meta["resourceVersion"] = rv
-			}
-			data, err := json.Marshal(map[string]any{"metadata": meta})
-			must(err)
-			_, err = m.Patch(modelCRDKey, types.MergePatchType, data)
-			return err
 		}
 		server := func(a *apimodel.Actor, who string, dead *bool) procServer {
 			return procServer{loggingServer{modelServer{m, a}, who, &log}, dead}
@@ -209,10 +217,10 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 			return ix
 		}
 		// disown is a process's Disown loop.
-		disown := func(a *apimodel.Actor, who string, dead *bool, rounds int) {
-			srv, ix := server(a, who, dead), procIndex(a, who, dead, nil, nil)
+		disown := func(a *apimodel.Actor, who string, gone *bool, rounds int) {
+			srv, ix := server(a, who, gone), procIndex(a, who, gone, nil, nil)
 			ix.keptLive = func(context.Context) (disownSet, error) {
-				if *dead {
+				if *gone {
 					return disownSet{}, errProcDead
 				}
 				return keptKinds(readCRD(a, "switch, for a prune").Annotations), nil
@@ -220,17 +228,18 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 			d := &disownState{}
 			runStart, first := 0, 0
 			for range rounds {
-				if d.zeros == passes-1 {
+				// A wait that is over is no step of the schedule.
+				if d.zeros == passes-1 && (pruning(runStart) || holding(runStart)) {
 					a.Wait("margin", time.Time{}, func() bool {
 						for at := range inFlight {
 							if at < runStart {
 								return false
 							}
 						}
-						return !pruning(runStart)
+						return pruneAt == 0 || pruneDone || dead || pruneAt >= runStart
 					})
 				}
-				if *dead {
+				if *gone {
 					return
 				}
 				start := readCRD(a, "crd at the start")
@@ -239,6 +248,9 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 					first = startStep
 				}
 				set := parseDisown(start.Annotations[AnnotationDisown])
+				// Decided before the pass reads the index: the read that the
+				// strip rests on must come after the wait.
+				hold := c.b && pruning(first)
 				known, count := true, 0
 				holders, err := srv.List(ctx, widgetGK, "ns")
 				if err != nil {
@@ -253,7 +265,7 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 				}
 				var cur indexVersion
 				for {
-					if c.readOutside {
+					if c.readOutside && window {
 						a.Wait("outside the window", time.Time{}, func() bool { return !window })
 					}
 					var sure bool
@@ -264,7 +276,7 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 						break
 					}
 				}
-				if *dead {
+				if *gone {
 					return
 				}
 				lined := slices.Contains(cur.lines, p.String())
@@ -277,7 +289,6 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 					listed = countPrefix(sec.Finalizers, prefix)
 					count += listed
 				}
-				hold := c.b && pruning(first)
 				if named && !lined {
 					if err := ix.add(ctx, []ID{p}); err != nil {
 						known, hold = false, true
@@ -297,7 +308,7 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 						lined = false // not free
 					}
 				}
-				if *dead {
+				if *gone {
 					return
 				}
 				n := "unknown"
@@ -309,34 +320,12 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 				} else {
 					d.zeros = 0
 				}
-				crd := readCRD(a, "crd")
-				d.startRV = start.ResourceVersion
-				done, write := d.decide(crd.Annotations, crd.ResourceVersion, n, passes)
+				step++
+				done, same := countStep(a, m, d, set, start.ResourceVersion, n, passes, false)
 				if d.zeros == 1 {
 					runStart = startStep
 				}
-				d.rv = crd.ResourceVersion
-				if write {
-					var value any
-					if done {
-						value = crd.Annotations[AnnotationDisown]
-					}
-					if *dead {
-						return
-					}
-					if err := a.Call("write the count", func() error {
-						step++
-						if err := patchCRD(crd.ResourceVersion, map[string]any{AnnotationHeldCount: n, AnnotationDisownSettled: value}); err != nil {
-							return err
-						}
-						now, err := m.Get(modelCRDKey)
-						d.rv = now.ResourceVersion
-						return err
-					}); err != nil {
-						continue
-					}
-				}
-				if !lined || !done {
+				if !same || !lined || !done {
 					continue
 				}
 				if sec, err := srv.Get(ctx, secretGroupKind, "ns", "s"); err == nil && countPrefix(sec.Finalizers, prefix) == 0 {
@@ -347,7 +336,7 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 
 		s.Go("operator", 0, func(a *apimodel.Actor) {
 			for !on {
-				if c.switchOutside {
+				if c.switchOutside && window {
 					a.Wait("outside the window", time.Time{}, func() bool { return !window })
 				}
 				_ = a.Call("switch", func() error {
@@ -356,7 +345,7 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 					}
 					step++
 					on = true
-					return patchCRD("", map[string]any{AnnotationDisown: "all"})
+					return patchModelCRD(m, "", map[string]any{AnnotationDisown: "all"})
 				})
 			}
 		})
@@ -475,58 +464,68 @@ func exploreKill(t *testing.T, c killCase) (violations int, sample string, died 
 			return err
 		}
 		if dead {
-			died++
+			st.Died++
 		}
 		if settled {
-			settles++
+			st.Settles++
 		}
 		if stripped {
-			strips++
+			st.Strips++
 		}
 		if bad != nil {
-			violations++
-			if sample == "" {
-				sample = bad.Error()
+			st.Violations++
+			if st.Sample == "" {
+				st.Sample = bad.Error()
 			}
 		}
 		return nil
-	})
-	for _, f := range res.Failures {
-		t.Errorf("%v\n  schedule: %s", f.Err, f.Trace)
 	}
-	if !res.Finished && len(res.Failures) == 0 {
-		t.Errorf("the search didn't finish: %d runs", res.Runs)
-	}
-	if settles == 0 || strips == 0 {
-		t.Errorf("%d schedules settled, and %d stripped a record; want both reached", settles, strips)
-	}
-	if died == 0 && c.at != "" {
-		t.Error("the process died in no schedule")
-	}
-	t.Logf("%+v: 2 preemptions, %d schedules, %d died, %d stripped a record, %d settled, %d had the hold under a settled flag", c, res.Runs, died, strips, settles, violations)
-	return violations, sample, died
 }
 
 // TestModelKillInAPrune: a process killed between its prune's removal and
 // its re-add, with an A2 of its own in flight for the same object, the switch
 // set and the index read by a Disown pass between the prune's read of the
 // switch and its removal, leaves a hold that Disown settles over, whichever
-// process that pass was of. Without the kill there, or the switch or the read
-// there, it doesn't; nor, anywhere, if no pass strips a record until every
-// prune begun before its process's first pass has ended.
+// process that pass was of: one schedule shows it. Without the kill there, or
+// the switch or the read there, it doesn't; nor, anywhere, if no pass strips a
+// record until every prune begun before its process's first pass has ended.
+//
+// With two Disown processes the searches are for one preemption, or for none
+// in CI's bound: what needs more there isn't covered.
 func TestModelKillInAPrune(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
 	}
 	who := map[string]killCase{"same": {same: true}, "other": {other: true}, "both": {same: true, other: true}}
-	run := func(t *testing.T, name string, c killCase, reached bool) {
+	reached := func(t *testing.T, name string, c killCase) {
 		t.Run(name, func(t *testing.T) {
-			v, sample, _ := exploreKill(t, c)
-			if reached && v == 0 {
+			if !reachable(t, 2, func(s *apimodel.Sched) error {
+				st := &killStats{}
+				if err := killScenario(c, st)(s); err != nil {
+					return err
+				}
+				if st.Violations > 0 {
+					return errReached
+				}
+				return nil
+			}) {
 				t.Error("no schedule has the hold under a settled flag")
 			}
-			if !reached && v != 0 {
-				t.Errorf("%d schedules have the hold under a settled flag: %s", v, sample)
+		})
+	}
+	clean := func(t *testing.T, name string, c killCase) {
+		t.Run(name, func(t *testing.T) {
+			bound := modelBound(1, 2)
+			if c.same && c.other {
+				bound = modelBound(0, 1)
+			}
+			st := exhaust(t, bound, func(st *killStats) func(*apimodel.Sched) error { return killScenario(c, st) }, func(st *killStats) {
+				if st.Violations != 0 {
+					t.Errorf("%d schedules have the hold under a settled flag: %s", st.Violations, st.Sample)
+				}
+			})
+			if st.Settles == 0 || st.Strips == 0 || st.Died == 0 && c.at != "" {
+				t.Errorf("%d schedules settled, %d stripped a record, and the process died in %d; want all reached", st.Settles, st.Strips, st.Died)
 			}
 		})
 	}
@@ -536,10 +535,10 @@ func TestModelKillInAPrune(t *testing.T) {
 			c.at = at
 			fresh := c
 			fresh.freshHolders = true
-			run(t, "reached/"+name+"/"+at, c, true)
-			run(t, "reached/"+name+"/"+at+", holder cache fresh", fresh, true)
+			reached(t, "reached/"+name+"/"+at, c)
+			reached(t, "reached/"+name+"/"+at+", holder cache fresh", fresh)
 			c.b = true
-			run(t, "B/"+name+"/"+at, c, false)
+			clean(t, "B/"+name+"/"+at, c)
 		}
 		for title, off := range map[string]killCase{
 			"no kill":                   {},
@@ -549,7 +548,7 @@ func TestModelKillInAPrune(t *testing.T) {
 			"index read outside":        {at: "read after", readOutside: true},
 		} {
 			off.same, off.other = w.same, w.other
-			run(t, "one off/"+name+"/"+title, off, false)
+			clean(t, "one off/"+name+"/"+title, off)
 		}
 	}
 }
