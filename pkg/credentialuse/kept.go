@@ -19,6 +19,10 @@ import (
 // each Namespace one, once.
 const maxGateReads = 16
 
+// gateReadTimeout is how long those reads may take together, in a tracker
+// (§11.3).
+const gateReadTimeout = 5 * time.Second
+
 // recordedGate is what gateRecorded found.
 type recordedGate struct {
 	// live are the answers read live, for the pass to use rather than read
@@ -26,9 +30,6 @@ type recordedGate struct {
 	live map[ID]gateResult
 	// withdrawn are the refs it dropped, and reported.
 	withdrawn map[ID]bool
-	// retried are the refs whose read failed, and that the pass has asked a
-	// retry for.
-	retried map[ID]bool
 	// folded are the released holds' entries that its A1 trimmed from the
 	// unheld list into More, by their refs.
 	folded []string
@@ -43,18 +44,18 @@ type recordedGate struct {
 // has synced and lacks its object isn't held, or is gone, or its held label
 // was stripped (LabelScoped), or its index line is missing (PerName): it is
 // kept, and not read. Anything else is read live, up to maxGateReads refs a
-// pass, those that have waited the longest first; the rest are kept, with
-// RetryAfter.
+// pass and within gateReadTimeout, those that have waited the longest first;
+// the rest are kept, with RetryAfter.
 //
 // A withdrawn ref is dropped from the record, and listed as ConsentWithdrawn,
-// in one A1; a ref that can't be read is kept, with RetryAfter; one that is
-// gone is kept, as any Missing ref. Not asked about are the refs of the
+// in one A1, under ctx; a ref that can't be read is kept, with RetryAfter; one
+// that is gone is kept, as any Missing ref. Not asked about are the refs of the
 // holder's own namespace, cluster-scoped objects, kinds the tracker doesn't
 // protect, and kinds that the Disown switch covers, which the Disown loop
 // strips (§7.4). Nothing is dropped once ctx has ended. It returns
 // ErrHolderConflict when the A1 conflicts.
 func (p *protocol) gateRecorded(ctx context.Context, obj metav1.Object, a *Acquired) (recordedGate, error) {
-	g := recordedGate{live: map[ID]gateResult{}, withdrawn: map[ID]bool{}, retried: map[ID]bool{}}
+	g := recordedGate{live: map[ID]gateResult{}, withdrawn: map[ID]bool{}}
 	rec := ReadRecord(obj) // an unparseable one names nothing to ask about
 	var ask []ID
 	for _, id := range rec.IDs {
@@ -68,58 +69,58 @@ func (p *protocol) gateRecorded(ctx context.Context, obj metav1.Object, a *Acqui
 		ask = append(ask, id)
 	}
 	uid := obj.GetUID()
-	rest := consentKey{holder: uid}
-	over := len(ask) > maxGateReads
-	if over {
-		ask = p.gateTurns.next(uid, ask, maxGateReads)
-		a.retryIn(p.backoff.fail(rest))
-	} else {
-		p.gateTurns.clear(uid)
-		p.backoff.succeed(rest)
-	}
 	var withdrawn []ID
-	failed := map[ID]bool{}
+	known := 0 // how many of ask this pass knows about now
 	namespaces := map[string]namespaceRead{}
-	for i, id := range ask {
-		if ctx.Err() != nil {
+	// The reads have a deadline of their own, so that one that hangs takes
+	// neither the pass, nor the A1 of what the others found.
+	reads, cancel := ctx, context.CancelFunc(func() {})
+	if p.gateContext != nil {
+		reads, cancel = p.gateContext(ctx)
+	}
+	defer cancel()
+	for i, id := range p.gateTurns.next(uid, ask, maxGateReads) {
+		if reads.Err() != nil {
 			break
 		}
-		found := p.liveConsentIn(ctx, obj, id, namespaces)
-		if ctx.Err() != nil {
-			// Whatever it found, it may be for want of ctx, so it keeps its
-			// turn; but not if the pass got to no other that moves back, or
-			// one whose read takes all that ctx has would keep the others
-			// from theirs.
-			if i == len(withdrawn) {
+		found := p.liveConsentIn(reads, obj, id, namespaces)
+		if reads.Err() != nil {
+			// Whatever it found, it may be for want of time, so it keeps its
+			// turn, and is the first next time; unless it was the first, and
+			// so had all the time there is.
+			if i == 0 {
 				p.gateTurns.read(uid, id)
 			}
 			break
 		}
 		g.live[id] = found
-		if found == gateNotHeld {
+		switch found {
+		case gateNotHeld:
 			// First again next pass, unless its A1 drops it now.
 			withdrawn = append(withdrawn, id)
-		} else {
-			p.gateTurns.read(uid, id)
+			known++
+			continue
+		case gateUnknown:
+		default:
+			known++
 		}
-		switch key := (consentKey{uid, id}); {
-		case found != gateUnknown:
-			p.backoff.succeed(key)
-		case !over:
-			failed[id] = true
-			g.retried[id] = true
-			a.retryIn(p.backoff.fail(key))
-		}
-		// Past the bound, one that fails is read again at its turn, which
-		// the retry for the rest asks for: a retry of its own wouldn't bring
-		// it sooner.
-	}
-	p.forgetFailed(uid, ask, over, failed, g.live)
-	if len(withdrawn) == 0 {
-		return g, nil
+		p.gateTurns.read(uid, id)
 	}
 	if err := ctx.Err(); err != nil {
+		if len(withdrawn) == 0 {
+			err = nil // the pass has nothing to drop, and finds out itself
+		}
 		return g, err
+	}
+	// One backoff, the gate's own, for all that this pass asked about and
+	// doesn't know: what it couldn't read, and what it didn't get to.
+	if rest := (consentKey{holder: uid}); known < len(ask) {
+		a.retryIn(p.backoff.fail(rest))
+	} else {
+		p.backoff.succeed(rest)
+	}
+	if len(withdrawn) == 0 {
+		return g, nil
 	}
 	withdrawn = SortedIDs(withdrawn)
 	for _, id := range withdrawn {
@@ -167,55 +168,35 @@ type namespaceRead struct {
 	ok      bool
 }
 
-// forgetFailed drops the backoff of the refs whose read by the gate failed in
-// an earlier pass of holder, and which it no longer asks about: whoever edits
-// the holder names them, and could name others on every pass. asked is what
-// this pass asks about, failed what it couldn't read, and answered what it
-// got to; one it didn't get to keeps its backoff. A pass with more to ask
-// about than it may read keeps none (over).
-func (p *protocol) forgetFailed(holder types.UID, asked []ID, over bool, failed map[ID]bool, answered map[ID]gateResult) {
-	was := p.gateTurns.failing(holder)
-	if !over {
-		for _, id := range asked {
-			if _, got := answered[id]; !got && was[id] {
-				failed[id] = true
-			}
-		}
-	}
-	for id := range was {
-		if !failed[id] {
-			p.backoff.succeed(consentKey{holder, id})
-		}
-	}
-	p.gateTurns.setFailing(holder, failed)
-}
-
 // gateTurns is what the gate of recorded refs remembers of a holder, in memory
-// (§11.3): how long each ref has waited to be read, for a holder with more to
-// read than one pass may, so that each gets its turn; and the refs whose
-// backoff it keeps. A nil one remembers nothing.
+// (§11.3): how long each ref has waited to be read, so that each gets its turn,
+// whether a pass reads no more than maxGateReads or runs out of time. A nil
+// one remembers nothing.
 type gateTurns struct {
 	mu sync.Mutex
 	// n counts what happens, and at is when each ref was last read, or first
 	// asked about.
-	n    uint64
-	at   map[types.UID]map[ID]uint64
-	fail map[types.UID]map[ID]bool
+	n  uint64
+	at map[types.UID]map[ID]uint64
 }
 
-func newGateTurns() *gateTurns {
-	return &gateTurns{at: map[types.UID]map[ID]uint64{}, fail: map[types.UID]map[ID]bool{}}
-}
+func newGateTurns() *gateTurns { return &gateTurns{at: map[types.UID]map[ID]uint64{}} }
 
-// next returns the n of ids that have waited the longest. One that wasn't
-// asked about on the holder's last pass starts to wait now, behind all that
-// were: whoever edits the record can't put others ahead of a ref in it.
+// next returns the n of ids, at most, that have waited the longest, in that
+// order. One that wasn't asked about on the holder's last pass starts to wait
+// now, behind all that were: whoever edits the record can't put others ahead
+// of a ref in it.
 func (t *gateTurns) next(holder types.UID, ids []ID, n int) []ID {
+	n = min(n, len(ids))
 	if t == nil {
 		return ids[:n]
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(ids) == 0 {
+		delete(t.at, holder)
+		return nil
+	}
 	t.n++
 	was, now := t.at[holder], map[ID]uint64{}
 	for _, id := range ids { // and those no longer asked about are forgotten
@@ -244,41 +225,7 @@ func (t *gateTurns) read(holder types.UID, id ID) {
 	}
 }
 
-// clear drops holder's turns, once a pass reads all that it asks about.
-func (t *gateTurns) clear(holder types.UID) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.at, holder)
-}
-
-// failing returns the refs of holder whose backoff the gate keeps.
-func (t *gateTurns) failing(holder types.UID) map[ID]bool {
-	if t == nil {
-		return nil
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.fail[holder]
-}
-
-// setFailing replaces them with ids.
-func (t *gateTurns) setFailing(holder types.UID, ids map[ID]bool) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if len(ids) == 0 {
-		delete(t.fail, holder)
-		return
-	}
-	t.fail[holder] = ids
-}
-
-// forget drops all that is remembered of holder.
+// forget drops holder's turns.
 func (t *gateTurns) forget(holder types.UID) {
 	if t == nil {
 		return
@@ -286,7 +233,6 @@ func (t *gateTurns) forget(holder types.UID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.at, holder)
-	delete(t.fail, holder)
 }
 
 // listWithdrawn is the unheld list found, with withdrawn as ConsentWithdrawn.
