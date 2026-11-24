@@ -1263,6 +1263,12 @@ func TestIndexLostUnderDisown(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, lost: true},
+		// Its index is another kind's, and has no line of a Secret.
+		"moved from LabelScoped into a marked index": {before: func(t *testing.T, idx, ns string) {
+			createSecret(t, ns, "leftover")
+			acquireAs(t, ns, "leftover")
+			createIndexFor(t, idx, "Target."+cutest.Group)
+		}, lost: true},
 		"the CRD recreated, the index kept": {before: func(t *testing.T, idx, ns string) {
 			createSecret(t, ns, "leftover")
 			acquireAs(t, ns, "leftover")
@@ -1286,6 +1292,15 @@ func TestIndexLostUnderDisown(t *testing.T) {
 			// Another ConfigMap's vouch isn't this one's.
 			vouchIndex(t, idx, "00000000-0000-0000-0000-000000000000")
 			staysUnknown(t)
+			if name == "moved from LabelScoped into a marked index" {
+				if f := finalizersOf(t, ns, "leftover"); len(f) != 1 {
+					t.Errorf("the Secret's finalizers are %v, want the hold the index has no line of", f)
+				}
+				// The steps.
+				if _, err := env.Kube.CoreV1().Secrets(ns).Patch(ctx, "leftover", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			vouchIndex(t, idx, "")
 			cutest.Eventually(t, time.Minute, settledAtZero(t))
 		})
@@ -1610,7 +1625,7 @@ func indexRebuilt(t *testing.T, idx string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cm.Annotations[cu.AnnotationRebuilt] == string(cm.UID)
+	return cm.Annotations[cu.AnnotationRebuilt] == string(cm.UID)+"/Secret"
 }
 
 // An index restored from a backup isn't complete, whatever it carries: it may

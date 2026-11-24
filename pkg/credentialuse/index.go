@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -189,8 +190,9 @@ func union(a, b []string) []string {
 type indexVersion struct {
 	lines []string
 	rv    string
-	// rebuilt: the index carries AnnotationRebuilt, of its own uid (§10.6.6).
-	rebuilt bool
+	// marked are the kinds AnnotationRebuilt, of its own uid, lists (§10.6.6);
+	// nil without it.
+	marked kindSet
 	// vouched is AnnotationVouched's value, as the operator wrote it;
 	// vouchedIndex, AnnotationVouchedIndex's. uid is the ConfigMap's.
 	vouched, vouchedIndex, uid string
@@ -199,25 +201,34 @@ type indexVersion struct {
 	obj *unstructured.Unstructured
 }
 
-// complete reports whether v names every hold of kinds: a rebuild of it
-// completed, or an operator vouched for this very ConfigMap and each of those
-// kinds after a loss (§7.4).
-func (v indexVersion) complete(kinds map[schema.GroupKind]bool) bool {
-	uid, list, _ := strings.Cut(v.vouchedIndex, "/")
-	if v.rebuilt || v.uid == "" || uid != v.uid {
-		return v.rebuilt
-	}
-	vouched := parseDisown(list).kinds
+// kindSet is a set of protected kinds.
+type kindSet = map[schema.GroupKind]bool
+
+// complete reports whether v names every hold of kinds: for each, a rebuild
+// of this very ConfigMap completed that covered it, or an operator vouched for
+// the two after a loss (§7.4).
+func (v indexVersion) complete(kinds kindSet) bool {
+	vouched := kindsOf(v.vouchedIndex, v.uid)
 	for gk := range kinds {
-		if !vouched[gk] {
+		if !v.marked[gk] && !vouched[gk] {
 			return false
 		}
 	}
 	return len(kinds) > 0
 }
 
-// vouchFor is AnnotationVouchedIndex's value for kinds of the index uid.
-func vouchFor(uid string, kinds map[schema.GroupKind]bool) string {
+// kindsOf are the kinds that value, of AnnotationRebuilt or
+// AnnotationVouchedIndex, lists for the index uid; nil when it is another's.
+func kindsOf(value, uid string) kindSet {
+	of, list, ok := strings.Cut(value, "/")
+	if !ok || uid == "" || of != uid {
+		return nil
+	}
+	return parseDisown(list).kinds
+}
+
+// valueOf is the value that lists kinds for the index uid: kindsOf's inverse.
+func valueOf(uid string, kinds kindSet) string {
 	var labels []string
 	for gk := range kinds {
 		labels = append(labels, kindLabel(gk))
@@ -233,9 +244,9 @@ type indexStore interface {
 	// doesn't exist.
 	get(ctx context.Context) (indexVersion, error)
 	// update writes lines over cur, guarded by cur's resourceVersion, and
-	// with rebuilt sets AnnotationRebuilt in the same write; without, it
-	// leaves the annotation as cur had it.
-	update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error)
+	// with mark sets AnnotationRebuilt to its kinds in the same write; with
+	// nil, it leaves the annotation as cur had it.
+	update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error)
 	// create creates the index with lines, without AnnotationRebuilt, whose
 	// value is the uid it then gets.
 	create(ctx context.Context, lines []string) (indexVersion, error)
@@ -258,7 +269,7 @@ func versionOf(u *unstructured.Unstructured) indexVersion {
 	data, _, _ := unstructured.NestedString(u.Object, "data", indexDataKey)
 	ann, uid := u.GetAnnotations(), string(u.GetUID())
 	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u, uid: uid,
-		rebuilt: uid != "" && ann[AnnotationRebuilt] == uid, vouched: ann[AnnotationVouched], vouchedIndex: ann[AnnotationVouchedIndex]}
+		marked: kindsOf(ann[AnnotationRebuilt], uid), vouched: ann[AnnotationVouched], vouchedIndex: ann[AnnotationVouchedIndex]}
 }
 
 func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
@@ -269,7 +280,7 @@ func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
 	return versionOf(u), nil
 }
 
-func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	if cur.obj == nil {
 		return indexVersion{}, errors.New("credential-use: an index update needs the version it read")
 	}
@@ -277,12 +288,12 @@ func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []st
 	if err := unstructured.SetNestedField(u.Object, encodeIndex(lines), "data", indexDataKey); err != nil {
 		return indexVersion{}, err
 	}
-	if rebuilt {
+	if mark != nil {
 		ann := u.GetAnnotations()
 		if ann == nil {
 			ann = map[string]string{}
 		}
-		ann[AnnotationRebuilt] = string(u.GetUID())
+		ann[AnnotationRebuilt] = valueOf(string(u.GetUID()), mark)
 		u.SetAnnotations(ann)
 	}
 	out, err := s.c.Update(ctx, u, metav1.UpdateOptions{})
@@ -311,7 +322,7 @@ func (s configMapStore) create(ctx context.Context, lines []string) (indexVersio
 type indexSnapshot struct {
 	lines   map[string]bool
 	vouched map[ID]bool
-	rebuilt bool
+	rebuilt bool // the marker is of the index's kinds
 }
 
 // index is one holder kind's index (§10.6), for its PerName kinds. Its
@@ -484,7 +495,7 @@ func (ix *index) covers(gk schema.GroupKind) bool { return ix != nil && ix.kinds
 
 // saw keeps v as this process's view, and reports its lines.
 func (ix *index) saw(v indexVersion) {
-	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines)), vouched: ix.parseVouched(v.vouched), rebuilt: v.rebuilt}
+	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines)), vouched: ix.parseVouched(v.vouched), rebuilt: !ix.needsRebuild(v)}
 	for _, l := range v.lines {
 		s.lines[l] = true
 	}
@@ -591,12 +602,16 @@ func policyParamsMissing(err error) bool {
 // from the records (§10.6.6). It fails with errIndexFull past the cap or the
 // size. It adds no line that can't be one (lineErr): nothing of such a name is
 // held (ensure).
-func (ix *index) add(ctx context.Context, ids []ID) error { return ix.merge(ctx, ids, false) }
+func (ix *index) add(ctx context.Context, ids []ID) error { return ix.merge(ctx, ids, nil) }
 
-// merge is add; with rebuilt, it is a rebuild's last merge, and sets
-// AnnotationRebuilt in the same guarded write (§10.6.6), writing even when
-// no line is new. One that creates the index sets it in a second write.
-func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
+// merge is add; with mark, it is a rebuild's last merge, and sets
+// AnnotationRebuilt to the kinds mark has for the version it reads, in the
+// same guarded write (§10.6.6), writing even when no line is new, and not at
+// all for nil. One that creates the index sets it in a second write.
+func (ix *index) merge(ctx context.Context, ids []ID, mark func(cur indexVersion) kindSet) error {
+	if mark == nil {
+		mark = func(indexVersion) kindSet { return nil }
+	}
 	lines := linesOf(slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return lineErr(id) != nil }))
 	var last error
 	for range maxIndexWriteAttempts {
@@ -616,8 +631,8 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 				return ix.writeErr("creating", err)
 			}
 			ix.saw(v)
-			if rebuilt {
-				// The marker is the uid it just got: the next attempt sets it.
+			if mark(v) != nil {
+				// The marker has the uid it just got: the next attempt sets it.
 				last = errors.New("the index was created, and its marker isn't set")
 				continue
 			}
@@ -627,7 +642,8 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 			return fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
 		}
 		next := union(cur.lines, lines)
-		if len(next) == len(cur.lines) && (!rebuilt || cur.rebuilt) {
+		kinds := mark(cur)
+		if len(next) == len(cur.lines) && kinds == nil {
 			ix.saw(cur)
 			return nil
 		}
@@ -635,7 +651,7 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 			ix.saw(cur)
 			return err
 		}
-		v, err := ix.store.update(ctx, cur, next, rebuilt)
+		v, err := ix.store.update(ctx, cur, next, kinds)
 		if Classify(err) == ClassConflict {
 			last = err
 			continue
@@ -678,7 +694,7 @@ func (ix *index) remove(ctx context.Context, lines []string) (tried []string, er
 			return tried, nil
 		}
 		tried = union(tried, present)
-		v, err := ix.store.update(ctx, cur, next, false)
+		v, err := ix.store.update(ctx, cur, next, nil)
 		if Classify(err) == ClassConflict {
 			last = err
 			continue
@@ -1201,21 +1217,39 @@ func (ix *index) rebuild(ctx context.Context) error {
 	// The last merge, which sets the marker in the same write, unless
 	// Disown may have stripped the records it was rebuilt from: read after
 	// the list, a switch that is off had stripped none of them.
-	mark := true
+	complete := true
 	if ix.disowning != nil && !ix.isFresh() {
 		on, err := ix.disowning(ctx)
 		if err != nil {
 			return fmt.Errorf("credential-use: reading the Disown switch to rebuild the index %s: %w", ix.ref(), err)
 		}
-		mark = !on
+		complete = !on
 	}
-	if err := ix.merge(ctx, keep, mark); err != nil {
+	if err := ix.merge(ctx, keep, func(cur indexVersion) kindSet { return ix.mark(cur, complete) }); err != nil {
 		return err
 	}
-	if mark {
+	if complete {
 		ix.setFresh(false)
 	}
 	return nil
+}
+
+// mark is what a rebuild sets cur's marker to: the index's kinds when it is
+// complete, and otherwise those of them it was marked with; nil when that is
+// what it is marked with already. A kind that isn't the index's any more is
+// taken out either way: its holds have no lines now, so a rebuild that covers
+// it is due before it counts again.
+func (ix *index) mark(cur indexVersion, complete bool) kindSet {
+	want := kindSet{}
+	for gk := range ix.kinds {
+		if complete || cur.marked[gk] {
+			want[gk] = true
+		}
+	}
+	if maps.Equal(want, cur.marked) {
+		return nil
+	}
+	return want
 }
 
 func (ix *index) isFresh() bool {
@@ -1270,9 +1304,9 @@ func (ix *index) switchChanged() {
 }
 
 // needsRebuild reports whether v, a version of the index read live, lacks
-// the marker of a completed rebuild (§10.6.6): Track and the startup recheck
-// rebuild it then.
-func (ix *index) needsRebuild(v indexVersion) bool { return !v.rebuilt }
+// the marker of a completed rebuild of the index's kinds, or has one of others
+// (§10.6.6): Track and the startup recheck rebuild it then.
+func (ix *index) needsRebuild(v indexVersion) bool { return !maps.Equal(v.marked, ix.kinds) }
 
 // lostTick runs the rebuild if one is due, and reports whether one ran
 // and failed.

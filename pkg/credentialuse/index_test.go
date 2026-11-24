@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,9 +41,19 @@ type memStore struct {
 	beforeCreate func(s *memStore)
 	failGet      error
 	updates      int
+	// rebuilt: the marker is of Secrets, unless marked has its kinds.
 	rebuilt      bool
+	marked       kindSet
 	vouched      string
 	uid, vouches string // the ConfigMap's uid, and AnnotationVouchedIndex
+}
+
+func (s *memStore) version() indexVersion {
+	v := indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), marked: s.marked, vouched: s.vouched, uid: s.uid, vouchedIndex: s.vouches}
+	if s.rebuilt && v.marked == nil {
+		v.marked = kindSet{secretGroupKind: true}
+	}
+	return v
 }
 
 func (s *memStore) get(context.Context) (indexVersion, error) {
@@ -52,10 +63,10 @@ func (s *memStore) get(context.Context) (indexVersion, error) {
 	if !s.exists {
 		return indexVersion{}, apierrors.NewNotFound(configMapsGR, "cu-index")
 	}
-	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched, uid: s.uid, vouchedIndex: s.vouches}, nil
+	return s.version(), nil
 }
 
-func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	if f := s.beforeUpdate; f != nil {
 		f(s)
 	}
@@ -66,9 +77,11 @@ func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, r
 		return indexVersion{}, apierrors.NewConflict(configMapsGR, "cu-index", errors.New("modified"))
 	}
 	s.lines, s.rv = slices.Clone(lines), s.rv+1
-	s.rebuilt = s.rebuilt || rebuilt
+	if mark != nil {
+		s.marked, s.rebuilt = mark, len(mark) > 0
+	}
 	s.updates++
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched}, nil
+	return s.version(), nil
 }
 
 func (s *memStore) create(_ context.Context, lines []string) (indexVersion, error) {
@@ -78,8 +91,8 @@ func (s *memStore) create(_ context.Context, lines []string) (indexVersion, erro
 	if s.exists {
 		return indexVersion{}, apierrors.NewAlreadyExists(configMapsGR, "cu-index")
 	}
-	s.exists, s.lines, s.rv, s.rebuilt = true, slices.Clone(lines), s.rv+1, false
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv)}, nil
+	s.exists, s.lines, s.rv, s.rebuilt, s.marked = true, slices.Clone(lines), s.rv+1, false, nil
+	return s.version(), nil
 }
 
 // objServer serves Get from a map of objects, and fails the names in fail.
@@ -426,11 +439,11 @@ func (s *lossyStore) get(ctx context.Context) (indexVersion, error) {
 	return v, err
 }
 
-func (s *lossyStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s *lossyStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	if err := ctx.Err(); err != nil {
 		return indexVersion{}, err
 	}
-	v, err := s.memStore.update(ctx, cur, lines, rebuilt)
+	v, err := s.memStore.update(ctx, cur, lines, mark)
 	if err == nil && s.lose {
 		s.lose = false
 		if s.afterLoss != nil {
@@ -658,11 +671,11 @@ func (s slowStore) get(ctx context.Context) (indexVersion, error) {
 	return s.memStore.get(ctx)
 }
 
-func (s slowStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s slowStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	if err := pause(ctx, s.d); err != nil {
 		return indexVersion{}, err
 	}
-	return s.memStore.update(ctx, cur, lines, rebuilt)
+	return s.memStore.update(ctx, cur, lines, mark)
 }
 
 // A prune of more lines than one check can read within its bound, as after a
@@ -1302,8 +1315,65 @@ func TestTheRebuiltMarker(t *testing.T) {
 	if err := testIndex(st2, srv).rebuild(context.Background()); err != nil || !st2.rebuilt {
 		t.Errorf("a rebuild that adds no line: %v, marker %v", err, st2.rebuilt)
 	}
-	if !testIndex(st, srv).needsRebuild(indexVersion{}) || testIndex(st, srv).needsRebuild(indexVersion{rebuilt: true}) {
+	if !testIndex(st, srv).needsRebuild(indexVersion{}) || testIndex(st, srv).needsRebuild(indexVersion{marked: kindSet{secretGroupKind: true}}) {
 		t.Error("needsRebuild doesn't follow the marker")
+	}
+}
+
+// The marker is of the index's kinds: one moved to PerName since is in no
+// marker, so a rebuild is due, and Disown of it isn't complete; one moved away
+// leaves it, under the switch too, so that moved back it isn't complete before
+// a rebuild of it (§10.6.6).
+func TestTheMarkersKinds(t *testing.T) {
+	ctx := context.Background()
+	m := apimodel.New(time.Now)
+	seed(m, "ns", "s", []string{"h"}, true)
+	srv := nsServer{modelServer{m: m}, "ns"}
+	secrets, both := kindSet{secretGroupKind: true}, kindSet{secretGroupKind: true, configMapGroupKind: true}
+	st := &memStore{exists: true, rebuilt: true}
+	rebuild := func(kinds kindSet, on bool) *index {
+		t.Helper()
+		ix := testIndex(st, srv)
+		ix.kinds = kinds
+		ix.disowning = func(context.Context) (bool, error) { return on, nil }
+		if err := ix.rebuild(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return ix
+	}
+	for _, step := range []struct {
+		what       string
+		kinds      kindSet // the process's
+		on         bool    // the switch
+		due        bool    // whether the rebuild was
+		want       kindSet // the marker after it
+		incomplete kindSet
+	}{
+		{"as it was", secrets, false, false, secrets, both},
+		{"another moved to PerName, under the switch", both, true, true, secrets, both},
+		{"another moved to PerName", both, false, true, both, nil},
+		{"and moved away, under the switch", secrets, true, true, secrets, both},
+		{"and back, under the switch", both, true, true, secrets, both},
+		{"and back", both, false, true, both, nil},
+		{"and away", secrets, false, true, secrets, both},
+	} {
+		ix := testIndex(st, srv)
+		ix.kinds = step.kinds
+		if got := ix.needsRebuild(st.version()); got != step.due {
+			t.Errorf("%s: a rebuild is due: %v, want %v", step.what, got, step.due)
+		}
+		rebuild(step.kinds, step.on)
+		v := st.version()
+		v.uid = "u"
+		if !maps.Equal(v.marked, step.want) || !v.complete(secrets) || v.complete(both) != (step.incomplete == nil) {
+			t.Errorf("%s: marked %v, want %v; complete for Secrets %v, for both %v", step.what, v.marked, step.want, v.complete(secrets), v.complete(both))
+		}
+	}
+	// A vouch makes up for what the marker lacks, kind by kind.
+	v := st.version()
+	v.uid, v.vouchedIndex = "u", "u/ConfigMap"
+	if !v.complete(both) {
+		t.Error("the marker of Secrets, and a vouch for ConfigMaps, aren't complete for both")
 	}
 }
 
@@ -1339,7 +1409,7 @@ func TestARebuildUnderDisownLeavesNoMarker(t *testing.T) {
 		t.Errorf("a rebuild after the switch: %v, marker %v", err, st.rebuilt)
 	}
 	ix.lost = false
-	ix.saw(indexVersion{rebuilt: true})
+	ix.saw(indexVersion{marked: kindSet{secretGroupKind: true}})
 	if ix.switchChanged(); ix.lost {
 		t.Error("a switch that changes over a rebuilt index asks for a rebuild")
 	}
@@ -1373,7 +1443,9 @@ func TestIndexVersionComplete(t *testing.T) {
 		{indexVersion{uid: "a"}, secrets, false},
 		{indexVersion{}, secrets, false}, // no uid vouches for no uid
 		{indexVersion{vouchedIndex: "/Secret"}, secrets, false},
-		{indexVersion{uid: "a", rebuilt: true}, both, true},
+		{indexVersion{uid: "a", marked: both}, both, true},
+		{indexVersion{uid: "a", marked: secrets}, both, false}, // moved to PerName since
+		{indexVersion{uid: "a", marked: secrets}, secrets, true},
 		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, secrets, true},
 		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, both, false}, // the switch was widened
 		{indexVersion{uid: "a", vouchedIndex: "a/KubernetesTarget.core.krateo.io,Secret"}, both, true},
@@ -1388,8 +1460,11 @@ func TestIndexVersionComplete(t *testing.T) {
 			t.Errorf("%+v is complete for %v: %v, want %v", c.v, c.kinds, got, c.want)
 		}
 	}
-	if v := vouchFor("a", both); v != "a/KubernetesTarget.core.krateo.io,Secret" {
-		t.Errorf("the vouch for both is %q", v)
+	if v := valueOf("a", both); v != "a/KubernetesTarget.core.krateo.io,Secret" || !maps.Equal(kindsOf(v, "a"), both) {
+		t.Errorf("the value for both is %q, of %v", v, kindsOf(v, "a"))
+	}
+	if got := kindsOf("a/", "a"); got == nil || len(got) != 0 {
+		t.Errorf("a value of no kind is %v, want one that lists none", got)
 	}
 }
 
@@ -1448,7 +1523,7 @@ func TestReadSure(t *testing.T) {
 			tc.before(ix)
 		}
 		cur, sure, err := ix.readSure(context.Background(), secrets)
-		if err != nil || !cur.rebuilt || sure != tc.sure {
+		if err != nil || len(cur.marked) == 0 || sure != tc.sure {
 			t.Errorf("%s: %+v, sure %v, %v; want sure %v", name, cur, sure, err, tc.sure)
 		}
 	}
@@ -1729,7 +1804,7 @@ func TestIndexWritesPreserveTheVouch(t *testing.T) {
 	if err := ix.add(context.Background(), []ID{SecretRef("ns", "a").ID()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ix.merge(context.Background(), nil, true); err != nil {
+	if err := ix.merge(context.Background(), nil, func(cur indexVersion) kindSet { return ix.mark(cur, true) }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ix.remove(context.Background(), []string{SecretRef("ns", "a").ID().String()}); err != nil {
@@ -1739,22 +1814,22 @@ func TestIndexWritesPreserveTheVouch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.vouched != "ns/Secret/s" || !v.rebuilt {
-		t.Errorf("after the writes: vouched %q, rebuilt %v", v.vouched, v.rebuilt)
+	if v.vouched != "ns/Secret/s" || !maps.Equal(v.marked, ix.kinds) || v.obj.GetAnnotations()[AnnotationRebuilt] != "u1/Secret" {
+		t.Errorf("after the writes: vouched %q, marked %v", v.vouched, v.marked)
 	}
 	// A copy restored from a backup has another uid, and the marker and the
 	// lines of the one it copies.
 	restored := v.obj.DeepCopy()
 	restored.SetUID("u2")
-	if v := versionOf(restored); v.rebuilt || v.uid != "u2" {
+	if v := versionOf(restored); v.marked != nil || v.uid != "u2" {
 		t.Errorf("a restored copy: %+v; want no marker", v)
 	}
-	for uid, marker := range map[string]string{"u1": "true", "": "", "u2": "u1"} {
+	for uid, marker := range map[string]string{"u1": "true", "": "/Secret", "u2": "u1/Secret", "u3": "u3"} {
 		u := v.obj.DeepCopy()
 		u.SetUID(types.UID(uid))
 		u.SetAnnotations(map[string]string{AnnotationRebuilt: marker})
-		if versionOf(u).rebuilt {
-			t.Errorf("uid %q with the marker %q counts as rebuilt", uid, marker)
+		if got := versionOf(u).marked; got != nil {
+			t.Errorf("uid %q with the marker %q is marked for %v", uid, marker, got)
 		}
 	}
 }

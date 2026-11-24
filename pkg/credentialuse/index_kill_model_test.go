@@ -137,7 +137,7 @@ func (s procStore) get(ctx context.Context) (indexVersion, error) {
 	return s.modelIndexStore.get(ctx)
 }
 
-func (s procStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s procStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	*s.updates++
 	n := *s.updates
 	if s.before != nil {
@@ -146,7 +146,7 @@ func (s procStore) update(ctx context.Context, cur indexVersion, lines []string,
 	if *s.dead {
 		return indexVersion{}, errProcDead
 	}
-	v, err := s.modelIndexStore.update(ctx, cur, lines, rebuilt)
+	v, err := s.modelIndexStore.update(ctx, cur, lines, mark)
 	if err == nil && s.after != nil {
 		s.after(n)
 	}

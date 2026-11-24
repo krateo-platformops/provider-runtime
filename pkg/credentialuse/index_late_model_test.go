@@ -29,8 +29,8 @@ type lossyModelStore struct {
 	lose *bool
 }
 
-func (s lossyModelStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
-	v, err := s.modelIndexStore.update(ctx, cur, lines, rebuilt)
+func (s lossyModelStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
+	v, err := s.modelIndexStore.update(ctx, cur, lines, mark)
 	if err == nil && *s.lose {
 		*s.lose = false
 		return indexVersion{}, errResponseLost

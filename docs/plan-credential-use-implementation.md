@@ -1081,8 +1081,9 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
 - **A durable marker, `credential-use.krateo.io/rebuilt`, on the index**
   (the user's decision, 2026-11-22). Only a completed rebuild sets it, in
   the same guarded write as its last merge, which writes even when it adds
-  no line; its value is the ConfigMap's uid, so that a restored copy isn't
-  marked (2026-11-24). Every create, an acquirer's or `Track`'s, leaves it
+  no line; its value is the ConfigMap's uid and the PerName kinds, so that a
+  restored copy isn't marked, nor a kind moved to PerName since (2026-11-24).
+  Every create, an acquirer's or `Track`'s, leaves it
   absent. `Track` and the startup recheck rebuild, by merging, an index
   without it, so a process that dies between creating the index and
   rebuilding it, or an index an acquirer recreated while no write loops

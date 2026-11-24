@@ -23,8 +23,14 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/cutest"
 )
 
-// createIndex creates the rebuilt index in idx with lines.
+// createIndex creates the index in idx with lines, rebuilt for Secrets.
 func createIndex(t *testing.T, idx string, lines ...string) {
+	t.Helper()
+	createIndexFor(t, idx, "Secret", lines...)
+}
+
+// createIndexFor is createIndex for kinds, as the marker lists them.
+func createIndexFor(t *testing.T, idx, kinds string, lines ...string) {
 	t.Helper()
 	data := ""
 	for _, l := range lines {
@@ -36,8 +42,8 @@ func createIndex(t *testing.T, idx string, lines ...string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Its own uid: the marker of a completed rebuild (§10.6.6).
-	cm.Annotations = map[string]string{cu.AnnotationRebuilt: string(cm.UID)}
+	// The marker of a completed rebuild (§10.6.6).
+	cm.Annotations = map[string]string{cu.AnnotationRebuilt: string(cm.UID) + "/" + kinds}
 	if _, err := cms.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}

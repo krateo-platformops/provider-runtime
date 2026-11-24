@@ -3513,13 +3513,23 @@ the index and rebuilding it, or an acquirer that recreated a deleted index
 while no write loops ran, leaves no hold without its line past the next
 start.
 
-**The marker's value is the ConfigMap's own `metadata.uid`**, so a rebuild
-that creates the index sets it in a second write. A copy restored from a
-backup, by a backup tool or by `kubectl apply`, gets another uid, and may lack
-the lines of the holds made since: its marker is another ConfigMap's, so it
-isn't marked, and it is rebuilt, or is a lost one under Disown (§7.4). An
-index whose marker is `"true"`, the value before 2026-11-24, isn't marked
-either, and is rebuilt at the next start. No tag has written one.
+**The marker's value is `<uid>/<kinds>`**: the ConfigMap's own
+`metadata.uid`, so a rebuild that creates the index sets it in a second write;
+and the PerName kinds the rebuild was of, as the Disown switch lists them.
+
+- **A copy restored from a backup**, by a backup tool or by `kubectl apply`,
+  gets another uid, and may lack the lines of the holds made since: its marker
+  is another ConfigMap's, so it isn't marked, and it is rebuilt, or is a lost
+  one under Disown (§7.4).
+- **A kind moved to PerName while the index is another kind's** (the user's
+  decision, 2026-11-24) is in no marker: its holds from before have no lines.
+  `Track` and the startup recheck rebuild an index whose marker isn't of
+  exactly its kinds; under a switch that covers the moved kind it is a lost
+  one for that kind, and not for the others. A kind moved away is taken out of
+  the marker by that rebuild, under the switch too, so that moved back it
+  needs one again.
+- **An index whose marker is `"true"`**, the value before 2026-11-24, isn't
+  marked, and is rebuilt at the next start. No tag has written one.
 
 **A rebuild under Disown doesn't set the marker** (the user's decision,
 2026-11-23), unless the kind was never tracked before: the records it works

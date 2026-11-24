@@ -82,8 +82,8 @@ func (r runningStore) now() modelIndexStore {
 	return modelIndexStore{m: r.m, a: r.s.Running(), who: r.s.Running().Name, log: r.log}
 }
 func (r runningStore) get(ctx context.Context) (indexVersion, error) { return r.now().get(ctx) }
-func (r runningStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
-	return r.now().update(ctx, cur, lines, rebuilt)
+func (r runningStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
+	return r.now().update(ctx, cur, lines, mark)
 }
 func (r runningStore) create(ctx context.Context, lines []string) (indexVersion, error) {
 	return r.now().create(ctx, lines)

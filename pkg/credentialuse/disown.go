@@ -640,7 +640,7 @@ func (t *Tracker) reportIndexLost(cur indexVersion, kinds map[schema.GroupKind]b
 	if uid == "" {
 		uid, where = "UID", ", with its metadata.uid for UID once it exists again"
 	}
-	vouch := vouchFor(uid, kinds)
+	vouch := valueOf(uid, kinds)
 	_, labels, _ := strings.Cut(vouch, "/")
 	note := "the index " + t.idx.ref() + " was lost, and Disown strips the records that named its holds, so held-count stays unknown: no sooner than " +
 		(t.o.TimeoutBound + t.s.landingMargin()).String() + " after the switch was last changed, list the objects of " + labels +
