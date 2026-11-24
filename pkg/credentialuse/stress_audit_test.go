@@ -144,7 +144,7 @@ func (b *auditRun) end(p *stPass, held ...stObj) { p.held, p.done = held, b.tick
 
 func (b *auditRun) a1(p *stPass, rec ...stObj) {
 	b.call(stCall{proc: 1, g: "5", pass: p.id, op: "a1", obj: auditH}, func(c *stCall) {
-		c.from(b.put(auditH, "uh", func(v *stVersion) { v.rec = rec }))
+		c.from(b.put(auditH, p.uid, func(v *stVersion) { v.rec = rec }))
 	})
 }
 
@@ -176,8 +176,11 @@ func (b *auditRun) r1() {
 func (b *auditRun) namespace() {
 	b.call(stCall{op: "get", obj: nsObj("ns")}, func(c *stCall) { c.from(b.last[nsObj("ns")]) })
 }
-func (b *auditRun) list() {
-	b.call(stCall{op: "list", obj: stObj{"Widget", "ns", ""}}, func(c *stCall) { c.rv = b.rv })
+func (b *auditRun) list() { b.listBy(2, "9") }
+
+// listBy is a list of the holders on goroutine g of process proc.
+func (b *auditRun) listBy(proc int, g string) {
+	b.call(stCall{proc: proc, g: g, op: "list", obj: stObj{"Widget", "ns", ""}}, func(c *stCall) { c.rv = b.rv })
 }
 
 func (b *auditRun) batch() {
@@ -422,7 +425,7 @@ func TestAuditReleases(t *testing.T) {
 			b.acquired()
 			b.batch()
 			b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
-			b.call(stCall{proc: 2, g: "10", op: "list", obj: stObj{"Widget", "ns", ""}}, func(c *stCall) { c.rv = b.rv })
+			b.listBy(2, "10")
 			b.r3()
 		}, []string{findReleasedOverUser}},
 	} {
