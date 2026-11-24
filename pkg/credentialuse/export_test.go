@@ -96,7 +96,10 @@ func (s *Shared) Flood(gk schema.GroupKind, ns string, n int) {
 
 // Collapsed is how many namespaces' names of holder kind gk the queue dropped, and
 // the write loops haven't made up for.
-func (s *Shared) Collapsed(gk schema.GroupKind) int { return len(s.queue.collapsedKeys(gk)) }
+func (s *Shared) Collapsed(gk schema.GroupKind) int {
+	keys, _ := s.queue.collapsedOf(gk)
+	return len(keys)
+}
 
 // DrainQueue takes every batch waiting in the queue, as a release loop with
 // nothing to do would, and returns how many it took.

@@ -276,9 +276,6 @@ type recheckPart struct {
 
 func (s *Shared) recheckParts(ts []*Tracker) []recheckPart {
 	var parts []recheckPart
-	if p, ok := s.collapsedPart(ts); ok {
-		parts = append(parts, p)
-	}
 	for _, t := range ts {
 		for _, gk := range sweepKinds(t) {
 			parts = append(parts, recheckPart{[]*Tracker{t}, func(ctx context.Context) error { return s.sweepMarkers(ctx, t, gk) }})
@@ -303,6 +300,10 @@ func (s *Shared) recheckParts(ts []*Tracker) []recheckPart {
 	for _, gk := range kinds {
 		parts = append(parts, recheckPart{byKind[gk], func(ctx context.Context) error { return s.recheckHeld(ctx, gk, byKind[gk]) }})
 	}
+	// Last: the parts run one after another, and none of those above is of a flood.
+	if p, ok := s.collapsedPart(ts); ok {
+		parts = append(parts, p)
+	}
 	return parts
 }
 
@@ -312,41 +313,42 @@ func (s *Shared) recheckParts(ts []*Tracker) []recheckPart {
 // other parts find whatever was dropped. This one queues what the cached holders of
 // the collapsed namespaces name now; and every object of a LabelScoped kind that
 // carries a finalizer of ts for one of them, its labels stripped or not, from one
-// list of each such kind's metadata in every namespace, a page at a time. Lost is a
-// name that no record has any more, of a kind that isn't in Protected. The collapses
-// are settled once all the lists succeeded: write loops that end before that leave
-// them to the next.
+// list of each such kind's metadata in every namespace, a page at a time. Of a holder
+// kind that collapsed as a whole, it is every namespace's records and finalizers. Lost
+// is a name that no record has any more, of a kind that isn't in Protected. The
+// collapses are settled once all the lists succeeded: write loops that end before that
+// leave them to the next.
 func (s *Shared) collapsedPart(ts []*Tracker) (recheckPart, bool) {
 	var with []*Tracker
-	var keys []batchKey
 	var kinds []schema.GroupKind
+	keys, whole := map[*Tracker][]batchKey{}, map[*Tracker]bool{}
+	collapsed := map[batchKey]bool{}
 	for _, t := range ts {
-		ks := s.queue.collapsedKeys(t.gk)
-		if len(ks) == 0 {
+		ks, all := s.queue.collapsedOf(t.gk)
+		if len(ks) == 0 && !all {
 			continue
 		}
-		with, keys = append(with, t), append(keys, ks...)
+		with, keys[t], whole[t] = append(with, t), ks, all
+		for _, k := range ks {
+			collapsed[k] = true
+		}
 		for _, gk := range sweepKinds(t) {
 			if !slices.Contains(kinds, gk) {
 				kinds = append(kinds, gk)
 			}
 		}
 		t.warn("credential-use: while no write loops ran, more names waited for a release than are kept, and these namespaces' were dropped: the objects held for them are looked for with a list of every object of each protected kind",
-			"kind", t.gk.String(), "namespaces", len(ks), "kept", maxStandbyNames)
+			"kind", t.gk.String(), "namespaces", len(ks), "everyNamespace", all, "keptNames", standbyMax.names, "keptBytes", standbyMax.bytes)
 	}
 	if len(with) == 0 {
 		return recheckPart{}, false
-	}
-	collapsed := map[batchKey]bool{}
-	for _, k := range keys {
-		collapsed[k] = true
 	}
 	records, done := false, map[schema.GroupKind]bool{}
 	return recheckPart{with, func(ctx context.Context) error {
 		if !records {
 			for _, t := range with {
 				for _, obj := range t.holders.GetStore().List() {
-					if m, ok := metadataOf(obj); ok && collapsed[batchKey{t.gk, m.Namespace}] {
+					if m, ok := metadataOf(obj); ok && (whole[t] || collapsed[batchKey{t.gk, m.Namespace}]) {
 						t.addNamed(m.Namespace, ReadRecord(m).IDs)
 					}
 				}
@@ -364,7 +366,7 @@ func (s *Shared) collapsedPart(ts []*Tracker) (recheckPart, bool) {
 					id := ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name}
 					for _, t := range with {
 						for n := range holds(t, m) {
-							if k := (batchKey{t.gk, n}); collapsed[k] {
+							if k := (batchKey{t.gk, n}); whole[t] || collapsed[k] {
 								s.queue.AddHeld(k, id)
 							}
 						}
@@ -378,7 +380,9 @@ func (s *Shared) collapsedPart(ts []*Tracker) (recheckPart, bool) {
 			done[gk] = true
 		}
 		if len(errs) == 0 {
-			s.queue.settleCollapsed(keys...)
+			for _, t := range with {
+				s.queue.settleCollapsed(t.gk, keys[t], whole[t])
+			}
 		}
 		return errors.Join(errs...)
 	}}, true

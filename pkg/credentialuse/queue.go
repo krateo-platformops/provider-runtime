@@ -20,10 +20,10 @@ type batchKey struct {
 }
 
 // batchQueue is the (K, N) batch queue (§10.2, §7.5). NewShared creates it
-// before any informer starts, so that it buffers and deduplicates from the
-// first event, the grace's timers included, while the write loops wait for
-// leader election (M1 of the review of revision 16). The release loop drains
-// it once it runs.
+// before any informer starts, so that it buffers, within a bound (below), and
+// deduplicates from the first event, the grace's timers included, while the write
+// loops wait for leader election (M1 of the review of revision 16). The release loop
+// drains it once it runs.
 //
 // A key is queued once however often it is added, and the protected objects
 // added with it accumulate until the batch is taken. A key added while its
@@ -45,11 +45,12 @@ type batchKey struct {
 // and ShutDown stop timers after releasing mu.
 //
 // Nothing drains the queue while no write loops run, as in a process that waits for
-// election, and it would keep every name that any record has had since the process
-// started. So until then it keeps maxStandbyNames that aren't known to be held: past
-// them, the key with the most is collapsed to its namespace's list, and takes no
-// more. What a collapse dropped is made up for at the write loops' start
-// (Shared.collapsedPart), which settles it.
+// election, and it would keep every name that any record has had, and every object
+// that was held, since the process started. So until then what waits is bounded
+// (standbyMax): past it, the key whose names take the most is collapsed to its
+// namespace's list, and past so many keys the holder kind with the most of them is,
+// and either takes no more. What a collapse dropped is made up for at the write loops'
+// start (Shared.collapsedPart), which settles it.
 type batchQueue struct {
 	clock clock.WithDelayedExecution
 
@@ -59,7 +60,8 @@ type batchQueue struct {
 	lines   map[batchKey]*lines  // and in which order
 	taken   map[batchKey]places  // what each batch being worked on covers
 	placed  uint64               // the last place given
-	names   int                  // pending ones not known to be held
+	names   int                  // pending ones, namespaces' lists aside
+	bytes   int                  // and about how much memory they take
 	ready   []batchKey           // keys waiting to be taken, in order
 	queued  map[batchKey]bool    // in ready
 	working map[batchKey]bool    // taken, not yet done
@@ -74,9 +76,12 @@ type batchQueue struct {
 	// takes the batch at once.
 	afterAdd func(k batchKey)
 	// draining: the write loops run; collapsed are the keys whose names were
-	// dropped while they didn't, until that is made up for.
+	// dropped while they didn't, and kinds the holder kinds all of whose were, until
+	// that is made up for. max is the bound without them.
 	draining  bool
 	collapsed map[batchKey]bool
+	kinds     map[schema.GroupKind]bool
+	max       queueMax
 }
 
 func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
@@ -93,6 +98,8 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 		backoff: backoffAfter,
 
 		collapsed: map[batchKey]bool{},
+		kinds:     map[schema.GroupKind]bool{},
+		max:       standbyMax,
 	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
@@ -103,9 +110,13 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 // name it, can settle without a read is many times what a turn reads (maxTurnReads).
 const lineWindow = 1024
 
-// maxStandbyNames is how many names that aren't known to be held wait at most while
-// no write loops run: more than 10,000 holders' of a few refs each, and 20 to 35 MB.
-const maxStandbyNames = 1 << 16
+// queueMax bounds what waits while no write loops run.
+type queueMax struct{ names, bytes, keys int }
+
+// standbyMax is 65,536 names, more than 10,000 holders' of a few refs each; 32 MiB of
+// what they take (costOf), since a name may be as long as a record; and 16,384 keys, of
+// about 0.6 KB each beside their names.
+var standbyMax = queueMax{names: 1 << 16, bytes: 32 << 20, keys: 1 << 14}
 
 // places are the objects of a batch, each with its place.
 type places map[ID]place
@@ -130,7 +141,7 @@ func (p places) inOrder() []ID {
 // back at an earlier place.
 type lines struct {
 	held, others line
-	names        int // pending ones not known to be held
+	bytes        int // what its pending names take
 }
 
 // A line is what was put back, taken from its end, and then what was added.
@@ -225,17 +236,14 @@ func (q *batchQueue) addLocked(k batchKey, ids []ID, held func(ID) bool) {
 		return
 	}
 	for _, id := range ids {
+		if !q.draining && !q.takesLocked(k, id) {
+			continue
+		}
 		set, ls := q.pendingLocked(k)
 		p, waits := set[id]
 		known := id == fillAll || held(id)
 		if waits && (p.held || !known) {
 			continue
-		}
-		if !known && !q.draining {
-			if !q.roomLocked(k) {
-				continue
-			}
-			set, ls = q.pendingLocked(k) // another key's collapse, or this one's earlier, may have made it anew
 		}
 		if !waits {
 			q.placed++
@@ -246,28 +254,61 @@ func (q *batchQueue) addLocked(k batchKey, ids []ID, held func(ID) bool) {
 		l := ls.of(known)
 		l.added = append(l.added, entry{id, p.at})
 	}
-	q.pendingLocked(k)
-	q.readyLocked(k)
+	if q.pending[k] != nil {
+		q.readyLocked(k)
+	}
+}
+
+// costOf is about how much memory a waiting name takes: its text, and what keeps it.
+func costOf(id ID) int {
+	if id == fillAll {
+		return 0
+	}
+	return len(id.Group) + len(id.Kind) + len(id.Namespace) + len(id.Name) + 256
 }
 
 // setLocked sets id's place in set, of lines ls, and counts it.
 func (q *batchQueue) setLocked(set places, ls *lines, id ID, p place) {
-	if was, waits := set[id]; waits && !was.held {
-		q.names--
-		ls.names--
-	}
-	if !p.held {
+	if _, waits := set[id]; !waits && id != fillAll {
 		q.names++
-		ls.names++
+		q.bytes += costOf(id)
+		ls.bytes += costOf(id)
 	}
 	set[id] = p
 }
 
-// roomLocked makes room for one more name of k that isn't known to be held, and
-// reports whether there is: not once k has collapsed, whose namespace's list waits
-// instead.
-func (q *batchQueue) roomLocked(k batchKey) bool {
-	for q.names >= maxStandbyNames && !q.collapsed[k] && q.collapseLocked() {
+// dropLocked takes id from set, of lines ls, and counts it no more.
+func (q *batchQueue) dropLocked(set places, ls *lines, id ID) {
+	if id != fillAll {
+		q.names--
+		q.bytes -= costOf(id)
+		ls.bytes -= costOf(id)
+	}
+	delete(set, id)
+}
+
+// takesLocked reports whether id may wait in k while no write loops run, and makes the
+// room it needs, if there is none, by collapsing others, or k. A key that collapsed
+// takes nothing but its namespace's list, and a kind that did nothing.
+func (q *batchQueue) takesLocked(k batchKey, id ID) bool {
+	if q.kinds[k.Holder] {
+		return false
+	}
+	if q.pending[k] == nil && len(q.pending) >= q.max.keys {
+		q.collapseKindLocked()
+		if q.kinds[k.Holder] {
+			return false
+		}
+	}
+	if id == fillAll {
+		return true
+	}
+	if !q.collapsed[k] {
+		if _, waits := q.pending[k][id]; waits {
+			return true
+		}
+		for (q.names >= q.max.names || q.bytes+costOf(id) > q.max.bytes) && q.collapseLocked() && !q.collapsed[k] {
+		}
 	}
 	if q.collapsed[k] {
 		q.listLocked(k)
@@ -276,32 +317,64 @@ func (q *batchQueue) roomLocked(k batchKey) bool {
 	return true
 }
 
-// collapseLocked drops the names that aren't known to be held of the key that has
-// the most, and queues its namespace's list. It reports whether there was one.
+// collapseLocked drops what waits of the key whose names take the most, and queues its
+// namespace's list. It reports whether there was one.
 func (q *batchQueue) collapseLocked() bool {
 	var most batchKey
 	n := 0
 	for k, ls := range q.lines {
-		if ls.names > n {
-			most, n = k, ls.names
+		if ls.bytes > n {
+			most, n = k, ls.bytes
 		}
 	}
 	if n == 0 {
 		return false
 	}
-	set, ls := q.pending[most], q.lines[most]
-	kept := places{} // a map keeps the room of what is deleted from it
-	for id, p := range set {
-		if p.held {
-			kept[id] = p
-		}
-	}
-	q.pending[most] = kept
-	q.names -= ls.names
-	ls.names, ls.others = 0, line{}
+	q.forgetLocked(most)
 	q.collapsed[most] = true
 	q.listLocked(most)
 	return true
+}
+
+// forgetLocked drops all that waits of k. Its maps and slices go with it: they keep
+// the room of what is taken from them.
+func (q *batchQueue) forgetLocked(k batchKey) {
+	for id := range q.pending[k] {
+		if id != fillAll {
+			q.names--
+		}
+	}
+	q.bytes -= q.lines[k].bytes
+	delete(q.pending, k)
+	delete(q.lines, k)
+}
+
+// collapseKindLocked drops all that waits of the holder kind with the most keys.
+func (q *batchQueue) collapseKindLocked() {
+	by := map[schema.GroupKind]int{}
+	for k := range q.pending {
+		by[k.Holder]++
+	}
+	var most schema.GroupKind
+	n := 0
+	for gk, keys := range by {
+		if keys > n {
+			most, n = gk, keys
+		}
+	}
+	for k := range q.pending {
+		if k.Holder == most {
+			q.forgetLocked(k)
+			delete(q.queued, k)
+		}
+	}
+	q.ready = slices.DeleteFunc(slices.Clone(q.ready), func(k batchKey) bool { return k.Holder == most })
+	for k := range q.collapsed {
+		if k.Holder == most {
+			delete(q.collapsed, k)
+		}
+	}
+	q.kinds[most] = true
 }
 
 // listLocked queues the list of k's namespace.
@@ -315,37 +388,67 @@ func (q *batchQueue) listLocked(k batchKey) {
 	q.readyLocked(k)
 }
 
-// setDraining says whether the write loops run. Once they don't, what waits over
-// maxStandbyNames is dropped.
+// setDraining says whether the write loops run. Once they don't, what waited for a
+// retry or a time waits in the queue, its count forgotten, and what is over the bound
+// is dropped.
 func (q *batchQueue) setDraining(on bool) {
+	var old []clock.Timer
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	q.draining = on
-	for !on && q.names > maxStandbyNames && q.collapseLocked() {
-	}
-}
-
-// collapsedKeys are the keys of holder kind gk whose names were dropped, and not
-// made up for since.
-func (q *batchQueue) collapsedKeys(gk schema.GroupKind) []batchKey {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	var out []batchKey
-	for k := range q.collapsed {
-		if k.Holder == gk {
-			out = append(out, k)
+	if !on {
+		for e := range q.timers {
+			if e.retry || e.at != 0 {
+				delete(q.timers, e)
+				if e.t != nil {
+					old = append(old, e.t)
+				}
+			}
+		}
+		// The bound is held by each of these as it comes.
+		for k, m := range q.failing {
+			q.addLocked(k, SortedIDs(keysOf(m)), func(id ID) bool { return m[id].held })
+		}
+		q.failing = map[batchKey]map[ID]*failure{}
+		for f := range q.asked {
+			q.addLocked(f.k, []ID{f.id}, func(ID) bool { return true })
+		}
+		q.asked = map[askedFor]bool{}
+		for (q.names > q.max.names || q.bytes > q.max.bytes) && q.collapseLocked() {
+		}
+		for len(q.pending) > q.max.keys {
+			q.collapseKindLocked()
 		}
 	}
-	slices.SortFunc(out, func(a, b batchKey) int { return cmp.Compare(a.Namespace, b.Namespace) })
-	return out
+	q.mu.Unlock()
+	for _, t := range old {
+		t.Stop()
+	}
 }
 
-// settleCollapsed records that what ks' collapses dropped is made up for.
-func (q *batchQueue) settleCollapsed(ks ...batchKey) {
+// collapsedOf are the keys of holder kind gk whose names were dropped, and not made up
+// for since, and whether all of them may have been.
+func (q *batchQueue) collapsedOf(gk schema.GroupKind) (keys []batchKey, all bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for k := range q.collapsed {
+		if k.Holder == gk {
+			keys = append(keys, k)
+		}
+	}
+	slices.SortFunc(keys, func(a, b batchKey) int { return cmp.Compare(a.Namespace, b.Namespace) })
+	return keys, q.kinds[gk]
+}
+
+// settleCollapsed records that what the collapses of ks dropped, and, with all, of any
+// key of holder kind gk, is made up for.
+func (q *batchQueue) settleCollapsed(gk schema.GroupKind, ks []batchKey, all bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, k := range ks {
 		delete(q.collapsed, k)
+	}
+	if all {
+		delete(q.kinds, gk)
 	}
 }
 
@@ -674,11 +777,7 @@ func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 				return false
 			}
 			taken[e.id] = p
-			delete(set, e.id)
-			if !p.held {
-				q.names--
-				ls.names--
-			}
+			q.dropLocked(set, ls, e.id)
 			return true
 		})
 	}
@@ -766,9 +865,10 @@ func (q *batchQueue) ShutDown() {
 	clear(q.timers)
 	clear(q.failing)
 	clear(q.asked)
-	q.ready, q.pending, q.names = nil, map[batchKey]places{}, 0
+	q.ready, q.pending, q.names, q.bytes = nil, map[batchKey]places{}, 0, 0
 	clear(q.lines)
 	clear(q.collapsed)
+	clear(q.kinds)
 	clear(q.taken)
 	clear(q.queued)
 	q.cond.Broadcast()

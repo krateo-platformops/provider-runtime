@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,12 +13,19 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clienttesting "k8s.io/client-go/testing"
 	testingclock "k8s.io/utils/clock/testing"
 )
 
 // What the write loops' start makes up for, of the names that the queue of a process
 // without them dropped (§6.2).
+
+// collapsedOf are the keys of holder kind gk that collapsed, without the kind.
+func collapsedOf(q *batchQueue, gk schema.GroupKind) []batchKey {
+	keys, _ := q.collapsedOf(gk)
+	return keys
+}
 
 // floodedRig is a rig on objs whose write loops don't run, with a flood in
 // namespace ns.
@@ -115,7 +123,7 @@ func TestTheFullListIsForAnOverflow(t *testing.T) {
 		}
 	}
 	stop = r.runWrites(t)
-	eventually(t, "the full list", func() bool { return r.fullLists() == 1 && len(r.s.queue.collapsedKeys(widgetGK)) == 0 })
+	eventually(t, "the full list", func() bool { return r.fullLists() == 1 && len(collapsedOf(r.s.queue, widgetGK)) == 0 })
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +154,7 @@ func TestTheFullListIsRetried(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.s.queue.collapsedKeys(widgetGK)) != 1 {
+	if len(collapsedOf(r.s.queue, widgetGK)) != 1 {
 		t.Fatal("the next write loops won't list: the collapse is forgotten")
 	}
 	r.runWrites(t)
@@ -176,7 +184,7 @@ func TestAKindThatCantBeListedInFullStopsNoOther(t *testing.T) {
 	if n := r.fullLists(); n != 1 {
 		t.Errorf("%d full lists of Secrets, want one", n)
 	}
-	if len(r.s.queue.collapsedKeys(widgetGK)) != 1 {
+	if len(collapsedOf(r.s.queue, widgetGK)) != 1 {
 		t.Error("the collapse is settled, and a kind wasn't listed")
 	}
 }
@@ -249,7 +257,7 @@ func TestTheBoundIsForAProcessWithoutWriteLoops(t *testing.T) {
 	if names, _, _ := waitingNames(q); names != 80100 {
 		t.Errorf("%d names wait while the loops run, want all 80,100", names)
 	}
-	if got := q.collapsedKeys(widgetGK); len(got) != 0 {
+	if got := collapsedOf(q, widgetGK); len(got) != 0 {
 		t.Errorf("%v collapsed while the loops run", got)
 	}
 	q.setDraining(false)
@@ -259,7 +267,7 @@ func TestTheBoundIsForAProcessWithoutWriteLoops(t *testing.T) {
 	if _, waits := q.pending[k][fillAll]; !waits {
 		t.Error("the list of the collapsed namespace doesn't wait")
 	}
-	if got := q.collapsedKeys(widgetGK); !slices.Equal(got, []batchKey{k}) || len(q.collapsedKeys(gadgetGK)) != 0 {
+	if got := collapsedOf(q, widgetGK); !slices.Equal(got, []batchKey{k}) || len(collapsedOf(q, gadgetGK)) != 0 {
 		t.Errorf("collapsed %v, want %v", got, k)
 	}
 	q.setDraining(true)
@@ -267,32 +275,43 @@ func TestTheBoundIsForAProcessWithoutWriteLoops(t *testing.T) {
 	if _, by, _ := waitingNames(q); by[k] != 1 {
 		t.Error("a name added while the loops run isn't kept, for a key that had collapsed")
 	}
-	q.settleCollapsed(k)
-	if len(q.collapsedKeys(widgetGK)) != 0 {
+	q.settleCollapsed(widgetGK, []batchKey{k}, false)
+	if len(collapsedOf(q, widgetGK)) != 0 {
 		t.Error("the collapse is remembered once it is made up for")
 	}
 }
 
-// The count of the names that wait is right whatever happens to them: taken, put
-// back, promoted, added again, collapsed, dropped, or lost with ShutDown.
+// counted checks that q counts what waits.
+func counted(t *testing.T, what string, q *batchQueue) {
+	t.Helper()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	names, bytes := 0, 0
+	for k, set := range q.pending {
+		own := 0
+		for id := range set {
+			if id != fillAll {
+				names++
+				own += costOf(id)
+			}
+		}
+		bytes += own
+		if q.lines[k] == nil || q.lines[k].bytes != own {
+			t.Errorf("%s: %+v counted for %v, want %d bytes", what, q.lines[k], k, own)
+		}
+	}
+	if q.names != names || q.bytes != bytes || len(q.lines) != len(q.pending) {
+		t.Errorf("%s: %d names and %d bytes counted, %d lines; want %d, %d and %d", what, q.names, q.bytes, len(q.lines), names, bytes, len(q.pending))
+	}
+}
+
+// The count of what waits is right whatever happens to it: taken, put back, promoted,
+// added again, collapsed, dropped, or lost with ShutDown.
 func TestTheCountOfWaitingNames(t *testing.T) {
 	ctx := context.Background()
 	q := newBatchQueue(testingclock.NewFakeClock(time.Now()))
 	k := batchKey{widgetGK, "ns"}
-	check := func(what string) {
-		t.Helper()
-		want, by, _ := waitingNames(q)
-		q.mu.Lock()
-		defer q.mu.Unlock()
-		if q.names != want {
-			t.Errorf("%s: %d names counted, want %d", what, q.names, want)
-		}
-		for k, ls := range q.lines {
-			if ls.names != by[k] {
-				t.Errorf("%s: %d names counted for %v, want %d", what, ls.names, k, by[k])
-			}
-		}
-	}
+	check := func(what string) { t.Helper(); counted(t, what, q) }
 	names := someIDs("ns", "s", 3000)
 	q.Add(k, names...)
 	check("added")
@@ -323,15 +342,191 @@ func TestTheCountOfWaitingNames(t *testing.T) {
 		check("a flood")
 	}
 	q.Add(k, names...)
-	check("dropped")
 	q.AddHeld(k, names[0])
-	check("held, of a collapsed key")
+	check("dropped, of a collapsed key")
+	q.max.keys = 2
+	for _, ns := range []string{"a", "b", "c"} {
+		q.Add(batchKey{gadgetGK, ns}, names[0])
+		check("a kind's collapse")
+	}
+	q.setDraining(true)
+	q.Add(k, names...)
+	q.Fail(k, names[0], secretID("ns", "failed"))
+	q.AddAt(k, time.Now().Add(time.Hour), secretID("ns", "asked"))
+	check("failed and asked for")
+	q.setDraining(false)
+	check("the loops' end")
 	q.ShutDown()
 	check("shut down")
 }
 
-// A PerName kind isn't listed, which its RBAC would refuse: the index names all that
-// is held, whatever its labels.
+// The end of the write loops leaves no timer for a retry or a time, and no failure:
+// what they were for waits, as known as it was.
+func TestTheLoopsEndLeavesNoRetries(t *testing.T) {
+	clk := testingclock.NewFakeClock(time.Now())
+	q := newBatchQueue(nil)
+	q.clock = &unlockedClock{FakeClock: clk, t: t, q: q}
+	k, a, b, c := batchKey{widgetGK, "ns"}, secretID("ns", "a"), secretID("ns", "b"), secretID("ns", "c")
+	q.setDraining(true)
+	q.AddHeld(k, a)
+	_, _, _ = q.Get(context.Background())
+	q.Fail(k, a, b)
+	q.AddAt(k, clk.Now().Add(time.Hour), c)
+	q.AddAfter(k, time.Hour, secretID("ns", "grace"))
+	q.Done(k)
+	q.setDraining(false)
+	if len(q.failing)+len(q.asked) != 0 || len(q.timers) != 1 {
+		t.Errorf("%d keys with failures, %d times asked for, %d timers; want none, and the grace's timer", len(q.failing), len(q.asked), len(q.timers))
+	}
+	for id, held := range map[ID]bool{a: true, b: false, c: true} {
+		if p, waits := q.pending[k][id]; !waits || p.held != held {
+			t.Errorf("%s waits %v, known %v; want it to wait, known %v", id, waits, p.held, held)
+		}
+	}
+	counted(t, "the loops' end", q)
+	clk.Step(30 * time.Minute)
+	if got := len(q.pending[k]); got != 3 {
+		t.Errorf("%d wait once the retries' times passed, want the three", got)
+	}
+}
+
+// Every order of adding to three keys of two kinds, in either line, of taking a batch
+// and giving it back or not, and of the write loops' start and end, with a bound of
+// two names and two keys: the counts are right; the bound holds without the loops;
+// and nothing is lost but what a collapse dropped, which is remembered.
+func TestTheBoundInEveryOrder(t *testing.T) {
+	keys := map[string]batchKey{"A": {widgetGK, "a"}, "B": {widgetGK, "b"}, "C": {gadgetGK, "c"}}
+	for _, spec := range []string{
+		"add:A1 add:A2 held:A3 add:B1 get1 loops ends",
+		"add:A1 held:B1 add:C1 add:C2 get1 back1 loops ends",
+		"held:A1 held:A2 add:A3 add:B1 add:C1 loops get1 ends",
+		"add:A1 add:A1 held:A1 add:A2 loops ends get1 back1",
+	} {
+		orders := permutations(ops(spec), func(seq []enumOp) {
+			q := newBatchQueue(testingclock.NewFakeClock(time.Now()))
+			q.max = queueMax{names: 2, bytes: 1 << 20, keys: 2}
+			owed := map[batchKey]map[ID]bool{}
+			var held batchKey
+			var has []ID
+			name := ""
+			for _, o := range seq {
+				name += " " + o.String()
+				k := keys[o.key]
+				switch o.kind {
+				case "add", "held":
+					id := secretID(k.Namespace, o.id)
+					if o.kind == "add" {
+						q.Add(k, id)
+					} else {
+						q.AddHeld(k, id)
+					}
+					if owed[k] == nil {
+						owed[k] = map[ID]bool{}
+					}
+					owed[k][id] = true
+				case "loops":
+					q.setDraining(true)
+				case "ends":
+					q.setDraining(false)
+				case "get":
+					if has == nil && q.Len() > 0 {
+						held, has, _ = q.Get(context.Background())
+						for _, id := range has {
+							delete(owed[held], id)
+						}
+					}
+				case "back":
+					if has != nil {
+						q.PutBack(held, has...)
+						for _, id := range has {
+							if owed[held] == nil {
+								owed[held] = map[ID]bool{}
+							}
+							if id != fillAll {
+								owed[held][id] = true
+							}
+						}
+					}
+				case "done":
+					if has != nil {
+						q.Done(held)
+						has = nil
+					}
+				}
+				counted(t, name, q)
+				// What a worker puts back isn't kept out: it does so while they run.
+				if !q.draining && o.kind != "back" && !strings.Contains(name, "back") && (q.names > 2 || len(q.pending) > 2) {
+					t.Fatalf("%s: %d names of %d keys wait without the write loops, want two of each at most", name, q.names, len(q.pending))
+				}
+				for k, ids := range owed {
+					for id := range ids {
+						if _, waits := q.pending[k][id]; !waits && !q.collapsed[k] && !q.kinds[k.Holder] {
+							t.Fatalf("%s: %s of %v neither waits nor was dropped", name, id, k)
+						}
+					}
+				}
+				for k := range q.collapsed {
+					if _, waits := q.pending[k][fillAll]; !waits && !slices.Contains(has, fillAll) && !strings.Contains(name, "get") {
+						t.Fatalf("%s: %v collapsed, and its namespace's list doesn't wait", name, k)
+					}
+				}
+			}
+		})
+		t.Logf("%s: %d orders", spec, orders)
+	}
+}
+
+// The full list, which a flood causes and its size delays, is made after everything
+// else of the recheck, of any kind.
+func TestTheFullListIsMadeLast(t *testing.T) {
+	r := floodedRig(t, SharedOptions{Namespaces: []string{"in"}}, "ns", namespaceObject("ns"), namespaceObject("in"))
+	parts := r.s.recheckParts(r.s.trackerList())
+	for i, p := range parts {
+		if n := r.fullLists(); n != 0 {
+			t.Errorf("part %d of %d comes after the full list", i+1, len(parts))
+		}
+		if err := p.run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := r.fullLists(); n != 1 {
+		t.Errorf("%d full lists, want one", n)
+	}
+}
+
+// A holder kind that collapsed as a whole, with more keys than are kept, is made up for
+// in every namespace: a hold whose labels were stripped, and what a record names.
+func TestAnElectionAfterAKindsCollapse(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"), unlabelled(heldObject(secretGVK, "ns", "s", "u", widgetGK, "ns")), holderObject("ns", "h", secretID("ns", "missing")))
+	l := r.log()
+	r.track(t, widgetGK)
+	r.run(t)
+	eventually(t, "the record's name", func() bool { return len(r.queued(widgetGK, "ns")) == 1 })
+	for i := range standbyMax.keys + 1 {
+		ns := fmt.Sprintf("forged%d", i)
+		r.s.queue.AddHeld(batchKey{widgetGK, ns}, secretID("ns", "s"))
+	}
+	if keys, all := r.s.queue.collapsedOf(widgetGK); !all || len(keys) != 0 || r.s.queue.Len() != 0 {
+		t.Fatalf("%v collapsed, the kind %v, with %d batches; want the kind, and nothing to wait", keys, all, r.s.queue.Len())
+	}
+	r.s.queue.Add(batchKey{widgetGK, "ns"}, secretID("ns", "s"))
+	r.s.queue.Add(batchKey{widgetGK, "ns"})
+	if n := r.s.queue.Len(); n != 0 {
+		t.Fatalf("%d batches of the collapsed kind wait", n)
+	}
+	r.runWrites(t)
+	releasedStepping(t, r, "the hold to be released", func() bool { return !hasFinalizer(r.secretMeta(t, "ns", "s"), fWidgetNS) })
+	var got []ID
+	eventually(t, "what the record names to be read", func() bool {
+		got = append(got, l.take()...)
+		return slices.Contains(got, secretID("ns", "missing"))
+	})
+	eventually(t, "the collapse to be settled", func() bool { _, all := r.s.queue.collapsedOf(widgetGK); return !all })
+}
+
+// A PerName kind isn't listed, which its RBAC would refuse. (That the index names all
+// that is held, whatever its labels, is the envtest's,
+// TestAnElectionAfterAFloodReleasesWhatTheIndexNames.)
 func TestAPerNameKindIsntListedAfterAFlood(t *testing.T) {
 	r := newFakeRig(t, namespaceObject("ns"))
 	tr := r.track(t, widgetGK)
@@ -343,7 +538,7 @@ func TestAPerNameKindIsntListedAfterAFlood(t *testing.T) {
 	if !ok {
 		t.Fatal("nothing to make up for")
 	}
-	if err := p.run(context.Background()); err != nil || r.fullLists() != 0 || len(r.s.queue.collapsedKeys(widgetGK)) != 0 {
-		t.Errorf("%v, %d full lists, and %v still collapsed; want none of them", err, r.fullLists(), r.s.queue.collapsedKeys(widgetGK))
+	if err := p.run(context.Background()); err != nil || r.fullLists() != 0 || len(collapsedOf(r.s.queue, widgetGK)) != 0 {
+		t.Errorf("%v, %d full lists, and %v still collapsed; want none of them", err, r.fullLists(), collapsedOf(r.s.queue, widgetGK))
 	}
 }

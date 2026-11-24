@@ -94,6 +94,7 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		s.mu.Unlock()
 		return errWriteLoopsRunning
 	}
+	s.queue.setDraining(true) // before a Track can see that they run
 	s.writeCtx = ctx
 	trackers := make([]*Tracker, 0, len(s.trackers))
 	for _, t := range s.trackers {
@@ -101,7 +102,6 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		t.startQuiet()
 	}
 	s.mu.Unlock()
-	s.queue.setDraining(true)
 	defer func() {
 		// Ending ctx under mu stops endTracking from starting a recheck
 		// (it adds to writeWG only under mu while ctx is live), so the Wait

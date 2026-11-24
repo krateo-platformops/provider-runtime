@@ -324,8 +324,8 @@ func (s *Shared) landingMargin() time.Duration {
 }
 
 // NewShared builds the process-wide state. It creates the batch queue before
-// any informer starts, so that it buffers and deduplicates from the first
-// event (M1 of the review of revision 16).
+// any informer starts, so that it buffers, within a bound, and deduplicates from
+// the first event (M1 of the review of revision 16).
 func NewShared(c Clients, o SharedOptions) *Shared {
 	return newShared(c, o, clock.RealClock{})
 }
