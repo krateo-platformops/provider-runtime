@@ -1716,41 +1716,87 @@ func TestARecordChangesReads(t *testing.T) {
 	}
 }
 
-// TestTheGatesDropsReads: the gate drops at most maxGateReads withdrawn refs a
-// pass, and each A1 that does is a change of the record: its batch reads all
-// the names there were (§11.3).
+// TestTheGatesDropsReads: each A1 of the gate that drops withdrawn refs is a
+// change of the record, and its batch reads all the names there were, outside
+// the caches. All the refs that the gate asks about share a pass's reads, so a
+// few withdrawn ones may go one a pass (§11.3).
 func TestTheGatesDropsReads(t *testing.T) {
-	const w = 40
 	ctx := context.Background()
-	ids := manySecrets("other", w)
-	objs := []runtime.Object{namespaceObject("ns"), namespaceObject("other"), holderObject("ns", "h", ids...)}
-	for _, id := range ids {
-		objs = append(objs, plainSecret("other", id.Name)) // without consent
+	for name, tc := range map[string]struct {
+		names int
+		// withdrawn is which of them exist, without consent; the others don't.
+		withdrawn func(i int) bool
+		drops     []int // by pass
+	}{
+		"all withdrawn":       {40, func(int) bool { return true }, []int{16, 16, 8}},
+		"one withdrawn in 16": {48, func(i int) bool { return i%16 == 0 }, []int{1, 1, 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ids := manySecrets("other", tc.names)
+			objs := []runtime.Object{namespaceObject("ns"), namespaceObject("other"), holderObject("ns", "h", ids...)}
+			for i, id := range ids {
+				if tc.withdrawn(i) {
+					objs = append(objs, plainSecret("other", id.Name))
+				}
+			}
+			r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"ns"}}, objs...)
+			o := r.options(widgetGK)
+			o.Refs = func(metav1.Object) ([]Ref, error) { return nil, errors.New("no refs") }
+			tr, err := r.s.Track(ctx, o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.run(t)
+			r.drain()
+			names := tc.names
+			for pass, want := range tc.drops {
+				obj, err := r.md.Tracker().Get(widgetsGVR, "ns", "h")
+				if err != nil {
+					t.Fatal(err)
+				}
+				a, err := tr.Acquire(ctx, obj.(*metav1.PartialObjectMetadata).DeepCopy())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(a.Unheld) != want {
+					t.Fatalf("pass %d, of %d names, dropped %d, want %d", pass, names, len(a.Unheld), want)
+				}
+				eventually(t, "the batch of the record's change", func() bool { return r.queued(widgetGK, "ns") != nil })
+				if n := r.secretGets(t, tr, true); n != names {
+					t.Errorf("pass %d: %d GETs by the batch of a record of %d names, want one of each", pass, n, names)
+				}
+				names -= want
+			}
+		})
 	}
-	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"ns"}}, objs...)
-	o := r.options(widgetGK)
-	o.Refs = func(metav1.Object) ([]Ref, error) { return nil, errors.New("no refs") }
-	tr, err := r.s.Track(ctx, o)
-	if err != nil {
-		t.Fatal(err)
-	}
+}
+
+// TestABatchThatFailsReadsAllAgain: a batch that fails at one name is retried
+// whole, for as long as it fails, so a record that names one that can't be
+// read costs its other names' GETs at every retry (§11.3).
+func TestABatchThatFailsReadsAllAgain(t *testing.T) {
+	const m = 20
+	r := newFakeRigWith(t, SharedOptions{}, namespaceObject("ns"), namespaceObject("other"))
+	bad := SecretRef("other", "refused").ID()
+	r.md.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if a.(clienttesting.GetAction).GetName() == bad.Name {
+			return true, nil, apierrors.NewForbidden(a.GetResource().GroupResource(), bad.Name, errors.New("no"))
+		}
+		return false, nil, nil
+	})
+	tr := r.track(t, widgetGK)
 	r.run(t)
 	r.drain()
-	for _, names := range []int{w, w - maxGateReads, w - 2*maxGateReads} {
-		obj, err := r.md.Tracker().Get(widgetsGVR, "ns", "h")
-		if err != nil {
-			t.Fatal(err)
+	forged := manySecrets("other", m)
+	holderHandler{tr}.OnUpdate(holderObject("ns", "h"), holderObject("ns", "h", append(slices.Clone(forged), bad)...))
+	for try := range 3 {
+		if n := r.secretGets(t, tr, true); n != m+1 {
+			t.Errorf("try %d: %d GETs, want all %d names'", try, n, m+1)
 		}
-		a, err := tr.Acquire(ctx, obj.(*metav1.PartialObjectMetadata).DeepCopy())
-		if err != nil {
-			t.Fatal(err)
+		if n := r.queueTimers(); n != 1 {
+			t.Fatalf("try %d: %d retries wait, want one", try, n)
 		}
-		if want := min(names, maxGateReads); len(a.Unheld) != want {
-			t.Fatalf("of %d names, the pass dropped %d, want %d", names, len(a.Unheld), want)
-		}
-		eventually(t, "the batch of the record's change", func() bool { return r.queued(widgetGK, "ns") != nil })
-		if n := r.secretGets(t, tr, true); n != names {
-			t.Errorf("%d GETs by the batch of a pass that found %d names, want one of each", n, names)
-		}
+		r.clk.Step(releaseBackoffMax)
+		eventually(t, "the retry", func() bool { return r.s.queue.Len() == 1 })
 	}
 }

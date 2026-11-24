@@ -104,19 +104,36 @@ func (f *forgedReads) count(name string) {
 	}
 }
 
-// most is the most GETs that the gate made in one pass, and passes how many
-// passes of it made any; releases is how many the release loop made, of names
-// names, and others who else made how many.
-func (f *forgedReads) most() (most, passes, releases, names int, others map[string]int) {
+// byGate is the most GETs that the gate made in one pass, and how many passes
+// made any.
+func (f *forgedReads) byGate() (most, passes int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, n := range f.gate {
 		most = max(most, n)
 	}
+	return most, len(f.gate)
+}
+
+// byRelease is how many names the release loop read, and how often it read
+// the one that it read the least, and the most.
+func (f *forgedReads) byRelease() (names, least, most int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, n := range f.release {
-		releases += n
+		if least == 0 || n < least {
+			least = n
+		}
+		most = max(most, n)
 	}
-	return most, len(f.gate), releases, len(f.release), maps.Clone(f.others)
+	return len(f.release), least, most
+}
+
+// byOthers is who else made how many.
+func (f *forgedReads) byOthers() map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.others)
 }
 
 // The callers that readerOf tells apart.
@@ -438,7 +455,13 @@ func TestAForgedRecordsReads(t *testing.T) {
 		}, change: perName, forged: 100},
 	} {
 		t.Run(name, func(t *testing.T) {
-			k := newKeptWorldWith(t, tc.so(t), tc.change)
+			logs := &warnLog{}
+			k := newKeptWorldWith(t, tc.so(t), func(o *cu.Options) {
+				o.Logger = logs
+				if tc.change != nil {
+					tc.change(o)
+				}
+			})
 			k.name(t, map[string]any{"refsError": true})
 			k.passes(t, 2)
 			ids := []cu.ID{cu.SecretRef(k.other, "x").ID()}
@@ -455,30 +478,34 @@ func TestAForgedRecordsReads(t *testing.T) {
 			released := func(changes int) {
 				t.Helper()
 				cutest.Eventually(t, time.Minute, func() error {
-					if _, _, n, _, _ := k.forged.most(); n < changes*tc.forged {
-						return fmt.Errorf("the release loop has made %d GETs of %d names for %d changes of the record: %w", n, tc.forged, changes, cutest.ErrNotYet)
+					if names, least, _ := k.forged.byRelease(); names < tc.forged || least < changes {
+						return fmt.Errorf("the release loop has read %d names of %d, each %d times or more, for %d changes of the record: %w", names, tc.forged, least, changes, cutest.ErrNotYet)
 					}
 					return nil
 				})
 			}
 			check := func(changes int) {
 				t.Helper()
-				most, passes, releases, names, others := k.forged.most()
-				t.Logf("the gate: at most %d GETs of forged refs a pass, in %d passes; the release loop: %d, of %d names, for %d changes of the record", most, passes, releases, names, changes)
+				most, passes := k.forged.byGate()
+				names, least, oftenest := k.forged.byRelease()
+				t.Logf("the gate: at most %d GETs of forged refs a pass, in %d passes; the release loop: %d names, each from %d to %d times, for %d changes of the record", most, passes, names, least, oftenest, changes)
 				if most > tc.perPass {
 					t.Errorf("the gate made %d GETs of forged refs in one pass, want at most %d", most, tc.perPass)
 				}
-				if releases > changes*tc.forged {
-					t.Errorf("the release loop made %d GETs of %d forged refs, want at most one of each for each of %d changes of the record", releases, tc.forged, changes)
+				if names != tc.forged || oftenest > changes {
+					// A batch that fails at one object is retried whole, as by a
+					// 5xx, and reads them all again.
+					t.Errorf("the release loop read %d forged names, one of them %d times, want %d, each once for each of %d changes of the record; batches that failed, and were retried: %q",
+						names, oftenest, tc.forged, changes, logs.matching("a release batch failed"))
 				}
-				if len(others) > 0 {
+				if others := k.forged.byOthers(); len(others) > 0 {
 					t.Errorf("GETs of forged refs by others: %v", others)
 				}
 			}
 			released(1)
 			k.passes(t, 7)
 			check(1)
-			if most, _, _, _, _ := k.forged.most(); tc.perPass > 0 && most == 0 {
+			if most, _ := k.forged.byGate(); tc.perPass > 0 && most == 0 {
 				t.Error("no GETs where no cache covers them: the case reads nothing")
 			}
 			if !k.recorded(t) {

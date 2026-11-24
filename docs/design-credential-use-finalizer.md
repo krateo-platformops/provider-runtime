@@ -3347,16 +3347,34 @@ process that runs the write loops makes a GET of each of the others, one after
 the other, where the caches cover them too: it grows with the record, 4,000 for
 a change that puts 4,000 such names there, and 8,000 for one that replaces them
 all. The changes that come while a batch waits cost one batch together, of
-every name of all of them. It was so before the gate, and what is to bound it is
-the release loop's own: a batch in bounded turns, apart from this.
+every name of all of them. 4,000 GETs in a row, at about 2ms each (against an
+envtest, 2026-11-24), hold one of the two workers for 8s, and for longer where
+the client's rate limit is lower; beside R0's own work, which grows with the
+square of the names.
+
+**That is once only where each GET is answered, and nothing asks for the batch
+again.** A batch that fails at one object is retried whole, after 1s, doubling
+up to 5 minutes, for as long as it fails, and whatever the record says by then;
+a restart forgets it, and reads the names that the records have then. Whoever
+writes the record can name what always fails: a kind that can't be mapped, or an
+object outside a `resourceNames` grant. A batch that waits for the grace of one of its objects,
+or that restored an epoch, runs whole again too. So a change may cost m GETs
+every 5 minutes.
+
+It was so before the gate, and it is the release loop's to bound, in changes
+apart from this: a retry of what failed or asked for it, and no more, and
+batches in bounded turns.
 
 **The gate adds to it:** an A1 that drops refs is a change of the record. Its
 batch has the names of the one holder's record as it was, which the new one's
 are among, and whatever else waits for that (K, N). So dropping one ref of m
-costs up to m GETs, which any drop did, and w withdrawn refs that a pass doesn't
-name, dropped 16 a pass, cost up to ⌈w/16⌉ such batches. Each of the w is an
-object that exists, and that a cache has without consent, or that no cache
-covers.
+costs up to m GETs, which any drop did, and the gate may drop them over many
+passes. All the refs that it asks about share a pass's 16 reads, those that the
+pass names and those it doesn't, withdrawn or not: of m, w of them withdrawn, the
+drops cost at most w such batches, as each drops one or more, and in passes that
+aren't cut at most ⌈m/16⌉, and one for what a pass drops among the refs it names
+itself. Each of the w is an object that exists, and that a cache has without
+consent, or that no cache covers.
 
 **What remains.** Where no cache covers the target (outside
 `SharedOptions.Namespaces`, §10.5), there is no cached yes, so an honest
