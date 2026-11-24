@@ -541,6 +541,16 @@ func TestAuditReads(t *testing.T) {
 			h3(b)
 			b.writes[len(b.writes)-1].answer = answerMarked
 		}, []string{findIncomplete, findLostRead, findUnexplainedRemoval}},
+		{"the DELETE's answer was lost", func(b *auditRun) {
+			h3(b)
+			w := &b.writes[len(b.writes)-1]
+			w.answer, w.uid, w.err = answerUnknown, "", "connection reset"
+		}, []string{findIncomplete, findLostRead, findUnexplainedRemoval}},
+		{"the DELETE's answer was lost, and the client's own retry was answered NotFound", func(b *auditRun) {
+			h3(b)
+			w := &b.writes[len(b.writes)-1]
+			w.answer, w.uid = answerNotFound, ""
+		}, []string{findLostRead, findUnexplainedRemoval}},
 		{"no DELETE", func(b *auditRun) {
 			h3(b)
 			b.writes = b.writes[:len(b.writes)-1]

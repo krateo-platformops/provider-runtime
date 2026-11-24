@@ -438,8 +438,12 @@ func patchOf(pt types.PatchType, data []byte) stCall {
 	return c
 }
 
-// deleteObject makes one of the test's DELETEs, and records what the API
-// server answered: the typed clients drop it.
+// deleteObject makes one of the test's DELETEs, through a client of the
+// test's, and records what the API server answered: the typed clients drop
+// it. Every DELETE of a Secret or a Target in the stress is made here. An
+// answer that is lost names no incarnation, so it exempts nothing: its
+// outcome is unknown, which fails the run; and one that client-go retried
+// by itself is answered NotFound, which leaves the removal unexplained.
 func (r *stressRecorder) deleteObject(ctx context.Context, o stObj) error {
 	gvr := recordedKinds[o.kind]
 	path := "/api/" + gvr.Version

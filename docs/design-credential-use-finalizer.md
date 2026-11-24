@@ -6003,6 +6003,8 @@ failure that the API server had caused (H3 below). Now:
   began before its first hold could be seen; and no release of that name that
   succeeded, or whose outcome isn't known, overlaps its life. Nothing is
   exempt by the error's text, or by how the holder is when it is read again.
+  A DELETE whose answer is lost names no incarnation, so it exempts nothing,
+  and fails the run by itself.
 - **On a failure it prints** what it found, and the timeline around it:
   versions, calls, passes, releases and DELETEs.
 
