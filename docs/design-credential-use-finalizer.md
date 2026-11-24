@@ -876,8 +876,11 @@ tested on the queue by enumeration and on the loop. A time a batch asks for, a
 grace's end or a repaired epoch's recheck, is for the object that asked, each at
 its own time, not for the rest of the batch, and waits for no backoff. An object
 whose release must wait (R1, §6.4) is neither decided nor failed: it is queued
-again when its wait ends, and its backoff stays as it was. The log line of a
-failed batch has the first few errors, and how many more there are.
+again when its wait ends, and its backoff stays as it was. What is logged of a
+failed batch is one line for each turn (below) that fails at something, with how
+many objects that is, the first few errors, and how many more there are: 500 names
+that all fail are 8 lines, each time they are retried, and a line is about 2 KB at
+most.
 
 **A batch is a turn of its key.** Whoever can edit a holder's record decides how
 many objects wait in its (K, N), and must not decide how long the other keys'

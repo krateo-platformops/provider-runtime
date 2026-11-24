@@ -1760,7 +1760,8 @@ func TestAnErrorThatNamesNoObjectBacksOff(t *testing.T) {
 	}
 }
 
-// A batch that fails at many objects says how many, and why the first few did.
+// A batch that fails at many objects says how many, and why the first few did, in
+// each of its turns.
 func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	ctx := context.Background()
 	r, k := outside(t)
@@ -1777,14 +1778,31 @@ func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	for i := range 500 {
 		ids = append(ids, secretID("out", fmt.Sprintf("a-name-of-some-length-%03d", i)))
 	}
-	r.s.releaseBatch(ctx, k, ids)
+	// One line a turn, of 64 objects at most.
+	r.s.queue.Add(k, ids...)
+	turns := 0
+	for range ids {
+		if _, ok := r.turn(ctx); !ok {
+			break
+		}
+		turns++
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.got) != 1 || len(w.got[0]) > 4096 || !strings.Contains(w.got[0], "500") || !strings.Contains(w.got[0], "a-name-of-some-length-000") || strings.Contains(w.got[0], "a-name-of-some-length-400") {
-		t.Errorf("%d warnings, the first of %d bytes; want one, of 500 objects, with the first few errors", len(w.got), len(strings.Join(w.got, "")))
+	if turns != 8 || len(w.got) != 8 {
+		t.Fatalf("%d warnings in %d turns, want one in each of 8", len(w.got), turns)
 	}
-	if !strings.Contains(w.got[0], "and 497 more") {
-		t.Errorf("%q doesn't say how many more there are", w.got[0])
+	for i, line := range w.got {
+		objects, more := 64, 61
+		if i == 7 {
+			objects, more = 52, 49
+		}
+		if len(line) > 4096 || !strings.Contains(line, fmt.Sprintf("objects %d ", objects)) || !strings.Contains(line, fmt.Sprintf("a-name-of-some-length-%03d", 64*i)) || strings.Contains(line, fmt.Sprintf("a-name-of-some-length-%03d", 64*i+40)) {
+			t.Errorf("warning %d of %d bytes: %q; want it of %d objects, with the first few errors", i, len(line), line, objects)
+		}
+		if !strings.Contains(line, fmt.Sprintf("and %d more", more)) {
+			t.Errorf("%q doesn't say how many more there are", line)
+		}
 	}
 	if got := errorSample(errors.New(strings.Repeat("é", 5000))); len(got) > maxLoggedBytes+3 || !strings.HasSuffix(got, "é...") {
 		t.Errorf("a long error is cut to %d bytes, ending %q", len(got), got[max(0, len(got)-8):])
