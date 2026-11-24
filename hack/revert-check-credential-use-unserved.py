@@ -49,7 +49,7 @@ MUTANTS = [
     ("a cluster-scoped object is NotFound", SV,
      [('\treturn (namespace != "") == namespaced && ', '\treturn namespace != "" && (namespace != "") == namespaced && ')]),
     ("a list without a namespace is NotFound", SV,
-     [("\tc := s.client(gvr, namespaced, namespace)\n\tvar out", "\tc, err := s.object(gk, namespace, \"x\")\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tvar out")]),
+     [("\tc := s.client(gvr, namespaced, namespace)\n\tvar out", "\tif namespaced && namespace == \"\" {\n\t\treturn nil, apierrors.NewNotFound(gvr.GroupResource(), \"x\")\n\t}\n\tc := s.client(gvr, namespaced, namespace)\n\tvar out")]),
     ("content without its namespace is asked for", CH,
      [("\tif !mayExist(namespaced, namespace, name) {", "\tif !mayExist(namespaced, namespace, name) && namespace != \"\" {")]),
     ("cluster-scoped content is NotFound", CH,
