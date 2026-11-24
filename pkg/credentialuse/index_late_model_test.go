@@ -158,6 +158,19 @@ type lateCase struct {
 	unnamed bool
 }
 
+// lateChecks reports whether the sender makes its late check.
+func (c lateCase) lateChecks() bool { return c.lost && !c.killedBeforeCheck && !c.killedWithinMargin }
+
+// preemptions is the bound c is searched within: 3, and 2 with the late check
+// and its batch racing a holder that goes, whose schedules with 3 are past
+// 2,000,000.
+func (c lateCase) preemptions() int {
+	if c.lateChecks() && c.unnamed {
+		return 2
+	}
+	return 3
+}
+
 // senderServer is the sender's server: a lost A2 is sent, and lands when the
 // network actor delivers it.
 type senderServer struct {
@@ -203,7 +216,7 @@ func (l senderLines) unknownA2(ctx context.Context, id ID, n string) {
 func exploreLate(t *testing.T, c lateCase) (violations int, sample string, pruned int) {
 	t.Helper()
 	p := SecretRef("ns", "s").ID()
-	res := apimodel.Explore(apimodel.Bounds{Preemptions: 3, MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
+	res := apimodel.Explore(apimodel.Bounds{Preemptions: c.preemptions(), MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
 		var log []string
 		m := apimodel.New(s.Clock.Now)
 		seed(m, "ns", "s", nil, false)
@@ -273,7 +286,7 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 			})
 			batch(a, "rel")
 		})
-		if c.lost && !c.killedBeforeCheck && !c.killedWithinMargin {
+		if c.lateChecks() {
 			// The late check: the landing margin is over, by when the A2 has
 			// landed, or not.
 			s.Go("late", 0, func(a *apimodel.Actor) {
@@ -316,7 +329,7 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 	if !res.Finished {
 		t.Errorf("the search didn't finish: %d runs", res.Runs)
 	}
-	t.Logf("%+v: %d schedules, %d with the line taken before the landing, %d held without a line", c, res.Runs, pruned, violations)
+	t.Logf("%+v: %d preemptions, %d schedules, %d with the line taken before the landing, %d held without a line", c, c.preemptions(), res.Runs, pruned, violations)
 	return violations, sample, pruned
 }
 
@@ -325,7 +338,7 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 // after its A2, in either of two ways; its late check doesn't see the
 // landing, in either of two ways; and a prune takes the line before the
 // landing. With all three, a hold without its line is reached; with any one
-// off, none is, on any schedule.
+// off, none is, on any schedule within each case's bound (preemptions).
 func TestModelLateHold(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
@@ -355,8 +368,12 @@ func TestModelLateHold(t *testing.T) {
 	}
 	for name, c := range safe {
 		t.Run("one off/"+name, func(t *testing.T) {
-			if n, sample, _ := exploreLate(t, c); n != 0 {
+			n, sample, pruned := exploreLate(t, c)
+			if n != 0 {
 				t.Errorf("a hold without its line in %d schedules: %s", n, sample)
+			}
+			if c.unnamed && pruned == 0 {
+				t.Error("no schedule has the line taken before the landing: the other rules weren't needed")
 			}
 		})
 	}
