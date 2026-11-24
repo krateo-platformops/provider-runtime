@@ -19,10 +19,10 @@ import (
 // added meanwhile, every object is read within a number of turns that what was
 // queued before it bounds.
 
-// readIn runs up to max turns of k, with before each of them, until one reads
+// readIn runs up to most turns, with before each of them, until one reads
 // id, and returns which did, from 1, or 0.
-func readIn(r *fakeRig, l *costLog, id ID, max int, before func(turn int)) int {
-	for turn := 1; turn <= max; turn++ {
+func readIn(r *fakeRig, l *costLog, id ID, most int, before func(turn int)) int {
+	for turn := 1; turn <= most; turn++ {
 		before(turn)
 		l.take()
 		if _, ok := r.turn(context.Background()); !ok {

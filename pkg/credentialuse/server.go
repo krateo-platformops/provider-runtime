@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -26,6 +27,8 @@ type clientServer struct {
 	mapper meta.RESTMapper
 	// holder is a tracker's holder kind, at its declared version (§6.2).
 	holder schema.GroupVersionKind
+	// pageTime, if set, replaces listPageTime.
+	pageTime time.Duration
 }
 
 var _ server = clientServer{}
