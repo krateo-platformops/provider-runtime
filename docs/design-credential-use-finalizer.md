@@ -1403,26 +1403,46 @@ the evidence: the GET is.
 - *Not the mapper.* controller-runtime's doesn't look again at a kind it knows
   (§6.2); one that did would have given the list the new resource. A mapper that
   finds K under another resource is a veto too, and costs no request.
-- *The group's own document, not the list of groups:* just after a CRD is
-  established the API server serves its objects and this document, through the
-  CRD's own handlers, before it has the group's APIService, which the list is
-  made of (kube-aggregator v1.36.4, `handler_apis.go`, read at its source).
+- *The group's own document, not the list of groups:* just after a group's
+  **first** CRD is established the API server serves its objects and this
+  document, through the CRD's own handlers, before it has the group's
+  APIService, which the list is made of (kube-aggregator v1.36.4,
+  `handler_apis.go`; seen through a summary of the source). A group that has an
+  APIService is the aggregator's in both, so a **version** that comes later to
+  it isn't there before its own APIService: a group whose kinds come with
+  versions of their own has that gap. N's `Track` needs the kind in its mapper,
+  and so in some API server's discovery, before N's first A2, which leaves O
+  an API server that lags behind N's: the third limit below.
 - *An aggregated API server* in K's group is asked through the API server: one
   that serves K vetoes, and one that is down answers 503, which keeps the holds
   for as long as it lasts (the aggregator lists a group's versions whether or not
   they are available). A partial failure of discovery elsewhere doesn't matter:
   no other group is read. One that hangs costs a release worker 10s at most for
   each round (`discoveryTimeout`).
-- *The cost* is one GET and one for each of the group's versions, for a round
-  that found the CRD gone, and nothing otherwise.
+- *The cost* is one GET and one for each of the group's versions, one after
+  another, for a round that found the CRD gone, and nothing otherwise. It is per
+  batch, so per (K, N): with 30 versions and holders in 50 namespaces, one CRD's
+  deletion is about 1,550 GETs. A client with a rate limit may not finish a
+  large group within the 10s; the batch is then retried. And a discovery that
+  hangs holds one of the two release workers for 10s for each key of K, so that
+  every kind's releases wait. The answer isn't shared between batches: that
+  would be state in a path that decides a release, to save reads on a rare
+  event.
 - *Just after the CRD goes*, discovery may still show it, or a version it no
-  longer serves may be a 404: the batch is retried once or twice, 1s and 2s
-  later.
+  longer serves may be a 404: the batch is retried, 1s and then 2s later for a
+  key that hadn't failed before. One that had, its CRD being there, is at its
+  backoff, of up to 5 minutes. The error says that discovery still shows the
+  resource, and asks for no restart, which would leave the hold for good: a new
+  process can't track the kind (§7.3).
 - *The client* is `Clients.Discovery`, a REST client and not a discovery client,
   so that a caching one can't answer for the API server. provider-runtime sets
   it. Without it no kind is ever taken for gone: the holds stay, and the error
   says so. Neither the metadata nor the dynamic client can read a document that
   isn't an object's.
+- *A 404 of the group's* isn't checked for its form, as the CRD's GET is: the API
+  server's own is plain text, so it can't be. Something in front of the API
+  server that doesn't pass `/apis/<group>` would be taken for a group that isn't
+  served; it would have had to pass the CRD's GET, whose 404 is checked.
 - *RBAC:* `get` on the non-resource URLs `/apis/*`, which `system:discovery`
   grants to every authenticated user, unless a cluster has removed that binding.
   Without it the holds stay, and the error says what to grant (§13).
@@ -1437,7 +1457,7 @@ two as well.
 |---|---|---|
 | Instances left behind a CRD that is gone | Its cleanup finalizer was stripped by hand, or it was deleted while not established: the cleanup deletes instances only of an established CRD (`apiextensions-apiserver@v0.37.2/pkg/controller/finalizer/crd_finalizer.go:144-170`). Nobody can read them. If the CRD returns, they do, and each one's next pass holds P again | Don't strip `customresourcecleanup.apiextensions.k8s.io`. Delete the holders first |
 | An instance a stale API server creates after the cleanup's last check | Several API servers, one of them behind by more than the cleanup: its own source has a TODO for it (`crd_finalizer.go:235`). The instance is readable only through that server, until it catches up | None is needed once it has caught up: the instance is the row above's |
-| K's CRD replaced by one of another plural, or by an aggregated API server, while a process tracks the first, and the API server that answers its discovery hasn't seen that yet | One strip of a hold, which its holder's next pass puts back; in a namespace being deleted, P may go. Not a loop: the old process would have to be answered by a lagging API server at every turn | Restart every process of the kind when its plural changes, before the new CRD has holders: the old tracker's resource is fixed at `Track` (§7.3) |
+| K's CRD replaced by one of another plural, or by an aggregated API server, while a process tracks the first, and the API server that answers its discovery hasn't seen that yet | Strips, for as long as that API server's discovery lags, each put back by its holder's next pass: a process usually keeps one connection, so the same API server answers it at every turn. It ends when that server catches up. In a namespace being deleted the first is enough for P to go | Restart every process of the kind when its plural changes, before the new CRD has holders: the old tracker's resource is fixed at `Track` (§7.3) |
 
 *And what it doesn't cover*, where a hold stays, and `DisownPrefix` remains the
 remedy:
@@ -1878,6 +1898,10 @@ For unstructured-runtime:
 6. RBAC as in §13. In PerName or PerNamePoll mode, also set
    `SharedOptions.IndexNamespace` (§10.6.1).
 7. **On a stop, wait for the calls in flight** before the process exits.
+8. **Set `Clients.Discovery`** to a discovery client's `RESTClient()`, as
+   provider-runtime does. Without it what a kind that is gone held stays until
+   `DisownPrefix` strips it (§6.4), and `Track` warns. It needs no grant beyond
+   `system:discovery`.
 
 "Find the last user" is the release loop's job, inside `Run`. `Users` is
 exported for diagnostics and tests.
@@ -2458,7 +2482,8 @@ protects Secrets, LabelScoped. The implicit `Shared` uses the default
 `SharedOptions`. A provider that needs others (`Namespaces`,
 `IndexNamespace`, `Listers`) builds its own `Shared` and passes
 `reconciler.WithCredentialUseShared(s)`, which is supported in production as
-well as in tests. The adapter sets `TimeoutBound` to its reconcile timeout
+well as in tests; it then fills `Clients` itself, `Discovery` too (§7.2). The
+adapter sets `TimeoutBound` to its reconcile timeout
 plus grace.
 
 **The owner finalizer under a custom `WithFinalizer`.** `APIFinalizer`
@@ -3053,8 +3078,8 @@ delivers no more deletions, so nothing else is certain to queue a hold whose
 holder it missed: only a change to P itself would. The recheck of what the
 caches can't show runs too, on the process whose write loops run: the objects
 outside them, where `SharedOptions.Namespaces` restricts them (§10.5), and in
-PerName mode those the index names (§10.6.5), whose watch may be refused. One
-runs at a time for a tracker. A
+PerName mode those the index names (§10.6.5), whose watch may be refused. Of
+the rechecks that a CRD's deletion starts, one runs at a time for a tracker. A
 CRD that is back before the batch keeps R0 as it was: the holder informer lists
 again, within its backoff, and delivers what it missed.
 
@@ -5151,7 +5176,8 @@ Doc text for consumers:
 > Don't ship it in a chart, and don't give it an `aggregationRule`. Connect's
 > own read grants come from your separate provisioning. Don't use a
 > namespaced Role for these permissions: it is deleted with its namespace,
-> and objects there then can't finish deleting.
+> and objects there then can't finish deleting. Discovery (`get` on `/apis/*`)
+> is granted by `system:discovery`, unless your cluster has removed its binding.
 >
 > **Refs across namespaces.** Holders hold a Secret in another namespace
 > only if that Secret, or its Namespace, carries
@@ -5774,7 +5800,7 @@ writing for #510:
 It has the same deadlock (§1, and core-provider#402 for the chart
 `passwordRef` in the composition controller's Delete). It integrates the
 core as §7.2 says, using `Track` after start for kinds discovered at
-runtime (§7.3).
+runtime (§7.3). It builds its own `Clients`, so it sets `Clients.Discovery` too.
 
 **Its holder kind is the CompositionDefinition** (the user's decision,
 2026-11-23), on the hub, LabelScoped. Compositions aren't its holders: what
