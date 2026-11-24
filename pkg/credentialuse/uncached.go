@@ -149,7 +149,7 @@ func listResource(ctx context.Context, cl Clients, gk schema.GroupKind, gvr sche
 	var out []metav1.PartialObjectMetadata
 	opts := metav1.ListOptions{LabelSelector: selector, Limit: listPageSize}
 	for {
-		l, err := c.List(ctx, opts)
+		l, err := listPage(ctx, livePageTime, c, opts)
 		if err != nil {
 			return nil, fmt.Errorf("credential-use: listing %s with %q outside the caches: %w", gk, selector, err)
 		}

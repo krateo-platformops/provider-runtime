@@ -17,10 +17,9 @@ import (
 // listPageSize bounds each page of a consistent list (R2, the prober).
 const listPageSize = 500
 
-// listPageTime bounds how long each page of one takes, from the client's rate
-// limiter to its answer: the API server's own time for a request, by default, so
-// that a page it would still have answered isn't cut. A list has as many pages as
-// it needs.
+// listPageTime bounds how long the answer to each page of one takes (answered): the
+// API server's own time for a request, by default, so that a page it would still have
+// answered isn't cut. A list has as many pages as it needs.
 const listPageTime = time.Minute
 
 // clientServer is the protocol's server on client-go (plan, PR 3): the
@@ -194,7 +193,5 @@ func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace s
 }
 
 func listPage(ctx context.Context, limit time.Duration, c metadata.ResourceInterface, opts metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
-	ctx, cancel := context.WithTimeout(ctx, limit)
-	defer cancel()
-	return c.List(ctx, opts)
+	return answered(ctx, limit, func(ctx context.Context) (*metav1.PartialObjectMetadataList, error) { return c.List(ctx, opts) })
 }
