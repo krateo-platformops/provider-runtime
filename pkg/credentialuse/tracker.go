@@ -403,8 +403,16 @@ func (t *Tracker) dropHeld() {
 // Acquired: MustNotConnect for a holder that isn't established, Degraded for
 // one that is.
 func (t *Tracker) Acquire(ctx context.Context, obj metav1.Object) (Acquired, error) {
+	// failed is a pass that ends before it names its refs. The gate of what
+	// the record names runs first in every pass (§11.3), in these as in
+	// proto.acquire; what comes before it here calls nothing.
 	failed := func(err error, reason string) (Acquired, error) {
 		var a Acquired
+		if _, gerr := t.proto.gateRecorded(ctx, obj, &a); errors.Is(gerr, ErrHolderConflict) {
+			return a, gerr
+		} else if gerr != nil {
+			err = errors.Join(err, gerr)
+		}
 		a.Err = err
 		if IsEstablished(obj, t.o.OwnerFinalizers) {
 			a.Degraded = true
