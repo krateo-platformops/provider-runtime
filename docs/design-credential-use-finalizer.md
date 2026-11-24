@@ -2032,10 +2032,22 @@ count to find it by. So:
   pass.
 - **No other prune takes a line meanwhile** (E1). A prune leaves out the
   lines of the kinds the switch covers while it is unsettled, as the CRD's
-  cache has it, and reads the switch live after its removal: lines removed
-  under an unsettled switch go back, and so do they all when that read
-  fails. A switch set after that read found it off has its first Disown pass
-  after the removal, and E2 adds the lines then.
+  cache has it, and then as a live read before its removal has it; when that
+  read fails, it removes nothing. After the removal it reads the switch live
+  again: lines removed under an unsettled switch go back, and so do they all
+  when that read fails. A switch set after that read found it off has its
+  first Disown pass after the removal, and E2 adds the lines then.
+
+  So a removal under the switch began, with its first live read, before the
+  switch was set, and the prune's 15s run from then: they cover **both reads,
+  the removal with its retries, the reads of the objects and the re-add, as
+  calls**. The line is back within 15s of the switch, and the last pass of a
+  run starts at least `TimeoutBound` + 60s after it. The 15s don't cover two
+  things. A removal cut short at their end may still land later, as any write
+  may (the landing margin): 75s after the switch at the latest, which the
+  last pass is past with a `TimeoutBound` of 15s or more, and the drop is
+  then found and checked as anyone's is (§10.6.6). And a re-add that fails is
+  queued: until it lands, that process's Disown counts `"unknown"`.
 - **A record's refs get their lines before the record is stripped** (E2).
   A1 comes before A2, so an A2 that lands after the strip has its object's
   line there for a later pass's count, even one a prune took before the
@@ -3183,8 +3195,10 @@ another writer's change.
   whose objects carry no finalizer with K's prefix, and that no record names,
   then live-GETs those objects, and adds back any that now do.
 - **Disown keeps the lines of the kinds it covers until it has settled**
-  (§7.4). Every prune above leaves them out, and puts back what it removed
-  if a live read of the switch after its removal finds it set and unsettled.
+  (§7.4). Every prune above leaves them out, by the CRD's cache and then by a
+  live read of the switch, without which it removes nothing; and puts back
+  what it removed if a second live read, after its removal, finds the switch
+  set and unsettled, or fails.
   Disown's own emptying, once settled, follows the pruner's rule too.
 - **A re-add that fails** after a prune is retried by the write loops until
   it lands.
@@ -4293,8 +4307,16 @@ on krateo-057:
   a hold that lands late, with its response arriving or lost, is found by
   its line; only a process whose own run is done empties the index, and only
   lines it proves free; no prune takes a line meanwhile, whichever side of
-  its removal the switch is set on; a full index leaves the records
-  unstripped; two processes settle apart.
+  its removal the switch is set on, nor with the switch unread; a full index
+  leaves the records unstripped; two processes settle apart.
+- **Disown over the index, in the model:** the switch set, turned off and on
+  again, widened, and narrowed and widened again; the A2 answered, lost, and
+  lost with its sender killed; the holder there or gone; with a pruner whose
+  holder cache and CRD cache are behind. Two things are taken as given: **the
+  landing margin**, that a hold whose pass read the switch before the run's
+  first pass has landed, or failed, by its last; and **a prune's bound**, that
+  a prune begun before the run's first pass has ended by then, its re-add
+  included. A control per rule checks that the model sees what it is for.
 - **The flag** (§7.4): a switch turned off and on again while nothing runs
   isn't settled by the old flag; no A2 under a stale flag, its removal
   refused included; a run starts over when the CRD changes between its
