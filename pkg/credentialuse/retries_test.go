@@ -170,17 +170,17 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 	q.backoff = func(n int) time.Duration { return time.Duration(1+n%5) * unit }
 	key := func(i int) batchKey { return batchKey{widgetGK, fmt.Sprintf("ns%d", i%keys)} }
 
-	// A one-off object is added, or failed, once, and is in some later batch.
-	// A shared one is added again and again, also while its batch is worked on,
-	// whose worker fails it or decides it: the last addition, or failure, began
-	// before some batch that has it was taken. (Fail and Settle of one object
-	// are its worker's alone, as in the release loop: a Settle that raced
-	// another's Fail would forget it.) A settled one fails and is settled; it
-	// owes nothing.
+	// A one-off object is added, or failed, once, and is in some later batch,
+	// whose worker may fail it again: each time it is owed again, by the only
+	// one who can add it. A shared one is added again and again, also while its
+	// batch is worked on or being taken, each time with a fresh one-off object:
+	// one call adds both or neither, so one of those additions that is dropped
+	// is seen, which a look at the shared one alone can forgive. Its worker
+	// fails it now and then. (Fail and Settle of one object are its worker's
+	// alone, as in the release loop: a Settle that raced another's Fail would
+	// forget it.) A settled one fails and is settled; it owes nothing.
 	var mu sync.Mutex
-	var now int64                      // a tick for each thing that happens
 	owed := map[batchKey]map[ID]bool{} // one-off objects not yet in a batch
-	began, taken := map[ID]int64{}, map[ID]int64{}
 	owe := func(k batchKey, id ID) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -189,23 +189,12 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 		}
 		owed[k][id] = true
 	}
-	begin := func(id ID) {
-		mu.Lock()
-		defer mu.Unlock()
-		now++
-		began[id] = now
-	}
 	lost := func() (out []string) {
 		mu.Lock()
 		defer mu.Unlock()
 		for k, m := range owed {
 			for id := range m {
 				out = append(out, fmt.Sprint(k, id))
-			}
-		}
-		for id, at := range began {
-			if taken[id] < at {
-				out = append(out, fmt.Sprintf("%s, added at %d, last taken at %d", id, at, taken[id]))
 			}
 		}
 		return out
@@ -249,19 +238,20 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 						return
 					}
 					mu.Lock()
-					now++
 					for _, id := range ids {
 						delete(owed[k], id)
-						taken[id] = now
 					}
 					mu.Unlock()
 					time.Sleep(20 * time.Microsecond) // a batch takes time
 					var failed, decided []ID
 					for i, id := range ids {
-						if strings.HasPrefix(id.Name, "shared") && (turn+i)%3 == 0 && !quiet.Load() {
-							begin(id)
+						switch again := (turn+i)%3 == 0 && !quiet.Load(); {
+						case again && strings.HasPrefix(id.Name, "one"):
+							owe(k, id)
 							failed = append(failed, id)
-						} else {
+						case again && strings.HasPrefix(id.Name, "shared"):
+							failed = append(failed, id)
+						default:
 							decided = append(decided, id)
 						}
 					}
@@ -295,7 +285,7 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 				for i := range each {
 					k := key(i)
 					one := idOf(fmt.Sprintf("one%d-%d", a, i))
-					shared := idOf(fmt.Sprintf("shared%d-%d", a, i%keys)) // of one key, and one adder
+					shared, with := idOf(fmt.Sprintf("shared%d", i%keys)), idOf(fmt.Sprintf("with%d-%d", a, i))
 					switch i % 6 {
 					case 0:
 						owe(k, one)
@@ -304,11 +294,11 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 						owe(k, one)
 						q.Fail(k, one)
 					case 3:
-						begin(shared)
-						q.Add(k, shared)
+						owe(k, with)
+						q.Add(k, shared, with)
 					case 4:
-						begin(shared)
-						q.AddAfter(k, time.Duration(i%7)*unit, shared)
+						owe(k, with)
+						q.AddAfter(k, time.Duration(i%7)*unit, shared, with)
 					case 5:
 						id := idOf(fmt.Sprintf("settled%d-%d", a, i%40))
 						q.Fail(k, id)
@@ -322,8 +312,9 @@ func stressQueue(t *testing.T, clk clock.WithDelayedExecution, step func()) {
 		}
 		adding.Wait()
 		// Nothing is added or fails any more, so everything there is drains:
-		// nothing is owed, waits, or is remembered. While the workers still
-		// failed the shared objects, one was owed between two looks.
+		// nothing is owed, waits, or is remembered. One look a turn, and the
+		// last one counts: while the workers still failed some, one was owed
+		// between two looks.
 		quiet.Store(true)
 		left := func() (out []string) {
 			out = lost()
@@ -394,6 +385,45 @@ func (c *duringClock) AfterFunc(d time.Duration, f func()) clock.Timer {
 	t := c.FakeClock.AfterFunc(d, f)
 	once(&c.after)
 	return t
+}
+
+// What a worker fails at is owed until its retry's batch is taken, and so each
+// time it fails again: nothing is owed, then one is, then nothing.
+func TestARetryThatFailsIsTakenAgain(t *testing.T) {
+	ctx := context.Background()
+	clk := testingclock.NewFakeClock(time.Now())
+	q := newBatchQueue(clk)
+	id := idOf("s")
+	q.Fail(batchNS, id)
+	for _, wait := range []time.Duration{1, 2, 4, 8} {
+		clk.Step(wait*time.Second - 1)
+		if q.Len() != 0 {
+			t.Fatalf("the retry is there before %ds", wait)
+		}
+		clk.Step(1)
+		k, ids, ok := q.Get(ctx)
+		if !ok || k != batchNS || !slices.Equal(ids, []ID{id}) {
+			t.Fatalf("after %ds, Get = %v %v %v", wait, k, ids, ok)
+		}
+		if waiting, n := timersOf(q, k); len(waiting)+n != 0 {
+			t.Fatalf("taken, and %v still waits, with %d timers", waiting, n)
+		}
+		q.Fail(k, id) // owed again, while its batch is worked on
+		if waiting, n := timersOf(q, k); !slices.Equal(waiting, []ID{id}) || n != 1 {
+			t.Fatalf("failed, and %v waits, with %d timers", waiting, n)
+		}
+		q.Done(k)
+		if q.Len() != 0 {
+			t.Fatal("its batch is queued before its time")
+		}
+	}
+	clk.Step(16 * time.Second)
+	k, _, _ := q.Get(ctx)
+	q.Settle(k, id)
+	q.Done(k)
+	if _, n := timersOf(q, k); n != 0 || len(q.failing) != 0 || clk.HasWaiters() {
+		t.Errorf("decided, and %d timers, %d keys with failures", n, len(q.failing))
+	}
 }
 
 // Every schedule of one thing that happens while Fail is between its two
