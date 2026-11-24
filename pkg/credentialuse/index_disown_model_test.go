@@ -24,11 +24,14 @@ import (
 //
 // The process holds, makes its late checks and runs Disown over one index;
 // another process releases, and prunes with a holder cache that shows no
-// record, and a CRD cache that shows the switch as it is (staleCRD: as off).
-// As in the flag's model, no Disown pass learns of the switch but by its live
-// reads, and the landing margin is taken as given; so is a prune's bound,
-// which is shorter: a pass that may settle starts once every prune begun
-// before the run's first pass has ended.
+// record, and a CRD cache that never shows the switch. As in the flag's
+// model, no Disown pass learns of the switch but by its live reads.
+//
+// Two things are taken as given. The landing margin: a pass that may settle
+// starts once every hold whose pass read the switch before the run's first
+// pass has landed, or failed. And a prune's bound (pruneBound), which is
+// shorter: it starts once every prune begun before the run's first pass has
+// ended, its check and its re-add included.
 
 // disownIndexCase is one script of the operator's, and one way of an A2.
 type disownIndexCase struct {
@@ -44,11 +47,9 @@ type disownIndexCase struct {
 	unnamed bool
 	// The rules off, for the controls: Disown empties in every pass; it
 	// doesn't add the lines of what the records name; a prune doesn't read
-	// the switch after it; a count doesn't wait for what the process owes; a
-	// run goes on over a changed CRD.
-	emptyEarly, noLines, noLive, noUnsure, noVersion bool
-	// staleCRD: the pruner's CRD cache never shows the switch.
-	staleCRD bool
+	// the switch before its removal, or after it; a count doesn't wait for
+	// what the process owes; a run goes on over a changed CRD.
+	emptyEarly, noLines, noBefore, noAfter, noUnsure, noVersion bool
 }
 
 // preemptions is the bound c is searched within: 2, and 1 with two or more of
@@ -175,7 +176,7 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 			return crd
 		}
 		keptLive := func(context.Context) (disownSet, error) {
-			return keptKinds(readCRD(s.Running(), "switch after the removal").Annotations), nil
+			return keptKinds(readCRD(s.Running(), "switch, for a prune").Annotations), nil
 		}
 		// ix is the process's index.
 		srv := runningServer{s, m, &log}
@@ -207,14 +208,6 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 			r, err := pr.release(ctx, "ns", []ID{p})
 			if err != nil {
 				return
-			}
-			bx.keptCached = func(gk schema.GroupKind) bool {
-				if c.staleCRD {
-					return false
-				}
-				crd, err := m.Get(modelCRDKey)
-				must(err)
-				return keptKinds(crd.Annotations).covers(gk)
 			}
 			step++
 			at := step
@@ -453,8 +446,12 @@ func exploreDisownIndex(t *testing.T, c disownIndexCase) (violations int, sample
 				return err != nil || acquired
 			})
 			bx := modelIndex(m, a, "rel", &log)
-			if !c.noLive {
-				bx.keptLive = keptLive
+			reads := 0 // of the switch by its one prune, before and after
+			bx.keptLive = func(ctx context.Context) (disownSet, error) {
+				if reads++; reads == 1 && c.noBefore || reads == 2 && c.noAfter {
+					return disownSet{}, nil
+				}
+				return keptLive(ctx)
 			}
 			batch(a, bx)
 		})
@@ -547,10 +544,11 @@ func TestModelIndexDisown(t *testing.T) {
 	for name, c := range map[string]disownIndexCase{
 		"emptied in every pass":                {switches: []string{"all"}, lost: true, killed: true, emptyEarly: true},
 		"records stripped without their lines": {switches: []string{"all"}, lost: true, killed: true, noLines: true},
-		"a prune that doesn't read the switch": {switches: []string{"all"}, lost: true, killed: true, noLive: true},
+		"a prune with no read after it":        {switches: []string{"all"}, lost: true, killed: true, noAfter: true},
 		"a count that waits for nothing owed":  {switches: []string{"all"}, lost: true, unnamed: true, noUnsure: true},
 		"a run over a changed CRD":             {initial: "all", switches: []string{"", "all"}, noVersion: true},
-		"a pruner whose CRD cache is behind":   {switches: []string{"all"}, lost: true, killed: true, staleCRD: true},
+		// With no read before the removal either.
+		"a pruner whose CRD cache is behind": {switches: []string{"all"}, lost: true, killed: true, noBefore: true},
 	} {
 		t.Run("control/"+name, func(t *testing.T) {
 			if v, _, _, _ := exploreDisownIndex(t, c); v == 0 {

@@ -583,43 +583,52 @@ func TestAPruneOutlivesAStop(t *testing.T) {
 }
 
 // While Disown covers the kind and hasn't settled, a prune's lines stay,
-// whatever the CRD's cache shows: the live read after the removal decides,
-// and one that fails puts them back. Disown's own emptying removes them
-// (§7.4).
+// whatever the CRD's cache shows: a live read before the removal that finds
+// it on, or fails, removes nothing; one after it, for a switch set meanwhile,
+// puts them back, and so does one that fails. Disown's own emptying removes
+// them (§7.4).
 func TestAPruneWhileDisownHasntSettled(t *testing.T) {
 	ctx := context.Background()
 	bare := SecretRef("ns", "bare").ID()
 	all := parseDisown("all")
 	for name, tc := range map[string]struct {
-		cached, live disownSet
-		fail         bool
-		empty        bool
-		kept         bool
-		updates      int
+		cached, before, after disownSet
+		// fail is the live read that fails, 1 or 2; reads is how many there
+		// are.
+		fail, reads int
+		empty       bool
+		kept        bool
+		updates     int
 	}{
-		"off":                          {updates: 1},
-		"on, and cached":               {cached: all, live: all, kept: true},
-		"on, and not cached":           {live: all, kept: true, updates: 2},
-		"on for another kind":          {live: parseDisown("ConfigMap"), updates: 1},
-		"unreadable":                   {fail: true, kept: true, updates: 2},
-		"on, and the emptying":         {cached: all, live: all, empty: true, updates: 1},
+		"off":                          {reads: 2, updates: 1},
+		"on, and cached":               {cached: all, before: all, after: all, kept: true},
+		"on, and not cached":           {before: all, after: all, reads: 1, kept: true},
+		"set during it":                {after: all, reads: 2, kept: true, updates: 2},
+		"on for another kind":          {before: parseDisown("ConfigMap"), after: parseDisown("ConfigMap"), reads: 2, updates: 1},
+		"unreadable before it":         {fail: 1, reads: 1, kept: true},
+		"unreadable after it":          {fail: 2, reads: 2, kept: true, updates: 2},
+		"on, and the emptying":         {cached: all, before: all, after: all, empty: true, updates: 1},
 		"off, with a cache that isn't": {cached: all, kept: true},
 	} {
+		reads := 0
 		st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare}), rv: 1}
 		ix := testIndex(st, &objServer{objs: map[ID]*metav1.PartialObjectMetadata{bare: {ObjectMeta: metav1.ObjectMeta{Name: "bare"}}}})
 		ix.keptCached = tc.cached.covers
 		ix.keptLive = func(context.Context) (disownSet, error) {
-			if tc.fail {
+			if reads++; reads == tc.fail {
 				return disownSet{}, errors.New("the CRD can't be read")
 			}
-			return tc.live, nil
+			if reads == 1 {
+				return tc.before, nil
+			}
+			return tc.after, nil
 		}
 		remove := ix.prune
 		if tc.empty {
 			remove = ix.empty
 		}
-		if err := remove(ctx, []ID{bare}); (err != nil) != tc.fail {
-			t.Errorf("%s: %v", name, err)
+		if err := remove(ctx, []ID{bare}); (err != nil) != (tc.fail > 0) || reads != tc.reads {
+			t.Errorf("%s: %v, with %d live reads of the switch, want %d", name, err, reads, tc.reads)
 		}
 		if got := len(st.lines) == 1; got != tc.kept || st.updates != tc.updates {
 			t.Errorf("%s: the line kept: %v, in %d updates; want %v, in %d", name, got, st.updates, tc.kept, tc.updates)

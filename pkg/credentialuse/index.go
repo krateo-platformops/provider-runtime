@@ -427,10 +427,12 @@ const (
 	// maxOwnRemovals bounds index.own. A removal it forgets costs a live
 	// check of each of its lines.
 	maxOwnRemovals = 64
-	// pruneBound bounds a prune, its check after it and its re-add included,
-	// once it has begun, whatever its context does: below the 30s a manager
-	// gives its runnables to stop by default, so that a graceful stop
-	// doesn't come between a removal and its re-add.
+	// pruneBound bounds a prune's calls, from its live read of the Disown
+	// switch to its check and its re-add, once it has begun, whatever its
+	// context does: below the 30s a manager gives its runnables to stop by
+	// default, so that a graceful stop doesn't come between a removal and its
+	// re-add. A removal cut short by it may land after it, as any write may
+	// (LandingMargin).
 	pruneBound = 15 * time.Second
 )
 
@@ -653,9 +655,12 @@ func (ix *index) removed(rv string, lines []string) {
 //
 // While Disown covers a kind and hasn't settled, its lines stay: a hold that
 // lands late has only its line for Disown's count to find it by (§7.4). The
-// switch is read again, live, after the removal, which the cache may lag; one
-// read as off then was set after the removal, so that Disown's first pass
-// comes after it and adds the lines of every record (§7.4, E2).
+// cache shows the switch first, and may lag it: it is read live before the
+// removal, and one that can't be read removes nothing. So a removal under the
+// switch began before it was set, and is put back within pruneBound of that,
+// before a run of zeros can be done: the switch is read live again after the
+// removal. One read as off then was set after the removal, so that Disown's
+// first pass comes after it and adds the lines of every record (§7.4, E2).
 func (ix *index) prune(ctx context.Context, ids []ID) error {
 	if ix.keptCached != nil {
 		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return ix.keptCached(id.GroupKind()) })
@@ -678,6 +683,16 @@ func (ix *index) removeAndCheck(ctx context.Context, ids []ID, disown bool) erro
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pruneBound)
 	defer cancel()
+	if ix.keptLive != nil && disown {
+		set, err := ix.keptLive(ctx)
+		if err != nil {
+			return fmt.Errorf("credential-use: reading the Disown switch before pruning the index %s: %w", ix.ref(), err)
+		}
+		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return set.covers(id.GroupKind()) })
+		if len(ids) == 0 {
+			return nil
+		}
+	}
 	tried, err := ix.remove(ctx, linesOf(ids))
 	if len(tried) == 0 {
 		return err
