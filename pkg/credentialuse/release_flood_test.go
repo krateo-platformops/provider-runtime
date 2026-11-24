@@ -4,8 +4,10 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	testingclock "k8s.io/utils/clock/testing"
 )
 
 // A flood of names, as in the records of one holder that is edited again and
@@ -80,5 +82,112 @@ func TestAHeldObjectDoesntWaitBehindAFlood(t *testing.T) {
 	}
 	if r.heldBy(t, widgetGK, "ns", "held") {
 		t.Error("the Secret wasn't released")
+	}
+}
+
+// The queue's two lines: a worker takes 1,024 of each at most, in their order,
+// and what it doesn't take, or puts back, is taken next.
+func TestTheQueuesLines(t *testing.T) {
+	ctx := context.Background()
+	k, names := batchKey{widgetGK, "ns"}, someIDs("ns", "a", 3000)
+	x, y := secretID("ns", "x"), secretID("ns", "y")
+	setup := func() (*batchQueue, *testingclock.FakeClock) {
+		clk := testingclock.NewFakeClock(time.Now())
+		q := newBatchQueue(nil)
+		q.clock = &unlockedClock{FakeClock: clk, t: t, q: q}
+		q.Add(k, names...)
+		return q, clk
+	}
+	get := func(q *batchQueue) []ID {
+		t.Helper()
+		if q.Len() != 1 {
+			t.Fatalf("%d batches wait, want one", q.Len())
+		}
+		_, ids, _ := q.Get(ctx)
+		return ids
+	}
+	want := func(what string, got, want []ID) {
+		t.Helper()
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: a batch of %d, want %d; %v %v", what, len(got), len(want), got[:min(3, len(got))], want[:min(3, len(want))])
+		}
+	}
+
+	q, _ := setup()
+	q.AddHeld(k, x)
+	first := get(q)
+	want("with one held", first, append(slices.Clone(names[:1024]), x))
+	if !q.held(k, x) || q.held(k, names[0]) {
+		t.Error("want the one added so known to be held, and no other")
+	}
+	// What is put back, and one added again meanwhile, at their old places.
+	q.Add(k, names[1023], y)
+	q.PutBack(k, names[1020:1024]...)
+	q.PutBack(k)
+	q.Done(k)
+	second := get(q)
+	want("after four were put back", second, names[1020:2044])
+	q.PutBack(k, second[1:]...)
+	q.Done(k)
+	want("after all but the first was", get(q), append(slices.Clone(second[1:]), names[2044]))
+	q.Done(k)
+	rest := get(q)
+	want("the rest", rest, append(slices.Clone(names[2045:]), y))
+	q.Done(k)
+	if q.Len() != 0 || len(q.pending)+len(q.lines)+len(q.taken) != 0 {
+		t.Errorf("%d batches wait, %d pending, %d lines, %d taken; want none: none is taken twice", q.Len(), len(q.pending), len(q.lines), len(q.taken))
+	}
+
+	// Found to be held once it waits, it is in both lines, and is taken once.
+	q, _ = setup()
+	q.Add(k, x)
+	q.AddHeld(k, x)
+	q.Add(k, x)
+	want("one found to be held", get(q), append(slices.Clone(names[:1024]), x))
+	q.Done(k)
+	var after []ID
+	for q.Len() > 0 {
+		after = append(after, get(q)...)
+		q.Done(k)
+	}
+	want("then", after, names[1024:])
+
+	// A namespace's list is of the held line, and so is what it found.
+	q, _ = setup()
+	q.Add(k)
+	if got := get(q); !slices.Contains(got, fillAll) || !q.held(k, x) || q.held(k, names[0]) {
+		t.Error("want the namespace's list in the first batch, and what it finds known to be held")
+	}
+	q.PutBack(k, x)
+	q.Done(k)
+	want("what the list found, put back", get(q), append(slices.Clone(names[1024:2048]), x)) // at the list's place, after the names
+	q.Done(k)
+
+	// A failure's retry is of the line its object was in; a time asked for, and a
+	// grace's end, are of the held one.
+	q, clk := setup()
+	q.AddHeld(k, x)
+	get(q)
+	q.Fail(k, x, names[0])
+	q.AddAt(k, clk.Now().Add(2*time.Second), y)
+	q.Done(k)
+	clk.Step(releaseBackoffBase)
+	want("a held object's retry", get(q), append(slices.Clone(names[1024:2048]), x))
+	q.Done(k)
+	q.Add(k, names[:1024]...)
+	q.Add(k, someIDs("ns", "b", 1024)...)
+	q.AddAfter(k, time.Second, secretID("ns", "z"))
+	clk.Step(time.Second)
+	if got := get(q); !slices.Contains(got, y) || !slices.Contains(got, secretID("ns", "z")) || len(got) != 1026 {
+		t.Errorf("a batch of %d without the time asked for or the grace's end, want both with 1024 others", len(got))
+	}
+	q.ShutDown()
+	if len(q.pending)+len(q.lines)+len(q.taken) != 0 {
+		t.Error("ShutDown leaves something")
+	}
+	q.AddHeld(k, x)
+	q.PutBack(k, x)
+	if q.Len() != 0 || len(q.pending) != 0 {
+		t.Error("something is queued after ShutDown")
 	}
 }

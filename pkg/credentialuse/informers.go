@@ -304,7 +304,7 @@ func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata, gap bool)
 		if m == nil {
 			m = old
 		}
-		h.t.s.queue.Add(batchKey{h.t.gk, m.Namespace}, ids...)
+		h.t.addNamed(m.Namespace, ids)
 	}
 	// Once per holder, which its deletion or Forget forgets, and never what
 	// the record says (§4).
@@ -322,6 +322,22 @@ func (h holderHandler) recordOf(m *metav1.PartialObjectMetadata) (r Record, uses
 	}
 	r = ReadRecord(m)
 	return r, r.Unparseable && !notAUser(m, h.t.o.OwnerFinalizers)
+}
+
+// addNamed adds, in one Add, the batch of ids, which a record of a holder in
+// namespace n names: those that the caches show carrying the finalizer, as known to.
+func (t *Tracker) addNamed(n string, ids []ID) {
+	if len(ids) == 0 {
+		return
+	}
+	held := map[ID]bool{}
+	f, _ := FinalizerName(t.gk, n) // "" for a namespace that can't be one
+	for _, id := range ids {
+		if m, ok := (trackerViews{t}).Protected(id); ok && hasFinalizer(m, f) {
+			held[id] = true
+		}
+	}
+	t.s.queue.addKnown(batchKey{t.gk, n}, ids, func(id ID) bool { return held[id] })
 }
 
 // --- the protected informers: one per protected kind, shared (§10.1) ---
@@ -512,7 +528,7 @@ func (h *protectedHandler) OnAdd(obj any, _ bool) {
 	id := h.id(m)
 	held := holds(h.t, m)
 	for n := range held {
-		h.s.queue.Add(batchKey{h.t.gk, n}, id)
+		h.s.queue.AddHeld(batchKey{h.t.gk, n}, id)
 	}
 	if m.DeletionTimestamp != nil {
 		h.graceTimers(m, id)
@@ -538,7 +554,7 @@ func (h *protectedHandler) OnUpdate(oldObj, newObj any) {
 		eb, inB := before[ns]
 		ea, inA := after[ns]
 		if inB != inA || eb != ea || newlyDeleting || replaced {
-			h.s.queue.Add(batchKey{t.gk, ns}, id)
+			h.s.queue.AddHeld(batchKey{t.gk, ns}, id)
 		}
 		lost = lost || (inB && (!inA || replaced))
 	}
@@ -575,7 +591,7 @@ func (h *protectedHandler) OnDelete(obj any) {
 	t.ver.protectedEvent(m, nil)
 	held := holds(t, m)
 	for n := range held {
-		h.s.queue.Add(batchKey{t.gk, n}, id)
+		h.s.queue.AddHeld(batchKey{t.gk, n}, id)
 	}
 	t.enqueueHolders(id)
 	// The object left the cache: its first sight goes, so that firstSight
@@ -663,7 +679,7 @@ func (h namespaceHandler) OnUpdate(oldObj, newObj any) {
 				t.enqueueHolders(id)
 				if newlyDeleting {
 					for ns := range holds(t, m) {
-						h.s.queue.Add(batchKey{t.gk, ns}, id)
+						h.s.queue.AddHeld(batchKey{t.gk, ns}, id)
 					}
 				}
 			}

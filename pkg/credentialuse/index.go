@@ -2116,7 +2116,7 @@ func (t *Tracker) startQuiet() {
 // §10.6.5, M1 of the review of revision 16), run at their start, and, while
 // they run, after a Track and when t's CRD goes.
 func (s *Shared) recheckIndex(ctx context.Context, t *Tracker, done map[ID]bool) error {
-	return t.idx.recheckRest(ctx, done, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
+	return t.idx.recheckRest(ctx, done, func(id ID, n string) { s.queue.AddHeld(batchKey{t.gk, n}, id) })
 }
 
 // recheckRest reads the index live, reads each object it names, and hands

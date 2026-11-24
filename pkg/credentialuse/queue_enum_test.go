@@ -42,7 +42,7 @@ import (
 
 // An enumOp is one operation of a scenario.
 type enumOp struct {
-	kind   string // add, after, at, fail, settle, step, get, back, done, rescan, shutdown
+	kind   string // add, held, after, at, fail, settle, step, get, back, done, rescan, shutdown
 	key    string // A or B
 	id     string
 	worker int
@@ -50,7 +50,7 @@ type enumOp struct {
 
 func (o enumOp) String() string {
 	switch o.kind {
-	case "add", "after", "at", "fail", "settle":
+	case "add", "held", "after", "at", "fail", "settle":
 		return o.kind + "(" + o.key + o.id + ")"
 	case "get", "back", "done":
 		return fmt.Sprintf("%s%d", o.kind, o.worker)
@@ -157,6 +157,9 @@ func (s *enumState) apply(o enumOp) {
 	switch o.kind {
 	case "add":
 		s.q.Add(enumKey(o.key), enumID(o.id))
+		s.added(enumKey(o.key), enumID(o.id))
+	case "held":
+		s.q.AddHeld(enumKey(o.key), enumID(o.id))
 		s.added(enumKey(o.key), enumID(o.id))
 	case "rescan":
 		// The write loops' Start: every held object's batch, at once.
@@ -478,6 +481,7 @@ func TestBatchQueueEveryOrdering(t *testing.T) {
 		"stop with both held":         "add:A1 add:B2 get1 get2 after:A2 shutdown done1 done2",
 		"places":                      "add:A2 add:A1 add:A3 add:A2 get1 done1 get2",
 		"putting back":                "add:A2 add:A1 get1 back1 add:A2 add:A3 done1 get2",
+		"known to be held":            "add:A2 held:A2 add:A1 get1 back1 held:A1 done1 get2",
 		"putting back, and timers":    "add:A2 after:A1 get1 back1 step step done1 get2",
 		"stop with a batch put back":  "add:A2 add:A1 get1 back1 shutdown done1 add:A3",
 	}

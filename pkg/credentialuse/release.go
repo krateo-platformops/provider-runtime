@@ -135,7 +135,7 @@ func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
 
 // What one batch, a turn of its key, covers of the objects that R0 leaves (§6.6):
 // maxTurnReads at most, of which at least minTurnOthers, when there are so many,
-// are ones the caches don't show carrying the finalizer. And none of R1's reads
+// are ones not known to carry the finalizer. And none of R1's reads
 // begins once turnReadTime is over, but the first of each sort (turnOf): a client
 // of few requests a second reads fewer than 64, and what it read is decided.
 const (
@@ -198,10 +198,10 @@ func (p *protocol) readTime() time.Duration {
 }
 
 // turnOf splits todo into what this turn reads, in the order it does, and the
-// rest. Those that shown says the caches show carrying the finalizer are read
-// first, since they are the likely releases; but the others may be real holds
-// too, as outside the caches, so they have a part in every turn that no number of
-// the former can take. Each sort is in todo's order, that of waiting; first are
+// rest. Those that shown says are known to carry the finalizer, from how they were
+// queued or the caches, are read first, since they are the likely releases; but
+// the others may be real holds too, as outside the caches, so they have a part in
+// every turn that no number of the former can take. Each sort is in todo's order, that of waiting; first are
 // the first of each, which the turn reads however long its reads take. So every
 // turn decides the one of each sort that has waited longest, or fails it: an
 // object waits for no more turns than objects were queued before it, whatever is
@@ -283,7 +283,9 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			res.Kept = append(res.Kept, Kept{P: id, Why: KeptUserDeleting, Users: u.users, DeletingUsers: u.deletingUsers})
 		}
 	}
-	todo, rest, first := turnOf(todo, func(id ID) bool { return cachedUsers[id].carries })
+	todo, rest, first := turnOf(todo, func(id ID) bool {
+		return cachedUsers[id].carries || p.known != nil && p.known(n, id)
+	})
 	res.Rest = append(res.Rest, rest...)
 
 	builtFrom := map[ID]string{} // the resourceVersion each failed release was built from

@@ -30,9 +30,12 @@ type batchKey struct {
 // batch is being worked on is queued again when the work is done, with what
 // was added meanwhile. Each object has its place, by when it was added: adding
 // it again doesn't move it, and what a batch didn't get to keeps it (PutBack).
-// So an object waits for no more than what was queued before it, and a key for
-// no more than one batch of every other. Timers run on the queue's clock, so
-// tests drive them with a fake one.
+// A key has two lines, of what is known to carry its finalizer (AddHeld), and of
+// the rest, as the names in a record, and a worker takes lineWindow of each at
+// most: so what a batch costs doesn't grow with what waits, an object waits for no
+// more than what was before it in its line, and one that is known to carry the
+// finalizer for none of the rest; and a key for no more than one batch of every
+// other. Timers run on the queue's clock, so tests drive them with a fake one.
 //
 // The queue never calls its clock while holding mu. A clock may run a
 // timer's function while holding a lock of its own, as the fake clock of
@@ -45,7 +48,8 @@ type batchQueue struct {
 
 	mu      sync.Mutex
 	cond    *sync.Cond
-	pending map[batchKey]places  // what each key's next batch covers
+	pending map[batchKey]places  // what each key's next batches cover
+	lines   map[batchKey]*lines  // and in which order
 	taken   map[batchKey]places  // what each batch being worked on covers
 	placed  uint64               // the last place given
 	ready   []batchKey           // keys waiting to be taken, in order
@@ -66,6 +70,7 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 	q := &batchQueue{
 		clock:   c,
 		pending: map[batchKey]places{},
+		lines:   map[batchKey]*lines{},
 		taken:   map[batchKey]places{},
 		queued:  map[batchKey]bool{},
 		working: map[batchKey]bool{},
@@ -78,15 +83,67 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 	return q
 }
 
-// places are the objects of a batch, each with its place: the lower, the longer
-// it has waited. Those of one namespace's list share its place.
-type places map[ID]uint64
+// lineWindow is how many objects of each of a key's two lines a worker takes at
+// most: R0, which reads the caches for each, costs milliseconds, and settles many
+// times what a turn reads (maxTurnReads).
+const lineWindow = 1024
+
+// places are the objects of a batch, each with its place.
+type places map[ID]place
+
+// A place is when an object was added, the lower the longer ago, and whether it
+// is known to carry the finalizer. Those of one namespace's list share theirs.
+type place struct {
+	at   uint64
+	held bool
+}
 
 // inOrder returns the objects of p, those that have waited longest first.
 func (p places) inOrder() []ID {
 	ids := SortedIDs(keysOf(p))
-	slices.SortStableFunc(ids, func(a, b ID) int { return cmp.Compare(p[a], p[b]) })
+	slices.SortStableFunc(ids, func(a, b ID) int { return cmp.Compare(p[a].at, p[b].at) })
 	return ids
+}
+
+// lines are a key's two, of what is known to carry the finalizer, and of the
+// rest, each in the order of its places. An entry whose object isn't pending at
+// its place is stale: the object was taken by its entry in the other line, or put
+// back at an earlier place.
+type lines struct{ held, others line }
+
+// A line is what was put back, and then what was added.
+type line struct{ back, added []entry }
+
+type entry struct {
+	id ID
+	at uint64
+}
+
+// take takes entries from l, until pending has taken n of them. What it doesn't
+// take is stale.
+func (l *line) take(n int, pending func(entry) bool) {
+	for n > 0 {
+		var e entry
+		switch {
+		case len(l.back) > 0:
+			e, l.back = l.back[0], l.back[1:]
+		case len(l.added) > 0:
+			e, l.added = l.added[0], l.added[1:]
+		default:
+			return
+		}
+		if pending(e) {
+			n--
+		}
+	}
+}
+
+// of is the line of what is known to carry the finalizer, or the other.
+func (l *lines) of(held bool) *line {
+	if held {
+		return &l.held
+	}
+	return &l.others
 }
 
 // fillAll is never an object: it stands in a batch for "every object of
@@ -109,30 +166,64 @@ func (q *batchQueue) Add(k batchKey, ids ...ID) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.addLocked(k, ids)
+	q.addLocked(k, ids, func(id ID) bool { return id == fillAll })
 }
 
-func (q *batchQueue) addLocked(k batchKey, ids []ID) {
+// AddHeld is Add of objects known to carry K's finalizer for N, as a cache, an
+// A2 or a list shows. With none it does nothing.
+func (q *batchQueue) AddHeld(k batchKey, ids ...ID) {
+	if len(ids) == 0 {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.addLocked(k, ids, func(ID) bool { return true })
+}
+
+// addKnown is Add of ids, of which held says which are known to carry K's
+// finalizer for N, as AddHeld adds them. With none it does nothing.
+func (q *batchQueue) addKnown(k batchKey, ids []ID, held func(ID) bool) {
+	if len(ids) == 0 {
+		return
+	}
+	if q.afterAdd != nil {
+		defer q.afterAdd(k)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.addLocked(k, ids, held)
+}
+
+func (q *batchQueue) addLocked(k batchKey, ids []ID, held func(ID) bool) {
 	if q.stopped {
 		return
 	}
-	set := q.pendingLocked(k)
+	set, ls := q.pendingLocked(k)
 	for _, id := range ids {
-		if _, waits := set[id]; !waits {
-			q.placed++
-			set[id] = q.placed
+		p, waits := set[id]
+		known := held(id)
+		if waits && (p.held || !known) {
+			continue
 		}
+		if !waits {
+			q.placed++
+			p.at = q.placed
+		}
+		p.held = known
+		set[id] = p
+		l := ls.of(known)
+		l.added = append(l.added, entry{id, p.at})
 	}
 	q.readyLocked(k)
 }
 
-func (q *batchQueue) pendingLocked(k batchKey) places {
-	set := q.pending[k]
+func (q *batchQueue) pendingLocked(k batchKey) (places, *lines) {
+	set, ls := q.pending[k], q.lines[k]
 	if set == nil {
-		set = places{}
-		q.pending[k] = set
+		set, ls = places{}, &lines{}
+		q.pending[k], q.lines[k] = set, ls
 	}
-	return set
+	return set, ls
 }
 
 func (q *batchQueue) readyLocked(k batchKey) {
@@ -163,20 +254,26 @@ type askedFor struct {
 }
 
 // A failure is an object that a batch of a key failed at, and none decided
-// since: how often in a row its retries failed, and the one it waits for. It is
-// the name's: one deleted and created again while no batch decided it inherits
-// the count, until one does.
+// since: how often in a row its retries failed, the one it waits for, and whether
+// it was known to carry the finalizer. It is the name's: one deleted and created
+// again while no batch decided it inherits the count, until one does.
 type failure struct {
 	n     int
 	waits *queueTimer
+	held  bool
 }
 
-// AddAfter adds k's batch, covering ids, once d has passed on the queue's
-// clock: the end of a grace (§5, §10.2). A d of zero or less adds at once.
-// After ShutDown it does nothing.
+// AddAfter adds k's batch, covering ids, as AddHeld does, once d has passed on
+// the queue's clock: the end of a grace (§5, §10.2). A d of zero or less adds at
+// once. With no ids it covers the namespace, as Add. After ShutDown it does
+// nothing.
 func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
+	if d <= 0 && len(ids) > 0 {
+		q.AddHeld(k, ids...)
+		return
+	}
 	if d <= 0 {
-		q.Add(k, ids...)
+		q.Add(k)
 		return
 	}
 	e := &queueTimer{ids: slices.Clone(ids)}
@@ -203,7 +300,7 @@ func (q *batchQueue) AddAt(k batchKey, at time.Time, ids ...ID) {
 	}
 	d := at.Sub(q.clock.Now())
 	if d <= 0 {
-		q.Add(k, ids...)
+		q.AddHeld(k, ids...)
 		return
 	}
 	e := &queueTimer{at: at.UnixNano()}
@@ -255,6 +352,7 @@ func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
 			f = &failure{}
 			m[id] = f
 		}
+		f.held = f.held || q.taken[k][id].held
 		if f.waits != nil {
 			continue
 		}
@@ -288,6 +386,16 @@ func (q *batchQueue) failures(k batchKey, id ID) int {
 		return f.n
 	}
 	return 0
+}
+
+// held is whether id, of the batch of k being worked on, is known to carry the
+// finalizer: it was added so, or it is one that the namespace's list found.
+func (q *batchQueue) held(k batchKey, id ID) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	p, added := q.taken[k][id]
+	_, fill := q.taken[k][fillAll]
+	return p.held || !added && fill
 }
 
 // Settle records that ids of k's batch were decided: what they waited for, and
@@ -350,7 +458,10 @@ func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 				}
 			}
 		}
-		q.addLocked(k, ids)
+		q.addLocked(k, ids, func(id ID) bool {
+			f := q.failing[k][id]
+			return !e.retry || f != nil && f.held
+		})
 	})
 
 	q.mu.Lock()
@@ -367,9 +478,10 @@ func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 	}
 }
 
-// Get takes the next batch, waiting for one, and marks it as being worked
-// on, with its objects in the order they were added: the caller calls Done when it has finished. It returns false once the
-// queue is shut down, or ctx is done.
+// Get takes the next batch, waiting for one, and marks it as being worked on:
+// the caller calls Done when it has finished. Its objects are in the order they
+// were added, lineWindow of each line at most; the rest of them stay pending. It
+// returns false once the queue is shut down, or ctx is done.
 func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 	stop := context.AfterFunc(ctx, func() {
 		q.mu.Lock()
@@ -389,9 +501,25 @@ func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 	q.ready = q.ready[1:]
 	delete(q.queued, k)
 	q.working[k] = true
-	q.taken[k] = q.pending[k]
-	delete(q.pending, k)
-	return k, q.taken[k].inOrder(), true
+	set, ls := q.pending[k], q.lines[k]
+	taken := places{}
+	for _, l := range []*line{&ls.held, &ls.others} {
+		l.take(lineWindow, func(e entry) bool {
+			p, waits := set[e.id]
+			if !waits || p.at != e.at {
+				return false
+			}
+			taken[e.id] = p
+			delete(set, e.id)
+			return true
+		})
+	}
+	q.taken[k] = taken
+	if len(set) == 0 {
+		delete(q.pending, k)
+		delete(q.lines, k)
+	}
+	return k, taken.inOrder(), true
 }
 
 // PutBack adds to k's next batch what its worker didn't get to, each object at
@@ -404,19 +532,30 @@ func (q *batchQueue) PutBack(k batchKey, ids ...ID) {
 	if q.stopped || len(ids) == 0 {
 		return
 	}
-	set := q.pendingLocked(k)
+	set, ls := q.pendingLocked(k)
+	back := map[bool][]entry{}
 	for _, id := range ids {
-		place, had := q.taken[k][id]
+		p, had := q.taken[k][id]
 		if !had {
-			place, had = q.taken[k][fillAll]
+			p, had = q.taken[k][fillAll]
 		}
 		if !had {
 			q.placed++
-			place = q.placed
+			p.at = q.placed
 		}
-		if again, waits := set[id]; !waits || place < again {
-			set[id] = place
+		if again, waits := set[id]; waits {
+			if again.at <= p.at {
+				continue
+			}
+			p.held = p.held || again.held
 		}
+		set[id] = p
+		back[p.held] = append(back[p.held], entry{id, p.at})
+	}
+	for held, es := range back {
+		slices.SortStableFunc(es, func(a, b entry) int { return cmp.Compare(a.at, b.at) })
+		l := ls.of(held)
+		l.back = append(es, l.back...)
 	}
 	q.readyLocked(k)
 }
@@ -457,6 +596,7 @@ func (q *batchQueue) ShutDown() {
 	clear(q.failing)
 	clear(q.asked)
 	q.ready, q.pending = nil, map[batchKey]places{}
+	clear(q.lines)
 	clear(q.taken)
 	clear(q.queued)
 	q.cond.Broadcast()

@@ -1883,12 +1883,18 @@ func TestARecordsChangeIsOneBatch(t *testing.T) {
 			tr := r.track(t, widgetGK)
 			var batches [][]ID
 			r.s.queue.afterAdd = func(k batchKey) {
-				got, ids, _ := r.s.queue.Get(context.Background())
-				if got != k {
-					t.Errorf("batch %v, want %v", got, k)
+				// A worker takes a turn of what one Add queued at a time
+				// (§6.2): what is left of it, it takes next.
+				var batch []ID
+				for r.s.queue.Len() > 0 {
+					got, ids, _ := r.s.queue.Get(context.Background())
+					if got != k {
+						t.Errorf("batch %v, want %v", got, k)
+					}
+					batch = append(batch, ids...)
+					r.s.queue.Done(got)
 				}
-				batches = append(batches, ids)
-				r.s.queue.Done(got)
+				batches = append(batches, SortedIDs(batch))
 			}
 			h := holderHandler{tr}
 			switch {

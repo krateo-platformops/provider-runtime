@@ -270,11 +270,12 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		conflicts:       newConflictSet(),
 		written:         newRecordWrites(),
 		unheldReads:     s.unheldReads,
+		known:           func(n string, id ID) bool { return s.queue.held(batchKey{gk, n}, id) },
 		readLimit: func(n string, id ID) time.Duration {
 			return readLimitAfter(s.queue.failures(batchKey{gk, n}, id))
 		},
 		enqueueBatch: func(id ID, ns string) {
-			s.queue.Add(batchKey{gk, ns}, id)
+			s.queue.AddHeld(batchKey{gk, ns}, id)
 		},
 		disowned:   func(pk schema.GroupKind) bool { return t.disownSwitch().covers(pk) },
 		disownLive: t.disownForHold,
@@ -520,7 +521,7 @@ func (t *Tracker) noteMissing(obj metav1.Object, a Acquired) {
 // informer does it.
 func (t *Tracker) heldDeleting(id ID, namespace string) {
 	if !t.cachedID(id) {
-		t.s.queue.Add(batchKey{t.gk, namespace}, id)
+		t.s.queue.AddHeld(batchKey{t.gk, namespace}, id)
 	}
 }
 

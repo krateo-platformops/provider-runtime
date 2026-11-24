@@ -294,7 +294,7 @@ func (s *Shared) recheckHeld(ctx context.Context, gk schema.GroupKind, ts []*Tra
 		id := ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name}
 		for _, t := range ts {
 			for n := range holds(t, m) {
-				s.queue.Add(batchKey{t.gk, n}, id)
+				s.queue.AddHeld(batchKey{t.gk, n}, id)
 			}
 		}
 	}

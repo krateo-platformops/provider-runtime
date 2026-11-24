@@ -314,7 +314,7 @@ func (s *Shared) rescan() {
 			id := ID{Group: p.gk.Group, Kind: p.gk.Kind, Namespace: m.Namespace, Name: m.Name}
 			for _, t := range trackers {
 				for n := range holds(t, m) {
-					s.queue.Add(batchKey{t.gk, n}, id)
+					s.queue.AddHeld(batchKey{t.gk, n}, id)
 				}
 			}
 			if s.needsJanitor(m) {
