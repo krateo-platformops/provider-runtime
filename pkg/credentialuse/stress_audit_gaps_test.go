@@ -308,31 +308,205 @@ func TestAuditGapEstablish(t *testing.T) {
 	}
 }
 
-// H1's recreate has a class of its own: two releases of one incarnation
-// answered, and the next one went while the second was in flight.
-func TestAuditGapRecreate(t *testing.T) {
+// recreated is a history where processes procs each release u1, which the
+// first of them removes; u2 is created, f happens to it, and it goes. The
+// last release is in flight the whole time if inFlight, and had ended before
+// the create if not.
+func recreated(procs []int, inFlight bool, f func(b *auditRun)) *auditRun {
 	b := newAuditRun(stressPlain).acquired()
 	b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
 	b.mark(auditS)
 	read := b.last[auditS]
-	for _, g := range []string{"9", "10"} {
+	gs := []string{"9", "10"}
+	for i, proc := range procs {
 		for _, o := range []stObj{auditS, nsObj("ns")} {
-			b.call(stCall{proc: 2, g: g, op: "get", obj: o}, func(c *stCall) { c.from(b.last[o]) })
+			b.call(stCall{proc: proc, g: gs[i], op: "get", obj: o}, func(c *stCall) { c.from(b.last[o]) })
 		}
-		b.listBy(2, g)
+		b.listBy(proc, gs[i])
 	}
 	removed := func(c *stCall) {
 		c.from(read)
 		c.fins, c.epochs, c.testedUID, c.tested = nil, nil, "u1", "e1"
 	}
-	b.call(stCall{proc: 2, g: "9", op: "r3", obj: auditS, fin: auditFin}, func(c *stCall) {
-		removed(c)
-		b.remove(auditS)
-	})
-	b.call(stCall{proc: 2, g: "10", op: "r3", obj: auditS, fin: auditFin}, func(c *stCall) {
-		removed(c)
+	next := func() {
 		b.create(auditS, "u2")
+		if f != nil {
+			f(b)
+		}
+		b.remove(auditS)
+	}
+	first := b.call(stCall{proc: procs[0], g: gs[0], op: "r3", obj: auditS, fin: auditFin}, func(c *stCall) {
+		removed(c)
 		b.remove(auditS)
 	})
-	b.want(t, "H1-RECREATE")
+	if len(procs) > 1 {
+		b.call(stCall{proc: procs[1], g: gs[1], op: "r3", obj: auditS, fin: auditFin}, func(c *stCall) {
+			removed(c)
+			if inFlight {
+				next()
+			}
+		})
+		b.calls[len(b.calls)-1].start = first.start
+	}
+	if len(procs) == 1 || !inFlight {
+		next()
+	}
+	return b
 }
+
+// H1's recreate has a class of its own: two processes' releases of one
+// incarnation answered, and the next one went while the second was in flight.
+// One process's two releases are a bug of ours, and anything less than the
+// whole shape explains nothing.
+func TestAuditGapRecreate(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		procs    []int
+		inFlight bool
+		f        func(b *auditRun)
+		want     []string
+	}{
+		{"two processes", []int{1, 2}, true, nil, []string{"H1-RECREATE"}},
+		{"and the next had been held", []int{1, 2}, true, func(b *auditRun) {
+			b.put(auditS, "u2", func(v *stVersion) { b.hold(v, "e2") })
+		}, []string{"H1-RECREATE"}},
+		{"and the next had been marked", []int{1, 2}, true, func(b *auditRun) {
+			b.put(auditS, "u2", func(v *stVersion) { b.hold(v, "e2") })
+			b.mark(auditS)
+		}, []string{"H1-RECREATE"}},
+		{"one process, twice", []int{2, 2}, true, nil, []string{"RELEASED-TWICE", "UNEXPLAINED-REMOVAL"}},
+		{"one release", []int{2}, true, nil, []string{"UNEXPLAINED-REMOVAL"}},
+		{"both had ended before the create", []int{1, 2}, false, nil, []string{"UNEXPLAINED-REMOVAL"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			recreated(c.procs, c.inFlight, c.f).want(t, c.want...)
+		})
+	}
+}
+
+// A read that answers less than the watch had delivered before it began isn't
+// a live one.
+func TestAuditGapStaleRead(t *testing.T) {
+	b := newAuditRun(stressPlain).acquired()
+	b.mark(auditS)
+	b.wait(testGrace)
+	live := b.last[nsObj("ns")]
+	b.put(nsObj("ns"), "uns", func(v *stVersion) { v.deleting = true })
+	b.r1()
+	b.call(stCall{op: "get", obj: nsObj("ns")}, func(c *stCall) { c.from(live) })
+	b.list()
+	b.r3()
+	b.want(t, "STALE-READ")
+
+	b = newCrossRun("ns")
+	p := b.pass()
+	old := b.last[auditC]
+	b.put(auditC, "uc", func(v *stVersion) { v.consent = "" })
+	b.call(stCall{proc: 1, g: "5", pass: p.id, op: "get", obj: nsObj("target")}, func(c *stCall) { c.from(b.last[nsObj("target")]) })
+	b.call(stCall{proc: 1, g: "5", pass: p.id, op: "get", obj: auditC}, func(c *stCall) { c.from(old) })
+	b.a1(p, auditC)
+	b.a2(p, auditC, "e1")
+	b.end(p, auditC)
+	b.want(t, "STALE-READ")
+
+	b = newAuditRun(stressPlain)
+	b.call(stCall{op: "get", obj: auditS, err: "not found", notFound: true}, func(*stCall) {})
+	b.put(auditS, "u1", func(v *stVersion) { v.consent = "x" })
+	b.want(t, "STALE-READ")
+
+	b = newAuditRun(stressPlain)
+	b.call(stCall{op: "get", obj: auditS, err: "not found", notFound: true}, func(*stCall) {})
+	w := b.began(auditS)
+	b.remove(auditS)
+	b.answer(w, answerStatus, "u1")
+	b.want(t) // it may have gone before the read, and the watch be late
+}
+
+// What explains a pass that stopped is what it was answered last.
+func TestAuditGapStop(t *testing.T) {
+	b := newAuditRun(stressPlain).acquired()
+	p := b.pass()
+	b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, unknown: true})
+	b.a2(p, auditS, "e2")
+	p.degraded, p.acqErr = true, "something else"
+	b.end(p, auditS)
+	b.want(t, "ACQUIRE-FAILED")
+
+	b = newAuditRun(stressPlain).acquired()
+	p = b.pass()
+	b.refused(p, stCall{op: "a2", obj: auditS2, fin: auditFin, unknown: true})
+	p.degraded, p.acqErr = true, "connection reset"
+	b.end(p)
+	b.want(t, "ACQUIRE-FAILED") // of an object it doesn't name
+
+	// A pass that stopped at its A2 had written its record.
+	b = newAuditRun(stressPlain)
+	p = b.pass()
+	b.refused(p, stCall{op: "a2", obj: auditS, fin: auditFin, unknown: true})
+	p.degraded, p.acqErr = true, "connection reset"
+	b.end(p)
+	b.want(t, "RECORD-DIFFERS")
+}
+
+// H1's lost A2 has a class of its own, where a deletion pass's read fails for
+// it: the A2 is the incarnation's last version, and every release that
+// answered had tested an older one.
+func TestAuditGapLostA2(t *testing.T) {
+	lost := func(tested func(read, last stVersion) uint64) *auditRun {
+		b := newAuditRun(stressPlain).acquired()
+		b.mark(auditS)
+		b.wait(testGrace)
+		b.batch() // over a live user, after the grace
+		read := b.last[auditS]
+		p := b.deletion()
+		b.a2(p, auditS, "e2")
+		b.r3()
+		b.calls[len(b.calls)-1].rv = tested(read, b.vs[len(b.vs)-2])
+		b.lostRead(p)
+		b.end(p, auditS)
+		return b
+	}
+	r := lost(func(read, _ stVersion) uint64 { return read.rv }).want(t, "H1-LOST-A2")
+	wantCount(t, r, countLostA2, 1)
+	lost(func(_, last stVersion) uint64 { return last.rv }).want(t, "LOST-READ", "RELEASED-OVER-A-USER", "RELEASED-WHAT-IT-HADNT-READ")
+}
+
+// A release of unknown outcome may have taken the last finalizer, and the
+// object with it; and is judged.
+func TestAuditGapUnknownRemoval(t *testing.T) {
+	for _, c := range []struct {
+		name, epoch string
+		users       bool
+		want        []string
+	}{
+		{"its own", "e1", false, nil},
+		{"another epoch's", "e0", false, []string{"UNEXPLAINED-REMOVAL"}},
+		{"over a user", "e1", true, []string{"RELEASED-INSIDE-THE-GRACE"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newAuditRun(stressPlain).acquired()
+			if !c.users {
+				b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+			}
+			b.mark(auditS)
+			b.batch()
+			b.call(stCall{op: "r3", obj: auditS, fin: auditFin, testedUID: "u1", tested: c.epoch, err: "connection reset", unknown: true}, func(*stCall) {
+				b.remove(auditS)
+			})
+			b.want(t, c.want...)
+		})
+	}
+}
+
+// One key of the queue is one worker's at a time (§10.2).
+func TestAuditGapTwoWorkers(t *testing.T) {
+	b := newAuditRun(stressPlain)
+	b.listBy(2, "9")
+	b.listBy(2, "10")
+	b.want(t)
+	b.calls[1].start = b.calls[0].start
+	b.want(t, "RELEASED-TWICE")
+	b.calls[1].proc = 1
+	b.want(t)
+}
+
