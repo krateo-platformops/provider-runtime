@@ -59,6 +59,10 @@ func (s *Shared) QueueLoad() (ready, working int) {
 // short. Set it before Track.
 func (s *Shared) SetLandingMargin(d time.Duration) { s.hooks.landingMargin = &d }
 
+// SetPruneQuiet replaces how long the prunes are kept back once the write
+// loops have started. Set it before they do.
+func (s *Shared) SetPruneQuiet(d time.Duration) { s.hooks.pruneQuiet = &d }
+
 // QueuedBatch reports whether the batch of holder kind gk in namespace ns is
 // waiting, and the protected objects it covers.
 func (s *Shared) QueuedBatch(gk schema.GroupKind, ns string) (bool, []ID) {

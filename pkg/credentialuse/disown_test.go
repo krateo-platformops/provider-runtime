@@ -41,7 +41,7 @@ func TestALostIndexHasOneReport(t *testing.T) {
 		}
 		// As a PerName kind, with an index of the test's own.
 		tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
-		tr.idx = testIndex(st, r.s.newServer())
+		tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 		r.s.disownPass(ctx, tr, parseDisown("all"))
 		var got []string
 		for len(r.events.Events) > 0 {
@@ -68,7 +68,7 @@ func TestALostIndexReportNamesTheCoveredKinds(t *testing.T) {
 	configMap := configMapGroupKind.WithVersion("v1")
 	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMap, Watch: PerName}}
 	st := &memStore{exists: true, uid: "u1"}
-	tr.idx = testIndex(st, r.s.newServer())
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 	tr.idx.kinds[configMapGroupKind] = true
 	pass := func(value string) (got []string) {
 		r.s.disownPass(ctx, tr, parseDisown(value))
@@ -120,7 +120,7 @@ func TestAFailedCheckOfAnotherKind(t *testing.T) {
 		}
 		// As PerName kinds, with an index of the test's own.
 		tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMapGVK, Watch: PerName}}
-		tr.idx = testIndex(&memStore{exists: true, rebuilt: true}, r.s.newServer())
+		tr.idx = testIndex(&memStore{exists: true, rebuilt: true}, r.s.newServer(tr.o.Holder))
 		tr.idx.kinds[configMapGroupKind] = true
 		tr.idx.queue([]ID{{Kind: "ConfigMap", Namespace: "ns", Name: "c"}}, false)
 		r.md.PrependReactor("get", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
@@ -155,7 +155,7 @@ func TestDisownWithAVouchedNamespace(t *testing.T) {
 	// As a PerName kind, with an index of the test's own.
 	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
 	st := &memStore{exists: true, rebuilt: true}
-	tr.idx = testIndex(st, r.s.newServer())
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 	tr.idx.maxLines = 2000
 	r.md.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, rbacForbidden(a.GetNamespace(), a.(clienttesting.GetAction).GetName())
@@ -221,7 +221,7 @@ func TestDisownWithARecordThatDoesntFit(t *testing.T) {
 	// As a PerName kind, with an index of the test's own, of five lines.
 	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
 	st := &memStore{exists: true, rebuilt: true}
-	tr.idx = testIndex(st, r.s.newServer())
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 	r.s.disownPass(ctx, tr, parseDisown("all"))
 	if want := linesOf([]ID{secretID("ns", "a"), secretID("ns", "b"), forged[0]}); !slices.Equal(st.lines, want) {
 		t.Errorf("lines %q, want %q", st.lines, want)
@@ -254,11 +254,16 @@ func TestIndexFitting(t *testing.T) {
 		}
 		return out
 	}
-	long := SecretRef("ns", strings.Repeat("x", indexMaxBytes)).ID()
+	var big []ID // past a ConfigMap's size
+	for i := range indexMaxBytes / 253 {
+		big = append(big, SecretRef("ns", fmt.Sprintf("%0253d", i)).ID())
+	}
+	tooLong := SecretRef("ns", strings.Repeat("x", 254)).ID()
 	for name, c := range map[string]struct {
 		lines     []ID
 		sets      [][]ID
 		add, over []ID
+		cap       int // 5, if 0
 	}{
 		"all":                     {sets: [][]ID{ids("a", "b"), ids("c")}, add: ids("a", "b", "c")},
 		"the smallest first":      {sets: [][]ID{ids("a", "b", "c", "d"), ids("e", "f")}, add: ids("e", "f"), over: ids("a", "b", "c", "d")},
@@ -266,9 +271,14 @@ func TestIndexFitting(t *testing.T) {
 		"partly there":            {lines: ids("a", "b", "c", "d"), sets: [][]ID{ids("a", "b", "e")}, add: ids("e")},
 		"there already":           {lines: ids("a", "b", "c", "d", "e"), sets: [][]ID{ids("a", "b"), ids("f")}, over: ids("f")},
 		"a cap since lowered":     {lines: ids("a", "b", "c", "d", "e", "f"), sets: [][]ID{ids("a", "f")}},
-		"past a ConfigMap's size": {sets: [][]ID{{long}, ids("a")}, add: ids("a"), over: []ID{long}},
+		"past a ConfigMap's size": {sets: [][]ID{big, ids("a")}, add: ids("a"), over: big, cap: IndexMaxLinesCeiling},
+		"what can't be a line":    {lines: ids("a", "b", "c", "d", "e"), sets: [][]ID{ids("a", "f\n"), {tooLong}}},
 	} {
-		add, over, err := testIndex(&memStore{}, nil).fitting(linesOf(c.lines), c.sets)
+		ix := testIndex(&memStore{}, nil)
+		if c.cap > 0 {
+			ix.maxLines = c.cap
+		}
+		add, over, err := ix.fitting(linesOf(c.lines), c.sets)
 		if !slices.Equal(SortedIDs(add), c.add) || !slices.Equal(over, c.over) || (err != nil) != (len(c.over) > 0) || err != nil && !errors.Is(err, errIndexFull) {
 			t.Errorf("%s: %v, over %d, %v; want %v, over %d", name, add, len(over), err, c.add, len(c.over))
 		}
@@ -1067,8 +1077,7 @@ func TestDisownsFirstPassNeedsItsCRD(t *testing.T) {
 // spans, the CRD's newest writer at them is reported, at most once per
 // eventThrottle, and neither older ones nor, though it is newer, the entry of
 // the count's and the flag's own writes. Once the CRD
-// stays as it is, Disown settles, and nothing more is counted (§7.4; the
-// user's decision, 2026-11-23).
+// stays as it is, Disown settles, and nothing more is counted (§7.4).
 func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
 	ctx := context.Background()
 	r := newFakeRig(t)
@@ -1168,7 +1177,7 @@ func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
 // of which takes it, and so its entry in managedFields, from the one before:
 // the report names the newest at each restart of the streak, the last three,
 // each with its operation and subresource; and nobody of a streak before
-// (§7.4; the user's decision, 2026-11-23).
+// (§7.4).
 func TestDisownReportsWritersThatOverwriteEachOther(t *testing.T) {
 	ctx := context.Background()
 	r := newFakeRig(t)

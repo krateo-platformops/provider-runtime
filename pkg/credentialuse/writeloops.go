@@ -73,6 +73,7 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 	trackers := make([]*Tracker, 0, len(s.trackers))
 	for _, t := range s.trackers {
 		trackers = append(trackers, t)
+		t.startQuiet()
 	}
 	s.mu.Unlock()
 	defer func() {

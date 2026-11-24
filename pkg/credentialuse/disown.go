@@ -164,8 +164,8 @@ func (t *Tracker) disownLive(ctx context.Context) (disownSet, error) {
 //
 // It also removes a disown-settled that a switch of another value left,
 // guarded by the version it read: a hold made now must not stand under a
-// flag that says nothing is held, should that value come back (§7.4; the
-// user's decision, 2026-11-23). One it can't remove fails the pass: no A2.
+// flag that says nothing is held, should that value come back (§7.4). One it
+// can't remove fails the pass: no A2.
 func (t *Tracker) disownForHold(ctx context.Context) (disownSet, error) {
 	m, err := t.s.c.Metadata.Resource(crdGVR).Get(ctx, t.crdName, metav1.GetOptions{})
 	if Classify(err) == ClassNotFound {

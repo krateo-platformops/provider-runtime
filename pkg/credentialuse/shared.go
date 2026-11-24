@@ -140,8 +140,8 @@ type Options struct {
 	// DisownInterval is derived from the kind's TimeoutBound, after
 	// DisownPasses' default: max(60s, ⌈span / (DisownPasses − 1)⌉), where
 	// span is max(2 × TimeoutBound, TimeoutBound + LandingMargin), so a long
-	// reconcile timeout needs no setting (the user's decisions, 2026-11-22
-	// and 2026-11-23). That derived value is what Track publishes on the CRD,
+	// reconcile timeout needs no setting (the user's decision, 2026-11-22; the
+	// span as of 2026-11-23). That derived value is what Track publishes on the CRD,
 	// so every process of the kind agrees on it. An interval that is set is
 	// used as given, and Track refuses one too short for the span.
 	DisownInterval time.Duration
@@ -281,6 +281,9 @@ type hooks struct {
 	// landingMargin replaces LandingMargin, so that Disown's passes can be
 	// short.
 	landingMargin *time.Duration
+	// pruneQuiet replaces how long the prunes are kept back once the write
+	// loops have started.
+	pruneQuiet *time.Duration
 }
 
 // landingMargin is LandingMargin, or the tests' own.
@@ -784,6 +787,7 @@ func (s *Shared) endTracking(gk schema.GroupKind, mine *inflight) {
 	}
 	if t != nil && wctx != nil {
 		s.writeWG.Add(1)
+		t.startQuiet()
 	}
 	s.mu.Unlock()
 	if t != nil {

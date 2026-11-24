@@ -137,6 +137,7 @@ func TestIndexPointerWrittenOnce(t *testing.T) {
 	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
 	track := func(ns string) error {
 		s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: ns})
+		s.SetPruneQuiet(0)
 		o := widgetOptions(func(types.NamespacedName) {})
 		perName(&o)
 		_, err := s.Track(context.Background(), o)
@@ -373,6 +374,7 @@ func perNameProcess(t *testing.T, cfg *rest.Config, idx string, connect func(con
 	}()
 	clients.Events = rec
 	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	o := widgetOptions(c.enqueue)
 	o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
 	perName(&o)
@@ -827,8 +829,7 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	g := newGates()
 	var armed, r3Issued, a2Issued, pruneIssued atomic.Bool
 	var relIndexGets, acqUpdates, relUpdates atomic.Int32
-	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
-	s.HookCalls(func(ctx context.Context, c cu.Call) error {
+	hook := func(ctx context.Context, c cu.Call) error {
 		if err := g.killed(); err != nil {
 			return err
 		}
@@ -868,23 +869,34 @@ func runSuperset(t *testing.T, sc supersetCase) {
 			return g.hold(ctx, "check")
 		}
 		return nil
-	}, nil)
-	o := widgetOptions(func(types.NamespacedName) {})
-	o.DeletionGrace = testGrace
-	perName(&o)
-	tr, err := s.Track(context.Background(), o)
-	if err != nil {
-		t.Fatal(err)
 	}
-	d := newDriver(tr)
+	// The pruner's process, and the acquirer's: a process's prune leaves the
+	// line of an A2 of its own (§10.6.2).
+	process := func() (*cu.Shared, *cu.Tracker) {
+		s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+		s.SetPruneQuiet(0)
+		s.HookCalls(hook, nil)
+		o := widgetOptions(func(types.NamespacedName) {})
+		o.DeletionGrace = testGrace
+		perName(&o)
+		tr, err := s.Track(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, tr
+	}
+	s, tr := process()
+	acquirer, acquirerTr := process()
+	d := newDriver(acquirerTr)
 	runCtx, kill := context.WithCancel(withRole(context.Background(), "rel"))
 	var loops sync.WaitGroup
 	t.Cleanup(func() {
 		kill()
 		loops.Wait()
 	})
-	stopInformers := runningInformers(t, s)
+	stopInformers, stopAcquirer := runningInformers(t, s), runningInformers(t, acquirer)
 	t.Cleanup(stopInformers)
+	t.Cleanup(stopAcquirer)
 	startLoops := func() {
 		loops.Add(1)
 		go func() {
@@ -965,6 +977,7 @@ func runSuperset(t *testing.T, sc supersetCase) {
 		killPasses()
 		loops.Wait()
 		stopInformers()
+		stopAcquirer()
 		_ = passResult()
 	}
 	prune := "prune"
@@ -1004,7 +1017,7 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	}
 
 	if sc.crashAt != "" {
-		// The process died between a write and its check: P carries the
+		// The processes died between a write and its check: P carries the
 		// finalizer without its line, until H2's next pass, whose written
 		// set is empty, adds it before its A2 (§10.6.3, L2).
 		if err := heldFor(ns, "s", ns)(); err != nil {
@@ -1436,6 +1449,7 @@ func TestIndexNamespaceChecks(t *testing.T) {
 	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
 	track := func(idx string) (*cu.Tracker, error) {
 		s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+		s.SetPruneQuiet(0)
 		o := widgetOptions(func(types.NamespacedName) {})
 		perName(&o)
 		return s.Track(context.Background(), o)
@@ -1501,6 +1515,7 @@ func TestIndexCreatedAtStartRebuildsFromRecords(t *testing.T) {
 	resetPublished(t, cutest.WidgetGVR)
 	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	o := widgetOptions(func(types.NamespacedName) {})
 	perName(&o)
 	if _, err := s.Track(context.Background(), o); err != nil {
@@ -1698,6 +1713,7 @@ func TestIndexCrashBeforeTheRebuildIsRebuiltAtRestart(t *testing.T) {
 	// The process creates the index, and dies before its rebuild: every
 	// list of the holders fails, and it never runs.
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	created := false
 	s.HookCalls(func(_ context.Context, c cu.Call) error {
 		if c.Op == "index-create" {
@@ -1740,6 +1756,7 @@ func TestIndexAcquirerCreatedIndexIsRebuiltAtStart(t *testing.T) {
 	// A process whose Track found the index rebuilt, and whose write loops
 	// never run.
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	o := widgetOptions(func(types.NamespacedName) {})
 	perName(&o)
 	tr, err := s.Track(context.Background(), o)
@@ -1925,6 +1942,7 @@ func TestIndexRecheckWithAnUnreadableRecordedObject(t *testing.T) {
 	fTarget, _ := cu.FinalizerName(targetGK, ns)
 
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx, Namespaces: []string{cached}})
+	s.SetPruneQuiet(0)
 	s.HookCalls(func(_ context.Context, c cu.Call) error {
 		if c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == ns && c.Name == "a-nogrant" {
 			return apierrors.NewServiceUnavailable("the API server can't read a-nogrant")
@@ -2045,7 +2063,6 @@ func TestIndexRecheckDoesntRetryADeniedLine(t *testing.T) {
 // decision of 2026-11-22). No write removes the line before that (§7.4).
 func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	cutest.Require(t, env)
-	ctx := context.Background()
 	set := disowning(t)
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-unreadable")
 	const sa = "cu-disown-unreadable"

@@ -351,6 +351,7 @@ func TestARefWithoutItsNamespaceIsMissing(t *testing.T) {
 	c := newController(t)
 	clients := clientsFor(t, env.Config)
 	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	s.SetLandingMargin(0) // disownOptions' passes are short
 	o := widgetOptions(c.enqueue)
 	o.Holder, o.ProbeInterval = gvk, time.Second

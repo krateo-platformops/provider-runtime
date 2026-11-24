@@ -89,7 +89,7 @@ func TestModelIndexDrops(t *testing.T) {
 					st := modelIndexStore{m: m, a: a, who: "hand", log: &log}
 					cur, err := st.get(context.Background())
 					if err == nil && slices.Contains(cur.lines, p.String()) {
-						if _, err := st.update(context.Background(), cur, nil, false); err == nil {
+						if _, err := st.update(context.Background(), cur, nil, nil); err == nil {
 							handWon++
 						}
 					}
@@ -146,6 +146,12 @@ type lateCase struct {
 	// A prune may take the line before the landing: nothing names the
 	// object any more.
 	unnamed bool
+	// Whose prune it is: the sender's own (own), which leaves the line of an
+	// A2 that may land yet; its successor's, whose write loops start once the
+	// sender has ended, as with leader election, and prune nothing at first
+	// (quiet), or do; or, with neither, another process's, which runs all
+	// along.
+	own, successor, quiet bool
 }
 
 // lateChecks reports whether the sender makes its late check.
@@ -200,10 +206,19 @@ func (l senderLines) unknownA2(ctx context.Context, id ID, n string) {
 	}
 }
 
-// exploreLate searches every schedule of case c, and returns how many ended
-// with P held and without its line, one such log, and how many had the prune
-// take the line before the landing.
-func exploreLate(t *testing.T, c lateCase) (violations int, sample string, pruned int) {
+// lateResult is what a search of a case saw: how many schedules ended with P
+// held and without its line, and one such log; how many had the prune take the
+// line before the landing; how many had it left by the rules; and how many
+// ended with P held.
+type lateResult struct {
+	violations int
+	sample     string
+	pruned     int
+	left, held int
+}
+
+// exploreLate searches every schedule of case c.
+func exploreLate(t *testing.T, c lateCase) (r lateResult) {
 	t.Helper()
 	p := SecretRef("ns", "s").ID()
 	res := apimodel.Explore(apimodel.Bounds{Preemptions: c.preemptions(), MaxRuns: 2_000_000}, func(s *apimodel.Sched) error {
@@ -214,7 +229,25 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 		must(m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: map[string]string{AnnotationRebuilt: "true"}}))
 		must(m.Create(widgetKey("ns", "h"), metav1.ObjectMeta{}))
 		var sent []byte
-		landed, acquired := false, false
+		landed, acquired, left := false, false, false
+		// process is the index of one process, the sender's: whichever of its
+		// actors is running.
+		var process *index
+		if c.own {
+			prefix, _ := FinalizerPrefix(widgetGK)
+			st := runningStore{s, m, &log}
+			process = newIndex(widgetGK, prefix, "idx", DefaultIndexMaxLines, kindSet{secretGroupKind: true}, st, runningServer{s, m, &log})
+			process.cached = func(ctx context.Context, line string) bool {
+				v, err := st.get(ctx)
+				return err == nil && slices.Contains(v.lines, line)
+			}
+		}
+		indexOf := func(a *apimodel.Actor, who string) *index {
+			if process != nil {
+				return process
+			}
+			return modelIndex(m, a, who, &log)
+		}
 		// batch is a release batch of P, and its prune. The pruner's view of
 		// the records is the most adversarial one, unless something names P.
 		batch := func(a *apimodel.Actor, who string) {
@@ -224,11 +257,27 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 			if err != nil {
 				return
 			}
-			ix := modelIndex(m, a, who, &log)
+			ix := indexOf(a, who)
 			if !c.unnamed {
 				ix.recorded = func(ID) bool { return true }
 			}
+			now := time.Unix(0, 0)
+			if c.quiet {
+				ix.now = func() time.Time { return now }
+				ix.startQuiet(time.Minute)
+			}
 			_ = ix.prune(context.Background(), ix.prunable(r.Bare))
+			left = left || len(ix.deferred) > 0
+			if !c.quiet || len(ix.deferred) == 0 {
+				return
+			}
+			// The quiet time is over, by when the sender's A2 has landed, or
+			// past the margin not.
+			if sent != nil && !landed && !c.landsPastMargin {
+				a.Wait("quiet", time.Time{}, func() bool { return landed })
+			}
+			now = now.Add(time.Minute)
+			_ = ix.deferredTick(context.Background(), now)
 		}
 		s.Go("acquirer", 0, func(a *apimodel.Actor) {
 			defer func() { acquired = true }()
@@ -238,7 +287,7 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 				return
 			}
 			pr := newProtocol(senderServer{log1, c.lost, &sent}, noViews{}, newVerified(widgetGK), newFirstSight(), a.Clock(), testGrace)
-			pr.lines = senderLines{modelIndex(m, a, "acq", &log), c.killedBeforeCheck}
+			pr.lines = senderLines{indexOf(a, "acq"), c.killedBeforeCheck}
 			_, _ = pr.acquire(context.Background(), h, []Ref{SecretRef("ns", "s")})
 		})
 		if c.lost {
@@ -271,7 +320,7 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 		s.Go("releaser", 0, func(a *apimodel.Actor) {
 			a.Wait("batch", time.Time{}, func() bool {
 				_, err := m.Get(widgetKey("ns", "h"))
-				return err != nil || acquired
+				return err != nil && !c.successor || acquired
 			})
 			batch(a, "rel")
 		})
@@ -283,7 +332,7 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 				if sent == nil {
 					return
 				}
-				ix := modelIndex(m, a, "late", &log)
+				ix := indexOf(a, "late")
 				ix.late[lateHold{p, "ns"}] = time.Time{}
 				owed := false
 				ix.lateTick(time.Now(), func(ID, string) { owed = true })
@@ -291,6 +340,8 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 				if owed {
 					batch(a, "late")
 				}
+				// The prune the releaser's batch left, if it did, once due.
+				_ = ix.deferredTick(context.Background(), time.Now().Add(24*time.Hour))
 			})
 		}
 		if err := s.Run(); err != nil {
@@ -299,15 +350,21 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 		if i := slices.IndexFunc(log, func(e string) bool { return e == "rel update []" }); i >= 0 {
 			for j, e := range log {
 				if j > i && (e == "net A2 lands" || e == fmt.Sprintf("acq patch %s s", types.StrategicMergePatchType)) {
-					pruned++
+					r.pruned++
 					break
 				}
 			}
 		}
+		if left {
+			r.left++
+		}
+		if o, err := m.Get(secretKey(p.Namespace, p.Name)); err == nil && len(o.Finalizers) > 0 {
+			r.held++
+		}
 		if err := indexSuperset(m, p); err != nil {
-			violations++
-			if sample == "" {
-				sample = fmt.Sprintf("%v; log %q", err, log)
+			r.violations++
+			if r.sample == "" {
+				r.sample = fmt.Sprintf("%v; log %q", err, log)
 			}
 		}
 		return nil
@@ -318,8 +375,8 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 	if !res.Finished {
 		t.Errorf("the search didn't finish: %d runs", res.Runs)
 	}
-	t.Logf("%+v: %d preemptions, %d schedules, %d with the line taken before the landing, %d held without a line", c, c.preemptions(), res.Runs, pruned, violations)
-	return violations, sample, pruned
+	t.Logf("%+v: %d preemptions, %d schedules, %d with the line taken before the landing, %d with it left, %d held, %d without a line", c, c.preemptions(), res.Runs, r.pruned, r.left, r.held, r.violations)
+	return r
 }
 
 // TestModelLateHold: the residual of §10.6.3 (the user's decision,
@@ -328,6 +385,13 @@ func exploreLate(t *testing.T, c lateCase) (violations int, sample string, prune
 // landing, in either of two ways; and a prune takes the line before the
 // landing. With all three, a hold without its line is reached; with any one
 // off, none is, on any schedule within each case's bound (preemptions).
+//
+// With the pruner's two rules for a hold that may land yet (§10.6.2; the
+// user's decision, 2026-11-24), none is with all three either, if the A2 lands
+// within the margin, and the prune is the sender's successor's, or its own.
+// The successor's that prunes at once reaches it, as another process's does,
+// which has neither rule, and is the one without its own for the sender's: it
+// shares nothing with it. Past the margin, a successor's reaches it too.
 func TestModelLateHold(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
@@ -337,12 +401,33 @@ func TestModelLateHold(t *testing.T) {
 		"lost, lands past the margin":    {lost: true, landsPastMargin: true, unnamed: true},
 		"killed before its check":        {killedBeforeCheck: true, killedWithinMargin: true, unnamed: true},
 		"lost, and killed before it":     {lost: true, killedBeforeCheck: true, killedWithinMargin: true, unnamed: true},
+
+		"a successor at once, lost, ended within the margin":  {lost: true, killedWithinMargin: true, unnamed: true, successor: true},
+		"a successor at once, lost, and killed before it":     {lost: true, killedBeforeCheck: true, killedWithinMargin: true, unnamed: true, successor: true},
+		"a successor quiet at first, lost, lands past margin": {lost: true, killedWithinMargin: true, landsPastMargin: true, unnamed: true, successor: true, quiet: true},
 	}
 	for name, c := range reached {
 		t.Run("all three/"+name, func(t *testing.T) {
-			n, _, pruned := exploreLate(t, c)
-			if n == 0 || pruned == 0 {
-				t.Errorf("a hold without its line in %d schedules, the line taken before the landing in %d; want both reached", n, pruned)
+			r := exploreLate(t, c)
+			if r.violations == 0 || r.pruned == 0 {
+				t.Errorf("a hold without its line in %d schedules, the line taken before the landing in %d; want both reached", r.violations, r.pruned)
+			}
+		})
+	}
+	ruled := map[string]lateCase{
+		"a successor, lost, ended within the margin": {lost: true, killedWithinMargin: true, unnamed: true, successor: true, quiet: true},
+		"a successor, lost, and killed before it":    {lost: true, killedBeforeCheck: true, killedWithinMargin: true, unnamed: true, successor: true, quiet: true},
+		"its own, lost, ended within the margin":     {lost: true, killedWithinMargin: true, unnamed: true, own: true},
+		"its own, lost, alive":                       {lost: true, unnamed: true, own: true},
+	}
+	for name, c := range ruled {
+		t.Run("the pruner's rules/"+name, func(t *testing.T) {
+			r := exploreLate(t, c)
+			if r.violations != 0 {
+				t.Errorf("a hold without its line in %d schedules: %s", r.violations, r.sample)
+			}
+			if r.left == 0 || r.held == 0 && !c.lateChecks() {
+				t.Errorf("%d schedules have the line left, and %d end with a hold; want both", r.left, r.held)
 			}
 		})
 	}
@@ -357,11 +442,11 @@ func TestModelLateHold(t *testing.T) {
 	}
 	for name, c := range safe {
 		t.Run("one off/"+name, func(t *testing.T) {
-			n, sample, pruned := exploreLate(t, c)
-			if n != 0 {
-				t.Errorf("a hold without its line in %d schedules: %s", n, sample)
+			r := exploreLate(t, c)
+			if r.violations != 0 {
+				t.Errorf("a hold without its line in %d schedules: %s", r.violations, r.sample)
 			}
-			if c.unnamed && pruned == 0 {
+			if c.unnamed && r.pruned == 0 {
 				t.Error("no schedule has the line taken before the landing: the other rules weren't needed")
 			}
 		})

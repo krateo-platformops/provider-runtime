@@ -413,6 +413,7 @@ func TestPerNameUnderResourceNamesRBAC(t *testing.T) {
 	// per-name watches cover every namespace, so it needs no list of
 	// Secrets in any (§10.5, §13 shape 1).
 	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx, Namespaces: []string{"unrelated"}})
+	s.SetPruneQuiet(0)
 	o := widgetOptions(c.enqueue)
 	o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
 	logs := &warnLog{}

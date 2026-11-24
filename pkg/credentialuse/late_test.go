@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	testingclock "k8s.io/utils/clock/testing"
 )
 
 // An A2 whose outcome its sender doesn't learn, and one its caller's stop
@@ -198,6 +199,182 @@ func TestAnA2OfUnknownOutcomeIsChecked(t *testing.T) {
 	}
 }
 
+// The index is told of an A2 before its line is ensured, and of its end once
+// its line was checked, or its unknown outcome told; whatever came of it, in a
+// pass and before establishing (§10.6.2).
+func TestTheIndexIsToldOfAnA2(t *testing.T) {
+	ctx := context.Background()
+	refused := rbacForbidden("ns", "a")
+	for name, tc := range map[string]struct {
+		err                  error
+		failEnsure, failPost bool
+		want                 []string
+	}{
+		"held":                 {want: []string{"holding", "ensure", "check", "done"}},
+		"its check fails":      {failPost: true, want: []string{"holding", "ensure", "check", "done"}},
+		"its line isn't there": {failEnsure: true, want: []string{"holding", "ensure", "done"}},
+		"refused":              {err: refused, want: []string{"holding", "ensure", "done"}},
+		"of unknown outcome":   {err: errors.New("EOF"), want: []string{"holding", "ensure", "unknown", "done"}},
+	} {
+		for _, establishing := range []bool{false, true} {
+			r, l, _ := lateRig(t, func(_ context.Context, _ string, next func() (*metav1.PartialObjectMetadata, error)) (*metav1.PartialObjectMetadata, error) {
+				if tc.err != nil {
+					return nil, tc.err
+				}
+				return next()
+			})
+			l.failEnsure, l.failPost = tc.failEnsure, tc.failPost
+			h := r.holder(t, "h", false)
+			if establishing {
+				_ = r.p.beforeEstablish(ctx, h, Acquired{Unheld: []Unheld{{Ref: SecretRef("ns", "a"), Reason: ReasonMissing}}})
+			} else if _, err := r.p.acquire(ctx, h, []Ref{SecretRef("ns", "a")}); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(l.steps, tc.want) || l.flying[SecretRef("ns", "a").ID()] != 0 {
+				t.Errorf("%s, establishing %v: %q, with %v in flight; want %q, and none", name, establishing, l.steps, l.flying, tc.want)
+			}
+		}
+	}
+}
+
+// A prune leaves the lines of the A2s this process has in flight, or of
+// unknown outcome, those begun during its removal included, and takes them
+// later, unless the object is held, named, or can't be read (§10.6.2).
+func TestAPruneLeavesWhatMayLand(t *testing.T) {
+	ctx := context.Background()
+	bare, flying, late, begun, lost := SecretRef("ns", "a-bare").ID(), SecretRef("ns", "b-flying").ID(), SecretRef("ns", "c-late").ID(), SecretRef("ns", "d-begun").ID(), SecretRef("ns", "e-lost").ID()
+	all := []ID{bare, flying, late, begun, lost}
+	for name, empty := range map[string]bool{"a prune": false, "Disown's emptying": true} {
+		srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{}, fail: map[ID]bool{}, forbid: map[ID]bool{}}
+		st := &memStore{exists: true, rebuilt: true, lines: linesOf(all), rv: 1}
+		ix := testIndex(st, srv)
+		now := time.Now()
+		ix.now = func() time.Time { return now }
+		done := ix.holding(flying)
+		doneTwice := ix.holding(flying)
+		ix.unknownA2(ctx, late, "ns")
+		var removed []string // the lines between the removal and the re-add
+		st.beforeUpdate = func(s *memStore) {
+			s.beforeUpdate = func(s *memStore) { s.beforeUpdate, removed = nil, slices.Clone(s.lines) }
+			ix.holding(begun)
+			ix.late[lateHold{lost, "ns"}] = now.Add(ix.margin)
+		}
+		remove := ix.prune
+		if empty {
+			remove = ix.empty
+		}
+		if err := remove(ctx, all); err != nil || !slices.Equal(st.lines, linesOf(all[1:])) {
+			t.Fatalf("%s: %v, lines %q; want the bare one's only gone", name, err, st.lines)
+		}
+		if !slices.Equal(removed, linesOf([]ID{flying, late})) {
+			t.Errorf("%s: the removal left %q, want those of the A2s from before it", name, removed)
+		}
+		// Its outcome known, one of two in flight isn't enough.
+		done()
+		at := func(d time.Duration, want ...ID) {
+			t.Helper()
+			if err := ix.deferredTick(ctx, now.Add(d)); err != nil || !slices.Equal(st.lines, linesOf(want)) {
+				t.Errorf("%s: after %s: %v, lines %q; want %q", name, d, err, st.lines, linesOf(want))
+			}
+		}
+		at(a2Grace-time.Millisecond, flying, late, begun, lost)
+		at(a2Grace, flying, late, begun, lost) // still in flight, so put off again
+		doneTwice()
+		at(2*a2Grace, late, begun, lost)
+		now = now.Add(2 * a2Grace)
+		at(0, late, begun, lost)
+		// Past the margin: one is held by now, one is named, one can't be read.
+		now = now.Add(ix.margin)
+		srv.objs[late] = heldObj(late.Name)
+		ix.lateTick(now, func(ID, string) {})
+		srv.fail[lost] = true
+		at(0, late, begun, lost)
+		srv.fail[lost] = false
+		at(deferRetry-time.Millisecond, late, begun, lost)
+		at(deferRetry, late, begun)
+	}
+}
+
+// The write loops' start keeps every prune back, but Disown's own emptying,
+// for as long as an A2 of the process before may land; the lines go then,
+// unless they are needed (§10.6.2).
+func TestThePrunesStartQuiet(t *testing.T) {
+	ctx := context.Background()
+	bare, held, named, denied := SecretRef("ns", "bare").ID(), SecretRef("ns", "held").ID(), SecretRef("ns", "named").ID(), SecretRef("ns", "denied").ID()
+	all := []ID{bare, held, named, denied}
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{}, forbid: map[ID]bool{}}
+	st := &memStore{exists: true, rebuilt: true, lines: linesOf(all), rv: 1}
+	ix := testIndex(st, srv)
+	now := time.Now()
+	ix.now = func() time.Time { return now }
+	ix.startQuiet(time.Minute)
+	if err := ix.recheck(ctx, func(ID, string) {}); err != nil || st.updates != 0 {
+		t.Errorf("the startup recheck: %v, %d updates", err, st.updates)
+	}
+	now = now.Add(time.Minute - time.Millisecond)
+	if err := ix.prune(ctx, all); err != nil || st.updates != 0 {
+		t.Errorf("a prune just before the end: %v, %d updates", err, st.updates)
+	}
+	if err := ix.deferredTick(ctx, now); err != nil || st.updates != 0 {
+		t.Errorf("the tick just before the end: %v, %d updates", err, st.updates)
+	}
+	// Meanwhile one was held, one named, and one can't be read any more.
+	now = now.Add(time.Millisecond)
+	srv.objs[held], srv.forbid[denied] = heldObj("held"), true
+	ix.recorded = func(id ID) bool { return id == named }
+	if err := ix.deferredTick(ctx, now); err != nil || !slices.Equal(st.lines, linesOf([]ID{held, named, denied})) || st.updates != 1 || len(ix.deferred) != 0 {
+		t.Errorf("at the end: %v, lines %q, %d updates, deferred %v", err, st.lines, st.updates, ix.deferred)
+	}
+	ix.startQuiet(time.Minute)
+	if err := ix.empty(ctx, []ID{named}); err != nil || slices.Contains(st.lines, named.String()) {
+		t.Errorf("Disown's emptying: %v, lines %q", err, st.lines)
+	}
+	// A prune that fails is tried again.
+	now = now.Add(time.Minute)
+	st.lines = linesOf([]ID{bare})
+	ix.deferred[bare] = now
+	st.beforeUpdate = func(s *memStore) { s.beforeUpdate, s.exists = nil, false }
+	if err := ix.deferredTick(ctx, now); err == nil {
+		t.Error("the prune didn't fail")
+	}
+	st.exists = true
+	if err := ix.deferredTick(ctx, now.Add(deferRetry)); err != nil || len(st.lines) != 0 {
+		t.Errorf("the retry: %v, lines %q", err, st.lines)
+	}
+}
+
+// The prunes are kept back for the timeout bound and the landing margin, when
+// the write loops start, and for a kind tracked while they run (§10.6.2).
+func TestTheQuietTime(t *testing.T) {
+	now := time.Now()
+	track := func(s *Shared) *Tracker {
+		ix := testIndex(&memStore{exists: true, rebuilt: true}, &objServer{})
+		ix.now = func() time.Time { return now }
+		return &Tracker{s: s, gk: widgetGK, o: Options{TimeoutBound: 90 * time.Second}, idx: ix}
+	}
+	clk := testingclock.NewFakeClock(now)
+	s := newShared(Clients{}, SharedOptions{}, clk)
+	tr := track(s)
+	tr.startQuiet()
+	if d := tr.idx.quietUntil.Sub(now); d != 150*time.Second {
+		t.Errorf("the prunes are kept back for %s, want 2m30s", d)
+	}
+	for name, running := range map[string]bool{"running": true, "not running": false} {
+		s := newShared(Clients{}, SharedOptions{}, clk)
+		tr := track(s)
+		s.trackers[widgetGK] = tr
+		if running {
+			s.writeCtx = context.Background()
+		}
+		s.endTracking(widgetGK, &inflight{done: make(chan struct{}), t: tr})
+		s.writeWG.Wait()
+		if got := !tr.idx.quietUntil.IsZero(); got != running {
+			t.Errorf("the write loops %s: the prunes of a kind tracked now are kept back %v", name, got)
+		}
+	}
+	(&Tracker{s: s}).startQuiet() // without an index, nothing
+}
+
 // The late entry of an A2 of unknown outcome (§10.6.2): the line is checked
 // at once; one entry per object and holder namespace, however often it is
 // retried; and once the margin is over the object's live check is queued and
@@ -225,8 +402,9 @@ func TestTheLateCheck(t *testing.T) {
 	if len(ix.late) != 1 || len(batches) != 0 || len(ix.pending) != 0 {
 		t.Errorf("before the margin is over: %d entries, batches %v, pending %v", len(ix.late), batches, ix.pending)
 	}
-	// A prune takes the line, the object being bare, and then it lands.
-	if err := ix.prune(context.Background(), []ID{id}); err != nil || len(st.lines) != 0 {
+	// Another process's prune takes the line, the object being bare, and then
+	// it lands.
+	if err := testIndex(st, srv).prune(context.Background(), []ID{id}); err != nil || len(st.lines) != 0 {
 		t.Fatalf("the prune: %v, lines %q", err, st.lines)
 	}
 	srv.objs[id] = heldObj("x")

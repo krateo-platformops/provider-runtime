@@ -598,7 +598,8 @@ func killScenario(c killCase, st *killStats) func(s *apimodel.Sched) error {
 // With one Disown process the clean cases are searched to two preemptions,
 // the "one off" ones to one in CI; with two, "both", to one, the "one off"
 // ones, and B with the A2 landing before the pass, under
-// CREDENTIALUSE_MODEL_DEEP only. What needs more isn't covered.
+// CREDENTIALUSE_MODEL_DEEP only, as is the one that is reached with the records
+// first, which takes 505s there. What needs more isn't covered.
 func TestModelKillInAPrune(t *testing.T) {
 	if raceEnabled {
 		t.Skip("model searches don't run under the race detector")
@@ -606,6 +607,9 @@ func TestModelKillInAPrune(t *testing.T) {
 	who := map[string]killCase{"same": {same: true}, "other": {other: true}, "both": {same: true, other: true}}
 	reached := func(t *testing.T, name string, c killCase) {
 		t.Run(name, func(t *testing.T) {
+			if c.same && c.other && c.landsFirst && modelBound(0, 1) == 0 {
+				t.Skip("searched under CREDENTIALUSE_MODEL_DEEP only: 505s, reached there (cred-idx20)")
+			}
 			if !reachable(t, 2, func(s *apimodel.Sched) error {
 				st := &killStats{}
 				if err := killScenario(c, st)(s); err != nil {

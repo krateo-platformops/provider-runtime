@@ -239,7 +239,7 @@ func TestDegradedIsLoggedOncePerHolder(t *testing.T) {
 	}
 }
 
-// §7.4 (the user's decisions of 2026-11-22 and 2026-11-23): an unset
+// §7.4 (the user's decision of 2026-11-22): an unset
 // DisownInterval is derived from TimeoutBound, max(60s, ⌈max(2 ×
 // TimeoutBound, TimeoutBound + LandingMargin) / (DisownPasses − 1)⌉), and
 // published on the CRD as derived, for every TimeoutBound and DisownPasses;

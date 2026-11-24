@@ -333,8 +333,8 @@ func TestALostLeaseWithAnA2InFlight(t *testing.T) {
 	}()
 	deleteWidget(t, ns, "w")
 	gone(t, time.Minute, "widget w", widgetGet(ns, "w"))
-	perNameRig(t, idx, nil, nil)
-	lined(t, idx, line, false) // the new owner's startup recheck, or batch
+	perNameRig(t, idx, nil, nil) // with no quiet time
+	lined(t, idx, line, false)   // the new owner's startup recheck, or batch
 	close(release)
 	<-stopped
 	old.c.stop() // waits for the pass
@@ -347,6 +347,28 @@ func TestALostLeaseWithAnA2InFlight(t *testing.T) {
 	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
 	lined(t, idx, line, false)
 	stripped(t, ns, "s")
+}
+
+// The write loops' start keeps the prunes back, as long as an A2 of the
+// process that ran them before may land (§10.6.2). One that does land
+// meanwhile, its holder gone, is found by the line that was kept, and
+// released; the lines go once the time is over.
+func TestThePrunesWaitForALandingAfterAStart(t *testing.T) {
+	cutest.Require(t, env)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-quiet")
+	const quiet = 15 * time.Second
+	createSecret(t, ns, "s")
+	createIndex(t, idx, secretLine(ns, "s"))
+	began := time.Now()
+	perNameRig(t, idx, nil, func(s *cu.Shared) { s.SetPruneQuiet(quiet) })
+	time.Sleep(quiet / 3) // the startup recheck has run, and found it bare
+	lined(t, idx, secretLine(ns, "s"), true)
+	acquireAs(t, ns, "s")
+	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
+	lined(t, idx, secretLine(ns, "s"), false)
+	if d := time.Since(began); d < quiet {
+		t.Errorf("the line went after %s, want %s", d, quiet)
+	}
 }
 
 // restartMetrics counts Disown's restarted runs.
@@ -473,9 +495,10 @@ func TestDisownWaitsForAPendingCheck(t *testing.T) {
 	stripped(t, ns, "x")
 }
 
-// An A2 lands after its response was lost, its holder was gone, and a batch
-// had pruned the line of a Secret it found bare: once the landing margin is
-// over, the sender checks the Secret again, and releases it (§10.6.2).
+// An A2 lands after its response was lost, its holder was gone, and another
+// process had pruned the line of a Secret it found bare, which the sender's own
+// batch leaves: once the landing margin is over, the sender checks the Secret
+// again, and releases it (§10.6.2).
 func TestALateA2IsReleased(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
@@ -485,7 +508,7 @@ func TestALateA2IsReleased(t *testing.T) {
 	line := secretLine(ns, "s")
 	var lost atomic.Bool
 	r := perNameRig(t, idx, nil, func(s *cu.Shared) {
-		s.SetLandingMargin(15 * time.Second)
+		s.SetLandingMargin(25 * time.Second)
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
 			// Every A2 the process sends: the holder never gets its finalizer.
 			if c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.StrategicMergePatchType {
@@ -505,7 +528,13 @@ func TestALateA2IsReleased(t *testing.T) {
 	r.c.stop()
 	deleteWidget(t, ns, "w")
 	gone(t, time.Minute, "widget w", widgetGet(ns, "w"))
+	time.Sleep(2 * time.Second) // the holder's batch runs, and leaves the line
+	if lines, _ := indexLines(t, idx); !slices.Contains(lines, line) {
+		t.Errorf("lines %q: the sender's own prune took the line of an A2 that may land yet", lines)
+	}
+	setIndexLines(t, idx, func(l []string) []string { return slices.DeleteFunc(l, func(x string) bool { return x == line }) })
 	lined(t, idx, line, false)
+	time.Sleep(3 * time.Second) // the check of the line's drop finds it bare, and is done
 	epoch, err := cu.NewEpoch()
 	if err != nil {
 		t.Fatal(err)

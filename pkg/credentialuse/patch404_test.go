@@ -133,7 +133,7 @@ func TestAnA2RefusedWithA404DidntLand(t *testing.T) {
 		})
 		r.md.PrependReactor("get", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) { return c.read != nil, nil, c.read })
 		st := &readsAfter{memStore: &memStore{exists: true, rebuilt: true}, after: &patched}
-		ix := testIndex(st, r.s.newServer())
+		ix := testIndex(st, r.s.newServer(tr.o.Holder))
 		tr.proto.lines = ix
 		batches := 0
 		tr.proto.enqueueBatch = func(ID, string) { batches++ }

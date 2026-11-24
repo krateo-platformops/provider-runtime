@@ -904,8 +904,8 @@ of tests.
   user's decision, 2026-11-23; §7.5): one whose controller sets
   `NeedLeaderElection` to false would hold on a standby, where nothing makes
   good what a hold owes after it.
-- **An A2 in flight outlives a stop, within bounds** (the user's decision,
-  2026-11-23; §7.2): 10s after its caller's context is cancelled, or the
+- **An A2 in flight outlives a stop, within bounds** (decided 2026-11-23;
+  §7.2): 10s after its caller's context is cancelled, or the
   caller's deadline if sooner, and the whole call 15s.
 - **A holder being deleted that carries none of its owner finalizers skips
   Acquire** (the user's decision, 2026-11-22): it has been finalized, isn't
@@ -1146,8 +1146,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   holder, Degraded for an established one. A failed check also drops the
   A2's written entry, so the next pass writes A2 and checks again.
 - **Disown keeps the index's lines until it has settled, then empties it
-  under the prune's rule** (§7.4, A15; the user's decisions E, E1 to E3 and
-  G, 2026-11-23). It counts the union of the index's lines and the records
+  under the prune's rule** (§7.4, A15; that it empties it only once settled is
+  the user's decision, 2026-11-23). It counts the union of the index's lines and the records
   of the kinds the switch covers, with a GET each, adds the line of every
   object a record names, and strips them, the objects before the records
   that name them. No other prune takes a line of
@@ -1159,8 +1159,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   saw it again (3 of 3 on envtest). A missing or unreadable index, a GET
   that fails, a full index, or a line this process may still owe makes the
   count `unknown`.
-- **An index lost under Disown keeps the count `unknown`** (the user's
-  decision, 2026-11-23; §7.4) until an operator sets the index's
+- **An index lost under Disown keeps the count `unknown`** until an operator
+  confirms (the user's decision, 2026-11-23; §7.4), by setting the index's
   `credential-use.krateo.io/vouched-index` to its uid and the kinds the
   switch covers: a rebuild under the
   switch works from records that may be stripped, and doesn't set the
@@ -1780,28 +1780,35 @@ Every other item in §5 is an implementation choice within the design. All of
 them are recorded in the design doc's §17, "Revision 16".
 
 **On the index fix** (2026-11-23), recorded in the design's §17, "Revision
-18":
+18". What is in parentheses was decided in the fix, and isn't the user's:
 
-1. **The fix ships as its own PR, before the tag**, with no change of the
-   index's format.
-2. **E, E1 to E3, G and H**: the lines stay until Disown has settled; only a
-   process's own run of zeros empties the index; the count is `unknown`
-   while a line may be owed; L5's skip is withdrawn.
-3. **The landing margin** is the constant `LandingMargin`, 60s; setup refuses
-   a span shorter than `max(2 × TimeoutBound, TimeoutBound +
-   LandingMargin)`.
-4. **An index lost under Disown** keeps the count `unknown` until
-   `vouched-index` names its uid and the kinds the switch covers.
-5. **F**: an A2 of unknown outcome is checked at once and after the margin,
-   with its release batch, and a stop doesn't cut an A2 short. What remains
-   needs three conditions together, accepted as a residual (§10.6.3).
-6. **The flag is the switch's value as written**, a reader makes three
-   checks, and no A2 is made under a stale flag. No migration: no release
-   wrote `"true"`.
-7. **Any other write of the CRD restarts a run of zeros**, and runs that
-   keep restarting are reported.
-8. **A process whose write loops haven't started refuses its passes.**
+1. **The index's lines stay until Disown has settled**, and only then is the
+   index emptied; L5's skip is withdrawn. (E1 to E3, and the count `unknown`
+   while a line may be owed. The fix as its own PR.)
+2. **Setup refuses a span** shorter than `max(2 × TimeoutBound, TimeoutBound
+   + 60s)`. (The derived interval.)
+3. **An index lost under Disown** keeps the count `unknown` until an operator
+   confirms. (`vouched-index`, the marker, and a rebuild under the switch that
+   doesn't set it.)
+4. **The residual, with its 60s margin**: what remains needs three conditions
+   together (§10.6.3). (F: an A2 of unknown outcome is checked at once and
+   after the margin, with its release batch, and a stop doesn't cut an A2
+   short.)
+5. **The flag is the switch's value as written**, and a reader makes three
+   checks. (No A2 is made under a stale flag. No migration: no release wrote
+   `"true"`.)
+6. **Any other write of the CRD restarts a run of zeros.** (Runs that keep
+   restarting are reported.)
+7. **A process whose write loops haven't started refuses its passes.**
+8. **An operator may vouch for a namespace** (2026-11-24).
 9. **A kill inside a prune, as Disown is turned on** (2026-11-24): accepted
    and documented (§10.6.3), with the objects stripped before the records.
    The wait that would close it can be added later, with no change of the
    index's format.
+10. **A prune leaves the line of a hold that may land yet** (2026-11-24): a
+    process's prunes remove nothing for `TimeoutBound` + 60s after its write
+    loops start, and never the line of an A2 of its own in flight or of
+    unknown outcome (§10.6.2). What is left of 4's residual is a landing later
+    than that, and, without leader election, another running process's prune.
+    The cost is 150s of lingering lines after a leader change, at
+    provider-runtime's defaults.

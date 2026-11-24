@@ -409,6 +409,12 @@ type index struct {
 	// object live, as a pending one, and enqueue its release batch. One entry
 	// per object and holder namespace, so the A2s of one margin bound it.
 	late map[lateHold]time.Time
+	// flying are the A2s of this process in flight, from before their lines
+	// are ensured. quietUntil is when this process's write loops may prune.
+	// deferred are the lines a prune left for either, and when they are due.
+	flying     map[ID]int
+	quietUntil time.Time
+	deferred   map[ID]time.Time
 	// lost: the index was seen deleted, or recreated by an add; the write
 	// loops rebuild it from the records (§10.6.6). lostDue is when the next
 	// try is due, lostFails how many failed in a row. rebuilding: one is under
@@ -474,6 +480,8 @@ const (
 	// pruneCheckBound bounds those before the re-add: a check it cuts short
 	// leaves the rest of pruneBound to put back every line it didn't come to.
 	pruneCheckBound = 10 * time.Second
+	// deferRetry is when a deferred prune that failed is tried again.
+	deferRetry = 30 * time.Second
 )
 
 func newIndex(holder schema.GroupKind, prefix, namespace string, maxLines int, kinds map[schema.GroupKind]bool, store indexStore, srv server) *index {
@@ -482,7 +490,8 @@ func newIndex(holder schema.GroupKind, prefix, namespace string, maxLines int, k
 		kinds: kinds, store: store, srv: srv,
 		pending: map[ID]*recheck{},
 		late:    map[lateHold]time.Time{},
-		now:     time.Now, margin: LandingMargin,
+		flying:  map[ID]int{}, deferred: map[ID]time.Time{},
+		now: time.Now, margin: LandingMargin,
 		bound: pruneBound, checkBound: pruneCheckBound,
 	}
 }
@@ -532,7 +541,8 @@ func (ix *index) fits(next []string, before int) error {
 
 // fitting returns, of sets of IDs, those whose lines fit together in an index
 // of lines, the sets taken whole, the smallest first; and the IDs of the sets
-// that don't, with why, as fits has it.
+// that don't, with why, as fits has it. What can't be a line (lineErr) needs no
+// room: no add writes it.
 func (ix *index) fitting(lines []string, sets [][]ID) (add, over []ID, err error) {
 	size := func(set []ID) (n int) {
 		for _, id := range set {
@@ -548,7 +558,7 @@ func (ix *index) fitting(lines []string, sets [][]ID) (add, over []ID, err error
 	sets = slices.Clone(sets)
 	slices.SortStableFunc(sets, func(a, b []ID) int { return cmp.Or(cmp.Compare(len(a), len(b)), cmp.Compare(size(a), size(b))) })
 	for _, set := range sets {
-		fresh := slices.DeleteFunc(SortedIDs(set), func(id ID) bool { return in[id.String()] })
+		fresh := slices.DeleteFunc(SortedIDs(set), func(id ID) bool { return in[id.String()] || lineErr(id) != nil })
 		n := size(fresh)
 		if len(fresh) > 0 && (count+len(fresh) > ix.maxLines || bytes+n > indexMaxBytes) {
 			over = append(over, fresh...)
@@ -750,11 +760,120 @@ func (ix *index) removed(rv string, lines []string) {
 // before a run of zeros can be done: the switch is read live again after the
 // removal. One read as off then was set after the removal, so that Disown's
 // first pass comes after it and adds the lines of every record (§7.4, E2).
+//
+// A hold that may land yet keeps its line, though nothing names it any more:
+// one that another process sent, for as long as it may land after that one
+// lost its Lease or ended, and these write loops started (quietUntil); and one
+// that this process sent, in flight or of unknown outcome (owes). Their lines
+// are pruned later, unless they are needed then (deferredTick).
 func (ix *index) prune(ctx context.Context, ids []ID) error {
 	if ix.keptCached != nil {
 		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return ix.keptCached(id.GroupKind()) })
 	}
-	return ix.removeAndCheck(ctx, ids, true)
+	return ix.removeAndCheck(ctx, ix.notQuiet(ids), true)
+}
+
+// startQuiet keeps every prune back for d: the write loops have just started.
+func (ix *index) startQuiet(d time.Duration) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.quietUntil = ix.now().Add(d)
+}
+
+// notQuiet returns ids, or none of them while the prunes are kept back, and
+// defers the others.
+func (ix *index) notQuiet(ids []ID) []ID {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if !ix.now().Before(ix.quietUntil) {
+		return ids
+	}
+	for _, id := range ids {
+		ix.deferred[id] = ix.quietUntil
+	}
+	return nil
+}
+
+// owes reports whether this process has an A2 of id that may land yet, in
+// flight or of unknown outcome within the landing margin, and until when its
+// line is kept: for one in flight, as long as a stop lets one go on.
+func (ix *index) owes(id ID) (until time.Time, owed bool) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.flying[id] > 0 {
+		until, owed = ix.now().Add(a2Grace), true
+	}
+	for l, at := range ix.late {
+		if l.id == id && (!owed || at.After(until)) {
+			until, owed = at, true
+		}
+	}
+	return until, owed
+}
+
+// keepOwed reports whether id's line is kept for an A2 of this process, and
+// defers its prune.
+func (ix *index) keepOwed(id ID) bool {
+	until, owed := ix.owes(id)
+	if owed {
+		ix.mu.Lock()
+		defer ix.mu.Unlock()
+		ix.deferred[id] = until
+	}
+	return owed
+}
+
+// holding is told of an A2 of id (lineKeeper).
+func (ix *index) holding(id ID) (done func()) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.flying[id]++
+	return func() {
+		ix.mu.Lock()
+		defer ix.mu.Unlock()
+		if ix.flying[id]--; ix.flying[id] <= 0 {
+			delete(ix.flying, id)
+		}
+	}
+}
+
+// deferredTick prunes the deferred lines that are due, of the objects a live
+// read finds bare, under prune's rule. One that can't be read keeps its line:
+// for good when the authorizer refused it, and otherwise until a later tick.
+func (ix *index) deferredTick(ctx context.Context, now time.Time) error {
+	ix.mu.Lock()
+	var due []ID
+	for id, at := range ix.deferred {
+		if !now.Before(at) {
+			due = append(due, id)
+			delete(ix.deferred, id)
+		}
+	}
+	ix.mu.Unlock()
+	if len(due) == 0 {
+		return nil
+	}
+	var bare, again []ID
+	for _, id := range SortedIDs(due) {
+		switch ix.carries(ctx, id) {
+		case carriesNot:
+			bare = append(bare, id)
+		case carriesUnknown:
+			again = append(again, id)
+		}
+	}
+	err := ix.prune(ctx, ix.prunable(bare))
+	if err != nil {
+		again = append(again, bare...)
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	for _, id := range again {
+		if _, ok := ix.deferred[id]; !ok {
+			ix.deferred[id] = now.Add(deferRetry)
+		}
+	}
+	return err
 }
 
 // empty is prune for Disown's own emptying, once it has settled: the switch
@@ -787,9 +906,9 @@ func (ix *index) removeChunk(parent context.Context, ids []ID, disown bool) erro
 			return fmt.Errorf("credential-use: reading the Disown switch before pruning the index %s: %w", ix.ref(), err)
 		}
 		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return set.covers(id.GroupKind()) })
-		if len(ids) == 0 {
-			return nil
-		}
+	}
+	if ids = slices.DeleteFunc(slices.Clone(ids), ix.keepOwed); len(ids) == 0 {
+		return nil
 	}
 	tried, err := ix.remove(ctx, linesOf(ids))
 	if len(tried) == 0 {
@@ -818,7 +937,8 @@ func (ix *index) checkRemoved(check, ctx context.Context, tried []string, kept f
 		if !ok {
 			continue
 		}
-		if kept(id.GroupKind()) {
+		// An A2 of this process begun since the check before the removal.
+		if kept(id.GroupKind()) || ix.keepOwed(id) {
 			back = append(back, id)
 			continue
 		}
@@ -1833,9 +1953,26 @@ func (s *Shared) runIndexes(ctx context.Context) {
 				if err := t.idx.recheckTick(ctx, now); err != nil {
 					t.warn("credential-use: a live check for the index failed; it is retried", "kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
 				}
+				if err := t.idx.deferredTick(ctx, now); err != nil {
+					t.warn("credential-use: a prune of the index that was put off failed; it is retried", "kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
+				}
 			}
 		}
 	}
+}
+
+// startQuiet keeps t's prunes back as its write loops start (§10.6.2): an A2
+// of the process that ran them before, which ended or lost its Lease by now,
+// may land until then.
+func (t *Tracker) startQuiet() {
+	if t.idx == nil {
+		return
+	}
+	d := t.o.TimeoutBound + t.s.landingMargin()
+	if q := t.s.hooks.pruneQuiet; q != nil {
+		d = *q
+	}
+	t.idx.startQuiet(d)
 }
 
 // recheckIndex is the write loops' startup recheck from t's index (§10.2,

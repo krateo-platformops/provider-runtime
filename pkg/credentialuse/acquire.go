@@ -178,6 +178,10 @@ type lineKeeper interface {
 	// unknown, so that it may have landed, or may yet: it checks id's line as
 	// postCheck does, and checks id again once the landing margin is over.
 	unknownA2(ctx context.Context, id ID, n string)
+	// holding is told of an A2 of id from before its line is ensured until
+	// the function it returns is called, once its outcome is known, or
+	// unknownA2 told of it: no prune of this process takes its line then.
+	holding(id ID) (done func())
 }
 
 const (
@@ -723,17 +727,25 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 					next = append(next, more...)
 					continue
 				}
+				done := p.holding(id)
 				if p.keepsLine(id.GroupKind()) {
 					// The line before A2 (§10.6.2): an add that fails, as on
 					// a full index, stops before A2.
 					if err := p.lines.ensure(ctx, id); err != nil {
+						done()
 						return fail(fmt.Errorf("credential-use: adding the index line of %s: %w", quotedLine(id), err), "Index")
 					}
 				}
-				switch class, uid, err := p.write(ctx, cc, id, namespace); class {
+				class, uid, err := p.write(ctx, cc, id, namespace)
+				var checkErr error
+				if class == ClassNone {
+					checkErr = p.checkLine(cc, id, uid, namespace)
+				}
+				done()
+				switch class {
 				case ClassNone:
-					if err := p.checkLine(cc, id, uid, namespace); err != nil {
-						return fail(err, "Index")
+					if checkErr != nil {
+						return fail(checkErr, "Index")
 					}
 					a.Held = append(a.Held, r)
 					held = true
@@ -1007,6 +1019,15 @@ func (p *protocol) checkLine(cc callContexts, id ID, uid types.UID, n string) er
 	return fmt.Errorf("credential-use: checking the index line of %s after holding it: %w", id, err)
 }
 
+// holding tells the index of an A2 of id that is about to be made
+// (lineKeeper), and of its end when the function it returns is called.
+func (p *protocol) holding(id ID) (done func()) {
+	if !p.keepsLine(id.GroupKind()) {
+		return func() {}
+	}
+	return p.lines.holding(id)
+}
+
 // wroteDeleting tells heldDeleting of an A2 response that shows its object
 // being deleted.
 func (p *protocol) wroteDeleting(id ID, namespace string, out *metav1.PartialObjectMetadata) {
@@ -1056,16 +1077,21 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 		case d:
 			continue
 		}
+		done := p.holding(id)
 		if p.keepsLine(id.GroupKind()) {
 			if err := p.lines.ensure(ctx, id); err != nil {
+				done()
 				return fmt.Errorf("credential-use: adding the index line of %s before establishing: %w", quotedLine(id), err)
 			}
 		}
 		class, uid, err := p.write(ctx, cc, id, obj.GetNamespace())
 		if class != ClassNone {
+			done()
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)
 		}
-		if err := p.checkLine(cc, id, uid, obj.GetNamespace()); err != nil {
+		err = p.checkLine(cc, id, uid, obj.GetNamespace())
+		done()
+		if err != nil {
 			return err
 		}
 		if cross && p.enqueueBatch != nil {

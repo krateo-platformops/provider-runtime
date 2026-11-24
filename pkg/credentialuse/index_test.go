@@ -871,7 +871,7 @@ func TestFreeLines(t *testing.T) {
 	for _, n := range []string{"bare", "denied", "failing", "gone", "held", "unstripped", "vouched", "vouched-held"} {
 		lined = append(lined, id(n))
 	}
-	got := tr.freeLines(context.Background(), srv, lined, map[ID]bool{id("unstripped"): true}, map[ID]bool{id("vouched"): true, id("vouched-held"): true})
+	got := tr.freeLines(context.Background(), srv, lined, map[ID]bool{id("unstripped"): true}, vouches{ids: map[ID]bool{id("vouched"): true, id("vouched-held"): true}})
 	if want := []ID{id("bare"), id("gone"), id("vouched")}; !slices.Equal(got, want) {
 		t.Errorf("free = %v, want %v", got, want)
 	}
@@ -1042,18 +1042,42 @@ func TestProbePerNameGetsOnly(t *testing.T) {
 // fails postCheck while failPost is set.
 type fakeLines struct {
 	ensured, checked, unknown []ID
-	failPost                  bool
+	failPost, failEnsure      bool
+	// flying are the A2s it was told of and not of their end, and steps what
+	// it was asked, in order.
+	flying map[ID]int
+	steps  []string
 }
 
-func (f *fakeLines) unknownA2(_ context.Context, id ID, _ string) { f.unknown = append(f.unknown, id) }
+func (f *fakeLines) holding(id ID) func() {
+	if f.flying == nil {
+		f.flying = map[ID]int{}
+	}
+	f.flying[id]++
+	f.steps = append(f.steps, "holding")
+	return func() {
+		f.flying[id]--
+		f.steps = append(f.steps, "done")
+	}
+}
+
+func (f *fakeLines) unknownA2(_ context.Context, id ID, _ string) {
+	f.unknown = append(f.unknown, id)
+	f.steps = append(f.steps, "unknown")
+}
 
 func (f *fakeLines) covers(gk schema.GroupKind) bool { return gk == secretGroupKind }
 func (f *fakeLines) ensure(_ context.Context, id ID) error {
 	f.ensured = append(f.ensured, id)
+	f.steps = append(f.steps, "ensure")
+	if f.failEnsure {
+		return errors.New("the index is full")
+	}
 	return nil
 }
 func (f *fakeLines) postCheck(_ context.Context, id ID) error {
 	f.checked = append(f.checked, id)
+	f.steps = append(f.steps, "check")
 	if f.failPost {
 		return errors.New("the index can't be read")
 	}
