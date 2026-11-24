@@ -338,6 +338,9 @@ func (t *Tracker) reportDisownUnreadable(unreadable []string) {
 // shortError is err as an event names it: its API reason, as "forbidden",
 // or its text.
 func shortError(err error) string {
+	if st, ok := statusOf(err); ok && unserved(st) && apierrors.IsNotFound(err) {
+		return "its kind isn't served" // the reason would say "notfound"
+	}
 	if r := apierrors.ReasonForError(err); r != metav1.StatusReasonUnknown {
 		return strings.ToLower(string(r))
 	}

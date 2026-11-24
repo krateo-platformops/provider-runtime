@@ -433,7 +433,7 @@ It also breaks foreground-deletion cycles (§11.8).
       nothing else is. A new holder gets `MustNotConnect`. For an
       established holder this is **Degraded**, the one term this doc uses
       for every fail-open (§8);
-    - **Missing**: NotFound;
+    - **Missing**: NotFound, of the object (below);
     - **Degraded**: any other error. A new holder fails closed and an
       established one proceeds (§8).
 - **A3.** Only then Connect.
@@ -477,6 +477,37 @@ suffix. **Krateo's minimum Kubernetes is 1.36** (the user's decision,
 §18). CI pins the exact text on envtest 1.37.0 and on 1.36.2, the latest
 1.36 patch, in `.github/workflows/run-tests.yaml`, and the same test also
 passes locally on 1.34 and 1.35.
+
+**A 404 is NotFound only when it is about the object.** A resource the API
+server doesn't serve also answers 404: a custom resource whose CRD no longer
+serves the version the tracker mapped, whose CRD is gone, or whose CRD this
+API server hasn't seen yet. It says nothing of the object, which may be there
+and carry a finalizer. Its body is plain text, from the server's last handler,
+not a Status, and client-go marks it with the cause `UnexpectedServerResponse`
+(P19); a missing object's 404 is a Status, without it. So a 404 with that cause
+is an ordinary failure everywhere, never NotFound, and apimachinery's
+`IsNotFound`, true of both, is never used alone. (An API server that is still
+starting answers 503 instead, until its CRD informer has synced.) While a kind
+isn't served:
+
+| Who | What it does |
+|---|---|
+| Acquire, `BeforeEstablish` | A2 fails: a new holder doesn't connect, or establish; an established one is Degraded |
+| the consent gate (§11.3) | unknown: a hold is kept, a new one waits, and the pass requeues |
+| the prober (§10.3) | can't tell: the ref's backoff stays as it is |
+| R1, R3, the epoch's repair | undecided: the batch is retried with backoff, and nothing is reported bare |
+| R2, when the **holder** kind isn't served | the list fails, and the batch is retried. It is never "no users": a live CRD read could tell, and isn't made yet |
+| the index's checks (§10.6) | the line is kept, or put back, and the check is retried |
+| the janitor | retried with backoff |
+| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object: its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
+| `DisownPrefix` | reports the failure, and goes on with the rest |
+
+**The cost:** a protected kind whose CRD is removed for good while objects of
+it are held, which takes forcing the CRD's cleanup finalizer since the holds
+block it, leaves batches retrying, at most every 5 minutes, and Disown's count
+unknown. The remedy is the vouch of §10.6.6, or restoring the CRD. Taking such
+a 404 for "gone" let Disown settle at zero, and dropped index lines, with
+finalizers left on objects that a later release of the CRD serves again.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an

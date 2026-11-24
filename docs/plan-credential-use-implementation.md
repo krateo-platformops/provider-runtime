@@ -1609,6 +1609,7 @@ it in the docs.
 | P16 | The policy allows exactly V11's identities, and `system:kube-controller-manager`, for those two names | 8 | envtest, impersonating each identity |
 | P17 | Escalation prevention lets the provisioner grant only the `get` and `patch` it holds | 9 | envtest under RBAC |
 | P18 | Monotonic times survive the paths they take (no `UTC()`, `In()` or `Round(0)`) | 2 | unit tests and a lint check in the revert check |
+| P19 | A resource the API server doesn't serve answers a plain-text 404, which client-go marks with the cause `UnexpectedServerResponse`; a missing object's 404 is a Status without it (`notfoundhandler/not_found_handler.go`; `rest/request.go`) | fix after 8 | envtest, for a version no longer served and for a CRD that is gone |
 
 ## 7. Size estimates
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -45,7 +46,9 @@ const (
 	// once (IP1), and counted, so an RBAC message the pattern stops matching
 	// shows up (L3 of the review of revision 16).
 	ClassAdmissionDenied
-	// ClassNotFound: the object doesn't exist (the Missing outcome of A2).
+	// ClassNotFound: the object doesn't exist (the Missing outcome of A2). A
+	// 404 for a resource the API server doesn't serve isn't one: it says
+	// nothing of the object, and is ClassOther (unserved).
 	ClassNotFound
 	// ClassConflict: a resourceVersion precondition failed.
 	ClassConflict
@@ -124,6 +127,9 @@ func Classify(err error) Class {
 	}
 	switch st.Code {
 	case http.StatusNotFound:
+		if unserved(st) {
+			return ClassOther
+		}
 		return ClassNotFound
 	case http.StatusConflict:
 		if st.Reason == metav1.StatusReasonAlreadyExists {
@@ -198,6 +204,18 @@ func statusOf(err error) (metav1.Status, bool) {
 		return metav1.Status{}, false
 	}
 	return s.Status(), true
+}
+
+// unserved reports whether a 404 is for a path the API server doesn't serve, as
+// a custom resource's whose CRD is gone or no longer serves the version, or
+// whose CRD this API server hasn't seen yet, rather than its answer that an
+// object doesn't exist. The server's last handler answers it in plain text,
+// not with a Status, and client-go marks every answer that isn't one with
+// this cause. The object may be there, and carry a hold.
+func unserved(st metav1.Status) bool {
+	return st.Details != nil && slices.ContainsFunc(st.Details.Causes, func(c metav1.StatusCause) bool {
+		return c.Type == metav1.CauseTypeUnexpectedServerResponse
+	})
 }
 
 // policyOf reports whether a status carries a ValidatingAdmissionPolicy's
