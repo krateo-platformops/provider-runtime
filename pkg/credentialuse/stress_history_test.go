@@ -1283,20 +1283,28 @@ func (h *stHistory) auditRemovals(r *stReport) {
 
 // recreate is why removal d isn't H1's recreate, or "" and the two releases:
 // of two processes, each answered as the removal of the incarnation just
-// before this one. One of them took that incarnation, since it went; and the
-// other ended after the create of this one was answered, so it was in flight
-// while this one lived, and what it removed, if not that one, was this one.
-// Nothing is asked of what happened to this one meanwhile: it may have been
-// held, or marked.
+// before this one. One of them took that incarnation, since it went. The
+// other, the late one, took this one, so it ended after this one was created.
+//
+// The bound is when the test began that create: the latest moment before
+// which a release that ended can't have met this incarnation, whatever the
+// answers' order. The create's answer isn't one: it and the late release's
+// come within a fraction of a millisecond of each other, in either order.
+//
+// So that nothing of ours can wear the shape, nothing else of ours may overlap
+// this one's life, from that moment to its removal's delivery: no other
+// release of the name that was answered, or may have landed; and no DELETE of
+// the test's that may have. Nothing is asked of what happened to it meanwhile:
+// it may have been held, or marked.
 func (h *stHistory) recreate(d stVersion) (string, []stCall) {
-	var created time.Time
-	for _, w := range h.writes[d.stObj] {
-		if w.op == "create" && w.answer == answerCreated && w.uid == d.uid {
-			created = w.end
-		}
-	}
+	created := h.createBegan(d.stObj, d.uid)
 	if created.IsZero() {
 		return "its create isn't the test's", nil
+	}
+	for _, w := range h.writes[d.stObj] {
+		if w.op == "DELETE" && w.answer == answerUnknown && w.start.Before(d.at) && w.end.After(created) {
+			return fmt.Sprintf("a DELETE of unknown outcome overlaps its life: %s", w), nil
+		}
 	}
 	before := stVersion{} // the removal before d
 	for _, v := range h.objs[d.stObj] {
@@ -1308,14 +1316,22 @@ func (h *stHistory) recreate(d stVersion) (string, []stCall) {
 	if len(rs) < 2 {
 		return fmt.Sprintf("%d releases of the incarnation before it answered", len(rs)), nil
 	}
+	same := func(a, b stCall) bool { return a.proc == b.proc && a.g == b.g && a.start.Equal(b.start) }
 	for _, late := range rs {
 		for _, taker := range rs {
-			if taker.proc != late.proc && late.end.After(created) {
-				return "", []stCall{taker, late}
+			if taker.proc == late.proc || !late.end.After(created) {
+				continue
 			}
+			others := h.callsOn(d.stObj, func(c stCall) bool {
+				return c.op == "r3" && (c.ok() || c.unknown) && c.start.Before(d.at) && c.end.After(created) && !same(c, taker) && !same(c, late)
+			})
+			if len(others) > 0 {
+				return fmt.Sprintf("another release overlaps its life: %s", others[0]), nil
+			}
+			return "", []stCall{taker, late}
 		}
 	}
-	return "no two processes released the incarnation before it, one of them until after its create was answered", nil
+	return "no two processes released the incarnation before it, one of them until after its create began", nil
 }
 
 // createBegan is a lower bound of when incarnation uid came to be: when the

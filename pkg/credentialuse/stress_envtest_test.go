@@ -416,10 +416,7 @@ func (w *stressWorld) teardown(ctx context.Context, ns string) error {
 // live user, and is released over it after the grace.
 func (w *stressWorld) canaryGrace(ctx context.Context) {
 	ns := w.canaryNamespace()
-	o, field := stObj{"Secret", ns, "s0"}, "secret"
-	if w.chained {
-		o, field = stObj{"Target", ns, "t0"}, "target"
-	}
+	o, field := w.canaryObject(ns)
 	uid, ok := w.canaryHeld(ctx, ns, field, o.name, o)
 	if !ok {
 		return
@@ -436,34 +433,108 @@ func (w *stressWorld) canaryGrace(ctx context.Context) {
 // user is there, and goes with it.
 func (w *stressWorld) canaryTeardown(ctx context.Context) {
 	ns := w.canaryNamespace()
-	o, field := stObj{"Secret", ns, "s0"}, "secret"
-	if w.chained {
-		o, field = stObj{"Target", ns, "t0"}, "target"
+	o, field := w.canaryObject(ns)
+	if uid, ok := w.canaryHeld(ctx, ns, field, o.name, o); ok {
+		w.canaryTorn(ctx, ns, o, uid)
 	}
+}
+
+// canaryTargetTeardown is the same of another namespace's object (§11.3): its
+// namespace is deleted, not its user's.
+func (w *stressWorld) canaryTargetTeardown(ctx context.Context) {
+	ns := w.canaryNamespace()
+	o := stObj{"Secret", env.Namespace(w.t, "stresstarget"), "canary"}
+	if err := w.rec.createSecret(ctx, o.ns, o.name); err != nil {
+		w.t.Errorf("creating %s: %v", o, err)
+		return
+	}
+	if !w.setConsent(ctx, o, ns) {
+		return
+	}
+	if uid, ok := w.canaryHeld(ctx, ns, "secret", o.ns+"/"+o.name, o); ok {
+		w.canaryTorn(ctx, ns, o, uid)
+	}
+}
+
+// canaryTorn deletes o's namespace, and then o, which the canary in ns holds.
+func (w *stressWorld) canaryTorn(ctx context.Context, ns string, o stObj, uid string) {
+	if err := env.Kube.CoreV1().Namespaces().Delete(ctx, o.ns, metav1.DeleteOptions{}); err != nil {
+		w.t.Errorf("deleting %s: %v", o.ns, err)
+		return
+	}
+	_ = w.rec.deleteObject(ctx, o)
+	w.canaryKept(ctx, ns, o, uid, testGrace+time.Second, "its namespace was deleted, and then it, with one live user")
+	w.canaryEnds(ctx, ns, o)
+}
+
+// canaryDeletingUser is §5's last row: an object is deleted in a live
+// namespace, and its one user begins to be deleted just before R2's list at
+// the grace's end, whose R0 has read a cache that doesn't show it. It is kept,
+// for as long as the user is there, though the grace is over.
+func (w *stressWorld) canaryDeletingUser(ctx context.Context) {
+	ns := w.canaryNamespace()
+	o, field := w.canaryObject(ns)
 	uid, ok := w.canaryHeld(ctx, ns, field, o.name, o)
 	if !ok {
 		return
 	}
-	if err := env.Kube.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{}); err != nil {
-		w.t.Errorf("deleting %s: %v", ns, err)
+	// A slow holder: no pass of it runs. And no list of the batch begins
+	// before its deletion is done, in any process: one that did would rightly
+	// release.
+	w.pause(ns, true)
+	defer w.pause(ns, false)
+	var once sync.Once
+	var deleted atomic.Bool
+	w.rec.beforeList.Store(ns, func() {
+		once.Do(func() {
+			if err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Delete(ctx, canaryHolder, metav1.DeleteOptions{}); err != nil {
+				w.t.Errorf("deleting the canary in %s: %v", ns, err)
+			}
+			deleted.Store(true)
+		})
+	})
+	defer w.rec.beforeList.Delete(ns)
+	_ = w.rec.deleteObject(ctx, o)
+	if !w.canaryUntil(ctx, ns, o, findNotReleased, "it was deleted, with one live user: its batch must list its holders when its grace ends", func() (bool, string) {
+		return deleted.Load(), ""
+	}) {
 		return
 	}
-	_ = w.rec.deleteObject(ctx, o)
+	w.canaryKept(ctx, ns, o, uid, time.Second, "its user began to be deleted just before R2's list, after the grace")
+	w.pause(ns, false)
+	w.canaryEnds(ctx, ns, o)
+}
+
+// canaryObject is the object a canary in ns names, and the field that names
+// it.
+func (w *stressWorld) canaryObject(ns string) (stObj, string) {
+	if w.chained {
+		return stObj{"Target", ns, "t0"}, "target"
+	}
+	return stObj{"Secret", ns, "s0"}, "secret"
+}
+
+// canaryKept checks, for d, that incarnation uid of o keeps the canary's hold.
+func (w *stressWorld) canaryKept(ctx context.Context, ns string, o stObj, uid string, d time.Duration, why string) {
 	fin, _ := cu.FinalizerName(widgetGK, ns)
-	began := time.Now()
-	for time.Since(began) < testGrace+time.Second {
+	for began := time.Now(); time.Since(began) < d; time.Sleep(100 * time.Millisecond) {
 		u, err := w.get(ctx, o)
 		if err != nil && !apierrors.IsNotFound(err) {
 			w.t.Errorf("reading %s: %v", o, err)
 			return
 		}
 		if err != nil || string(u.GetUID()) != uid || !slices.Contains(u.GetFinalizers(), fin) {
-			w.found(findNotKept, ns, o, began, fmt.Sprintf("its namespace was deleted, and then it, with one live user: it must be kept, and after %s it isn't: %v", time.Since(began), err))
-			break
+			w.found(findNotKept, ns, o, began, fmt.Sprintf("%s: it must be kept, and after %s it isn't: %v", why, time.Since(began), err))
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
-	if err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Delete(ctx, canaryHolder, metav1.DeleteOptions{}); err != nil {
+}
+
+// canaryEnds deletes the canary, and waits until o, whose last user it was, is
+// gone.
+func (w *stressWorld) canaryEnds(ctx context.Context, ns string, o stObj) {
+	err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Delete(ctx, canaryHolder, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
 		w.t.Errorf("deleting the canary in %s: %v", ns, err)
 		return
 	}
@@ -473,27 +544,43 @@ func (w *stressWorld) canaryTeardown(ctx context.Context) {
 	})
 }
 
+// pause has no controller run a pass of the canary in ns, or lets them again.
+func (w *stressWorld) pause(ns string, paused bool) {
+	for _, p := range w.procs {
+		nn := types.NamespacedName{Namespace: ns, Name: canaryHolder}
+		if paused {
+			p.ctrls[0].paused.Store(nn, true)
+		} else {
+			p.ctrls[0].paused.Delete(nn)
+		}
+	}
+	if !paused {
+		w.enqueue(0, ns, canaryHolder)
+	}
+}
+
+func (w *stressWorld) setConsent(ctx context.Context, o stObj, v any) bool {
+	data, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{cu.AnnotationAllowHoldersFrom: v}}})
+	_, err := env.Kube.CoreV1().Secrets(o.ns).Patch(ctx, o.name, types.MergePatchType, data, metav1.PatchOptions{})
+	if err != nil {
+		w.t.Errorf("setting the consent of %s: %v", o, err)
+	}
+	return err == nil
+}
+
 // canaryWithdrawal is §11.3: a hold of another namespace's object goes when
 // its consent does, though its holder still names it.
 func (w *stressWorld) canaryWithdrawal(ctx context.Context) {
 	ns := w.canaryNamespace()
 	o := stObj{"Secret", w.target, "canary"}
-	consent := func(v any) bool {
-		data, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{cu.AnnotationAllowHoldersFrom: v}}})
-		_, err := env.Kube.CoreV1().Secrets(o.ns).Patch(ctx, o.name, types.MergePatchType, data, metav1.PatchOptions{})
-		if err != nil {
-			w.t.Errorf("setting the consent of %s: %v", o, err)
-		}
-		return err == nil
-	}
 	if err := w.rec.createSecret(ctx, o.ns, o.name); err != nil {
 		w.t.Errorf("creating %s: %v", o, err)
 		return
 	}
-	if !consent(ns) {
+	if !w.setConsent(ctx, o, ns) {
 		return
 	}
-	if _, ok := w.canaryHeld(ctx, ns, "secret", o.ns+"/"+o.name, o); !ok || !consent(nil) {
+	if _, ok := w.canaryHeld(ctx, ns, "secret", o.ns+"/"+o.name, o); !ok || !w.setConsent(ctx, o, nil) {
 		return
 	}
 	w.canaryUntil(ctx, ns, o, findNotReleased, "its consent was withdrawn: its hold must go", func() (bool, string) {
@@ -648,8 +735,14 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	var wg sync.WaitGroup
 	wg.Go(func() { w.canaryGrace(ctx) })
 	wg.Go(func() { w.canaryTeardown(ctx) })
+	if !w.outside {
+		// Outside the caches, only a pass of the holder sees its object being
+		// deleted (§10.5), and this one's is paused.
+		wg.Go(func() { w.canaryDeletingUser(ctx) })
+	}
 	if w.target != "" {
 		wg.Go(func() { w.canaryWithdrawal(ctx) })
+		wg.Go(func() { w.canaryTargetTeardown(ctx) })
 		// One of the target's Secrets is deleted and recreated, so that §5's
 		// rows for an object being deleted see holders of other namespaces.
 		wg.Go(func() {

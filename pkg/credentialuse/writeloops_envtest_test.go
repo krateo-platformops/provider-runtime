@@ -72,8 +72,10 @@ type controller struct {
 	beginPass  func(ctx context.Context, nn types.NamespacedName) context.Context
 	endPass    func(ctx context.Context, res driver.Result, err error)
 	readFailed func(ctx context.Context, holder types.NamespacedName, ref cu.Ref, start time.Time, err error)
-	stop       func() // ends the controller, and waits for its pass
-	cancel     func() // ends it, and doesn't wait: from inside a pass
+	// paused are the holders no pass runs of, as of one that is slow.
+	paused sync.Map
+	stop   func() // ends the controller, and waits for its pass
+	cancel func() // ends it, and doesn't wait: from inside a pass
 }
 
 func newController(t *testing.T) *controller {
@@ -143,6 +145,9 @@ func (c *controller) start(d *driver.Driver) {
 			case <-ctx.Done():
 				return
 			case nn := <-c.q:
+				if _, paused := c.paused.Load(nn); paused {
+					continue
+				}
 				c.passes.Add(1)
 				passCtx := ctx
 				if c.beginPass != nil {

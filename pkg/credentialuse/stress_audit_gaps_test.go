@@ -441,7 +441,7 @@ func recreated(procs []int, inFlight bool, f func(b *auditRun)) *auditRun {
 	b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
 	b.mark(auditS)
 	read := b.last[auditS]
-	gs := []string{"9", "10"}
+	gs := []string{"9", "10", "11"}
 	for i, proc := range procs {
 		for _, o := range []stObj{auditS, nsObj("ns")} {
 			b.call(stCall{proc: proc, g: gs[i], op: "get", obj: o}, func(c *stCall) { c.from(b.last[o]) })
@@ -463,10 +463,10 @@ func recreated(procs []int, inFlight bool, f func(b *auditRun)) *auditRun {
 		removed(c)
 		b.remove(auditS)
 	})
-	if len(procs) > 1 {
-		b.call(stCall{proc: procs[1], g: gs[1], op: "r3", obj: auditS, fin: auditFin}, func(c *stCall) {
+	for i := 1; i < len(procs); i++ {
+		b.call(stCall{proc: procs[i], g: gs[i], op: "r3", obj: auditS, fin: auditFin}, func(c *stCall) {
 			removed(c)
-			if inFlight {
+			if inFlight && i == 1 {
 				next()
 			}
 		})
@@ -501,11 +501,42 @@ func TestAuditGapRecreate(t *testing.T) {
 		{"one process, twice", []int{2, 2}, true, nil, []string{"RELEASED-TWICE", "UNEXPLAINED-REMOVAL"}},
 		{"one release", []int{2}, true, nil, []string{"UNEXPLAINED-REMOVAL"}},
 		{"both had ended before the create", []int{1, 2}, false, nil, []string{"UNEXPLAINED-REMOVAL"}},
+		{"a third release overlaps the next one's life", []int{1, 2, 3}, true, nil, []string{"UNEXPLAINED-REMOVAL"}},
+		{"and a DELETE of the test's found nothing", []int{1, 2}, true, func(b *auditRun) {
+			b.answer(b.began(auditS), answerNotFound, "")
+		}, []string{"H1-RECREATE"}},
+		{"and a DELETE of the test's may have landed", []int{1, 2}, true, func(b *auditRun) {
+			b.answer(b.began(auditS), answerUnknown, "")
+		}, []string{"INCOMPLETE", "UNEXPLAINED-REMOVAL"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			recreated(c.procs, c.inFlight, c.f).want(t, c.want...)
 		})
 	}
+	// The create's answer may come before the late release's, as above, or
+	// after it.
+	t.Run("the create's answer comes last", func(t *testing.T) {
+		b := recreated([]int{1, 2}, true, nil)
+		late := b.calls[len(b.calls)-1]
+		for i := range b.writes {
+			if w := &b.writes[i]; w.uid == "u2" {
+				if !w.end.Before(late.end) {
+					t.Fatalf("the create's answer came after the late release's already")
+				}
+				w.end = late.end.Add(time.Millisecond)
+			}
+		}
+		b.want(t, "H1-RECREATE")
+	})
+	t.Run("the late release ended as the create began", func(t *testing.T) {
+		b := recreated([]int{1, 2}, true, nil)
+		for i := range b.writes {
+			if w := &b.writes[i]; w.uid == "u2" {
+				b.calls[len(b.calls)-1].end = w.start
+			}
+		}
+		b.want(t, "UNEXPLAINED-REMOVAL")
+	})
 }
 
 // A read that answers less than the watch had delivered before it began isn't

@@ -59,6 +59,9 @@ type stressRecorder struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	passSeq atomic.Int64
+	// beforeList are, by namespace, functions that run before each list of its
+	// Widgets that a process makes.
+	beforeList sync.Map
 
 	mu       sync.Mutex
 	versions []stVersion
@@ -411,6 +414,9 @@ func (c recordingResource) Patch(ctx context.Context, name string, pt types.Patc
 // order, when it is a consistent read, as R2's is; and, of a namespace's
 // holders, its items.
 func (c recordingResource) List(ctx context.Context, o metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
+	if f, ok := c.r.beforeList.Load(c.obj.ns); ok && c.obj.kind == "Widget" {
+		f.(func())()
+	}
 	sc := stCall{op: "list", proc: c.proc, g: goroutine(), pass: passID(ctx), obj: c.obj, start: time.Now(), continued: o.Continue != ""}
 	out, err := c.ResourceInterface.List(ctx, o)
 	sc.end = time.Now()

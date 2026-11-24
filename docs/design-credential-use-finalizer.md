@@ -6012,11 +6012,13 @@ failure that the API server had caused (H3 below). Now:
   less those without consent.
 - **The owner finalizer** (§6.7): it is added by a pass that held each ref of
   the record, or read it absent after its last A2.
-- **What must happen in every run does.** Three canaries, beside the
-  goroutines and within the run's 8s: an object with one live user is deleted,
-  and goes after its grace; one in a namespace that was deleted first is kept
-  past it, until its user goes; and a hold of another namespace's object goes
-  with its consent, though its holder still names it. And a run with too few
+- **What must happen in every run does.** Canaries make it, beside the
+  goroutines and within the run's 8s. An object with one live user is deleted,
+  and goes after its grace. One in a namespace that was deleted first is kept
+  past it, until its user goes; and so is another namespace's. One whose user
+  begins to be deleted just before R2's list, after the grace, with R0 past, is
+  kept until the user goes. And a hold of another namespace's object goes with
+  its consent, though its holder still names it. And a run with too few
   releases, holds, skips, establishments, or consenting reads, fails.
 - **A deletion pass reads what it has just held** (I1). It is a deletion pass
   if the holder was being deleted when the pass read it. One that began live
@@ -6035,7 +6037,13 @@ failure that the API server had caused (H3 below). Now:
 
 Each audit is tested on made-up histories, without an API server, and against
 mutants of the protocol by `hack/revert-check-credential-use-stress.py`, which
-counts the iterations each takes to be found, by the classes it names.
+counts the iterations each takes to be found, by the classes it names. Before
+the canaries, at 79c6868, in the plain sub-test of 8s on 4 CPUs, 13 of 16
+mutants were found in the first or second iteration every time. The others:
+after the grace, deleting users not counted, 3 reds in 9 iterations; the same
+in R2 alone, 2 in 21; R3 without the epoch test, 3 in 4; and **a release that
+ignores a terminating namespace, §1's own teardown, 0 in 30.** Two canaries
+make the first two and the last happen in every run.
 
 **What a green run of 300 iterations says**, as
 `hack/count-credential-use-stress.py` counts one: a defect that these audits
@@ -6071,8 +6079,10 @@ shows of a change to the releases.
   Secret answered, one removed it, the test's recreate landed, and the other's
   removed the recreated one at the next revision. It fails the run, under its
   own name (`H1-RECREATE`), only where both releases answered, of two
-  processes, and one was in flight still when the create had been answered.
-  One process's two releases are a defect of ours (`RELEASED-TWICE`).
+  processes, one of them after the create began, and no other release overlaps
+  the recreated Secret's life, nor a DELETE that may have landed. One process's
+  two releases are a defect of ours (`RELEASED-TWICE`). With three processes,
+  a third release may well overlap, and the removal is then unexplained.
 - **The chained case.** A pass that followed an older version of a Target may
   drop from the record a Secret that the holder now needs (H2, open). The
   stress counts such drops and doesn't fail on them: every release after one
@@ -6080,10 +6090,13 @@ shows of a change to the releases.
 - **A wrong release that its own races hide.** A defect whose window is a few
   milliseconds is found at the rate at which the stress's operations fall in
   it, so one green run says little of it.
-- **A cross-namespace hold whose target's namespace is being deleted:** no
-  target namespace is. Its Secrets are.
 - **`BeforeEstablish` left out:** a holder here has one ref, so its A2's own
   404 is confirmed by the read that §6.7 asks for.
+- **A deleting user outside the caches:** that canary doesn't run there, where
+  only a pass of its holder would see the object being deleted.
+- **What the mutants weren't run on.** They run in the plain and the cross
+  sub-test. With three processes, outside the caches, and chained, the same
+  audits run, and what they would miss there isn't measured.
 - **The index** (§10.6), Disown, a restart and a lost response: other tests',
   and the model's.
 - **A real cluster's rates.** envtest has one etcd, which doesn't sync its

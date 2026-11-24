@@ -27,8 +27,9 @@ can see it, and nothing of how often CI would.
 Usage, on a VM (the envtests need KUBEBUILDER_ASSETS):
   python3 hack/revert-check-credential-use-stress.py > hack/revert-check-credential-use-stress.txt
 
-REVERT_SUBTEST is plain (default), cross or chained; a mutant of the consent
-gate runs in cross alone. REVERT_SEED is passed on
+REVERT_SUBTEST is plain (default), cross, chained, three or outside; a mutant
+of the consent gate runs in cross alone, and one of a skip not outside the
+caches, where no pass skips. REVERT_SEED is passed on
 as CREDENTIALUSE_STRESS_SEED (default: CI's fixed seed; vary for others).
 REVERT_ONLY, a regular expression, runs only the mutants whose names it
 matches. REVERT_TIMEOUT_S bounds each go test (default 3600).
@@ -67,6 +68,8 @@ MISSING = "\t\t\t\tcase ClassNotFound:\n%s\t\t\t\t\tunfollowed = unfollowed || r
 OVER, EARLY, UNREAD = "RELEASED-OVER-A-USER", "RELEASED-INSIDE-THE-GRACE", "RELEASED-WHAT-IT-HADNT-READ"
 NO_A2, NO_CONSENT, UNACCOUNTED = "HELD-WITHOUT-A2", "HELD-WITHOUT-CONSENT", "REF-UNACCOUNTED"
 DROP, DIFFERS, UNANNOUNCED = "RECORD-DROP", "RECORD-DIFFERS", "HELD-BEFORE-THE-RECORD"
+KEPT = "CANARY-NOT-KEPT"
+CACHED = ("plain", "cross", "chained", "three")
 
 # (name, [(file, old, new), ...], the classes that find it): every old must
 # occur exactly once in file. A fourth element names the only sub-tests that
@@ -77,9 +80,9 @@ MUTANTS = [
      [(DE, "\tif holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers) {\n\t\treturn false",
        "\tif holder.GetDeletionTimestamp() != nil {\n\t\treturn false")], [OVER]),
     ("after the grace, users being deleted don't keep the object (R0 and R2)",
-     [(DE, "\treturn holder.GetDeletionTimestamp() != nil && IsUser(holder, p, ownerFinalizers)\n", "\treturn false\n")], [OVER]),
+     [(DE, "\treturn holder.GetDeletionTimestamp() != nil && IsUser(holder, p, ownerFinalizers)\n", "\treturn false\n")], [OVER, KEPT]),
     ("the same, in R2 alone",
-     [(RE, "\t\t\t\tif IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {", "\t\t\t\tif false && IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {")], [OVER]),
+     [(RE, "\t\t\t\tif IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {", "\t\t\t\tif false && IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {")], [OVER, KEPT]),
     # R3 without the epoch test.
     ("R3 doesn't test the epoch", [NO_EPOCH_TEST], [UNREAD, OVER]),
     ("R3 doesn't test the epoch, and is 200ms late", [NO_EPOCH_TEST, LATE_R3], [UNREAD, OVER, EARLY]),
@@ -89,7 +92,7 @@ MUTANTS = [
     ("the grace is half as long", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace/2)\n")], [EARLY]),
     ("a grace that never ends", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")], ["CANARY-NOT-RELEASED", "TOO-LITTLE"]),
     ("a release ignores a terminating namespace",
-     [(RE, "\t\t\t\t\tnsDeleting[ns] = m.DeletionTimestamp != nil\n", "\t\t\t\t\tnsDeleting[ns] = m == nil\n")], [OVER, "CANARY-NOT-KEPT"]),
+     [(RE, "\t\t\t\t\tnsDeleting[ns] = m.DeletionTimestamp != nil\n", "\t\t\t\t\tnsDeleting[ns] = m == nil\n")], [OVER, KEPT]),
     # R2's and the gate's reads.
     ("R2 lists before R1",
      [(RE, "\tbuiltFrom := map[ID]string{} // the resourceVersion each failed release was built from\n",
@@ -135,15 +138,15 @@ MUTANTS = [
     # A pass that skips A2 and reports Held.
     ("a deletion pass skips A2 and reports Held",
      [(AQ, "\t\t\theld := false\n\t\t\tif !deleting && !added[id] {", "\t\t\theld := deleting\n\t\t\tif deleting {\n\t\t\t\ta.Held = append(a.Held, r)\n\t\t\t}\n\t\t\tif !deleting && !added[id] {")], [NO_A2]),
-    ("a live pass skips A2 on any cached object", [(AQ, SKIP, "\t\t\t\tif _, ok := p.views.Protected(id); ok {")], [NO_A2]),
+    ("a live pass skips A2 on any cached object", [(AQ, SKIP, "\t\t\t\tif _, ok := p.views.Protected(id); ok {")], [NO_A2], CACHED),
     ("a live pass skips on a write from before the record named the ref",
-     [(VE, "\tskip := obs.Before(issued)\n", "\tskip := obs.Before(issued) || true\n")], [NO_A2]),
+     [(VE, "\tskip := obs.Before(issued)\n", "\tskip := obs.Before(issued) || true\n")], [NO_A2], CACHED),
     ("a skip goes by the object's name, not its uid",
      [(AQ, SKIP, "\t\t\t\tif _, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, types.UID(id.String()), namespace) {"),
-      (AQ, WROTE % "out.UID", WROTE % "types.UID(id.String())")], [NO_A2]),
+      (AQ, WROTE % "out.UID", WROTE % "types.UID(id.String())")], [NO_A2], CACHED),
     ("what a process wrote is dropped by no event",
      [(VE, "func (v *verified) protectedEvent(old, current metav1.Object) {\n\tv.access()\n", "func (v *verified) protectedEvent(old, current metav1.Object) {\n\tv.access()\n\tif v != nil {\n\t\treturn\n\t}\n")],
-     [NO_A2]),
+     [NO_A2], CACHED),
     # The consent gate.
     ("the consent gate says yes, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateHoldLive\n\t}\n" + LIVE_READ)], [NO_CONSENT], ("cross",)),
     ("the consent gate says no, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateNotHeld\n\t}\n" + LIVE_READ)], [UNACCOUNTED, DROP], ("cross",)),
@@ -167,6 +170,8 @@ SUBTESTS = {
     "plain": "^2_processes,_no_leader_election$",
     "cross": "^2_processes,_cross-namespace_refs_whose_consent_toggles$",
     "chained": "^2_processes,_Widgets_through_Targets$",
+    "three": "^3_processes,_no_leader_election$",
+    "outside": "^2_processes,_every_hold_outside_the_caches$",
 }
 WHERE = os.environ.get("REVERT_SUBTEST", "plain")
 SUBTEST = SUBTESTS[WHERE]
