@@ -89,6 +89,66 @@ func TestPatchConfirmsA404WithARead(t *testing.T) {
 	}
 }
 
+// readsAfter is a memStore that counts the reads made once *after is set.
+type readsAfter struct {
+	*memStore
+	after *bool
+	reads int
+}
+
+func (s *readsAfter) get(ctx context.Context) (indexVersion, error) {
+	if *s.after {
+		s.reads++
+	}
+	return s.memStore.get(ctx)
+}
+
+// An A2 of a PerName kind that is refused with a 404 no read confirms didn't
+// land (§10.6.2): no read of the index, no late check, no batch, and Disown's
+// count is sure of the index. One with no answer may have, and gets them all.
+func TestAnA2RefusedWithA404DidntLand(t *testing.T) {
+	ctx := context.Background()
+	there := apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, "ns")
+	for name, c := range map[string]struct {
+		patch, read error
+		unknown     bool
+	}{
+		"the object there":            {patch: there},
+		"the object named, there":     {patch: apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "s")},
+		"a read that is refused":      {patch: there, read: rbacForbidden("ns", "s")},
+		"a read with no answer":       {patch: there, read: context.DeadlineExceeded},
+		"a patch with no answer":      {patch: errors.New("EOF"), unknown: true},
+		"an object that is gone":      {patch: there, read: apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "s")},
+		"a patch a gateway times out": {patch: apierrors.NewTimeoutError("timed out", 1), unknown: true},
+	} {
+		h := holderObject("ns", "h")
+		r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u", widgetGK), h)
+		tr := r.track(t, widgetGK)
+		r.run(t)
+		r.setRefs("h", SecretRef("ns", "s"))
+		patched := false
+		r.md.PrependReactor("patch", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			patched = true
+			return true, nil, c.patch
+		})
+		r.md.PrependReactor("get", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) { return c.read != nil, nil, c.read })
+		st := &readsAfter{memStore: &memStore{exists: true, rebuilt: true}, after: &patched}
+		ix := testIndex(st, r.s.newServer())
+		tr.proto.lines = ix
+		batches := 0
+		tr.proto.enqueueBatch = func(ID, string) { batches++ }
+		a, err := tr.Acquire(ctx, h.DeepCopy())
+		if err != nil || !patched || len(a.Held) != 0 {
+			t.Fatalf("%s: %+v, %v, patched %v; want an A2 that fails", name, a, err, patched)
+		}
+		reads := st.reads
+		_, sure, err := ix.readSure(ctx, map[schema.GroupKind]bool{secretGroupKind: true})
+		if err != nil || sure == c.unknown || (reads > 0) != c.unknown || (len(ix.late) > 0) != c.unknown || (batches > 0) != c.unknown {
+			t.Errorf("%s: %d reads of the index, %d late checks, %d batches, sure %v (%v); want its outcome unknown %v", name, reads, len(ix.late), batches, sure, err, c.unknown)
+		}
+	}
+}
+
 // Every caller of a patch, when its 404 isn't about a missing object: a hold
 // isn't Missing, and nothing held is taken for gone.
 func TestA404OfAPatchOfAnObjectThatIsThere(t *testing.T) {

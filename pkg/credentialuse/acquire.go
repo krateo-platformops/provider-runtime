@@ -263,8 +263,12 @@ func (p *protocol) detach(ctx context.Context) callContexts {
 
 // mayHaveLanded reports whether a write that failed with err may have
 // landed, or may yet: anything but an answer of the API server that refuses
-// it, a 4xx.
+// it, a 4xx. A patch's 404 that no read confirmed is one (refusedPatch).
 func mayHaveLanded(err error) bool {
+	var refused refusedPatch
+	if errors.As(err, &refused) {
+		return false
+	}
 	st, ok := statusOf(err)
 	return err != nil && (!ok || st.Code < 400 || st.Code >= 500 || st.Code == http.StatusRequestTimeout)
 }

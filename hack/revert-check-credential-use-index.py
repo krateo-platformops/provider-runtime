@@ -36,7 +36,8 @@ AQ = C + "acquire.go"
 D = C + "disown.go"
 SH = C + "shared.go"
 RC = R + "credentialuse.go"
-FILES = [IX, AQ, D, SH, RC]
+SV = C + "server.go"
+FILES = [IX, AQ, D, SH, SV, RC]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -210,6 +211,12 @@ MUTANTS = [
       ("context.WithTimeout(cc.check, call)", "context.WithTimeout(cc.check, call+10*time.Second)")]),
     ("an A2 of unknown outcome isn't checked", AQ,
      [("\t\tif issuedOne && mayHaveLanded(err) && ", "\t\tif false && issuedOne && mayHaveLanded(err) && ")]),
+    ("an A2 refused with an unconfirmed 404 is of unknown outcome", AQ,
+     [("\tif errors.As(err, &refused) {\n", "\tif false && errors.As(err, &refused) {\n")]),
+    ("a 404 no read confirms isn't marked as a refusal", SV,
+     [("\t\t\terr = refusedPatch{err}\n", "\t\t\t_ = refusedPatch{err}\n")]),
+    ("a refusal loses its cause", SV,
+     [("func (e refusedPatch) Unwrap() error { return e.err }\n", "")]),
     ("a refused A2 is of unknown outcome", AQ,
      [("st.Code < 400 || st.Code >= 500 ||", "st.Code > 0 ||")]),
     ("an A2 of unknown outcome owes no batch", AQ,
@@ -314,6 +321,9 @@ KILLERS = {
     "an A2 in flight goes on too long": {C: "TestACallReturnsThoughTheServerHangs"},
     "a line check goes on too long": {C: "TestACallReturnsThoughTheServerHangs"},
     "an A2 of unknown outcome isn't checked": {C: "TestAnA2OfUnknownOutcomeIsChecked|TestALateA2IsReleased"},
+    "an A2 refused with an unconfirmed 404 is of unknown outcome": {C: "TestAnA2RefusedWithA404DidntLand"},
+    "a 404 no read confirms isn't marked as a refusal": {C: "TestAnA2RefusedWithA404DidntLand"},
+    "a refusal loses its cause": {C: "TestPatchConfirmsA404WithARead"},
     "a refused A2 is of unknown outcome": {C: "TestAnA2OfUnknownOutcomeIsChecked"},
     "an A2 of unknown outcome owes no batch": {C: "TestAnA2OfUnknownOutcomeIsChecked"},
     "no check at once": {C: "TestTheLateCheck"},

@@ -3185,7 +3185,8 @@ another writer's change.
      missing (a concurrent prune removed it), it adds it again. A check
      that fails fails the hold, and drops the A2's `written` entry, so the
      holder's next pass writes A2 and checks again.
-  3. **An A2 whose outcome is unknown** (no response, or a 5xx or 408) may
+  3. **An A2 whose outcome is unknown** (no response, or a 5xx or 408; not a
+     404, which refuses it, whatever the read that follows says, §6.2) may
      have landed, or may yet (the user's decision, 2026-11-23). It gets the
      same check at once. Once `LandingMargin` is over, the write loops read
      P live, and add its line back if P carries K's prefix. Its release batch
