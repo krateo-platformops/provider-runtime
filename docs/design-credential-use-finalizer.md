@@ -805,9 +805,9 @@ object that fails for good, as of a kind that isn't served, delays no other.
 of its retries that fails, and forgotten when a batch decides it. It has one
 pending retry: failing again before that, in a batch an event queued, neither
 moves nor lengthens it. Objects that fail together, as often, share a timer, so
-failures set no more timers than objects that fail. (A grace's end is asked for
-at each batch that finds it, and each sets a timer of its own: they end with
-the grace.) A namespace's live list (§10.5) that fails for one kind is retried
+failures set no more timers than objects that fail. A time an object asks for
+again, as each batch that finds it in its grace does, has one timer too. A
+namespace's live list (§10.5) that fails for one kind is retried
 so too, as a whole, deciding what it can list again, and doesn't hold up the
 kinds that could be listed. An object that fails stays in memory, and is read
 again every 5 minutes, for as long as it fails: it isn't dropped when no record

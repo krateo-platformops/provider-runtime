@@ -91,9 +91,27 @@ MUTANTS = [
     ("the grace's end waits for the backoff", WL,
      [("\tfor _, a := range res.Asked {\n", "\tfor _, a := range res.Asked {\n\t\tif len(errs) > 0 {\n\t\t\tbreak\n\t\t}\n")]),
     ("the grace's end covers what failed", WL,
-     [("\tat := map[time.Time][]ID{}\n", "\tat := map[time.Time][]ID{}\n\tif len(res.Asked) > 0 {\n\t\tat[res.RequeueAt] = res.Failed\n\t}\n")]),
+     [("\tat := map[time.Time][]ID{} // what", "\tat := map[time.Time][]ID{}\n\tif len(res.Asked) > 0 {\n\t\tat[res.RequeueAt] = res.Failed\n\t}\n\t// what")]),
     ("the grace's end covers what didn't ask", WL,
-     [("\tat := map[time.Time][]ID{}\n", "\tat := map[time.Time][]ID{}\n\tif len(res.Asked) > 0 {\n\t\tat[res.RequeueAt] = decided\n\t}\n")]),
+     [("\tat := map[time.Time][]ID{} // what", "\tat := map[time.Time][]ID{}\n\tif len(res.Asked) > 0 {\n\t\tat[res.RequeueAt] = decided\n\t}\n\t// what")]),
+    ("a time asked for again sets another timer", QU,
+     [("!q.asked[f] {\n", "true || !q.asked[f] {\n")]),
+    ("a time is another object's", QU,
+     [("askedFor{k, id, e.at}); !q", "askedFor{k, ID{}, e.at}); !q")]),
+    ("a time is another time's", QU,
+     [("askedFor{k, id, e.at}); !q", "askedFor{k, id, 0}); !q")]),
+    ("a time is another key's", QU,
+     [("askedFor{k, id, e.at}); !q", "askedFor{batchKey{}, id, e.at}); !q")]),
+    ("a time that came is remembered", QU,
+     [("\t\t\t\tdelete(q.asked, askedFor{k, id, e.at})\n", "\t\t\t\t_ = id\n")]),
+    ("ShutDown remembers the times", QU,
+     [("\tclear(q.asked)\n", "")]),
+    ("an AddAt after ShutDown sets a timer", QU,
+     [("\te := &queueTimer{at: at.UnixNano()}\n\tq.mu.Lock()\n\tif q.stopped {\n", "\te := &queueTimer{at: at.UnixNano()}\n\tq.mu.Lock()\n\tif false && q.stopped {\n")]),
+    ("a time that is past waits", QU,
+     [("\tif d <= 0 {\n\t\tq.Add(k, ids...)\n\t\treturn\n\t}\n\te := &queueTimer{at:", "\tif d < -time.Hour {\n\t\tq.Add(k, ids...)\n\t\treturn\n\t}\n\te := &queueTimer{at:")]),
+    ("a time no object asks for is the namespace's", QU,
+     [("\tif len(ids) == 0 {\n\t\treturn\n\t}\n\td := at.Sub", "\tif len(ids) == 0 {\n\t\tq.Add(k)\n\t\treturn\n\t}\n\td := at.Sub")]),
     ("every object that asked is looked at at the soonest time", WL,
      [("\t\tat[a.At] = append(at[a.At], a.ID)\n", "\t\tat[res.RequeueAt] = append(at[res.RequeueAt], a.ID)\n")]),
     ("one object of those that ask at a time is looked at", WL,
@@ -154,6 +172,7 @@ MUTANTS = [
 ]
 
 ONE = {C: "TestFailKeepsOneRetryPerObject|TestBatchQueueEveryOrdering"}
+GRACE = {C: "TestAGracesTimersDontAddUp|TestBatchQueueEveryOrdering|TestATimeIsItsObjects"}
 SAYS = {C: "TestReleaseSaysWhatItCouldntDecide"}
 ALONE = {C: "TestAFailingObjectIsRetriedAlone"}
 KIND = {C: "TestAKindThatCantBeListedStopsNoOther"}
@@ -199,6 +218,15 @@ KILLERS = {
     "what failed is settled": {C: "TestAFailingObjectIsRetriedAlone|TestEventsDontLengthenTheBackoff|TestAnHonestFailureBesideAPermanentOne"},
     "a failed prune isn't retried for its objects": {C: "TestAFailedPruneIsRetriedAlone"},
     "the grace's end covers what didn't ask": {C: "TestOnlyWhatAskedIsLookedAtAgain"},
+    "a time asked for again sets another timer": GRACE,
+    "a time is another object's": GRACE,
+    "a time is another time's": GRACE,
+    "a time is another key's": GRACE,
+    "a time that came is remembered": GRACE,
+    "ShutDown remembers the times": GRACE,
+    "an AddAt after ShutDown sets a timer": GRACE,
+    "a time that is past waits": GRACE,
+    "a time no object asks for is the namespace's": GRACE,
     "every object that asked is looked at at the soonest time": {C: "TestOnlyWhatAskedIsLookedAtAgain"},
     "one object of those that ask at a time is looked at": {C: "TestOnlyWhatAskedIsLookedAtAgain"},
     "what asked isn't recorded": {C: "TestOnlyWhatAskedIsLookedAtAgain"},

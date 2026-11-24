@@ -45,8 +45,9 @@ type batchQueue struct {
 	ready   []batchKey               // keys waiting to be taken, in order
 	queued  map[batchKey]bool        // in ready
 	working map[batchKey]bool        // taken, not yet done
-	timers  map[*queueTimer]bool     // AddAfter's and Fail's timers neither fired nor stopped
+	timers  map[*queueTimer]bool     // AddAfter's, AddAt's and Fail's, neither fired nor stopped
 	failing map[batchKey]map[ID]*failure
+	asked   map[askedFor]bool                // what AddAt's timers wait for
 	backoff func(failures int) time.Duration // backoffAfter, but for tests
 	stopped bool
 }
@@ -59,6 +60,7 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 		working: map[batchKey]bool{},
 		timers:  map[*queueTimer]bool{},
 		failing: map[batchKey]map[ID]*failure{},
+		asked:   map[askedFor]bool{},
 		backoff: backoffAfter,
 	}
 	q.cond = sync.NewCond(&q.mu)
@@ -104,15 +106,23 @@ func (q *batchQueue) addLocked(k batchKey, ids []ID) {
 	}
 }
 
-// A queueTimer is one AddAfter, or the pending retry of the objects that one
-// Fail gave the same delay. It is in the queue's timers from before the clock
+// A queueTimer is one AddAfter, or AddAt, or the pending retry of the objects
+// that one Fail gave the same delay. It is in the queue's timers from before the clock
 // is asked for a timer until the timer fires, ShutDown takes it, or everything
 // it would retry is decided; t is set once the clock has returned it.
 type queueTimer struct {
 	t     clock.Timer
 	ids   []ID
 	retry bool
-	left  int // a retry's objects that still wait for it
+	left  int   // a retry's objects that still wait for it
+	at    int64 // an AddAt's time
+}
+
+// askedFor is one object's time that an AddAt's timer waits for.
+type askedFor struct {
+	k  batchKey
+	id ID
+	at int64 // Unix nanoseconds
 }
 
 // A failure is an object that a batch of a key failed at, and none decided
@@ -136,6 +146,40 @@ func (q *batchQueue) AddAfter(k batchKey, d time.Duration, ids ...ID) {
 	}
 	q.mu.Lock()
 	if q.stopped {
+		q.mu.Unlock()
+		return
+	}
+	q.timers[e] = true
+	q.mu.Unlock()
+	q.arm(k, d, e)
+}
+
+// AddAt adds k's batch, covering ids, at the time at, as AddAfter does, but an
+// object's time has one timer: one that a batch asks for again, as every batch
+// that finds an object in its grace does, is there already. Unlike AddAfter,
+// with no ids it does nothing.
+func (q *batchQueue) AddAt(k batchKey, at time.Time, ids ...ID) {
+	if len(ids) == 0 {
+		return
+	}
+	d := at.Sub(q.clock.Now())
+	if d <= 0 {
+		q.Add(k, ids...)
+		return
+	}
+	e := &queueTimer{at: at.UnixNano()}
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return
+	}
+	for _, id := range ids {
+		if f := (askedFor{k, id, e.at}); !q.asked[f] {
+			q.asked[f] = true
+			e.ids = append(e.ids, id)
+		}
+	}
+	if len(e.ids) == 0 {
 		q.mu.Unlock()
 		return
 	}
@@ -237,6 +281,11 @@ func (q *batchQueue) arm(k batchKey, d time.Duration, e *queueTimer) {
 		}
 		delete(q.timers, e)
 		ids := e.ids
+		if e.at != 0 {
+			for _, id := range ids {
+				delete(q.asked, askedFor{k, id, e.at})
+			}
+		}
 		if e.retry {
 			ids = nil
 			for _, id := range e.ids {
@@ -324,6 +373,7 @@ func (q *batchQueue) ShutDown() {
 	}
 	clear(q.timers)
 	clear(q.failing)
+	clear(q.asked)
 	q.ready, q.pending = nil, map[batchKey]map[ID]bool{}
 	clear(q.queued)
 	q.cond.Broadcast()

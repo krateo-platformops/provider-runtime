@@ -1174,6 +1174,92 @@ func TestOnlyWhatAskedIsLookedAtAgain(t *testing.T) {
 	}
 }
 
+// Batches that find an object in its grace again and again, as events run them,
+// set one timer for its end.
+func TestAGracesTimersDontAddUp(t *testing.T) {
+	ctx := context.Background()
+	r, k := outside(t, deleting(heldObject(secretGVK, "out", "g1", "u1", widgetGK, "out"), time.Now()),
+		deleting(heldObject(secretGVK, "out", "g2", "u2", widgetGK, "out"), time.Now()),
+		holderObject("out", "h", secretID("out", "g1"), secretID("out", "g2")))
+	r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	for range 10 {
+		r.s.releaseBatch(ctx, k, []ID{secretID("out", "g1"), secretID("out", "g2")})
+		r.s.releaseBatch(ctx, k, []ID{secretID("out", "g2")})
+	}
+	if n := r.queueTimers(); n != 1 {
+		t.Errorf("%d timers after twenty batches, want one, of both objects", n)
+	}
+	r.clk.Step(DefaultDeletionGrace)
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{secretID("out", "g1"), secretID("out", "g2")}) || r.queueTimers() != 0 {
+		t.Errorf("at the grace's end the batch is %v, with %d timers; want both, and none", got, r.queueTimers())
+	}
+	// Past it, the same time asked for again is now.
+	r.drain()
+	r.s.queue.AddAt(k, r.clk.Now().Add(-time.Second), secretID("out", "g1"))
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{secretID("out", "g1")}) {
+		t.Errorf("a time that is past: the batch is %v, want its object at once", got)
+	}
+	r.drain()
+	r.s.queue.AddAt(k, r.clk.Now().Add(time.Second))
+	r.s.queue.AddAt(k, r.clk.Now())
+	if r.queueTimers() != 0 || r.s.queue.Len() != 0 {
+		t.Error("a time asked for by no object did something")
+	}
+	// What is armed is forgotten with its timer.
+	r.s.queue.AddAt(k, r.clk.Now().Add(time.Second), secretID("out", "g1"))
+	r.clk.Step(time.Second)
+	if len(r.s.queue.asked) != 0 {
+		t.Errorf("%d times remembered after their timers", len(r.s.queue.asked))
+	}
+	r.s.queue.AddAt(k, r.clk.Now().Add(time.Second), secretID("out", "g1"))
+	r.s.queue.ShutDown()
+	if len(r.s.queue.asked) != 0 || r.queueTimers() != 0 {
+		t.Errorf("%d times remembered after ShutDown", len(r.s.queue.asked))
+	}
+	r.s.queue.AddAt(k, r.clk.Now().Add(time.Second), secretID("out", "g1"))
+	if r.queueTimers() != 0 {
+		t.Error("an AddAt after ShutDown set a timer")
+	}
+}
+
+// The timer of one object's time is no other object's, time's or key's.
+func TestATimeIsItsObjects(t *testing.T) {
+	clk := testingclock.NewFakeClock(time.Now())
+	q := newBatchQueue(nil)
+	q.clock = &unlockedClock{FakeClock: clk, t: t, q: q}
+	a, b, other := idOf("a"), idOf("b"), batchKey{widgetGK, "other"}
+	soon, later := clk.Now().Add(time.Second), clk.Now().Add(2*time.Second)
+	for range 3 {
+		q.AddAt(batchNS, soon, a)
+		q.AddAt(batchNS, soon, a, b)
+		q.AddAt(batchNS, later, a)
+		q.AddAt(other, soon, a)
+	}
+	if _, n := timersOf(q, batchNS); n != 4 {
+		t.Fatalf("%d timers, want four: a's, b's, a's later one, and the other key's", n)
+	}
+	got := map[batchKey][]ID{}
+	take := func() {
+		for q.Len() > 0 {
+			k, ids, _ := q.Get(context.Background())
+			got[k] = append(got[k], ids...)
+			q.Done(k)
+		}
+	}
+	clk.Step(time.Second)
+	take()
+	if !slices.Equal(got[batchNS], []ID{a, b}) || !slices.Equal(got[other], []ID{a}) {
+		t.Errorf("at the first time, %v", got)
+	}
+	clk.Step(time.Second)
+	take()
+	if !slices.Equal(got[batchNS], []ID{a, b, a}) || len(got[other]) != 1 {
+		t.Errorf("at the second time, %v", got)
+	}
+}
+
 // The write loops' stop, under a batch that decided some: the next ones get
 // what failed, at once, and no more; and the backoff isn't counted.
 func TestAStoppedBatchLeavesWhatFailed(t *testing.T) {

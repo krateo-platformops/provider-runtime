@@ -231,14 +231,12 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		s.queue.Settle(k, fillAll)
 	}
 	s.queue.Settle(k, decided...)
-	// Each at its own time, and never with no objects, which asks for the whole
-	// namespace.
-	at := map[time.Time][]ID{}
+	at := map[time.Time][]ID{} // what asked to be looked at again, by when
 	for _, a := range res.Asked {
 		at[a.At] = append(at[a.At], a.ID)
 	}
-	for t, ids := range at {
-		s.queue.AddAfter(k, t.Sub(s.clock.Now()), ids...)
+	for when, asked := range at {
+		s.queue.AddAt(k, when, asked...)
 	}
 	if len(errs) > 0 {
 		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), errors.Join(errs...))

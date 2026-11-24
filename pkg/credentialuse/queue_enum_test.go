@@ -18,6 +18,7 @@ package credentialuse
 //   - a failed object is added once its own backoff has passed, which failing
 //     while it waits neither moves nor lengthens, unless it is settled first;
 //     and there are no more timers than objects that wait;
+//   - a time asked for twice for one object has one timer;
 //   - the clock is never called under the queue's lock;
 //   - after ShutDown, Get takes nothing and Add queues nothing.
 //
@@ -27,6 +28,7 @@ package credentialuse
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,7 +40,7 @@ import (
 
 // An enumOp is one operation of a scenario.
 type enumOp struct {
-	kind   string // add, after, fail, settle, step, get, done, rescan, shutdown
+	kind   string // add, after, at, fail, settle, step, get, done, rescan, shutdown
 	key    string // A or B
 	id     string
 	worker int
@@ -46,7 +48,7 @@ type enumOp struct {
 
 func (o enumOp) String() string {
 	switch o.kind {
-	case "add", "after", "fail", "settle":
+	case "add", "after", "at", "fail", "settle":
 		return o.kind + "(" + o.key + o.id + ")"
 	case "get", "done":
 		return fmt.Sprintf("%s%d", o.kind, o.worker)
@@ -95,9 +97,10 @@ func (s *enumState) waiting() int {
 }
 
 type enumTimer struct {
-	at  time.Time
-	key batchKey
-	id  ID
+	at    time.Time
+	key   batchKey
+	id    ID
+	asked bool // an AddAt's
 }
 
 func enumKey(k string) batchKey { return batchKey{widgetGK, k} }
@@ -145,7 +148,18 @@ func (s *enumState) apply(o enumOp) {
 	case "after":
 		s.q.AddAfter(enumKey(o.key), enumDelay, enumID(o.id))
 		if !s.stopped {
-			s.timers = append(s.timers, enumTimer{s.clk.Now().Add(enumDelay), enumKey(o.key), enumID(o.id)})
+			s.timers = append(s.timers, enumTimer{at: s.clk.Now().Add(enumDelay), key: enumKey(o.key), id: enumID(o.id)})
+		}
+	case "at":
+		// One time, the same for every object: past it, at once.
+		tm := enumTimer{at: s.start.Add(enumDelay), key: enumKey(o.key), id: enumID(o.id), asked: true}
+		s.q.AddAt(tm.key, tm.at, tm.id)
+		switch {
+		case s.stopped:
+		case !s.clk.Now().Before(tm.at):
+			s.added(tm.key, tm.id)
+		case !slices.Contains(s.timers, tm):
+			s.timers = append(s.timers, tm)
 		}
 	case "fail":
 		k, id := enumKey(o.key), enumID(o.id)
@@ -410,6 +424,8 @@ func TestBatchQueueEveryOrdering(t *testing.T) {
 		"failing again":               "fail:A1 fail:A1 step step step step step step get1 done1",
 		"a failure and a grace":       "fail:A1 after:A2 add:A1 step step get1 done1 settle:A1",
 		"failing while it runs":       "add:A1 get1 fail:A1 add:A1 done1 step step get2 done2",
+		"a time asked for again":      "at:A1 at:A1 at:A2 after:A1 step step get1 done1",
+		"stop with times asked for":   "at:A1 at:A1 fail:A1 step get1 shutdown done1 at:A2",
 		"stop with failures":          "fail:A1 fail:A2 step settle:A1 get1 shutdown done1 fail:A3",
 		"the rescan":                  "rescan add:A2 after:B1 step get1 get2 done1 done2",
 		"stop":                        "add:A1 after:B2 get1 step shutdown done1 add:A2",
