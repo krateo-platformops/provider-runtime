@@ -2016,8 +2016,8 @@ else changed in between.
 
 A non-zero or unknown count clears the flag. **Downgrading the runtime,
 removing the interface from the connecter, or uninstalling is safe once
-the three checks above hold**, but for what lands later than the margin,
-below. Any process can write the fields, because each one counts the same
+the three checks above hold**, but for what lands later than the margin and,
+in PerName mode, a kill inside a prune, both below. Any process can write the fields, because each one counts the same
 cluster, live.
 
 **A hold that lands later than the landing margin isn't covered.** Disown
@@ -2025,6 +2025,14 @@ may have settled by then, and the index's line may be gone. P then carries a
 finalizer that nothing counts. The remedy is to remove it by hand: its exact
 form is `credential-use.<kind>.<group>/<namespace>` (§3), and after the CRD
 is gone, `DisownPrefix` with `Names` removes it.
+
+**A kill inside a prune isn't covered either** (PerName; the user's decision,
+2026-11-24). A process that is pruning P's line as the switch is set, and is
+killed between the removal and its re-add, can leave a hold that Disown
+settles over, if a Disown pass read the index between the prune's read of the
+switch and its removal, and an A2 on P lands after that pass read P. §10.6.3
+has the conditions, what the model searched, and what would close it. The
+remedy is the same.
 
 **The index's lines stay until Disown has settled** (PerName; the user's
 decision, 2026-11-23). A hold that lands late has only its line for the
@@ -3303,6 +3311,57 @@ line. With any one off, in seven cases, it reaches none.
 - **What it leaves out:** a grace period that ends is a kill there. One
   holder, one object, one batch.
 
+**A kill inside a prune, as Disown is turned on**, is the third (the user's
+decision, 2026-11-24: accepted, and documented here). Here the pruner doesn't
+make its check. Disown can settle with P held when all of these come
+together:
+
+1. A process prunes P's line. It read P bare, and the prune's live read of
+   the switch, before its removal, found it off.
+2. **Between that read and the removal**, the switch is set, and a Disown
+   pass, of any process, reads the index with P's line still in it. It adds
+   no line (E2, §7.4). It finds P bare, and strips the record that names it.
+   The strip may come later.
+3. An A2 on P, of a pass that read the switch as off, lands after that
+   Disown pass has read P. If its check runs, it runs before the removal and
+   sees the line.
+4. The pruning process is killed after its removal has landed, and before
+   its re-add has.
+
+P then carries the finalizer, and neither a line nor a record names it, so
+no count finds it. One kill is enough. The sender may live, and have had its
+answer. The holder may still be there. No holder cache need be behind. What
+makes it narrow is 2: the gap is between two calls of one prune, the live
+read of the switch and the removal that follows it, milliseconds in practice
+and 15s at most; and the kill must come in the same 15s.
+
+- **The remedy** is the one above: the finalizer comes off by hand, the
+  marker label finds the object, and once the CRD is gone `DisownPrefix`
+  with `Names` removes it.
+- **What the model shows** (`TestModelKillInAPrune`). With one Disown
+  process, the one that dies or another, and with both, it reaches the path:
+  with the kill at the second read of the switch or at the re-add, with the
+  pruner's holder cache behind or fresh, and with the sender alive. It
+  doesn't reach it with no kill, or one before the removal or after the
+  prune; with the switch set outside that gap, or the index read outside it;
+  or with the A2 landing before the pass.
+- **Its bound:** with one Disown process, every schedule with at most two
+  preemptions; with both, at most one. **It takes two things as given**, as
+  §14 states them: the landing margin, and a prune's bound. The dying
+  process runs one Disown pass, and the kill comes at one of the prune's own
+  calls.
+- **What would close it:** a wait. No pass strips a record before 15s (a
+  prune's bound) after its process's first pass under the switch. Every prune
+  that read the switch as off began before any process's first pass under
+  it, so has ended, or died, by then, and the line E2 then adds stays. In the
+  model no schedule reaches the path with it, within the same bound. It
+  delays the settling by one `DisownInterval`. **It changes nothing in the
+  index's format, so it can be added later.**
+
+Stripping the records before the objects would widen it: the kill could then
+also fall between a pass's two strips, with the A2 landed before the pass.
+§7.4's order is why it can't.
+
 In LabelScoped mode there is no line to lose: the marker label is in the same
 write as the finalizer.
 
@@ -4400,11 +4459,22 @@ on krateo-057:
   schedule with one preemption less than `CREDENTIALUSE_MODEL_DEEP=1` does,
   which is the bound §10.6.3 states: the flag, 2 with two processes and 3 with
   one (DEEP 3); the late hold, 2, and 1 with the late check and a holder that
-  goes (DEEP 3 and 2); Disown over the index, 1 (DEEP 2). **A search with one
+  goes (DEEP 3 and 2); Disown over the index, 1 (DEEP 2); the kill inside a
+  prune, 2 for the wait that isn't built and 1 for the other clean cases (DEEP
+  2), and with two Disown processes 1 for the wait, the rest under DEEP only,
+  at 1. A search that reaches 1,000,000 schedules stops, and says that it
+  isn't exhaustive: under DEEP, two cases of Disown over the index, "lost,
+  holder gone" with the switch set, and off and on, are at 2 (every schedule
+  with 1, and the first 1,000,000 with 2). **A search with one
   preemption is no evidence for a case that needs two**: in "off and on" and
   "narrowed and widened", and in the controls "a run over a changed CRD" and
   "a pruner whose CRD cache is behind", the violation or the landing needs
   one or two, so only DEEP covers what those controls guard.
+- **What they cost in CI's step**, measured on 4 vCPU at 7fd7022, with CI's
+  bounds: the kill 457s (436s in a run of its own), Disown over the index
+  222s, the late hold 76s, the flag 46s, the drops 2s: about 13 and a half
+  minutes. Under DEEP: the late hold 1,000s, the flag 509s, and the kill's
+  clean cases with one Disown process 626s.
 - **The flag** (§7.4): a switch turned off and on again while nothing runs
   isn't settled by the old flag; no A2 under a stale flag, its removal
   refused included; a run starts over when the CRD changes between its
@@ -5276,6 +5346,7 @@ response could swallow a drop nobody then checked. The user's decisions:
 | The landing margin: `LandingMargin`, 60s, a margin and not a proof; the span is `max(2 × TimeoutBound, TimeoutBound + LandingMargin)`; a later landing isn't covered | §7.3, §7.4, §10.6.8 |
 | F: an A2 of unknown outcome is checked at once and after the margin, with its batch; a stop doesn't cut an A2 short; every bound stated | §7.2, §10.6.2 |
 | The residual: a hold without its line needs three conditions together, shown in the model within its bound; the remedy | §10.6.3 |
+| A kill inside a prune, as Disown is turned on: accepted and documented (2026-11-24), with the wait that would close it, which can be added later | §10.6.3, §7.4 |
 | `disown-settled` is the switch's value as written; a reader makes three checks, through `DisownSettled`; no A2 under a stale flag | §7.3, §7.4, §11.5, §11.6 |
 | A pass strips the objects before the records, and a record only once every object it names is stripped | §7.4 |
 | A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |

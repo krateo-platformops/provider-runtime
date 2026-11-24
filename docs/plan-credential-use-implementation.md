@@ -1793,3 +1793,7 @@ them are recorded in the design doc's §17, "Revision 16".
 7. **Any other write of the CRD restarts a run of zeros**, and runs that
    keep restarting are reported.
 8. **A process whose write loops haven't started refuses its passes.**
+9. **A kill inside a prune, as Disown is turned on** (2026-11-24): accepted
+   and documented (§10.6.3), with the objects stripped before the records.
+   The wait that would close it can be added later, with no change of the
+   index's format.
