@@ -1747,7 +1747,8 @@ a kill does: a pass that takes longer than the grace period, and **a lost
 Lease**, after which controller-runtime v0.25.2 waits for nothing
 (`pkg/manager/internal.go`). Another process's write loops may run by then.
 An A2 cut short that way may have landed, with nobody left to check its
-line at once or after the landing margin (§10.6.2).
+line at once or after the landing margin: condition 2 of §10.6.3's
+residual.
 
 ### 7.3 Setup: idempotent, after start, refuses to start on error
 
@@ -3245,6 +3246,58 @@ while every process of the kind is down, after a prune had removed its line
 and before any post-check ran. Its object then keeps the finalizer with no
 line. The marker label still finds it (§10.6.6).
 
+**A hold that lands when nobody looks any more is the other residual** (the
+user's decision, 2026-11-23). The argument above needs both checks to run, the
+acquirer's after its A2 has landed. With a pruner that makes its own, an A2
+leaves P with the finalizer and without a line only when all three of these
+hold together:
+
+1. **The sender makes no check after the A2**: its response is lost, or the
+   sender is killed between the response and the check.
+2. **The late check doesn't see the landing** (§10.6.2): the sender is
+   killed within `LandingMargin`, or a stop's grace period ends before the
+   A2 does, or the write lands later than `LandingMargin`.
+3. **A prune takes P's line before the landing**, because nothing names P
+   any more.
+
+With one of them off, the line is there:
+
+- **without 1**, the check sees the line missing and adds it back, or the
+  pruner's check after it sees the finalizer: the two cases above;
+- **without 2**, the sender, alive, reads P after the landing and adds its
+  line back, and its release batch releases P if its holder is gone;
+- **without 3**, nothing takes the line: a prune leaves the line of an
+  object that a record in its holder cache names.
+
+**The remedy** is to remove the finalizer by hand. Its exact form is
+`credential-use.<kind>.<group>/<namespace>` (§3); the marker label finds the
+object (§10.6.6); and once the CRD is gone, `DisownPrefix` with `Names`
+removes it.
+
+**What the model shows** (`TestModelLateHold`). It searches one acquirer, one
+release batch of P in another process, with its prune, the holder's deletion,
+the late landing, and the late check with its batch, through the code of the
+acquirer, the release batch and the index. With all three conditions, in four
+ways (lost and killed within the margin, lost and landing past it, killed
+before the check, lost and killed before it), it reaches P held without its
+line. With any one off, in seven cases, it reaches none.
+
+- **Its bound:** every schedule with at most three preemptions, and two in
+  the two cases where the late check and its batch race a holder that goes.
+  Every search finished, within 2,000,000 schedules.
+- **What it is given:** whether the landing is within the margin, so that the
+  late check comes after it, or not; and, in the cases without 3, that the
+  pruner sees a record naming P.
+- **What each clean case rests on:** in the cases without 1 and 2 the line
+  was taken before the landing in some schedules, and the check put it back.
+  In the four without 3 **no schedule has the line taken at all**: they show
+  that a line nothing takes is there, and nothing more.
+- **What it leaves out:** a grace period that ends is a kill there. One
+  holder, one object, one batch.
+
+In LabelScoped mode there is no line to lose: the marker label is in the same
+write as the finalizer.
+
 #### 10.6.4 Size, and when it fills (L1, L2)
 
 - **The cap is in lines:** `SharedOptions.IndexMaxLines`, 2,000 by default.
@@ -4309,6 +4362,9 @@ on krateo-057:
   lines it proves free; no prune takes a line meanwhile, whichever side of
   its removal the switch is set on, nor with the switch unread; a full index
   leaves the records unstripped; two processes settle apart.
+- **The residual of §10.6.3, in the model:** with its three conditions a hold
+  without its line is reached, and with any one off none is, within the bound
+  stated there.
 - **Disown over the index, in the model:** the switch set, turned off and on
   again, widened, and narrowed and widened again; the A2 answered, lost, and
   lost with its sender killed; the holder there or gone; with a pruner whose
@@ -5187,6 +5243,7 @@ response could swallow a drop nobody then checked. The user's decisions:
 | An index lost under Disown: no marker from a rebuild under the switch; `"unknown"` until `vouched-index` names the ConfigMap's uid; three cases and two limits | §7.4, §10.6.5, §10.6.6 |
 | The landing margin: `LandingMargin`, 60s, a margin and not a proof; the span is `max(2 × TimeoutBound, TimeoutBound + LandingMargin)`; a later landing isn't covered | §7.3, §7.4, §10.6.8 |
 | F: an A2 of unknown outcome is checked at once and after the margin, with its batch; a stop doesn't cut an A2 short; every bound stated | §7.2, §10.6.2 |
+| The residual: a hold without its line needs three conditions together, shown in the model within its bound; the remedy | §10.6.3 |
 | `disown-settled` is the switch's value as written; a reader makes three checks, through `DisownSettled`; no A2 under a stale flag | §7.3, §7.4, §11.5, §11.6 |
 | A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |
 | A process whose write loops haven't started refuses its passes | §7.2, §7.5 |

@@ -1784,7 +1784,8 @@ them are recorded in the design doc's §17, "Revision 16".
 4. **An index lost under Disown** keeps the count `unknown` until
    `vouched-index` names its uid.
 5. **F**: an A2 of unknown outcome is checked at once and after the margin,
-   with its release batch, and a stop doesn't cut an A2 short.
+   with its release batch, and a stop doesn't cut an A2 short. What remains
+   needs three conditions together, accepted as a residual (§10.6.3).
 6. **The flag is the switch's value as written**, a reader makes three
    checks, and no A2 is made under a stale flag. No migration: no release
    wrote `"true"`.
