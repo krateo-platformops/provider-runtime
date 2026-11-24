@@ -18,8 +18,8 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
-CL, AQ, CS, RL, IX, JN, PB, DS, DP, CH, SV = [C + f for f in ("classify.go", "acquire.go", "consent.go", "release.go", "index.go", "janitor.go", "prober.go", "disown.go", "disownprefix.go", "chain.go", "server.go")]
-FILES = [CL, AQ, CS, RL, IX, JN, PB, DS, DP, CH, SV]
+CL, AQ, CS, RL, IX, JN, PB, DS, DP, CH, SV, PN, UN, IN = [C + f for f in ("classify.go", "acquire.go", "consent.go", "release.go", "index.go", "janitor.go", "prober.go", "disown.go", "disownprefix.go", "chain.go", "server.go", "pername.go", "uncached.go", "informers.go")]
+FILES = [CL, AQ, CS, RL, IX, JN, PB, DS, DP, CH, SV, PN, UN, IN]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -39,7 +39,7 @@ MUTANTS = [
      [("\t\treturn c.Type == metav1.CauseTypeUnexpectedServerResponse\n", "\t\treturn false && c.Type == metav1.CauseTypeUnexpectedServerResponse\n")]),
     # An object named without its namespace.
     ("an object without its namespace is asked for", SV,
-     [('\tif namespaced && namespace == "" {', '\tif false && namespaced && namespace == "" {')]),
+     [('\treturn (namespace != "") == namespaced && ', '\treturn (namespace != "" || namespaced) == namespaced && ')]),
     ("a Get asks for an object without its namespace", SV,
      [("\tc, err := s.object(gk, namespace, name)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn c.Get(", "\tc, err := s.client(gk, namespace)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn c.Get(")]),
     ("a patch asks for an object without its namespace", SV,
@@ -47,13 +47,37 @@ MUTANTS = [
     ("the answer for it names nothing", SV,
      [("\t\treturn nil, apierrors.NewNotFound(gvr.GroupResource(), name)\n", "\t\treturn nil, apierrors.NewNotFound(gvr.GroupResource(), \"\")\n")]),
     ("a cluster-scoped object is NotFound", SV,
-     [('\tif namespaced && namespace == "" {', '\tif (namespaced || true) && namespace == "" {')]),
+     [('\treturn (namespace != "") == namespaced && ', '\treturn namespace != "" && (namespace != "") == namespaced && ')]),
     ("a list without a namespace is NotFound", SV,
      [("\tc, err := s.client(gk, namespace)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tvar out", "\tc, err := s.object(gk, namespace, \"x\")\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tvar out")]),
     ("content without its namespace is asked for", CH,
-     [('\t\tif namespace == "" {\n', '\t\tif false && namespace == "" {\n')]),
+     [("\tif !mayExist(namespaced, namespace, name) {", "\tif !mayExist(namespaced, namespace, name) && namespace != \"\" {")]),
     ("cluster-scoped content is NotFound", CH,
-     [("\tif m.Scope.Name() == meta.RESTScopeNameNamespace {\n\t\tif namespace", "\tif namespace == \"\" || m.Scope.Name() == meta.RESTScopeNameNamespace {\n\t\tif namespace")]),
+     [("\tif !mayExist(namespaced, namespace, name) {", "\tif !mayExist(true, namespace, name) {")]),
+    # A name, or a namespace, no object can have; a cluster-scoped kind's with
+    # a namespace.
+    ("an object with a name none can have is asked for", SV,
+     [(" && pathSegment(namespace) && pathSegment(name)\n", " && pathSegment(namespace)\n")]),
+    ("an object in a namespace none can have is asked for", SV,
+     [(" && pathSegment(namespace) && pathSegment(name)\n", " && pathSegment(name)\n")]),
+    ("a cluster-scoped object named with a namespace is asked for", SV,
+     [('\treturn (namespace != "") == namespaced && ', '\treturn (namespace != "" && namespaced) == namespaced && ')]),
+    ("a list in a namespace none can have is made", SV,
+     [("namespace != \"\" && (!namespaced || !pathSegment(namespace)) {", "namespace != \"\" && !namespaced {")]),
+    ("a list of a cluster-scoped kind in a namespace is made", SV,
+     [("namespace != \"\" && (!namespaced || !pathSegment(namespace)) {", "namespace != \"\" && namespaced && !pathSegment(namespace) {")]),
+    ("a live list in a namespace none can have is made", UN,
+     [("\tif !pathSegment(namespace) {\n", "\tif false && !pathSegment(namespace) {\n")]),
+    ("content that can't exist is asked for", CH,
+     [("\tif !mayExist(namespaced, namespace, name) {", "\tif false && !mayExist(namespaced, namespace, name) {")]),
+    ("what can't exist is watched", PN,
+     [("\tif !mayExist(info.namespaced, id.Namespace, id.Name) {", "\tif false && !mayExist(info.namespaced, id.Namespace, id.Name) {")]),
+    ("a cache has an object by another's name", IN,
+     [("\tif !pathSegment(namespace) || !pathSegment(name) {", "\tif !pathSegment(namespace) {")]),
+    ("a watch's selector isn't escaped", PN,
+     [("\tp.lw.field = fields.OneTermEqualSelector(\"metadata.name\", id.Name).String()\n", "\tp.lw.field = \"metadata.name=\" + id.Name + fields.Everything().String()\n")]),
+    ("a namespaced kind is watched in every namespace", PN,
+     [("\tif !mayExist(info.namespaced, id.Namespace, id.Name) {", "\tif !mayExist(info.namespaced && id.Namespace != \"\", id.Namespace, id.Name) {")]),
     ("the prober lists objects without their namespace", PB,
      [(' && (g.ns != "" || !t.namespaced(g.gk)) {', ' && (true || g.ns != "" || !t.namespaced(g.gk)) {')]),
     ("the prober never lists a kind without a namespace", PB,
@@ -170,6 +194,17 @@ REL = "TestReleaseOfAnUnservedKind"
 DIS = "TestDisownAndTheJanitorOfAnUnservedKind"
 ENV = "TestAProtectedKindThatStopsBeingServed"
 KILLERS = {
+    "an object with a name none can have is asked for": {C: "TestANameNoObjectCanHave|TestARefToANameNoObjectCanHave"},
+    "an object in a namespace none can have is asked for": {C: "TestANameNoObjectCanHave"},
+    "a cluster-scoped object named with a namespace is asked for": {C: "TestANameNoObjectCanHave|TestNoWatchOfANameNoObjectCanHave"},
+    "a list in a namespace none can have is made": {C: "TestANameNoObjectCanHave"},
+    "a list of a cluster-scoped kind in a namespace is made": {C: "TestANameNoObjectCanHave"},
+    "a live list in a namespace none can have is made": {C: "TestANameNoObjectCanHave"},
+    "content that can't exist is asked for": {C: "TestANameNoObjectCanHave"},
+    "what can't exist is watched": {C: "TestNoWatchOfANameNoObjectCanHave"},
+    "a cache has an object by another's name": {C: "TestNoCachedObjectOfANameNoObjectCanHave"},
+    "a watch's selector isn't escaped": {C: "TestNoWatchOfANameNoObjectCanHave"},
+    "a namespaced kind is watched in every namespace": {C: "TestNoWatchOfANameNoObjectCanHave"},
     "an unserved resource's 404 is NotFound": {C: "TestAnUnservedResourceIsntNotFound|TestPremiseUnservedResource"},
     "any cause makes a 404 unserved": {C: "TestAnUnservedResourceIsntNotFound"},
     "no 404 is NotFound": {C: "TestAnUnservedResourceIsntNotFound|TestClassify"},

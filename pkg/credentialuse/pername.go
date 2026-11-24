@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
@@ -134,17 +135,18 @@ func (n *perNames) stopAll() {
 }
 
 // newWatch builds and starts the per-name informer of id, with the
-// tracker's handler and the janitor's on it. n.mu is held.
+// tracker's handler and the janitor's on it, or returns nil for what can't be
+// watched. n.mu is held.
 func (n *perNames) newWatch(id ID) *nameWatch {
 	t, s := n.t, n.t.s
 	info, ok := n.infos[id.GroupKind()]
 	if !ok {
 		return nil
 	}
-	ns := ""
-	if info.namespaced {
-		ns = id.Namespace
+	if !mayExist(info.namespaced, id.Namespace, id.Name) {
+		return nil // it names no object (clientServer.object)
 	}
+	ns := id.Namespace
 	p := &protectedInformer{gk: id.GroupKind(), ns: ns, name: id.Name, gvr: info.gvr, content: info.content, failed: make(chan struct{})}
 	var example runtime.Object = &metav1.PartialObjectMetadata{}
 	tf := transform(isCredentialUseKey, isCredentialUseKey)
@@ -154,7 +156,7 @@ func (n *perNames) newWatch(id ID) *nameWatch {
 	} else {
 		p.lw = newListWatch(s.c.Metadata, info.gvr, ns, "", s.clock, nil)
 	}
-	p.lw.field = "metadata.name=" + id.Name
+	p.lw.field = fields.OneTermEqualSelector("metadata.name", id.Name).String()
 	p.inf = cache.NewSharedIndexInformerWithOptions(p.lw, example, cache.SharedIndexInformerOptions{
 		Indexers:          cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 		ObjectDescription: "credential-use " + p.what(),

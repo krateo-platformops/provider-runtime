@@ -134,6 +134,9 @@ func listLive(ctx context.Context, cl Clients, gk schema.GroupKind, namespace, s
 
 // listResource is listLive of gvr, gk's resource.
 func listResource(ctx context.Context, cl Clients, gk schema.GroupKind, gvr schema.GroupVersionResource, namespace, selector string) ([]metav1.PartialObjectMetadata, error) {
+	if !pathSegment(namespace) {
+		return nil, nil // it can't exist
+	}
 	var c metadata.ResourceInterface = cl.Metadata.Resource(gvr)
 	if namespace != "" {
 		c = cl.Metadata.Resource(gvr).Namespace(namespace)

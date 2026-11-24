@@ -84,7 +84,8 @@ func (d dynamicLW) watch(ctx context.Context, opts metav1.ListOptions) (watch.In
 }
 
 // newListWatch lists and watches gvr through md, in namespace, or in every
-// namespace when it is "".
+// namespace when it is "". The metadata client doesn't check it: it is the
+// operator's (SharedOptions.Namespaces), or one that may exist (newWatch).
 func newListWatch(md metadata.Interface, gvr schema.GroupVersionResource, namespace, selector string, clk clock.PassiveClock, listed func(time.Time)) *listWatch {
 	var client metadata.ResourceInterface = md.Resource(gvr)
 	if namespace != "" {

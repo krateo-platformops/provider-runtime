@@ -50,12 +50,12 @@ func (d dynamicContent) Content(ctx context.Context, gk schema.GroupKind, namesp
 	if err != nil {
 		return nil, fmt.Errorf("credential-use: mapping %s: %w", gk, err)
 	}
+	namespaced := m.Scope.Name() == meta.RESTScopeNameNamespace
+	if !mayExist(namespaced, namespace, name) {
+		return nil, apierrors.NewNotFound(m.Resource.GroupResource(), name) // as clientServer.object
+	}
 	r := d.dyn.Resource(m.Resource)
-	if m.Scope.Name() == meta.RESTScopeNameNamespace {
-		if namespace == "" {
-			// It can't exist (clientServer.object).
-			return nil, apierrors.NewNotFound(m.Resource.GroupResource(), name)
-		}
+	if namespaced {
 		return r.Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	}
 	return r.Get(ctx, name, metav1.GetOptions{})

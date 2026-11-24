@@ -535,6 +535,30 @@ consent first, from a Namespace that can't exist: the ref is
 every one, and isn't this. Such a ref with a `Next` leaves its chain unfollowed
 on every pass (§9.1).
 
+**Nor can one whose name, or namespace, isn't a single path segment**, as
+`<namespace>/<name>` where a name is meant: the API server's own registry admits
+none, whatever the kind. **Nor can a cluster-scoped kind's that is named with a
+namespace.** Each names no object, and is NotFound in the same way, without a
+call, whoever asks: a ref is Missing and its holder goes on, and what a record or
+an index line names so is gone, for a release batch, an index check and Disown
+alike, which settles. A list in such a namespace has nothing, nor has one of a
+cluster-scoped kind in any; no cache has such an object, and no per-name watch
+is made of it (§13 shape 1), nor of a namespaced kind's named without its
+namespace. *Before this,* such a ref could fail its holder's passes, keep its
+index line and the startup recheck from being done, and Disown from settling, or
+leave a hold no record names. LabelScoped finds that one by its labels, and
+releases it as any hold nobody names. PerName has no line of it: list the objects
+with the kind's marker label, and add the line
+`<group>/<kind>/<namespace>/<name>` of any that has the kind's finalizer and no
+line. Its watch, or the next startup recheck, then releases it, unless a holder's
+record names it.
+
+**A limit:** a namespaced holder can't hold a cluster-scoped object. Named
+without a namespace, as it must be, it is a ref to another namespace, whose
+consent (§11.3) nobody can give, since there is no Namespace to read:
+`ConsentUnreadable`, and the holder goes on. A cluster-scoped holder's is in its
+own.
+
 While a kind isn't served:
 
 | Who | What it does |
@@ -2363,6 +2387,20 @@ core kinds, and so is the namespace for cluster-scoped objects. The lines
 are sorted. **The index must be a superset** of what the kind holds: every
 protected object that carries a finalizer with K's prefix has its line. §10.6.3
 proves it.
+
+**A line must read back as its object** (decided 2026-11-24). One whose name or
+namespace has a line break, or a blank at its end, as a value copied with one
+may, would be read as another line, or as more than one, and a line that names
+nothing is never pruned. **And its name, and its namespace, are
+at most 253 bytes each**, a DNS subdomain's, so that a few refs can't fill the
+ConfigMap. So no add writes any other, and a ref to it is refused before A2, as a
+line that doesn't fit is (§10.6.4): a new holder doesn't connect, and an
+established one is Degraded, with an error that quotes the line's beginning and
+says which it is. In LabelScoped, which has no lines, the same ref is Missing,
+unless there is such an object. *The limit:* most kinds' names are DNS
+subdomains, or shorter, and the API server then admits none of these; an RBAC
+kind's need only be a path segment, so one with such a name can't be held in
+PerName, and a hold made before the rule has no line once something drops it.
 
 #### 10.6.1 Where it lives, and who owns it
 
