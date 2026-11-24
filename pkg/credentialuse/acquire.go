@@ -123,14 +123,12 @@ type protocol struct {
 	// The release's own (release.go): readRecord, if set, is how it reads a
 	// holder's record, for tests to count; turnTime, if set, replaces the
 	// constant of that name; known, if set, is whether a batch's object is known
-	// to carry the finalizer for holder namespace n, and readLimit how long its
-	// read may take; namespaceLimit, if set, replaces releaseReadLimit for a
-	// Namespace's.
-	readRecord     func(metav1.Object) Record
-	known          func(n string, id ID) bool
-	turnTime       time.Duration
-	readLimit      func(n string, id ID) time.Duration
-	namespaceLimit time.Duration
+	// to carry the finalizer for holder namespace n, and readLimit how long the
+	// answer to its read may take.
+	readRecord func(metav1.Object) Record
+	known      func(n string, id ID) bool
+	turnTime   time.Duration
+	readLimit  func(n string, id ID) time.Duration
 	// missed are the kinds a release couldn't map; nil remembers none.
 	missed *missedKinds
 	// heldDeleting, if set, is told of every object an A2 held that its

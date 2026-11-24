@@ -239,7 +239,7 @@ func TestALogLineBuildsFewErrors(t *testing.T) {
 	for range 64 {
 		errs = append(errs, countedError{&built})
 	}
-	got := errorSample(errors.Join(errors.New("first"), errors.Join(errs...)))
+	got := errorSample(joined([]error{errors.New("first"), joined(errs)}))
 	if n := built.Load(); n > maxLoggedErrors {
 		t.Errorf("the texts of %d errors were built, want %d at most", n, maxLoggedErrors)
 	}

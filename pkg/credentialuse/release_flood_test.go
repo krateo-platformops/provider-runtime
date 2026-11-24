@@ -169,8 +169,12 @@ func TestTheQueuesLines(t *testing.T) {
 	// A namespace's list is of the held line, and so is what it found.
 	q, clk := setup()
 	q.Add(k)
-	if got := get(q); !slices.Contains(got, fillAll) || !q.held(k, x) || q.held(k, names[0]) {
-		t.Error("want the namespace's list in the first batch, and what it finds known to be held")
+	if got := get(q); !slices.Contains(got, fillAll) || q.held(k, x) {
+		t.Error("want the namespace's list in the first batch, and nothing it didn't find known")
+	}
+	q.Known(k, x)
+	if !q.held(k, x) || q.held(k, names[0]) {
+		t.Error("want what the list found known to be held, and no other")
 	}
 	q.Fail(k, fillAll) // its retry too
 	q.PutBack(k, x)

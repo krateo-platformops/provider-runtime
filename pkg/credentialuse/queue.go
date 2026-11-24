@@ -84,8 +84,8 @@ func newBatchQueue(c clock.WithDelayedExecution) *batchQueue {
 }
 
 // lineWindow is how many objects of each of a key's two lines a worker takes at
-// most: R0, which reads the caches for each, costs milliseconds, and settles many
-// times what a turn reads (maxTurnReads).
+// most: what R0, which reads the caches for each, and for each of the holders that
+// name it, can settle without a read is many times what a turn reads (maxTurnReads).
 const lineWindow = 1024
 
 // places are the objects of a batch, each with its place.
@@ -111,7 +111,7 @@ func (p places) inOrder() []ID {
 // back at an earlier place.
 type lines struct{ held, others line }
 
-// A line is what was put back, and then what was added.
+// A line is what was put back, taken from its end, and then what was added.
 type line struct{ back, added []entry }
 
 type entry struct {
@@ -126,7 +126,7 @@ func (l *line) take(n int, pending func(entry) bool) {
 		var e entry
 		switch {
 		case len(l.back) > 0:
-			e, l.back = l.back[0], l.back[1:]
+			e, l.back = l.back[len(l.back)-1], l.back[:len(l.back)-1]
 		case len(l.added) > 0:
 			e, l.added = l.added[0], l.added[1:]
 		default:
@@ -388,14 +388,46 @@ func (q *batchQueue) failures(k batchKey, id ID) int {
 	return 0
 }
 
+// Known records that ids, of the batch of k being worked on, are known to carry the
+// finalizer: that the namespace's list found them, whose place those then have that
+// weren't in the batch, or that a read showed it. It is for the worker of k's batch,
+// before what it says of them, and lasts while they wait, fail or are put back.
+func (q *batchQueue) Known(k batchKey, ids ...ID) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	taken := q.taken[k]
+	if taken == nil {
+		return
+	}
+	for _, id := range ids {
+		p, had := taken[id]
+		if !had {
+			p.at = taken[fillAll].at
+		}
+		p.held = true
+		taken[id] = p
+	}
+}
+
 // held is whether id, of the batch of k being worked on, is known to carry the
-// finalizer: it was added so, or it is one that the namespace's list found.
+// finalizer.
 func (q *batchQueue) held(k batchKey, id ID) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	p, added := q.taken[k][id]
-	_, fill := q.taken[k][fillAll]
-	return p.held || !added && fill
+	return q.taken[k][id].held
+}
+
+// split is ids, of the batch of k being worked on, by whether they are known to carry
+// the finalizer.
+func (q *batchQueue) split(k batchKey, ids []ID) (held, rest []ID) {
+	for _, id := range ids {
+		if q.held(k, id) {
+			held = append(held, id)
+		} else {
+			rest = append(rest, id)
+		}
+	}
+	return held, rest
 }
 
 // Settle records that ids of k's batch were decided: what they waited for, and
@@ -523,9 +555,11 @@ func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 }
 
 // PutBack adds to k's next batch what its worker didn't get to, each object at
-// the place it had, so before whatever was added since; one that a whole
-// namespace's list found, at the list's. With no ids it does nothing. It is for
-// the worker of k's batch, before Done. After ShutDown it does nothing.
+// the place it had, so before whatever was added since, and known to carry the
+// finalizer if it was; one that a whole namespace's list found, at the list's. One
+// added again meanwhile has the earlier of its two places. With no ids it does
+// nothing. It is for the worker of k's batch, before Done. After ShutDown it does
+// nothing.
 func (q *batchQueue) PutBack(k batchKey, ids ...ID) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -537,25 +571,25 @@ func (q *batchQueue) PutBack(k batchKey, ids ...ID) {
 	for _, id := range ids {
 		p, had := q.taken[k][id]
 		if !had {
-			p, had = q.taken[k][fillAll]
-		}
-		if !had {
 			q.placed++
 			p.at = q.placed
 		}
+		p.held = p.held || id == fillAll
 		if again, waits := set[id]; waits {
-			if again.at <= p.at {
+			p.at = min(p.at, again.at)
+			p.held = p.held || again.held
+			if p == again {
 				continue
 			}
-			p.held = p.held || again.held
 		}
 		set[id] = p
 		back[p.held] = append(back[p.held], entry{id, p.at})
 	}
 	for held, es := range back {
 		slices.SortStableFunc(es, func(a, b entry) int { return cmp.Compare(a.at, b.at) })
+		slices.Reverse(es)
 		l := ls.of(held)
-		l.back = append(es, l.back...)
+		l.back = append(l.back, es...)
 	}
 	q.readyLocked(k)
 }

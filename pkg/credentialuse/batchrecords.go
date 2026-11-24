@@ -6,7 +6,7 @@ import (
 
 // batchRecords are the holders' records as one release batch reads them: each
 // is parsed once, however many of the batch's objects it is asked about, by R0
-// and by R2, and one that can't be parsed too (§6.6). Nothing of it outlives the
+// and by R2, and one that can't be parsed too (§6.2). Nothing of it outlives the
 // batch, which is one goroutine's.
 //
 // What a record names is a function of its text alone, so the text is the key;

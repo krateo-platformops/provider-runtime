@@ -806,8 +806,8 @@ type inflight struct {
 
 // A parkedBatch is a release batch held while its kind's Track runs.
 type parkedBatch struct {
-	key batchKey
-	ids []ID
+	key        batchKey
+	held, rest []ID // by whether they are known to carry the finalizer
 }
 
 // endTracking ends the Track of gk that mine records: the release batches
@@ -834,7 +834,10 @@ func (s *Shared) endTracking(gk schema.GroupKind, mine *inflight) {
 	s.mu.Unlock()
 	if t != nil {
 		for _, b := range parked {
-			s.queue.Add(b.key, b.ids...)
+			s.queue.AddHeld(b.key, b.held...)
+			if len(b.rest) > 0 || len(b.held) == 0 {
+				s.queue.Add(b.key, b.rest...)
+			}
 		}
 		if wctx != nil {
 			go func() {
@@ -856,7 +859,8 @@ func (s *Shared) trackerOrPark(k batchKey, ids []ID) *Tracker {
 		return t
 	}
 	if in := s.tracking[k.Holder]; in != nil {
-		in.parked = append(in.parked, parkedBatch{key: k, ids: append([]ID(nil), ids...)})
+		held, rest := s.queue.split(k, ids)
+		in.parked = append(in.parked, parkedBatch{key: k, held: held, rest: rest})
 	}
 	return nil
 }

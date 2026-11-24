@@ -1807,7 +1807,7 @@ func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	if got := errorSample(errors.New(strings.Repeat("é", 5000))); len(got) > maxLoggedBytes+3 || !strings.HasSuffix(got, "é...") {
 		t.Errorf("a long error is cut to %d bytes, ending %q", len(got), got[max(0, len(got)-8):])
 	}
-	if got := errorSample(errors.Join(errors.New("a"), errors.New("b"), errors.New("c"))); got != "a\nb\nc" {
+	if got := errorSample(joined([]error{errors.New("a"), errors.New("b"), errors.New("c")})); got != "a\nb\nc" {
 		t.Errorf("a short error is %q", got)
 	}
 }

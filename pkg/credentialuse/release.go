@@ -1,6 +1,7 @@
 package credentialuse
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -95,6 +96,8 @@ type ReleaseResult struct {
 	// Rest are the objects the batch didn't get to: neither decided nor
 	// failed. The caller puts them back where they were in the queue.
 	Rest []ID
+	// Known are the objects that a read of the batch showed carrying the finalizer.
+	Known []ID
 	// Asked are the objects that must be looked at again, and when each: at the
 	// end of its grace, or for its restored epoch's recheck. Nothing else of
 	// the batch is.
@@ -133,22 +136,23 @@ func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
 	}
 }
 
-// What one batch, a turn of its key, covers of the objects that R0 leaves (§6.6):
+// What one batch, a turn of its key, covers of the objects that R0 leaves (§6.2):
 // maxTurnReads at most, of which at least minTurnOthers, when there are so many,
-// are ones not known to carry the finalizer. And none of R1's reads
-// begins once turnReadTime is over, but the first of each sort (turnOf): a client
-// of few requests a second reads fewer than 64, and what it read is decided.
+// are ones not known to carry the finalizer. And none of R1's reads begins once
+// turnReadTime is over, but the first of each sort (turnOf), and those of a later
+// round: a client of few requests a second reads fewer than 64, and what it read is
+// decided.
 const (
 	maxTurnReads  = 64
 	minTurnOthers = 16
 	turnReadTime  = 10 * time.Second
 )
 
-// Each read that begins has a time of its own, whatever its turn's: a read cut
-// short by others' would be refused unread, as client-go's rate limiter does, or
-// cut at its every try. It is releaseReadLimit, doubled at each failure of its
-// object in a row, to maxReadLimit, the API server's own for a request: so an
-// object whose reads take long is released late, not never.
+// Each read that is sent must be answered in a time of its own (answered), whatever
+// its turn's: a read cut short by others' would be refused unread, as client-go's rate
+// limiter does, or cut at its every try. It is releaseReadLimit, doubled at each
+// failure of its object in a row, to maxReadLimit, the API server's own for a request:
+// so an object whose reads take long is released late, not never.
 const (
 	releaseReadLimit = 10 * time.Second
 	maxReadLimit     = 60 * time.Second
@@ -162,31 +166,24 @@ func readLimitAfter(n int) time.Duration {
 // read is R1's GET of id, for holder namespace n, unless its kind couldn't be
 // mapped just before (missedKinds).
 func (p *protocol) read(ctx context.Context, n string, id ID) (*metav1.PartialObjectMetadata, error) {
-	limit := releaseReadLimit
-	if p.readLimit != nil {
-		limit = p.readLimit(n, id)
-	}
 	if err := p.missed.known(id.GroupKind(), p.clock); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, limit)
-	defer cancel()
-	m, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+	m, err := answered(ctx, p.limitOf(n, id), func(ctx context.Context) (*metav1.PartialObjectMetadata, error) {
+		return p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+	})
 	if meta.IsNoMatchError(err) {
 		p.missed.add(id.GroupKind(), err, p.clock.Now())
 	}
 	return m, err
 }
 
-// readNamespace is R2's GET of Namespace ns.
-func (p *protocol) readNamespace(ctx context.Context, ns string) (*metav1.PartialObjectMetadata, error) {
-	limit := releaseReadLimit
-	if p.namespaceLimit != 0 {
-		limit = p.namespaceLimit
+// limitOf is how long the answer to a read of id may take.
+func (p *protocol) limitOf(n string, id ID) time.Duration {
+	if p.readLimit != nil {
+		return p.readLimit(n, id)
 	}
-	ctx, cancel := context.WithTimeout(ctx, limit)
-	defer cancel()
-	return p.srv.Get(ctx, namespaceGroupKind, "", ns)
+	return releaseReadLimit
 }
 
 // readTime is turnReadTime, unless a test sets its own.
@@ -300,7 +297,9 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		var live []r1Read
 		window, closeWindow := context.WithTimeout(ctx, p.readTime())
 		for _, id := range todo {
-			if ctx.Err() != nil || !first[id] && window.Err() != nil {
+			// A later round's reads are of what a release met a change of: they
+			// aren't left for another turn, which would know nothing of it.
+			if ctx.Err() != nil || round == 0 && !first[id] && window.Err() != nil {
 				res.Rest = append(res.Rest, id)
 				continue
 			}
@@ -327,6 +326,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				}
 				continue // done
 			}
+			res.Known = append(res.Known, id)
 			if m.Annotations[f] == "" {
 				if err := p.restoreEpoch(ctx, id, m, n); err != nil {
 					fail(err, id)
@@ -384,12 +384,22 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				continue
 			}
 			if _, done := nsReadAt[ns]; !done {
-				// As R1's reads: none begins once the time is over, but the first.
-				if len(nsReadAt)+len(nsFailed) > 0 && window.Err() != nil {
+				// As R1's reads: none begins once the time is over, but the first,
+				// and each sort's first's.
+				if round == 0 && len(nsReadAt)+len(nsFailed) > 0 && !first[r.id] && window.Err() != nil {
 					res.Rest = append(res.Rest, r.id)
 					continue
 				}
-				m, err := p.readNamespace(ctx, ns)
+				// For as long as the longest of the reads of those that ask.
+				var limit time.Duration
+				for _, o := range live {
+					if o.id.Namespace == ns && o.meta.DeletionTimestamp != nil {
+						limit = max(limit, p.limitOf(n, o.id))
+					}
+				}
+				m, err := answered(ctx, limit, func(ctx context.Context) (*metav1.PartialObjectMetadata, error) {
+					return p.srv.Get(ctx, namespaceGroupKind, "", ns)
+				})
 				switch Classify(err) {
 				case ClassNone:
 					nsDeleting[ns] = m.DeletionTimestamp != nil
@@ -487,11 +497,9 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			}
 		}
 		todo = next
-		if len(todo) > 0 {
-			first = map[ID]bool{todo[0]: true}
-		}
 	}
-	return res, errors.Join(errs...)
+	slices.SortStableFunc(res.Rest, func(a, b ID) int { return cmp.Compare(records.place[a], records.place[b]) })
+	return res, joined(errs)
 }
 
 // listHolders is R2's list of the holder kind in n, or an empty one when it

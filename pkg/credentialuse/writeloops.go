@@ -380,12 +380,14 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		if err != nil {
 			fail(err, fillAll)
 		}
+		s.queue.Known(k, held...)
 		ids = expand(ids, held)
 	}
 	res, err := t.proto.release(ctx, k.Namespace, ids)
 	if f := s.hooks.released; f != nil {
 		f(&res)
 	}
+	s.queue.Known(k, res.Known...)
 	s.queue.PutBack(k, res.Rest...)
 	rest := map[ID]bool{}
 	for _, id := range res.Rest {
@@ -430,7 +432,7 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		s.queue.AddAt(k, when, asked...)
 	}
 	if len(errs) > 0 {
-		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), errors.Join(errs...))
+		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), joined(errs))
 	}
 }
 
@@ -466,7 +468,7 @@ func expand(ids, held []ID) []ID {
 func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []ID, err error) {
 	if ctx.Err() != nil {
 		if len(ids) > 0 {
-			s.queue.Add(k, ids...)
+			s.queue.PutBack(k, ids...)
 		}
 		return
 	}
@@ -487,13 +489,53 @@ const (
 	maxLoggedBytes  = 2000
 )
 
-// errorSample is err's first few lines, and how many more it has.
+// batchErrors are the errors of a batch, one for each object that failed at most,
+// joined as errors.Join does; a log line builds the texts of a few of them alone.
+type batchErrors []error
+
+// joined is errs as one error, or nil.
+func joined(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return batchErrors(errs)
+}
+
+func (e batchErrors) Error() string {
+	texts := make([]string, len(e))
+	for i, err := range e {
+		texts[i] = err.Error()
+	}
+	return strings.Join(texts, "\n")
+}
+
+func (e batchErrors) Unwrap() []error { return e }
+
+// leaves gives do each of the errors that err joins, or err.
+func leaves(err error, do func(error)) {
+	if es, ok := err.(batchErrors); ok {
+		for _, e := range es {
+			leaves(e, do)
+		}
+		return
+	}
+	do(err)
+}
+
+// errorSample is err's first few errors' lines, and how many more it has.
 func errorSample(err error) string {
-	lines := strings.SplitN(err.Error(), "\n", maxLoggedErrors+1)
+	var lines []string
+	n := 0
+	leaves(err, func(e error) {
+		if n < maxLoggedErrors {
+			lines = append(lines, strings.Split(e.Error(), "\n")...)
+		}
+		n++
+	})
 	var more string
-	if len(lines) > maxLoggedErrors {
-		more = fmt.Sprintf("\nand %d more", 1+strings.Count(lines[maxLoggedErrors], "\n"))
-		lines = lines[:maxLoggedErrors]
+	if rest := n - min(n, maxLoggedErrors) + len(lines) - min(len(lines), maxLoggedErrors); rest > 0 {
+		more = fmt.Sprintf("\nand %d more", rest)
+		lines = lines[:min(len(lines), maxLoggedErrors)]
 	}
 	text := strings.Join(lines, "\n")
 	if len(text) > maxLoggedBytes {

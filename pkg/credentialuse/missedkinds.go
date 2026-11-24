@@ -8,7 +8,7 @@ import (
 	"k8s.io/utils/clock"
 )
 
-// The kinds a release couldn't map (§6.6). A mapper that finds new kinds by
+// The kinds a release couldn't map (§6.2). A mapper that finds new kinds by
 // itself looks for one again, which costs a discovery, whenever it is asked; and
 // what a record names may be of any kind, or of none. So a miss is remembered for
 // missedKindTime from when it was made, whatever asks for it meanwhile, and an

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"path"
 	"slices"
 	"strings"
@@ -24,10 +25,19 @@ import (
 // and each that began has a time of its own, so that one that doesn't answer
 // holds a worker for that long, and delays nothing else for good.
 
-// hang makes the GETs of the names hangs says wait for the end of their context.
+// send says that the call under ctx is out, as net/http's transport does.
+func send(ctx context.Context) {
+	if tr := httptrace.ContextClientTrace(ctx); tr != nil && tr.GetConn != nil {
+		tr.GetConn("the test's")
+	}
+}
+
+// hang makes the GETs of the names hangs says, once sent, wait for the end of their
+// context.
 func hang(hangs func(c Call) bool) func(ctx context.Context, c Call) error {
 	return func(ctx context.Context, c Call) error {
 		if c.Op == "get" && hangs(c) {
+			send(ctx)
 			<-ctx.Done()
 			return ctx.Err()
 		}
@@ -139,9 +149,9 @@ func TestTheWorkersGoOnBesideReadsThatDontAnswer(t *testing.T) {
 // A read's time is 10s, and twice that after each of its object's failures, to
 // 60s, the API server's own: an object whose reads are slow, as one behind a slow
 // conversion webhook, is delayed, never lost. One that was decided begins again.
-// The patches and the lists have no such time.
+// No call has a deadline, which the client's rate limiter would read.
 func TestAReadsTimeGrows(t *testing.T) {
-	r, _, l := quiet(t, heldObject(secretGVK, "out", "free", "u1", widgetGK, "out"))
+	r, tr, l := quiet(t, heldObject(secretGVK, "out", "free", "u1", widgetGK, "out"))
 	k, slow := batchKey{widgetGK, "out"}, secretID("out", "slow")
 	var mu sync.Mutex
 	var limits []time.Duration
@@ -149,16 +159,11 @@ func TestAReadsTimeGrows(t *testing.T) {
 	l.setBefore(func(ctx context.Context, c Call) error {
 		mu.Lock()
 		defer mu.Unlock()
-		end, limited := ctx.Deadline()
-		switch {
-		case c.Op != "get":
-			if limited {
-				t.Errorf("a %s has a deadline, in %s", c.Op, time.Until(end))
-			}
-		case c.Name == "slow" && !limited:
-			limits = append(limits, -1)
-		case c.Name == "slow":
-			limits = append(limits, time.Until(end))
+		if end, limited := ctx.Deadline(); limited {
+			t.Errorf("a %s has a deadline, in %s", c.Op, time.Until(end))
+		}
+		if c.Op == "get" && c.Name == "slow" {
+			limits = append(limits, tr.proto.readLimit("out", slow))
 			if fails {
 				return unservedError()
 			}
@@ -182,13 +187,8 @@ func TestAReadsTimeGrows(t *testing.T) {
 		t.Error("the Secret beside it wasn't released")
 	}
 	want := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second, 10 * time.Second}
-	if len(limits) != len(want) {
-		t.Fatalf("%d reads: %v, want %d", len(limits), limits, len(want))
-	}
-	for i, got := range limits {
-		if got > want[i] || got < want[i]-5*time.Second {
-			t.Errorf("read %d had %s, want %s", i+1, got, want[i])
-		}
+	if !slices.Equal(limits, want) {
+		t.Errorf("the reads' times are %v, want %v", limits, want)
 	}
 }
 
@@ -207,8 +207,6 @@ func TestANamespaceThatDoesntAnswer(t *testing.T) {
 			must(r.m.Delete(keyOf(id)))
 		}
 	}
-	r.p.readLimit = func(string, ID) time.Duration { return 5 * time.Second }
-	r.p.namespaceLimit = 30 * time.Millisecond
 	var got []string
 	r.p.srv = hookServer{server: r.p.srv, before: func(_ context.Context, c Call) error {
 		if c.Op == "get" && c.GK == namespaceGroupKind {
@@ -315,11 +313,11 @@ func TestARealSlowClientsTurns(t *testing.T) {
 }
 
 // pagedMetadata is a metadata client whose lists have pages pages, and whose
-// page at hangs waits for the end of its context; it notes each page's deadline.
+// page at hangs, once sent, waits for the end of its context; it notes each page's.
 type pagedMetadata struct {
 	metadata.Interface
 	pages, hangs int
-	ends         []time.Time
+	ctxs         []context.Context
 }
 
 type pagedLists struct {
@@ -334,10 +332,10 @@ func (m *pagedMetadata) Resource(gvr schema.GroupVersionResource) metadata.Gette
 func (p pagedLists) Namespace(string) metadata.ResourceInterface { return p }
 
 func (p pagedLists) List(ctx context.Context, _ metav1.ListOptions) (*metav1.PartialObjectMetadataList, error) {
-	end, _ := ctx.Deadline()
-	p.m.ends = append(p.m.ends, end)
-	n := len(p.m.ends)
+	p.m.ctxs = append(p.m.ctxs, ctx)
+	n := len(p.m.ctxs)
 	if n == p.m.hangs {
+		send(ctx)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -352,23 +350,17 @@ func (p pagedLists) List(ctx context.Context, _ metav1.ListOptions) (*metav1.Par
 // takes long is delayed by no more than the page that doesn't answer.
 func TestAListsPagesHaveATime(t *testing.T) {
 	r := newFakeRig(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
-	defer cancel()
 	m := &pagedMetadata{Interface: r.md, pages: 3}
-	now := time.Now()
-	items, err := clientServer{md: m, mapper: r.s.c.Mapper}.List(ctx, secretGroupKind, "ns")
-	if err != nil || len(items) != 3 || len(m.ends) != 3 {
-		t.Fatalf("%d items of %d pages, %v; want 3 of each", len(items), len(m.ends), err)
+	items, err := clientServer{md: m, mapper: r.s.c.Mapper}.List(context.Background(), secretGroupKind, "ns")
+	if err != nil || len(items) != 3 || len(m.ctxs) != 3 {
+		t.Fatalf("%d items of %d pages, %v; want 3 of each", len(items), len(m.ctxs), err)
 	}
-	for i, end := range m.ends {
-		if d := end.Sub(now); d <= 0 || d > 61*time.Second {
-			t.Errorf("page %d ends in %s, want a minute", i+1, d)
-		}
-		if i > 0 && !end.After(m.ends[i-1]) {
-			t.Errorf("page %d ends at %s, no later than the one before it: the minute is the list's", i+1, end)
+	for i, ctx := range m.ctxs {
+		if _, limited := ctx.Deadline(); limited || ctx.Err() == nil {
+			t.Errorf("page %d's context has a deadline %v, and ended %v; want it its own, ended with it, and no deadline", i+1, limited, ctx.Err())
 		}
 	}
-	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	m = &pagedMetadata{Interface: r.md, pages: 3, hangs: 2}
 	_, err = clientServer{md: m, mapper: r.s.c.Mapper, pageTime: 20 * time.Millisecond}.List(ctx, secretGroupKind, "ns")
