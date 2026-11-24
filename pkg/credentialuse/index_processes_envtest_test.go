@@ -287,6 +287,14 @@ func TestALostLeaseWithAnA2InFlight(t *testing.T) {
 	stripped(t, ns, "s")
 }
 
+// restartMetrics counts Disown's restarted runs.
+type restartMetrics struct {
+	cu.NopMetrics
+	restarts atomic.Int32
+}
+
+func (m *restartMetrics) DisownRestarts(string) { m.restarts.Add(1) }
+
 // Two writers of the CRD that never agree keep Disown from settling, and say
 // so: the flag never appears, the count stays right, and one event names
 // both, though each takes the field, and its entry in managedFields, from the
@@ -298,7 +306,11 @@ func TestDisownUnderTwoWritersThatNeverAgree(t *testing.T) {
 	ns := env.Namespace(t, "disown-writers")
 	createSecret(t, ns, "s")
 	createWidget(t, ns, "w", "s")
-	r := newWriteRig(t, env.Config, cu.SharedOptions{}, disownOptions, nil)
+	m := &restartMetrics{}
+	r := newWriteRig(t, env.Config, cu.SharedOptions{}, func(o *cu.Options) {
+		disownOptions(o)
+		o.Metrics = m
+	}, nil)
 	r.c.enqueue(widgetNN(ns, "w"))
 	established(t, ns, "s", "w")
 	write := func(manager string, value any) error {
@@ -318,8 +330,10 @@ func TestDisownUnderTwoWritersThatNeverAgree(t *testing.T) {
 				return
 			case <-time.After(200 * time.Millisecond):
 			}
-			w := []string{"writer-a", "writer-b"}[i%2]
-			if err := write(w, w); err != nil {
+			// Each has the restart after the other's: which one a restart
+			// sees doesn't depend on the clock.
+			w := []string{"writer-a", "writer-b"}[m.restarts.Load()%2]
+			if err := write(w, fmt.Sprintf("%s-%d", w, i)); err != nil {
 				done <- err
 				return
 			}

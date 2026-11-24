@@ -816,8 +816,9 @@ func TestDisownsFirstPassNeedsItsCRD(t *testing.T) {
 // TestDisownReportsARunThatKeepsRestarting: the CRD changes under every
 // pass, as with two writers that never agree: Disown doesn't settle, and
 // writes nothing; each restart is counted; and once they have gone on for two
-// spans, the CRD's last writers are reported, at most once per eventThrottle,
-// without the entry of the count's and the flag's own writes. Once the CRD
+// spans, the CRD's newest writer at them is reported, at most once per
+// eventThrottle, and neither older ones nor, though it is newer, the entry of
+// the count's and the flag's own writes. Once the CRD
 // stays as it is, Disown settles, and nothing more is counted (§7.4; the
 // user's decision, 2026-11-23).
 func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
@@ -835,8 +836,8 @@ func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
 		entry("older", "", `{"f:spec":{"f:scope":{}}}`, time.Hour),
 		entry("hub-writer", "", `{"f:spec":{"f:versions":{}}}`, time.Minute),
 		entry("kube-apiserver", "status", `{"f:status":{"f:conditions":{}}}`, 2*time.Minute),
-		entry("the-tracker", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}}}}`, time.Second),
-		entry("spoke-writer", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}},"f:labels":{"f:x":{}}}}`, 0),
+		entry("the-tracker", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}}}}`, 0),
+		entry("spoke-writer", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}},"f:labels":{"f:x":{}}}}`, time.Second),
 		entry("oldest", "", `{"f:spec":{"f:group":{}}}`, 2*time.Hour),
 	})
 	rv, changing := 1, true
@@ -880,17 +881,13 @@ func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("after two spans: %d reports %v, want one", len(got), got)
 	}
-	want := []string{"spoke-writer (Update", "hub-writer (Update", "kube-apiserver (Update of status"}
-	at := -1
-	for _, w := range want {
-		i := strings.Index(got[0], w)
-		if i <= at {
-			t.Errorf("the report %q doesn't name %v, newest first", got[0], want)
-		}
-		at = i
+	if !strings.Contains(got[0], "spoke-writer (Update,") || !strings.Contains(got[0], strconv.Itoa(n+1)+" times") {
+		t.Errorf("the report %q doesn't name the newest writer, or not how often", got[0])
 	}
-	if strings.Contains(got[0], "the-tracker") || strings.Contains(got[0], "older") || !strings.Contains(got[0], strconv.Itoa(n+1)+" times") {
-		t.Errorf("the report %q names the count's own writes, or more than three writers, or not how often", got[0])
+	for _, other := range []string{"the-tracker", "hub-writer", "kube-apiserver", "older", "oldest"} {
+		if strings.Contains(got[0], other) {
+			t.Errorf("the report %q names %s, which made no restart", got[0], other)
+		}
 	}
 	for range int(eventThrottle/tr.o.DisownInterval) - 1 {
 		pass()

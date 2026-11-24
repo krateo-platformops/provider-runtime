@@ -1953,12 +1953,12 @@ else changed in between.
   settles. Once runs that started over have gone on for two spans, `2 ×
   (DisownPasses − 1) × DisownInterval`, with nothing held, a Warning event
   on the CRD, `CredentialUseDisownRestarted`, and a log line name the CRD's
-  last writers, at most once per 10 minutes per process. managedFields keep
-  only the last writer of each field, so the process remembers the newest at
-  each restart, and names those first, then the others there: three managers
-  at most, each with its operation and subresource. **Two writers under one
-  manager name look like one**, as the two core-provider writers of a remote
-  kind's hub copy may. `credentialuse_disown_restarts_total` counts every
+  newest writer at each of those restarts, the last three managers, each with
+  its operation and subresource, at most once per 10 minutes per process.
+  managedFields keep only the last writer of each field, so the process
+  remembers them through the restarts; one that comes in after a report is
+  named by the next. **Two writers under one manager name look like one**, as
+  the two core-provider writers of a remote kind's hub copy may. `credentialuse_disown_restarts_total` counts every
   restart. **The remedy** is to find and stop the writer. For core-provider's CRDs:
   79 composition CRDs on krateo-057 were watched for 560s with no
   resourceVersion change (measured, with a working control); managedFields'

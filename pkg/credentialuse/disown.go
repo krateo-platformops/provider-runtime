@@ -808,13 +808,14 @@ const EventDisownRestarted = "CredentialUseDisownRestarted"
 // noteRestart follows the runs of zero passes that start over because the
 // CRD changed, after a pass that counted cur and read crd: each is counted
 // in the metric, and when they have gone on for two spans of a run without
-// one of them done, the CRD's last writers are reported, at most once per
-// eventThrottle: the newest at each restart, of two that write the same field
-// over each other too, and then the others of its managedFields. A count that
-// isn't zero, this process's or another's, and a flag that stands, end them:
-// then it isn't the CRD's changes that keep Disown from settling. The writes
-// of the count and the flag themselves stop once every process counts the
-// same, so they end too.
+// one of them done, the CRD's newest writer at each of them is reported, the
+// last three, at most once per eventThrottle: of two that write the same field
+// over each other, managedFields keep only one at a time. A writer that comes
+// in later is named by the next report. A count that isn't zero, this
+// process's or another's, and a flag that stands, end them: then it isn't the
+// CRD's changes that keep Disown from settling. The writes of the count and
+// the flag themselves stop once every process counts the same, so they end
+// too.
 func (t *Tracker) noteRestart(crd *unstructured.Unstructured, cur string) {
 	d, ann := &t.disown, crd.GetAnnotations()
 	d.mu.Lock()
@@ -828,14 +829,13 @@ func (t *Tracker) noteRestart(crd *unstructured.Unstructured, cur string) {
 		d.wanting = d.began
 	}
 	changed := d.changed
-	var now []crdWriter
 	if changed {
 		d.restarts++
-		now = crdWriters(crd)
+		now := crdWriters(crd)
 		d.writers = lastWriters(now[:min(1, len(now))], d.writers)
 	}
 	restarts, lasted := d.restarts, d.began.Sub(d.wanting)
-	writers := writersText(lastWriters(d.writers, now))
+	writers := writersText(d.writers)
 	report := changed && lasted >= 2*time.Duration(t.o.DisownPasses-1)*t.o.DisownInterval &&
 		(d.reported.IsZero() || d.began.Sub(d.reported) >= eventThrottle)
 	if report {
@@ -851,7 +851,7 @@ func (t *Tracker) noteRestart(crd *unstructured.Unstructured, cur string) {
 	obj := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	obj.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(obj, "Warning", EventDisownRestarted, fmt.Sprintf(
-		"Disown counts nothing held, and doesn't settle: the CRD changed under it %d times in %s, and each change starts its run over (§7.4). Its last writers: %s",
+		"Disown counts nothing held, and doesn't settle: the CRD changed under it %d times in %s, and each change starts its run over (§7.4). The newest writers then: %s",
 		restarts, lasted.Round(time.Second), writers))
 	t.warn("credential-use: Disown counts nothing held, and doesn't settle: the CRD keeps changing, and each change starts its run over",
 		"kind", t.gk.String(), "crd", t.crdName, "restarts", restarts, "in", lasted.String(), "writers", writers)
