@@ -128,16 +128,16 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 // selector and no resourceVersion: each page is a consistent read, and the
 // continue token keeps the pages at the first page's revision.
 // A namespace that can't exist has none, and any namespace none of a
-// cluster-scoped kind. But the holder kind's, in a namespace, is an error if
-// it is mapped cluster-scoped: the mapping is kept while the process lives, so
-// the kind may be namespaced by now, with holders there, and R2 releases what
-// has none (§6.2).
+// cluster-scoped kind: no call is made. But the holder kind's are always asked
+// for: the mapping is kept while the process lives, so a kind it has as
+// cluster-scoped may be namespaced by now, with holders in namespace, and R2
+// releases what has none (§6.2). Its list is then of every one, of which those
+// in namespace are kept.
 func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace string) ([]metav1.PartialObjectMetadata, error) {
+	filter := false
 	if _, namespaced, err := s.resource(gk); err == nil && namespace != "" {
-		if !namespaced && gk == s.holder.GroupKind() {
-			return nil, fmt.Errorf("credential-use: the holder kind %s is mapped cluster-scoped, so its holders in namespace %q can't be listed: if it is namespaced now, restart", gk, namespace)
-		}
-		if !namespaced || !pathSegment(namespace) {
+		filter = !namespaced && gk == s.holder.GroupKind()
+		if !filter && (!namespaced || !pathSegment(namespace)) {
 			return nil, nil
 		}
 	}
@@ -152,7 +152,11 @@ func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace s
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, l.Items...)
+		for i := range l.Items {
+			if !filter || l.Items[i].Namespace == namespace {
+				out = append(out, l.Items[i])
+			}
+		}
 		if l.Continue == "" {
 			return out, nil
 		}

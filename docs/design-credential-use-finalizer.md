@@ -542,12 +542,13 @@ namespace.** Each names no object, and is NotFound in the same way, without a
 call, whoever asks: a ref is Missing and its holder goes on, and what a record or
 an index line names so is gone, for a release batch, an index check and Disown
 alike, which settles. A list in such a namespace has nothing, nor has one of a
-cluster-scoped kind in any, but the holder kind's: mapped cluster-scoped, its
-list in a namespace is an error, since the kind may be namespaced by now (the
-mapping isn't refreshed, below) and R2 must not read that as "no users"; its
-batches are then retried, and a hold stays until the process restarts. No cache
-has such an object, and no per-name watch is made of it (§13 shape 1), nor of a
-namespaced kind's named without its namespace. *Before this,* such a ref could fail its holder's passes, keep its
+cluster-scoped kind in any, but the holder kind's: `spec.scope` can't change on
+an established CRD, so a kind that returns with another scope is a new CRD,
+which a process that mapped the old one still lists as it was (below); R2 and
+`Users` therefore list a holder kind mapped cluster-scoped in every namespace,
+and keep the holders in theirs. No cache has such an object, and no per-name
+watch is made of it (§13 shape 1), nor of a namespaced kind's named without its
+namespace. *Before this,* such a ref could fail its holder's passes, keep its
 index line and the startup recheck from being done, and Disown from settling, or
 leave a hold no record names. LabelScoped finds that one by its labels, and
 releases it as any hold nobody names. PerName has no line of it: list the objects
