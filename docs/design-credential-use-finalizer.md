@@ -478,28 +478,49 @@ suffix. **Krateo's minimum Kubernetes is 1.36** (the user's decision,
 1.36 patch, in `.github/workflows/run-tests.yaml`, and the same test also
 passes locally on 1.34 and 1.35.
 
-**A 404 is NotFound only when it is about the object.** A resource the API
-server doesn't serve also answers 404: a custom resource whose CRD no longer
-serves the version the tracker mapped, whose CRD is gone, or whose CRD this
-API server hasn't seen yet. It says nothing of the object, which may be there
-and carry a finalizer. Its body is plain text, from the server's last handler,
-not a Status, and client-go marks it with the cause `UnexpectedServerResponse`
-(P19); a missing object's 404 is a Status, without it. So a 404 with that cause
-is an ordinary failure everywhere, never NotFound, and apimachinery's
-`IsNotFound`, true of both, is never used alone. (An API server that is still
-starting answers 503 instead, until its CRD informer has synced.) While a kind
-isn't served:
+**A 404 is NotFound only when it names the object.** A resource the API
+server doesn't serve also answers 404, and that says nothing of the object,
+which may be there and carry a finalizer (P19):
+
+- Outside every group-version it serves, as for a custom resource whose CRD no
+  longer serves the version the tracker mapped, whose CRD is gone, or whose CRD
+  this API server hasn't seen yet, the body is plain text, from the server's
+  last handler, not a Status. client-go marks it with the cause
+  `UnexpectedServerResponse`, and may fill the request's name in.
+- Inside one, as for a built-in resource removed from a version that is still
+  served, or on an aggregated API server, it is a Status with no name in its
+  details.
+- An admission webhook may refuse a write with a 404 of its own.
+
+A missing object's 404 is a Status whose details name it, without that cause.
+Any other 404 is an ordinary failure everywhere in the package, never NotFound.
+(An API server that is still starting answers 503 instead, until its CRD
+informer has synced.)
+
+**A namespaced kind's object named without a namespace can't exist**, so it is
+NotFound, as a cluster-scoped holder's data may name one: the scope is the
+mapping's, and no call is made, since that 404 would name nothing. A2 finds it
+Missing, reported as any Missing ref is, and the holder goes on; a release
+batch, an index check, the prober and Disown find it gone. A namespaced
+holder's is a ref to another namespace, so the gate (§11.3) asks for its
+consent first, from a Namespace that can't exist: the ref is
+`ConsentUnreadable`, and the holder goes on. A list without a namespace is of
+every one, and isn't this. Such a ref with a `Next` leaves its chain unfollowed
+on every pass (§9.1).
+
+While a kind isn't served:
 
 | Who | What it does |
 |---|---|
-| Acquire, `BeforeEstablish` | A2 fails: a new holder doesn't connect, or establish; an established one is Degraded |
+| Acquire, `BeforeEstablish` | A2 fails, and ends the pass at that ref: the refs after it wait for a later pass. A new holder doesn't connect, or establish; an established one is Degraded |
+| a hop that isn't held, for want of consent or under Disown (§9) | its read fails the pass, as any read error does: what lies behind it is unknown. A new holder doesn't connect, under Disown too; an established one is Degraded |
 | the consent gate (§11.3) | unknown: a hold is kept, a new one waits, and the pass requeues |
 | the prober (§10.3) | can't tell: the ref's backoff stays as it is |
 | R1, R3, the epoch's repair | undecided: the batch is retried with backoff, and nothing is reported bare |
 | R2, when the **holder** kind isn't served | the list fails, and the batch is retried. It is never "no users": a live CRD read could tell, and isn't made yet |
 | the index's checks (§10.6) | the line is kept, or put back, and the check is retried |
 | the janitor | retried with backoff |
-| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object: its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
+| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or the kind it can't list (LabelScoped): its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
 | `DisownPrefix` | reports the failure, and goes on with the rest |
 
 **The cost, and the way out.** A protected kind whose CRD is removed for good
@@ -512,25 +533,50 @@ finalizers left on objects that a CRD installed again would serve.
 - **What is logged.** Each failed batch, with the delay and the error ("a
   release batch failed"), and each failed index check; a Degraded pass, once
   per holder, with its event; and, while Disown is on, on each pass, the
-  objects it can't read (a log line, the event `CredentialUseDisownUnreadable`
-  on the holder CRD, throttled, and the gauge
-  `credentialuse_disown_unreadable`), or, for a LabelScoped kind, the kind it
-  can't list (a log line alone). Disown's say that the kind isn't served; the
-  others carry client-go's error, "the server could not find the requested
-  resource".
-- **Restore the CRD**, at a version the trackers map. Everything goes on by
-  itself. This is the only way that strips a finalizer an object still has,
-  since nothing can write it meanwhile.
+  objects it can't read, or, for a LabelScoped kind, the kind it can't list: a
+  log line, the event `CredentialUseDisownUnreadable` on the holder CRD,
+  throttled, and, for objects, the gauge `credentialuse_disown_unreadable`.
+  Disown's say that the kind isn't served; the others carry client-go's error,
+  "the server could not find the requested resource".
+- **The mapping isn't refreshed while the process lives.** The resource and
+  version a kind maps to are the ones the RESTMapper gave at first, and a
+  mapper that finds new kinds by itself doesn't look again at one it knows.
+- **Restore the CRD**, at that version, whose objects are then served as they
+  were. Everything goes on by itself. Only serving the kind again lets a
+  finalizer an object still has be stripped, since nothing can write it
+  meanwhile.
+- **If only that version is gone, restart at one that is served**, with
+  `Protected` naming it: the objects are there, at the other versions. `Track`
+  refuses a GVK it can't map (§7.3), so a process that still names the old one
+  doesn't start.
+- **A switch that lists the other kinds** lets Disown settle for them, in both
+  modes: the kind is then neither counted nor stripped (§7.4).
 - **Or say it is gone**, once the objects are. *PerName:* vouch for each object
   (§10.6.6): Disown skips what it can't read of a vouched object, so it
-  settles, and a prune drops the line. *LabelScoped:* no vouch applies.
+  settles, and a prune drops the line. *LabelScoped:* no vouch applies; only
+  the next way settles Disown with the switch at `all`.
 - **And take the kind out of the tracker's `Protected`, and restart.** That is
   what ends the batches, which live in the process's memory, and it settles
   Disown for either mode. While the kind stays in `Protected` with no CRD, a
   restarted process refuses to start, since it can't map it (§7.3).
 - **`DisownPrefix`** reads no more than the others: it strips what is served,
-  and returns an error naming what isn't, on every run. Leave the kind out of
-  `Protected` and `Names`, and its lines out of the index it is given.
+  and returns an error naming what isn't, on every run. With `Index`, it reads
+  every line, and not the vouches: a vouched object of a removed kind is an
+  error on every run too. Leave the kind out of `Protected` and `Names`, and
+  its lines out of the index it is given.
+
+**A holder kind that isn't served.** The rule is this package's. The
+reconciler's own reads and writes of a holder, and `resource.IgnoreNotFound`,
+use apimachinery's `IsNotFound`, true of every 404, and that loses no hold and
+no record. The write that removes the owner finalizer and the record (§8
+steps 4 and 7) fails with nothing written, and is taken for done: the pass logs
+that the object is deleted, and doesn't requeue. The read after A1 (§6.2
+A1, L2), and the one that begins a pass, when they are live, end the pass as for
+an object that is gone, without connecting. Either way the holder keeps the
+finalizer and the record it had; R2's list of holders fails, so nothing is
+released meanwhile; and once the kind is served again, the informer's relist or
+resync reconciles the holder again, which finishes. What `Forget` drops in
+memory, the holder's Missing refs, the next pass finds again.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an

@@ -207,8 +207,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		items, err := s.liveList(ctx, gk, "", MarkerLabel(t.gk))
 		if err != nil {
 			known = false
-			t.warn("credential-use: Disown can't list a protected kind; its count stays unknown until it can (§7.4)",
-				"kind", t.gk.String(), "protected", gk.String(), "why", shortError(err), "error", err.Error())
+			t.reportDisownUnlisted(ctx, gk, err)
 			continue
 		}
 		for i := range items {
@@ -314,8 +313,8 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 }
 
 // EventDisownUnreadable (Warning, on the holder kind's CRD): Disown can't
-// read objects its index or the records name, so its count stays "unknown"
-// (§7.4).
+// read objects its index or the records name, or can't list a LabelScoped
+// kind, so its count stays "unknown" (§7.4).
 const EventDisownUnreadable = "CredentialUseDisownUnreadable"
 
 // reportDisownUnreadable reports the objects a Disown pass couldn't read:
@@ -340,7 +339,7 @@ func (t *Tracker) reportDisownUnreadable(unreadable []string) {
 // shortError is err as an event names it: its API reason, as "forbidden",
 // or its text.
 func shortError(err error) string {
-	if st, ok := statusOf(err); ok && unserved(st) && apierrors.IsNotFound(err) {
+	if st, ok := statusOf(err); ok && apierrors.IsNotFound(err) && !namesObject(st) {
 		return "its kind isn't served" // the reason would say "notfound"
 	}
 	if r := apierrors.ReasonForError(err); r != metav1.StatusReasonUnknown {
@@ -589,4 +588,20 @@ func (s *Shared) disownOff(ctx context.Context, t *Tracker, now time.Time) {
 	if _, err := s.c.Dynamic.Resource(crdGVR).Patch(ctx, t.crdName, types.MergePatchType, data, metav1.PatchOptions{}); err != nil && Classify(err) != ClassConflict {
 		t.warn("credential-use: couldn't clear Disown's count from the CRD after the switch was removed", "crd", t.crdName, "error", err.Error())
 	}
+}
+
+// reportDisownUnlisted reports a LabelScoped kind a Disown pass couldn't list,
+// which keeps the count unknown: a log line, and the Warning event the objects
+// of an indexed kind get, naming the kind and why. A list that the process's
+// own stop cut short isn't one.
+func (t *Tracker) reportDisownUnlisted(ctx context.Context, gk schema.GroupKind, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
+	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
+	t.s.events.record(crd, "Warning", EventDisownUnreadable, "Disown can't list "+kindLabel(gk)+" ("+shortError(err)+
+		"), so held-count stays unknown: grant list on it, or, if it isn't served, restore it, or take it out of the tracker's protected kinds and restart (§6.2)")
+	t.warn("credential-use: Disown can't list a protected kind; its count stays unknown until it can (§7.4)",
+		"kind", t.gk.String(), "protected", gk.String(), "why", shortError(err), "error", err.Error())
 }

@@ -23,6 +23,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	testingclock "k8s.io/utils/clock/testing"
 
+	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
@@ -57,6 +58,20 @@ func TestAnUnservedResourceIsntNotFound(t *testing.T) {
 		}
 		if c := ClassifyJSONPatch(err); c != ClassOther {
 			t.Errorf("%s: ClassifyJSONPatch = %v, want Other", name, c)
+		}
+	}
+	// Inside a group-version the API server serves, a Status that names
+	// nothing; an admission webhook's refusal; and client-go's generic error
+	// with the name filled in from the request.
+	named := apierrors.NewGenericServerResponse(http.StatusNotFound, "GET", secrets, "s", "404 page not found", 0, true)
+	for name, err := range map[string]error{
+		"no details":    &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusNotFound, Reason: metav1.StatusReasonNotFound}},
+		"nameless":      apierrors.NewGenericServerResponse(http.StatusNotFound, "GET", schema.GroupResource{}, "", "", 0, false),
+		"a webhook's":   &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusNotFound, Reason: metav1.StatusReasonNotFound, Message: `admission webhook "v.example.com" denied the request: no such team`}},
+		"named by hand": named,
+	} {
+		if c, j := Classify(err), ClassifyJSONPatch(err); c != ClassOther || j != ClassOther {
+			t.Errorf("%s: Classify = %v, ClassifyJSONPatch = %v, want Other", name, c, j)
 		}
 	}
 	// Another cause doesn't make an object's 404 an unserved resource's.
@@ -157,6 +172,24 @@ func TestReleaseOfAnUnservedKind(t *testing.T) {
 	r.srv.before = unserve("Secret", "patch")
 	if _, err := r.p.release(ctx, "ns", []ID{id}); err == nil {
 		t.Error("a failed repair of the epoch isn't reported")
+	}
+}
+
+// One batch, several objects: what can be read is released, and only the
+// failure is an error.
+func TestReleaseAroundAnUnservedObject(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	heldSecret(r)
+	must(r.m.Create(targetKey("c"), metav1.ObjectMeta{Finalizers: []string{fNS}, Annotations: map[string]string{fNS: "e0"},
+		Labels: map[string]string{LabelHeld: "true", MarkerLabel(widgetGK): "true"}}))
+	r.srv.before = unserve("Target")
+	res, err := r.p.release(ctx, "ns", []ID{targetID("c"), SecretRef("ns", "s").ID()})
+	if err == nil || !slices.Equal(res.Released, []ID{SecretRef("ns", "s").ID()}) || !slices.Equal(res.Bare, res.Released) {
+		t.Errorf("%+v, %v; want the Secret released, and an error for the Target", res, err)
+	}
+	if !hasFinalizer(r.get(t, targetKey("c")), fNS) || hasFinalizer(r.get(t, secretKey("ns", "s")), fNS) {
+		t.Error("want the Target held and the Secret not")
 	}
 }
 
@@ -337,6 +370,31 @@ func TestDisownSaysWhichKindItCantList(t *testing.T) {
 	if !slices.ContainsFunc(w.got, func(s string) bool { return strings.Contains(s, "Secret") && strings.Contains(s, "isn't served") }) {
 		t.Errorf("warnings %q; want one naming Secret, and that it isn't served", w.got)
 	}
+	select {
+	case e := <-r.events.Events:
+		if !strings.Contains(e, EventDisownUnreadable) || !strings.Contains(e, "Secret") || !strings.Contains(e, "isn't served") {
+			t.Errorf("the event is %q", e)
+		}
+	default:
+		t.Error("no event names the kind Disown can't list")
+	}
+	// A pass the process's stop cut short says nothing of the kind.
+	stopped, cancel := context.WithCancel(ctx)
+	cancel()
+	r.clk.Step(2 * eventThrottle)
+	r.s.disownPass(stopped, tr, parseDisown("all"))
+	if len(r.events.Events) != 0 {
+		t.Errorf("a stopped pass recorded %q", <-r.events.Events)
+	}
+	// A switch that doesn't name the kind doesn't need its list.
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"Other.`+widgetGK.Group+`"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	r.s.disownPass(ctx, tr, parseDisown("Other."+widgetGK.Group))
+	if crd, err = r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{}); err != nil || crd.GetAnnotations()[AnnotationHeldCount] != "0" {
+		t.Errorf("held-count %q, %v; want 0: the switch lists another kind", crd.GetAnnotations()[AnnotationHeldCount], err)
+	}
 }
 
 // A chain: what lies behind an unheld hop that couldn't be read so isn't
@@ -353,6 +411,127 @@ func TestAnUnheldHopOfAnUnservedKind(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("%d reads, want 2: a failure isn't remembered", calls)
+	}
+}
+
+// A hop that isn't held, for want of consent or under Disown, and can't be
+// read: what lies behind it is unknown, so the pass fails. A new holder
+// doesn't connect, under Disown too, as for any read error.
+func TestAnUnheldHopThatCantBeReadFailsThePass(t *testing.T) {
+	ctx := context.Background()
+	next := func(*unstructured.Unstructured) ([]Ref, error) { return nil, nil }
+	rigs := map[string]func() (*rig, Ref){
+		"without consent": func() (*rig, Ref) {
+			r, _ := consentRig(t, "")
+			must(r.m.Create(apimodel.Key{GK: targetGK, Namespace: "other", Name: "c"}, metav1.ObjectMeta{}))
+			return r, Ref{GroupKind: targetGK, Namespace: "other", Name: "c", Next: next}
+		},
+		"disowned": func() (*rig, Ref) {
+			r, set := disownRig(t)
+			*set = parseDisown("all")
+			must(r.m.Create(targetKey("c"), metav1.ObjectMeta{}))
+			return r, Ref{GroupKind: targetGK, Namespace: "ns", Name: "c", Next: next}
+		},
+	}
+	for name, rigOf := range rigs {
+		for _, established := range []bool{false, true} {
+			r, ref := rigOf()
+			r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
+			r.p.contents = contentFunc(unservedError)
+			a, err := r.p.acquire(ctx, r.holder(t, "h", established), []Ref{ref})
+			if err != nil || a.Err == nil || a.MustNotConnect == established || a.Degraded != established {
+				t.Errorf("%s, established %v: %+v, %v; want a failed pass", name, established, a, err)
+			}
+			// Gone, the chain ends there, and the pass goes on.
+			r, ref = rigOf()
+			r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
+			r.p.contents = contentFunc(func() error { return apierrors.NewNotFound(schema.GroupResource{Resource: "targets"}, "c") })
+			if a, err := r.p.acquire(ctx, r.holder(t, "h", established), []Ref{ref}); err != nil || a.Err != nil {
+				t.Errorf("%s, established %v, the hop gone: %+v, %v; want the pass to go on", name, established, a, err)
+			}
+		}
+	}
+}
+
+// A namespaced kind's object named without a namespace can't exist: NotFound,
+// and so Missing, without a call, whatever is asked. A cluster-scoped kind's
+// is read, and a list without a namespace is of every one.
+func TestAnObjectNamedWithoutItsNamespaceIsMissing(t *testing.T) {
+	ctx := context.Background()
+	clusterGK := schema.GroupKind{Group: widgetGK.Group, Kind: "ClusterTarget"}
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Version: "v1"}, {Group: widgetGK.Group, Version: "v1"}})
+	mapper.Add(secretGVK, meta.RESTScopeNamespace)
+	mapper.Add(clusterGK.WithVersion("v1"), meta.RESTScopeRoot)
+	md := metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme())
+	srv := clientServer{md: md, mapper: mapper}
+	_, gerr := srv.Get(ctx, secretGroupKind, "", "s")
+	_, perr := srv.Patch(ctx, secretGroupKind, "", "s", types.MergePatchType, []byte(`{}`))
+	_, jerr := srv.Patch(ctx, secretGroupKind, "", "s", types.JSONPatchType, []byte(`[]`))
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	_, cerr := dynamicContent{dyn: dyn, mapper: mapper}.Content(ctx, secretGroupKind, "", "s")
+	for what, err := range map[string]error{"Get": gerr, "Patch": perr, "a JSON patch": jerr, "Content": cerr} {
+		if Classify(err) != ClassNotFound || ClassifyJSONPatch(err) != ClassNotFound {
+			t.Errorf("%s = %v, want NotFound", what, err)
+		}
+	}
+	if len(md.Actions()) != 0 || len(dyn.Actions()) != 0 {
+		t.Errorf("calls were made: %v, %v", md.Actions(), dyn.Actions())
+	}
+	_, _ = srv.Get(ctx, clusterGK, "", "c")
+	_, _ = dynamicContent{dyn: dyn, mapper: mapper}.Content(ctx, clusterGK, "", "c")
+	_, _ = srv.List(ctx, secretGroupKind, "")
+	if len(md.Actions()) != 2 || len(dyn.Actions()) != 1 {
+		t.Errorf("calls %v, %v; want the cluster-scoped objects read, and the list made", md.Actions(), dyn.Actions())
+	}
+}
+
+// The prober: a group of such refs is never listed, which would find objects
+// of the same names in other namespaces, and enqueue the holders on every
+// probe; each backs off.
+func TestProbeOfObjectsNamedWithoutTheirNamespace(t *testing.T) {
+	clusterGK := schema.GroupKind{Group: widgetGK.Group, Kind: "ClusterTarget"}
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Version: "v1"}, {Group: widgetGK.Group, Version: "v1"}})
+	mapper.Add(secretGVK, meta.RESTScopeNamespace)
+	mapper.Add(clusterGK.WithVersion("v1"), meta.RESTScopeRoot)
+	var objs []runtime.Object
+	var ids []ID
+	for i := range probeGetLimit + 2 {
+		name := fmt.Sprintf("s%d", i)
+		objs = append(objs, heldObject(secretGVK, "elsewhere", name, types.UID(name), widgetGK))
+		ids = append(ids, SecretRef("", name).ID())
+	}
+	scheme := metadatafake.NewTestScheme()
+	if err := metav1.AddMetaToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	md := metadatafake.NewSimpleMetadataClient(scheme, objs...)
+	clk := testingclock.NewFakeClock(time.Now())
+	tr := &Tracker{s: newShared(Clients{Mapper: mapper}, SharedOptions{}, clk), gk: widgetGK, o: Options{ProbeInterval: time.Second}, missing: newMissingRefs(),
+		proto: &protocol{srv: clientServer{md: md, mapper: mapper}},
+		sink:  sinks{enqueue: func(types.NamespacedName) { t.Error("a holder was enqueued") }}}
+	tr.missing.set(types.NamespacedName{Name: "h"}, ids, clk.Now(), time.Second)
+	for range 2 {
+		clk.Step(5 * time.Second)
+		tr.probe(context.Background())
+	}
+	if len(md.Actions()) != 0 {
+		t.Errorf("calls were made: %v", md.Actions())
+	}
+	for _, id := range ids {
+		if got := tr.missing.refs[id].backoff; got != 4*time.Second {
+			t.Errorf("%s backs off to %s, want 4s", id, got)
+		}
+	}
+	// A cluster-scoped kind's group is listed, as a namespace's is.
+	ids = nil
+	for i := range probeGetLimit + 2 {
+		ids = append(ids, ID{Group: clusterGK.Group, Kind: clusterGK.Kind, Name: fmt.Sprintf("c%d", i)})
+	}
+	tr.missing.set(types.NamespacedName{Name: "h2"}, ids, clk.Now(), time.Second)
+	clk.Step(2 * time.Second)
+	tr.probe(context.Background())
+	if a := md.Actions(); len(a) != 1 || a[0].GetVerb() != "list" {
+		t.Errorf("calls %v, want one list of the cluster-scoped kind", a)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,6 +36,22 @@ func (s clientServer) resource(gk schema.GroupKind) (schema.GroupVersionResource
 	return m.Resource, m.Scope.Name() == meta.RESTScopeNameNamespace, nil
 }
 
+// object returns the client for object namespace/name of gk. An object of a
+// namespaced kind named without a namespace, as a cluster-scoped holder's data
+// may, can't exist: it is NotFound, without a call, whose 404 would name
+// nothing (Classify). A list without a namespace is of every one, and isn't
+// this.
+func (s clientServer) object(gk schema.GroupKind, namespace, name string) (metadata.ResourceInterface, error) {
+	gvr, namespaced, err := s.resource(gk)
+	if err != nil {
+		return nil, err
+	}
+	if namespaced && namespace == "" {
+		return nil, apierrors.NewNotFound(gvr.GroupResource(), name)
+	}
+	return s.client(gk, namespace)
+}
+
 func (s clientServer) client(gk schema.GroupKind, namespace string) (metadata.ResourceInterface, error) {
 	gvr, namespaced, err := s.resource(gk)
 	if err != nil {
@@ -48,7 +65,7 @@ func (s clientServer) client(gk schema.GroupKind, namespace string) (metadata.Re
 }
 
 func (s clientServer) Get(ctx context.Context, gk schema.GroupKind, namespace, name string) (*metav1.PartialObjectMetadata, error) {
-	c, err := s.client(gk, namespace)
+	c, err := s.object(gk, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +73,7 @@ func (s clientServer) Get(ctx context.Context, gk schema.GroupKind, namespace, n
 }
 
 func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace, name string, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
-	c, err := s.client(gk, namespace)
+	c, err := s.object(gk, namespace, name)
 	if err != nil {
 		return nil, err
 	}

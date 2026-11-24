@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,6 +23,7 @@ import (
 
 	cu "github.com/krateo-platformops/provider-runtime/pkg/credentialuse"
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/cutest"
+	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/driver"
 )
 
 // Multis are served at v2 and v1, and stored at v1; the mapper prefers v2,
@@ -142,6 +145,22 @@ func TestPremiseUnservedResource(t *testing.T) {
 		err := calls[name]("missing")
 		if c := cu.Classify(err); c != cu.ClassNotFound {
 			t.Errorf("%s of a missing object: Classify(%v) = %v, want NotFound", name, err, c)
+		}
+	}
+	// Inside a group-version the API server serves: a Status that names
+	// nothing, without the cause.
+	for _, gvr := range []schema.GroupVersionResource{{Version: "v1", Resource: "gonekinds"}, {Group: "apps", Version: "v1", Resource: "gonekinds"}} {
+		_, gerr := env.Metadata.Resource(gvr).Namespace(ns).Get(ctx, "x", metav1.GetOptions{})
+		_, lerr := env.Metadata.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
+		_, perr := env.Metadata.Resource(gvr).Namespace(ns).Patch(ctx, "x", types.MergePatchType, []byte(`{}`), metav1.PatchOptions{})
+		for what, err := range map[string]error{"get": gerr, "list": lerr, "patch": perr} {
+			st := statusOf(t, err)
+			if st.Code != http.StatusNotFound || st.Details == nil || st.Details.Name != "" || len(st.Details.Causes) != 0 {
+				t.Errorf("%s %s: %+v, want a 404 that names nothing, without a cause", what, gvr, st)
+			}
+			if c, j := cu.Classify(err), cu.ClassifyJSONPatch(err); c != cu.ClassOther || j != cu.ClassOther {
+				t.Errorf("%s %s: Classify %v, ClassifyJSONPatch %v, want Other", what, gvr, c, j)
+			}
 		}
 	}
 	serve(false)
@@ -306,4 +325,149 @@ func TestAVouchGetsDisownOutOfAnUnservedKind(t *testing.T) {
 		cm.Annotations[cu.AnnotationVouched] = ns + "/Multi." + cutest.Group + "/m"
 	})
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
+}
+
+// A Secret, or a custom resource, named without a namespace can't exist,
+// whatever asks for it: the ref is Missing, and its holder, cluster-scoped
+// here, establishes; the line its A2 added goes with the holder, in a release
+// batch that doesn't fail; and Disown settles.
+func TestARefWithoutItsNamespaceIsMissing(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	idx := indexNamespace(t)
+	crd := cutest.CRD("ClusterWidget", "clusterwidgets")
+	crd.Spec.Scope = apiextensionsv1.ClusterScoped
+	gvr := schema.GroupVersionResource{Group: cutest.Group, Version: "v1", Resource: "clusterwidgets"}
+	if err := env.Client.Create(ctx, crd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = env.Client.Delete(context.Background(), crd) })
+	holders := env.Dynamic.Resource(gvr)
+	cutest.Eventually(t, 30*time.Second, func() error { _, err := holders.List(ctx, metav1.ListOptions{}); return err })
+	gvk := gvr.GroupVersion().WithKind("ClusterWidget")
+	c := newController(t)
+	clients := clientsFor(t, env.Config)
+	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx})
+	o := widgetOptions(c.enqueue)
+	o.Holder, o.ProbeInterval = gvk, time.Second
+	disownOptions(&o)
+	perName(&o)
+	o.Protected = append(o.Protected, cu.ProtectedKind{GVK: cutest.TargetGVK, Watch: cu.PerName})
+	refs := []cu.Ref{cu.SecretRef("", "x"), {GroupKind: cutest.TargetGVK.GroupKind(), Name: "x"}}
+	o.Refs = func(metav1.Object) ([]cu.Ref, error) { return refs, nil }
+	logs := &warnLog{}
+	o.Logger = logs
+	tr, err := s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running(t, s)
+	c.start(&driver.Driver{Tracker: tr, Dynamic: env.Dynamic, Holder: gvr, OwnerFinalizer: ownerFinalizer})
+	// lines is how many of the refs have a line.
+	lines := func() int {
+		cm, err := env.Kube.CoreV1().ConfigMaps(idx).Get(ctx, cu.IndexName(gvk.GroupKind()), metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Split(cm.Data["entries"], "\n")
+		n := 0
+		for _, r := range refs {
+			if slices.Contains(got, r.ID().String()) {
+				n++
+			}
+		}
+		return n
+	}
+	established := func(name string) {
+		t.Helper()
+		u := &unstructured.Unstructured{Object: map[string]any{}}
+		u.SetGroupVersionKind(gvk)
+		u.SetName(name)
+		if _, err := holders.Create(ctx, u, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		nn := types.NamespacedName{Name: name}
+		c.enqueue(nn)
+		cutest.Eventually(t, 30*time.Second, func() error {
+			u, err := holders.Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if !slices.Contains(u.GetFinalizers(), ownerFinalizer) {
+				return fmt.Errorf("%s isn't established, its last pass %+v: %w", name, c.lastResult(nn).Acquired, cutest.ErrNotYet)
+			}
+			return nil
+		})
+		a := c.lastResult(nn).Acquired
+		if a.MustNotConnect || a.Degraded || len(a.Unheld) != 2 || a.Unheld[0].Reason != cu.ReasonMissing || a.Unheld[1].Reason != cu.ReasonMissing {
+			t.Errorf("%s: %+v; want both refs Missing, and nothing else", name, a)
+		}
+	}
+	established("a")
+	if n := lines(); n != 2 {
+		t.Errorf("the index has %d of the Missing refs' lines, want 2", n)
+	}
+	if err := holders.Delete(ctx, "a", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	c.enqueue(types.NamespacedName{Name: "a"})
+	cutest.Eventually(t, 30*time.Second, func() error {
+		if n := lines(); n != 0 {
+			return fmt.Errorf("%d lines are still there: %w", n, cutest.ErrNotYet)
+		}
+		return nil
+	})
+	logs.mu.Lock()
+	for _, w := range logs.warns {
+		if strings.Contains(w, "release batch failed") {
+			t.Errorf("logged %q", w)
+		}
+	}
+	logs.mu.Unlock()
+	established("b")
+	annotate := func(v string) {
+		t.Helper()
+		if _, err := env.Dynamic.Resource(crdGVR).Patch(ctx, crd.Name, types.MergePatchType, []byte(`{"metadata":{"annotations":{"`+cu.AnnotationDisown+`":"`+v+`"}}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	annotate("all")
+	cutest.Eventually(t, 30*time.Second, func() error {
+		u, err := env.Dynamic.Resource(crdGVR).Get(ctx, crd.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if a := u.GetAnnotations(); a[cu.AnnotationHeldCount] != "0" || a[cu.AnnotationDisownSettled] != "true" {
+			return fmt.Errorf("held-count %q, settled %q: %w", a[cu.AnnotationHeldCount], a[cu.AnnotationDisownSettled], cutest.ErrNotYet)
+		}
+		return nil
+	})
+}
+
+// A namespaced holder's ref without a namespace is in another, the one named
+// "", so the gate asks for its consent, which no Namespace can give: it is
+// unreadable, and the holder proceeds, as before the rule on 404s.
+func TestANamespacedHoldersRefWithoutItsNamespace(t *testing.T) {
+	cutest.Require(t, env)
+	ns := env.Namespace(t, "nameless")
+	r := newWriteRig(t, env.Config, cu.SharedOptions{}, func(o *cu.Options) {
+		o.Refs = func(metav1.Object) ([]cu.Ref, error) { return []cu.Ref{cu.SecretRef("", "x")}, nil }
+	}, nil)
+	createWidget(t, ns, "w", "x")
+	nn := widgetNN(ns, "w")
+	r.c.enqueue(nn)
+	cutest.Eventually(t, 30*time.Second, func() error {
+		w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(context.Background(), "w", metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(w.GetFinalizers(), ownerFinalizer) {
+			return fmt.Errorf("w isn't established, its last pass %+v: %w", r.c.lastResult(nn).Acquired, cutest.ErrNotYet)
+		}
+		return nil
+	})
+	a := r.c.lastResult(nn).Acquired
+	if a.MustNotConnect || a.Degraded || len(a.Unheld) != 1 || a.Unheld[0].Reason != cu.ReasonConsentUnreadable {
+		t.Errorf("%+v; want its consent unreadable, and the holder to proceed", a)
+	}
 }
