@@ -1337,6 +1337,21 @@ func TestAnErrorThatNamesNoObjectLosesNone(t *testing.T) {
 		if stopped && (n != 0 || !slices.Equal(queued, []ID{a, b})) {
 			t.Errorf("stopped: %d timers, and %v is queued; want the whole batch queued", n, queued)
 		}
+		if !stopped {
+			// The second round's delay is the second's: the count isn't reset.
+			r.clk.Step(releaseBackoffBase)
+			if got := r.next(ctx, k); !slices.Equal(got, []ID{a, b}) {
+				t.Errorf("the first retry's batch is %v", got)
+			}
+			r.clk.Step(2*releaseBackoffBase - 1)
+			if got := r.queued(widgetGK, "out"); got != nil {
+				t.Errorf("before its second delay ends, the batch is %v", got)
+			}
+			r.clk.Step(1)
+			if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{a, b}) {
+				t.Errorf("after its second delay, the batch is %v, want both", got)
+			}
+		}
 		cancel()
 	}
 }
