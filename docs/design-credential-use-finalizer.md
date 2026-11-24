@@ -1868,12 +1868,19 @@ in every process:
   `Disowned`, the object proceeds as today, and nothing is ever
   `MustNotConnect`. `Disowned` is never written to the `unheld` annotation,
   which Disown strips with the record.
-- The loop strips the record from every holder of K, with a merge patch
-  guarded by resourceVersion.
-- It removes every finalizer with K's prefix, and its epoch, from every
+- The loop removes every finalizer with K's prefix, and its epoch, from every
   protected object, using R3's JSON patch without the user check. It
   removes K's marker label, and the held label where that was the last
   `credential-use.` finalizer.
+- **Then** it strips the record from every holder of K, with a merge patch
+  guarded by resourceVersion. A holder that names an object whose strip
+  failed keeps its record, and is counted, until the next pass. **The order
+  matters in PerName mode**: Disown finds an object by its line or by a
+  record, so while one may be held, a record names it. With the records
+  first, a process killed between the two strips, with a prune of the same
+  object's line between its removal and its re-add, left an object held that
+  nothing named, and Disown settled over it (found in the model). The lines
+  of the objects the records name are still added before either strip (E2).
 
 **"Safe" is observable cluster-wide**, not only on one process's gauge.
 Every pass of the Disown loop, once per `DisownInterval` (60s by default,
@@ -3445,8 +3452,8 @@ no teardown of a managed namespace can remove them.
    restart, P's line is in the index, so the recheck enqueues its batch. R2
    finds no record naming P, and R3 releases it.
 3. **A1 before the Disown switch.** A pass that began before the switch was
-   set runs A1, then the switch is set, the Disown loop strips H's record
-   and P's finalizer, and then the pass's A2 lands and re-adds the
+   set runs A1, then the switch is set, the Disown loop strips P's finalizer
+   and H's record, and then the pass's A2 lands and re-adds the
    finalizer. Two things close this:
    - every Acquire reads the switch again just before each A2, and a pass
      that sees it set stops and returns its refs unheld;
@@ -5256,6 +5263,7 @@ response could swallow a drop nobody then checked. The user's decisions:
 | F: an A2 of unknown outcome is checked at once and after the margin, with its batch; a stop doesn't cut an A2 short; every bound stated | §7.2, §10.6.2 |
 | The residual: a hold without its line needs three conditions together, shown in the model within its bound; the remedy | §10.6.3 |
 | `disown-settled` is the switch's value as written; a reader makes three checks, through `DisownSettled`; no A2 under a stale flag | §7.3, §7.4, §11.5, §11.6 |
+| A pass strips the objects before the records, and a record only once every object it names is stripped | §7.4 |
 | A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |
 | A process whose write loops haven't started refuses its passes | §7.2, §7.5 |
 

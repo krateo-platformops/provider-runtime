@@ -1145,7 +1145,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   under the prune's rule** (§7.4, A15; the user's decisions E, E1 to E3 and
   G, 2026-11-23). It counts the union of the index's lines and the records
   of the kinds the switch covers, with a GET each, adds the line of every
-  object a record names, and strips them. No other prune takes a line of
+  object a record names, and strips them, the objects before the records
+  that name them. No other prune takes a line of
   those kinds meanwhile, and a dropped one goes back. Only a process whose
   own run of zeros is done removes lines, and only those it proves free in
   that pass, each read once more after the removal. Emptying it in every
