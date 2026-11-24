@@ -191,7 +191,7 @@ MUTANTS = [
     ("watch modes needn't agree", PN,
      [("\t\tif c := s.modes[gk]; c != nil && c.mode != pk.Watch {", "\t\tif c := s.modes[gk]; false && c != nil && c.mode != pk.Watch {")]),
     ("the prober lists a PerName kind", C + "prober.go",
-     [("\t\tif len(ids) > probeGetLimit && !t.isPerName(g.gk) {", "\t\tif len(ids) > probeGetLimit {")]),
+     [("\t\tif len(ids) > probeGetLimit && !t.isPerName(g.gk) && (", "\t\tif len(ids) > probeGetLimit && (")]),
     ("the marker sweep lists a PerName kind", C + "uncached.go",
      [("\t\t\tif pk.Watch == PerName {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tif gk := pk.GVK.GroupKind(); !slices.Contains(kinds, gk) {",
        "\t\t\tif gk := pk.GVK.GroupKind(); !slices.Contains(kinds, gk) {")]),
