@@ -252,7 +252,8 @@ type Shared struct {
 	// start; nil before.
 	informerCtx context.Context
 	// writeCtx is RunWriteLoops' context while the write loops run, for the
-	// recheck outside the caches after a Track (§10.5); nil otherwise.
+	// recheck outside the caches after a Track, or when a kind's CRD goes
+	// (§10.5); nil otherwise.
 	// writeWG counts those rechecks, so the write loops wait for them.
 	writeCtx context.Context
 	writeWG  sync.WaitGroup

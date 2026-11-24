@@ -2012,8 +2012,8 @@ func (t *Tracker) startQuiet() {
 }
 
 // recheckIndex is the write loops' startup recheck from t's index (§10.2,
-// §10.6.5, M1 of the review of revision 16), run at their start and after a
-// Track while they run.
+// §10.6.5, M1 of the review of revision 16), run at their start, and, while
+// they run, after a Track and when t's CRD goes.
 func (s *Shared) recheckIndex(ctx context.Context, t *Tracker, done map[ID]bool) error {
 	return t.idx.recheckRest(ctx, done, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
 }
