@@ -15,16 +15,16 @@ import (
 // for as long as it waits for election. It keeps 65,536 names at most, and what the
 // loops find at their start stands in for the others.
 
-// waitingNames is how many names wait in q that aren't known to be held, in all and
-// for each key, and how many objects do in all.
+// waitingNames is how many names wait in q, in all and for each key, a namespace's
+// list aside, and how many entries do in all.
 func waitingNames(q *batchQueue) (names int, by map[batchKey]int, all int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	by = map[batchKey]int{}
 	for k, set := range q.pending {
-		for _, p := range set {
+		for id := range set {
 			all++
-			if !p.held {
+			if id != fillAll {
 				names++
 				by[k]++
 			}
@@ -57,9 +57,9 @@ func TestAStandbysQueueIsBounded(t *testing.T) {
 	}
 }
 
-// A flood collapses its own namespace's names, and leaves the others': those of
-// other namespaces, what is known to be held in its own, and what another kind's
-// holders name there.
+// A flood collapses its own key, what is known to be held in it too, which the start's
+// rescan finds again, and leaves the others': those of other namespaces, and what
+// another kind's holders name in its own.
 func TestAFloodCollapsesItsOwnNamespace(t *testing.T) {
 	q := newBatchQueue(testingclock.NewFakeClock(time.Now()))
 	flood := batchKey{widgetGK, "flood"}
@@ -67,8 +67,7 @@ func TestAFloodCollapsesItsOwnNamespace(t *testing.T) {
 	for _, k := range honest {
 		q.Add(k, someIDs(k.Namespace, "honest", 100)...)
 	}
-	held := someIDs("flood", "held", 10)
-	q.AddHeld(flood, held...)
+	q.AddHeld(flood, someIDs("flood", "held", 10)...)
 	for i := range 40 {
 		q.Add(flood, someIDs("flood", fmt.Sprintf("s%d-", i), 4000)...)
 	}
@@ -92,7 +91,7 @@ func TestAFloodCollapsesItsOwnNamespace(t *testing.T) {
 			got = ids
 		}
 	}
-	if want := append(slices.Clone(held), fillAll); !slices.Equal(SortedIDs(got), SortedIDs(want)) {
-		t.Errorf("the flood's batch is of %d objects, want what is known to be held, and the namespace's list", len(got))
+	if !slices.Equal(got, []ID{fillAll}) {
+		t.Errorf("the flood's batch is of %d objects, want the namespace's list alone", len(got))
 	}
 }
