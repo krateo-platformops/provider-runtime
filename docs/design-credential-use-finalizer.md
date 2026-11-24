@@ -829,8 +829,8 @@ with `NewGenericServerResponse(422, …)` (`pkg/endpoints/handlers/patch.go:423-
 which drops json-patch's text. What remains is the generic message
 "the server rejected our request due to an error in our request", and no
 causes. A `remove` at an index that has moved looks the same. Either means
-**the state changed**: the releaser goes back to R1, at most 5 times per
-batch, and then requeues the batch with backoff. Each retry rebuilds the
+**the state changed**: the releaser goes back to R1, at most 4 times, and
+at its fifth such patch requeues the object with backoff. Each retry rebuilds the
 patch from R1's new read. A 422 with a policy's text
 is (c) there too, and anything else is an error for the batch.
 
@@ -878,9 +878,10 @@ its own time, not for the rest of the batch, and waits for no backoff. An object
 whose release must wait (R1, §6.4) is neither decided nor failed: it is queued
 again when its wait ends, and its backoff stays as it was. What is logged of a
 failed batch is one line for each turn (below) that fails at something, with how
-many objects that is, the first few errors, and how many more there are: 500 names
-that all fail are 8 lines, each time they are retried, and a line is about 2 KB at
-most.
+many objects that is, the first few errors, and how many more there are, and a line
+is about 2 KB at most: 500 names that all fail at once are 8 lines, each time they
+are retried, and 450,000, 7,000. A name that isn't answered takes a turn's time, so
+500 of them are up to 500 lines.
 
 **A batch is a turn of its key.** Whoever can edit a holder's record decides how
 many objects wait in its (K, N), and must not decide how long the other keys'
@@ -889,38 +890,46 @@ releases wait. So:
 - **A turn reads 64 objects live at most**, at R1, retried or not. R0, below, which
   reads the caches alone, covers what the turn took from the queue: 2,048 at most,
   and a namespace's list (§10.5). An object whose release meets a change is read
-  again in its own turn, past the 64, at most 4 times: put back, it would lose which
-  resourceVersion its patch was built from.
+  again in its own turn, past the 64 and its time, at most 4 times: put back, it
+  would lose which resourceVersion its patch was built from.
 - **What a turn doesn't get to goes back where it was**, and the key behind the
   other keys. It is neither decided nor failed: its failures, its pending retry and
   what is counted for it stay as they were.
 - **The queue is first in, first out**, and adding an object again doesn't move it.
-  A key has two lines: of what is known to carry K's finalizer for N, as the
-  protected informers, the rescan, the rechecks, A2, a grace's end and a record's
-  names that the caches show carrying it; and of the rest. A turn takes 1,024 of
+  A key has two lines: of what is known to carry K's finalizer for N, as what the
+  protected informers, the rescan, the rechecks, a namespace's list, the batch an A2
+  asks for (§10.2) and a grace's end queue, a record's names that the caches show
+  carrying it, and what a read of a batch showed, do; and of the rest. What is known
+  stays so while it waits, is put back, fails, or is held up by a Track. A turn takes 1,024 of
   each at most, and reads the known ones first, with 16 of the 64 for the others,
   which may be real holds the caches don't show (§10.5, a per-name watch that
-  hasn't synced, a label a third party stripped). The first of each sort is read in
-  every turn. So an object waits for no more turns than objects were in its line
+  hasn't synced, a label a third party stripped). The first of each sort is read, and
+  its Namespace, in every turn. So an object waits for no more turns than objects were in its line
   before it, whatever is added since; one that is known to carry the finalizer waits
   for none of the rest; and nothing is moved by a record's being edited.
-- **A turn's reads take 10s**: none of R1's begins after that, but the first of each
-  sort, and what wasn't begun goes back. **Each read has a time of its own**: 10s,
-  doubled at each failure of its object in a row, to 60s, the API server's own for a
-  request, so that an object whose reads are slow is released late, not never. A
-  time that a turn's reads shared would do worse: R1 would leave R2 none at a client
-  of few requests a second, so nothing would ever be released; and a client's own
-  rate limiter refuses a read whose wait would pass the deadline at once, with an
-  error that says nothing of either, so what wasn't read would fail
-  (`TestPremiseAClientRefusesAReadItCantWaitFor`). Such a limiter can refuse a read
-  of its own time too, when the process has more than 10s of calls waiting in it:
-  that read fails, as any other that isn't answered, and its next has a longer time.
-  R2's reads of Namespaces: the same 10s for them all, and 10s for each, whose
-  failure is one for all the objects in it. R2's list: a minute for each page, not
-  for the list. R3's patches and the index's writes have none. *How long one turn
-  can hold a worker*, with nothing answering: R1 30s for names that are new, 130s if
-  two that failed three times or more are among them; the Namespaces 20s; the list a
-  minute. R3's patches are at most 64, each answered or cut by the API server.
+- **A turn's reads begin within 10s**: none of R1's begins after that, in its first
+  round, but the first of each sort, and what wasn't begun goes back. **Each call that
+  is sent must be answered in a time of its own**: R1's 10s, doubled at each failure of
+  its object in a row, to 60s, the API server's own for a request; a Namespace's, read
+  within the same 10s for them all, the longest of those of the objects that ask for
+  it, and its failure is one for all of them; a page of R2's list, or of any live list,
+  a minute, not the list. So an object whose reads are slow is released late, not
+  never. The time starts when the call is sent, or a connection for it is asked for
+  (`answered`): **what the client's own rate limiter makes it wait isn't limited**, and
+  makes it late, as it always did. A deadline would be refused by that limiter at once,
+  unsent, whenever its wait passes it (`TestPremiseAClientRefusesAReadItCantWaitFor`),
+  so behind a standing backlog of calls nothing would ever be released; and a time that
+  a turn's reads shared would leave R2 none. A transport that gives no sign of what is
+  sent, as one that isn't built on net/http's, has no such time, as before.
+- **How long one turn can hold a worker**, with nothing that is sent answered, beside
+  the limiter's wait: R1 30s for names that are new, 130s if two that failed three times
+  or more are among them; the Namespaces twice the longest of their objects' times; the
+  list a minute a page, and before it a minute for each protected kind when the batch is
+  a namespace's outside the caches. Not limited here, and not more than before: the
+  mapper, which takes no context, and whose discovery client-go gives up after 32s (a
+  turn's window lets one or two of them begin); the epoch's repair in R1, R3's patches,
+  at most 64 and a conflict's, and the index's writes, each of which the API server
+  answers or cuts; and a conflict's rounds, up to 4 more, of objects that were read.
 - **Once the write loops' context ends**, nothing more is read, and what wasn't
   reached goes back for the next ones.
 - **Each holder's record is parsed once a turn**, by R0 and R2 together, one that
@@ -930,7 +939,10 @@ releases wait. So:
   discovery: R1 remembers the miss, of 256 kinds at most, the oldest out, and each
   of its objects fails as it would have. So once its CRD is back, a release waits for
   the rest of that minute, and then for the retry after: up to a minute and one
-  backoff later than without it. Acquire asks no such memory. A kind that is no
+  backoff later than without it. More kinds than 256, and a discovery that fails
+  rather than says that there is no such kind, as of an aggregated API that is down,
+  aren't remembered: each read of one is a discovery (§6.6). Acquire asks no such
+  memory. A kind that is no
   longer in `Protected` is read as any other: only these batches release what is
   left of it.
 
@@ -1713,8 +1725,15 @@ only come after the write it reports.
   1ms, and 0.38s at 200ms; with 200 in one namespace p50 0.59s, p90 1.2s, and 2.0s at
   the longest (3,827 R3s). So 4s in all after the grace is possible.
 - **A name that no object has**, as anyone who can edit a holder's record can put
-  there, costs one GET at each change of the record, and one of a kind that can't be
-  mapped, one discovery a minute for the kind. Its turn makes no list. 100 records
+  there, costs one GET at each change of the record. **One that can't be read**, of a
+  kind that can't be mapped, that the process may not get, or that no request can ask
+  for, fails: it costs a read, and for an unmapped kind a discovery, at each of its
+  retries too, every 5 minutes for as long as the process lives, whatever the records
+  say by then (§6.2). A kind's objects share one discovery a minute while no more than
+  256 such kinds are asked for; a record of 4,500 names, each of a kind of its own, is
+  4,500 discoveries every 5 minutes, 15 a second, as it was without the memory, and
+  nothing here bounds that: asking only for kinds that are protected is left to a later
+  release. A turn with nothing to decide makes no list. 100 records
   of 4,500 made-up names each are 7,000 turns of their own key, and one turn of it
   is what another key waits for.
 
