@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -48,6 +49,10 @@ func (d dynamicContent) Content(ctx context.Context, gk schema.GroupKind, namesp
 	}
 	r := d.dyn.Resource(m.Resource)
 	if m.Scope.Name() == meta.RESTScopeNameNamespace {
+		if namespace == "" {
+			// It can't exist (clientServer.object).
+			return nil, apierrors.NewNotFound(m.Resource.GroupResource(), name)
+		}
 		return r.Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	}
 	return r.Get(ctx, name, metav1.GetOptions{})

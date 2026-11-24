@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -45,7 +46,10 @@ const (
 	// once (IP1), and counted, so an RBAC message the pattern stops matching
 	// shows up (L3 of the review of revision 16).
 	ClassAdmissionDenied
-	// ClassNotFound: the object doesn't exist (the Missing outcome of A2).
+	// ClassNotFound: the object doesn't exist (the Missing outcome of A2). A
+	// 404 that isn't about an object, as for a resource the API server doesn't
+	// serve, isn't one: it says nothing of the object, and is ClassOther
+	// (namesObject).
 	ClassNotFound
 	// ClassConflict: a resourceVersion precondition failed.
 	ClassConflict
@@ -124,7 +128,10 @@ func Classify(err error) Class {
 	}
 	switch st.Code {
 	case http.StatusNotFound:
-		return ClassNotFound
+		if namesObject(st) {
+			return ClassNotFound
+		}
+		return ClassOther
 	case http.StatusConflict:
 		if st.Reason == metav1.StatusReasonAlreadyExists {
 			return ClassAlreadyExists
@@ -198,6 +205,24 @@ func statusOf(err error) (metav1.Status, bool) {
 		return metav1.Status{}, false
 	}
 	return s.Status(), true
+}
+
+// namesObject reports whether a 404 is the API server's answer that an object
+// doesn't exist: a Status that names it. Any other 404 is for something the
+// API server doesn't serve, or a refusal, and the object may be there, and
+// carry a hold:
+//   - outside every group-version it serves, as a custom resource whose CRD is
+//     gone, no longer serves the version, or isn't known to this API server
+//     yet, its last handler answers in plain text, and client-go marks every
+//     answer that isn't a Status with the cause below. It may fill the name
+//     in itself, from the request;
+//   - inside one, as a built-in resource removed from it, or on an aggregated
+//     API server, it answers a Status that names nothing;
+//   - an admission webhook may refuse a write with a 404 of its own.
+func namesObject(st metav1.Status) bool {
+	return st.Details != nil && st.Details.Name != "" && !slices.ContainsFunc(st.Details.Causes, func(c metav1.StatusCause) bool {
+		return c.Type == metav1.CauseTypeUnexpectedServerResponse
+	})
 }
 
 // policyOf reports whether a status carries a ValidatingAdmissionPolicy's

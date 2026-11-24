@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
@@ -188,6 +189,8 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	holders, err := s.liveList(ctx, t.gk, "", "")
 	if err != nil {
 		known = false
+		t.reportDisownFailed(ctx, "list the holders, "+kindLabel(t.gk), err, "grant list on it, in every namespace",
+			"restore it, or, if another version of it is served, restart at that one")
 	}
 	for i := range holders {
 		if recordsDisowned(&holders[i], set) {
@@ -207,6 +210,8 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		items, err := s.liveList(ctx, gk, "", MarkerLabel(t.gk))
 		if err != nil {
 			known = false
+			t.reportDisownFailed(ctx, "list "+kindLabel(gk), err, "grant list on it, in every namespace",
+				"restore it; or, once its objects are gone, stop naming it, let the passes drop it from the records, take it out of the tracker's protected kinds and restart; if another version of it is served, restart at that one instead")
 			continue
 		}
 		for i := range items {
@@ -224,6 +229,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	perName := t.disownPerName(set)
 	var lined []ID          // the index's lines of the kinds set covers
 	var unreadable []string // the objects of those that couldn't be read, with why
+	var texts []string      // and the errors
 	if len(perName) > 0 {
 		named := map[ID]bool{}
 		for i := range holders {
@@ -238,6 +244,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		cur, err := t.idx.store.get(ctx)
 		if err != nil {
 			known = false
+			t.reportDisownFailed(ctx, "read the index "+t.idx.ref(), err, "grant get on it", "")
 		}
 		vouched := t.idx.parseVouched(cur.vouched)
 		for _, id := range t.idx.ids(cur.lines) {
@@ -264,6 +271,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				// never zero, until it can be read (§7.4).
 				known = false
 				unreadable = append(unreadable, unheldRef(id)+": "+shortError(err))
+				texts = append(texts, err.Error())
 				continue
 			}
 			n := countPrefix(m.Finalizers, t.prefix)
@@ -306,21 +314,27 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		}
 	}
 	if len(perName) > 0 {
-		t.reportDisownUnreadable(unreadable)
+		t.reportDisownUnreadable(ctx, unreadable, texts)
 	}
 	s.writeDisownCount(ctx, t, set, count, known)
 }
 
 // EventDisownUnreadable (Warning, on the holder kind's CRD): Disown can't
-// read objects its index or the records name, so its count stays "unknown"
-// (§7.4).
+// read its index, or objects that or the records name, or can't list the
+// holders or a LabelScoped kind, so its count stays "unknown" (§7.4).
 const EventDisownUnreadable = "CredentialUseDisownUnreadable"
 
 // reportDisownUnreadable reports the objects a Disown pass couldn't read:
 // the gauge on every pass, and, when there are some, a log line and a
 // Warning event on the CRD naming each with why, which the event sink
-// throttles while the set stays the same.
-func (t *Tracker) reportDisownUnreadable(unreadable []string) {
+// throttles while the set stays the same. texts are their errors, for the log:
+// an event with them would be a new one at every pass whose errors vary. A pass
+// the process's stop cut short says nothing, and leaves the gauge: its reads
+// failed for that.
+func (t *Tracker) reportDisownUnreadable(ctx context.Context, unreadable, texts []string) {
+	if ctx.Err() != nil {
+		return
+	}
 	sinkMetrics{t}.DisownUnreadable(kindLabel(t.gk), len(unreadable))
 	if len(unreadable) == 0 {
 		return
@@ -332,16 +346,29 @@ func (t *Tracker) reportDisownUnreadable(unreadable []string) {
 	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
 	t.s.events.record(crd, "Warning", EventDisownUnreadable, note)
 	t.warn("credential-use: Disown can't read objects its index or the records name; its count stays unknown",
-		"kind", t.gk.String(), "crd", t.crdName, "unreadable", strings.Join(unreadable, ", "))
+		"kind", t.gk.String(), "crd", t.crdName, "unreadable", strings.Join(unreadable, ", "), "errors", strings.Join(texts, "; "))
 }
 
-// shortError is err as an event names it: its API reason, as "forbidden",
-// or its text.
+// notServed reports whether err is a 404 that isn't about an object: its kind
+// isn't served.
+func notServed(err error) bool {
+	st, ok := statusOf(err)
+	return ok && apierrors.IsNotFound(err) && !namesObject(st)
+}
+
+// shortError is err as an event names it: its class, as "forbidden", never
+// its text, which may be another one each time.
 func shortError(err error) string {
+	if notServed(err) {
+		return "its kind isn't served" // the reason would say "notfound"
+	}
 	if r := apierrors.ReasonForError(err); r != metav1.StatusReasonUnknown {
 		return strings.ToLower(string(r))
 	}
-	return err.Error()
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "error"
 }
 
 // disownPerName returns t's PerName kinds that set covers.
@@ -584,4 +611,27 @@ func (s *Shared) disownOff(ctx context.Context, t *Tracker, now time.Time) {
 	if _, err := s.c.Dynamic.Resource(crdGVR).Patch(ctx, t.crdName, types.MergePatchType, data, metav1.PatchOptions{}); err != nil && Classify(err) != ClassConflict {
 		t.warn("credential-use: couldn't clear Disown's count from the CRD after the switch was removed", "crd", t.crdName, "error", err.Error())
 	}
+}
+
+// reportDisownFailed reports something a Disown pass needs as a whole and
+// couldn't read, which keeps the count unknown: a log line, and the Warning
+// event the objects of an indexed kind get, saying what, the failure's class,
+// and what to do about that class. An error the process's own stop caused isn't
+// one.
+func (t *Tracker) reportDisownFailed(ctx context.Context, what string, err error, grant, notServedRemedy string) {
+	if ctx.Err() != nil {
+		return
+	}
+	remedy := "the next pass retries"
+	switch {
+	case apierrors.IsForbidden(err):
+		remedy = grant
+	case notServed(err) && notServedRemedy != "":
+		remedy = notServedRemedy + " (§6.2)"
+	}
+	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
+	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
+	t.s.events.record(crd, "Warning", EventDisownUnreadable, "Disown can't "+what+" ("+shortError(err)+"), so held-count stays unknown: "+remedy)
+	t.warn("credential-use: Disown can't read what it counts; its count stays unknown until it can (§7.4)",
+		"kind", t.gk.String(), "what", what, "why", shortError(err), "error", err.Error())
 }

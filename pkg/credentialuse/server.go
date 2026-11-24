@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,6 +36,22 @@ func (s clientServer) resource(gk schema.GroupKind) (schema.GroupVersionResource
 	return m.Resource, m.Scope.Name() == meta.RESTScopeNameNamespace, nil
 }
 
+// object returns the client for object namespace/name of gk. An object of a
+// namespaced kind named without a namespace, as a cluster-scoped holder's data
+// may, can't exist: it is NotFound, without a call, whose 404 would name
+// nothing (Classify). A list without a namespace is of every one, and isn't
+// this.
+func (s clientServer) object(gk schema.GroupKind, namespace, name string) (metadata.ResourceInterface, error) {
+	gvr, namespaced, err := s.resource(gk)
+	if err != nil {
+		return nil, err
+	}
+	if namespaced && namespace == "" {
+		return nil, apierrors.NewNotFound(gvr.GroupResource(), name)
+	}
+	return s.client(gk, namespace)
+}
+
 func (s clientServer) client(gk schema.GroupKind, namespace string) (metadata.ResourceInterface, error) {
 	gvr, namespaced, err := s.resource(gk)
 	if err != nil {
@@ -48,19 +65,44 @@ func (s clientServer) client(gk schema.GroupKind, namespace string) (metadata.Re
 }
 
 func (s clientServer) Get(ctx context.Context, gk schema.GroupKind, namespace, name string) (*metav1.PartialObjectMetadata, error) {
-	c, err := s.client(gk, namespace)
+	c, err := s.object(gk, namespace, name)
 	if err != nil {
 		return nil, err
 	}
 	return c.Get(ctx, name, metav1.GetOptions{})
 }
 
+// Patch patches the object. A 404 of a patch isn't the API server's word that
+// the object doesn't exist: admission may answer one for another object, as a
+// webhook's namespaceSelector does for a Namespace that is gone, or a validator
+// for whatever it looked up, this object included. Only a read's says so, which
+// admission isn't asked about: a 404 is confirmed by a GET, and is NotFound if
+// that GET finds nothing of this name. Anything else, the read's own failures
+// included, is an ordinary error, never of the class NotFound, whose text has
+// both answers; what isn't the API server's, as a timeout, stays in its chain.
 func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace, name string, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
-	c, err := s.client(gk, namespace)
+	c, err := s.object(gk, namespace, name)
 	if err != nil {
 		return nil, err
 	}
-	return c.Patch(ctx, name, pt, data, metav1.PatchOptions{})
+	out, err := c.Patch(ctx, name, pt, data, metav1.PatchOptions{})
+	if Classify(err) != ClassNotFound {
+		return out, err
+	}
+	// The texts of the answers, not the errors, below: wrapped, either would
+	// lend the error its class, and the patch's is a NotFound.
+	_, read := c.Get(ctx, name, metav1.GetOptions{})
+	if read == nil {
+		return nil, fmt.Errorf("credential-use: the patch was refused with a 404, and the object is there: %s", err)
+	}
+	if st, ok := statusOf(read); ok && Classify(read) == ClassNotFound && st.Details.Name == name {
+		return nil, read
+	}
+	const unconfirmed = "credential-use: the patch was refused with a 404 (%s), and a read can't tell whether the object is there: "
+	if _, ok := statusOf(read); !ok {
+		return nil, fmt.Errorf(unconfirmed+"%w", err, read)
+	}
+	return nil, fmt.Errorf(unconfirmed+"%s", err, read)
 }
 
 // List reads every object of gk in namespace, page by page, with no label

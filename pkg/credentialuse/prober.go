@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -183,7 +184,9 @@ func (t *Tracker) probe(ctx context.Context) {
 		var names map[string]bool
 		// A PerName kind is probed with GETs only: the list would be
 		// forbidden under resourceNames RBAC (§13 shape 1).
-		if len(ids) > probeGetLimit && !t.isPerName(g.gk) {
+		// Nor is a namespaced kind's group without a namespace listed: the
+		// list is of every one, and would find other objects of those names.
+		if len(ids) > probeGetLimit && !t.isPerName(g.gk) && (g.ns != "" || !t.namespaced(g.gk)) {
 			list, err := srv.List(ctx, g.gk, g.ns)
 			switch {
 			case err == nil:
@@ -224,4 +227,13 @@ func (t *Tracker) probe(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// namespaced reports whether gk is a namespaced kind, by the mapper.
+func (t *Tracker) namespaced(gk schema.GroupKind) bool {
+	if t.s.c.Mapper == nil {
+		return false
+	}
+	m, err := t.s.c.Mapper.RESTMapping(gk)
+	return err == nil && m.Scope.Name() == meta.RESTScopeNameNamespace
 }
