@@ -3177,6 +3177,13 @@ its Namespace's `allow-holders-from` names a holder's namespace any longer
   all lose consent together, so the finalizer for (K, N) goes once the last
   of them has dropped the ref.
 
+**How long that takes.** The change enqueues the target's holders where a cache
+or the Namespace informer delivers it, and otherwise each holder's next poll
+sees it. One that records more than 16 refs outside the caches
+(`SharedOptions.Namespaces`, §10.5) reads 16 of those it doesn't name a pass,
+so a withdrawal may take it up to ⌈n/16⌉ poll intervals for n such refs, and
+then §5's grace. A holder that names the ref reads it on every pass.
+
 **The gate runs on every pass** (M1), for every held cross-namespace ref,
 not only before A2:
 
@@ -3272,21 +3279,41 @@ holder in the index namespace included:
 about 4,000 refs of their choosing. So what the gate reads is bounded:
 
 - a ref whose **cache covers it, has synced, and lacks it** is kept, and not
-  read: no object there carries the held label, so it isn't held, or is gone. A
-  PerName kind's caches are its index lines' watches (§10.6), and an unsynced
-  one lacks nothing. A ref that the pass names is read live in any case, as
-  before. **The one it misses** is an object with its finalizer but without its
-  held label, which someone else stripped: no cache has it, and only an A2,
-  which a ref that only the record keeps doesn't get, restores the label. Its
-  withdrawal isn't seen until a pass follows the whole chain. The owner can end
-  that by setting the label back, `credential-use.krateo.io/held: "true"`: the
-  informer then delivers the object, and each holder's next pass reads it;
+  read: it isn't held, or is gone. An unsynced cache lacks nothing. A ref that
+  the pass names is read live in any case, as before. **What that misses**, and
+  so a withdrawal of it isn't seen until a pass follows the whole chain, or
+  the cause ends:
+  - **LabelScoped, in a namespace that its caches cover:** an object with its
+    finalizer but without its held label, which someone else stripped. No cache
+    has it, and only an A2, which a ref that only the record keeps doesn't get,
+    restores the label. The owner can set it back,
+    `credential-use.krateo.io/held: "true"`: the informer then delivers the
+    object, and each holder's next pass reads it. Outside the covered
+    namespaces (§10.5) the ref is read live, labelled or not;
+  - **PerName:** a hold without an index line, and so without a watch. The
+    watch doesn't depend on the label (§10.6). No prune takes the line of an
+    object that a record names (§10.6.2), and the write loops put back one
+    that someone else drops, or the whole index, as long as they can read the
+    object (§10.6.6); the ref is gated again once its watch has synced;
+  - **a kind no longer in `Protected`** while records still name it: it isn't
+    asked about at all. Disown it first (§7.4), or protect it again;
 - the rest are read live, **at most 16 a pass**, so at most 16 GETs of objects
-  and 16 of Namespaces, each Namespace once. Those unread the longest go first,
-  in memory, so each of n is read within ⌈n/16⌉ passes, and a withdrawal is
-  seen within that. The others are kept, and `RetryAfter` asks for the next
-  pass, with the backoff of a failed read: 1s, doubling up to the poll
-  interval. A pass that names more than that reads them too, as it always did;
+  and 16 of Namespaces, each Namespace once. Those that have waited the longest
+  go first, in memory: a ref starts to wait when a pass first asks about it, and
+  again when it is read. So a ref is read **within ⌈m/16⌉ passes**, where m is
+  how many refs, itself included, that first pass asks about, whatever is added
+  to the record later: fresh refs, or ones that leave it and return, go behind
+  it. The others are kept, and `RetryAfter` asks for the next pass, with the
+  backoff of a failed read: 1s, doubling up to the poll interval. A read that
+  fails there has no backoff of its own, since it comes back at its turn. A
+  restart, or a new leader, forgets how long each has waited, so the wait
+  starts over there: with m of 17 to 32 it costs one more pass. A read counts
+  once it is answered, a failure included. One that the end of the pass's
+  context cuts keeps its place, unless it took the context alone; a withdrawn
+  ref whose A1 wasn't written is first again. A pass that names more than 16
+  reads them too, as it always did;
+- **what it remembers** of a holder is of the refs that its record names now,
+  the backoff of failed reads included, and goes with the holder;
 - another holder's pass costs what it did. The reads of one holder's record
   use the same client as the others', though, and at its rate.
 
@@ -3306,7 +3333,10 @@ the gate answers it for no more than 16 refs a pass.
 is part of a pass, and a paused holder has none (§9.2): its recorded refs stay
 held, with their consent withdrawn, until it is unpaused or deleted and
 unpaused. So are those of a holder that no controller reconciles. Whether the
-owner should have a way out then is open.
+owner should have a way out then is open. Nor is anything dropped while a
+holder is edited faster than a pass takes, since every A1 then conflicts, or
+while the API server refuses the A1 for a cause other than its size (a 422 from
+a schema or a webhook), or while every pass's context ends before its A1.
 
 **A ref that only the record keeps, recreated without the annotation, is
 dropped.** A two-step apply (the object, then its annotation) of a target that
@@ -3787,7 +3817,10 @@ Doc text for consumers:
 > still works as before, but isn't protected, and the holder gets a
 > `CredentialRefNotHeld` event. Removing a namespace from the annotation
 > later releases those holders' holds through the normal protocol, with a
-> `CredentialConsentWithdrawn` event.
+> `CredentialConsentWithdrawn` event. It needs a pass of each holder, so not
+> of a paused one. With restricted caches (`SharedOptions.Namespaces`), a
+> holder that still records more than 16 refs outside them, n of them, may
+> take up to n/16 poll intervals, rounded up.
 
 ## 14. Tests, and what the reviewer should attack
 

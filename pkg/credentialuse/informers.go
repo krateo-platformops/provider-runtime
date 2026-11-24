@@ -633,9 +633,10 @@ func (t *Tracker) protectedFor(id ID) *protectedInformer {
 // cacheLacks reports whether the cache that covers id has synced, and doesn't
 // have it: it isn't held, or is gone, or has just been held, which the cache
 // will show, or its held label was stripped. A PerName kind's cache is the
-// watch of id's index line: with the index synced and no such watch, no line
-// was delivered yet for a hold of t's. A kind, or a namespace, that no cache
-// covers is never lacking.
+// watch of id's index line, whatever the object's labels: with the index
+// synced and no such watch, t holds no id, or its line is missing, until the
+// tamper check or a rebuild restores it (§10.6.6). A kind, or a namespace,
+// that no cache covers is never lacking.
 func (t *Tracker) cacheLacks(id ID) bool {
 	p := t.protectedFor(id)
 	if p == nil {
