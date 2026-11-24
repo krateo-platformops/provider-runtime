@@ -370,7 +370,7 @@ func TestTheLoopsEndLeavesNoRetries(t *testing.T) {
 	q.setDraining(true)
 	q.AddHeld(k, a)
 	_, _, _ = q.Get(context.Background())
-	q.Fail(k, a, b)
+	q.Fail(k, a, b, fillAll)
 	q.AddAt(k, clk.Now().Add(time.Hour), c)
 	q.AddAfter(k, time.Hour, secretID("ns", "grace"))
 	q.Done(k)
@@ -383,10 +383,44 @@ func TestTheLoopsEndLeavesNoRetries(t *testing.T) {
 			t.Errorf("%s waits %v, known %v; want it to wait, known %v", id, waits, p.held, held)
 		}
 	}
+	if _, waits := q.pending[k][fillAll]; !waits {
+		t.Error("the namespace's list that had failed doesn't wait")
+	}
 	counted(t, "the loops' end", q)
 	clk.Step(30 * time.Minute)
-	if got := len(q.pending[k]); got != 3 {
-		t.Errorf("%d wait once the retries' times passed, want the three", got)
+	if got := len(q.pending[k]); got != 4 {
+		t.Errorf("%d wait once the retries' times passed, want the three and the list", got)
+	}
+	q.ShutDown()
+	if clk.HasWaiters() {
+		t.Error("a timer that the loops' end took is still the clock's")
+	}
+}
+
+// What a namespace's list, a kind's collapse and ShutDown do to the bound.
+func TestTheBoundsEdges(t *testing.T) {
+	q := newBatchQueue(testingclock.NewFakeClock(time.Now()))
+	q.max = queueMax{names: 1, bytes: 1 << 20, keys: 3}
+	a, b, c := batchKey{widgetGK, "a"}, batchKey{widgetGK, "b"}, batchKey{gadgetGK, "c"}
+	x := secretID("ns", "x")
+	q.Add(a, x)
+	q.Add(b)
+	if got := collapsedOf(q, widgetGK); len(got) != 0 || q.names != 1 || q.Len() != 2 {
+		t.Errorf("a namespace's list collapsed %v, with %d names and %d batches waiting; want it to need no name's room", got, q.names, q.Len())
+	}
+	q.Add(a, secretID("ns", "y"))
+	if got := collapsedOf(q, widgetGK); !slices.Equal(got, []batchKey{a}) {
+		t.Errorf("%v collapsed, want %v", got, a)
+	}
+	q.Add(c, x)
+	q.Add(batchKey{gadgetGK, "d"}, x)
+	keys, all := q.collapsedOf(widgetGK)
+	if len(keys) != 0 || !all {
+		t.Errorf("the kind's collapse leaves %v collapsed, the kind %v; want the kind alone", keys, all)
+	}
+	q.ShutDown()
+	if keys, all := q.collapsedOf(widgetGK); len(keys) != 0 || all {
+		t.Errorf("after ShutDown, %v are collapsed, and the kind %v", keys, all)
 	}
 }
 

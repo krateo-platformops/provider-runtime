@@ -114,8 +114,8 @@ const lineWindow = 1024
 type queueMax struct{ names, bytes, keys int }
 
 // standbyMax is 65,536 names, more than 10,000 holders' of a few refs each; 32 MiB of
-// what they take (costOf), since a name may be as long as a record; and 16,384 keys, of
-// about 0.6 KB each beside their names.
+// what they take as costOf counts it, about, since a name may be as long as a record;
+// and 16,384 keys, of all holder kinds, of about 0.6 KB each beside their names.
 var standbyMax = queueMax{names: 1 << 16, bytes: 32 << 20, keys: 1 << 14}
 
 // places are the objects of a batch, each with its place.
@@ -153,15 +153,18 @@ type entry struct {
 }
 
 // take takes entries from l, until pending has taken n of them. What it doesn't
-// take is stale.
+// take is stale. A slice keeps what it was cut of, so each entry is cleared.
 func (l *line) take(n int, pending func(entry) bool) {
 	for n > 0 {
 		var e entry
 		switch {
 		case len(l.back) > 0:
-			e, l.back = l.back[len(l.back)-1], l.back[:len(l.back)-1]
+			i := len(l.back) - 1
+			e, l.back[i] = l.back[i], entry{}
+			l.back = l.back[:i]
 		case len(l.added) > 0:
-			e, l.added = l.added[0], l.added[1:]
+			e, l.added[0] = l.added[0], entry{}
+			l.added = l.added[1:]
 		default:
 			return
 		}
@@ -289,7 +292,9 @@ func (q *batchQueue) dropLocked(set places, ls *lines, id ID) {
 
 // takesLocked reports whether id may wait in k while no write loops run, and makes the
 // room it needs, if there is none, by collapsing others, or k. A key that collapsed
-// takes nothing but its namespace's list, and a kind that did nothing.
+// takes nothing but its namespace's list, which waits in its stead; a kind that did
+// takes nothing, not even that, since what makes up for it covers every namespace. A
+// namespace's list needs room for its key alone.
 func (q *batchQueue) takesLocked(k batchKey, id ID) bool {
 	if q.kinds[k.Holder] {
 		return false

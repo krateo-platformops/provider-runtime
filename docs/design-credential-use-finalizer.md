@@ -965,7 +965,8 @@ the queue, and the informers fill it, with every name that any record has had, a
 every object that was held, since the process started. So until the loops run, **what
 waits is bounded**: 65,536 names, more than 10,000 holders' of a few refs each; 32 MiB
 of them, a name costing its text and 256 bytes, since one may be as long as a record
-lets it; and 16,384 keys, of some 0.6 KB each beside their names. Past the names or the
+lets it, which is about what it takes; and 16,384 keys of all holder kinds, of some
+0.6 KB each beside their names. Past the names or the
 bytes, the key whose names take the most is **collapsed**: all that waits of it is
 dropped, what is known to be held too, its namespace's list waits instead (§10.5), and
 what it is added is dropped until the loops have made up for it. Past the keys, the
@@ -988,8 +989,9 @@ index's recheck, which run whatever was dropped:
   and a minute for each; what carries K's finalizer for one of those N, or any N of a
   collapsed kind, is queued, its labels stripped or not, the caches or their lists
   showing it or not. At 1 to 2 KB an object, 10,000 Secrets are 20 pages and 10 to 20 MB
-  on the wire. It is made once for an overflow, however much that collapsed, or twice
-  when a Track ends meanwhile. One that fails is retried with the release loop's
+  on the wire. It is made once for an overflow, however much that collapsed, and again
+  by each Track that ends while the loops run, of a kind that did: of the kinds it
+  protects, for what it has collapsed. One that fails is retried with the release loop's
   backoff, kind by kind, and write loops that end before all succeeded leave it to the
   next, whole: a kind that can never be listed keeps it owed, so each election lists the
   others again.
@@ -1002,7 +1004,7 @@ index's recheck, which run whatever was dropped:
 | outside the caches, with its label, in any namespace | §10.5's lists |
 | LabelScoped, its labels stripped, in any namespace | the list above |
 | PerName, its labels stripped or not | the index's recheck: a GET for each line. Such a kind isn't listed, which its RBAC would refuse (§13) |
-| PerName, and its line is gone (§10.6.6's residual) | **nothing**, until something names it again, as at a restart |
+| PerName, with no line in the index: gone (§10.6.6's residual), or never written, as of a hold made when the kind was LabelScoped | **nothing**, until something names it again. A restart doesn't find it either: its marker label does, or `DisownPrefix` with its name (§10.6.6) |
 | PerNamePoll (not built) | its index, the same way |
 | of a kind that a record names and `Protected` no longer lists | the record, while a cached holder has it |
 | of such a kind, that no record names any more | **nothing**, until something names it again |
@@ -1011,8 +1013,9 @@ index's recheck, which run whatever was dropped:
 informers' first sync, with leader election or without; and the informers' first events
 queue what is held and what the records name. So a process with **more than 65,536 held
 objects and recorded names**, a Secret that two holder kinds name counting for each, or
-more than 16,384 namespaces of holders of one kind, makes that one paged list at
-**each** start, before its leadership or not. It costs no more than that: a page is
+more than 16,384 namespaces of holders, each counted for each of its holder kinds, makes
+that one paged list at **each** start, before its leadership or not. Past the keys it is
+the kind with the most that collapses, whichever made them too many. It costs no more than that: a page is
 dropped once it is read, and the holds it finds are the rescan's.
 
 Who else can make it happen is whoever can edit a holder's record, or a few of them: 15

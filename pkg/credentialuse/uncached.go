@@ -315,9 +315,9 @@ func (s *Shared) recheckParts(ts []*Tracker) []recheckPart {
 // carries a finalizer of ts for one of them, its labels stripped or not, from one
 // list of each such kind's metadata in every namespace, a page at a time. Of a holder
 // kind that collapsed as a whole, it is every namespace's records and finalizers. Lost
-// is a name that no record has any more, of a kind that isn't in Protected. The
-// collapses are settled once all the lists succeeded: write loops that end before that
-// leave them to the next.
+// is a name that no record has any more, of a kind that isn't in Protected, or of a
+// PerName kind whose index doesn't have it. The collapses are settled once all the
+// lists succeeded: write loops that end before that leave them to the next.
 func (s *Shared) collapsedPart(ts []*Tracker) (recheckPart, bool) {
 	var with []*Tracker
 	var kinds []schema.GroupKind
