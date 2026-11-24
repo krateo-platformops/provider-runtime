@@ -66,23 +66,42 @@ type keptWorld struct {
 	home, other string
 	// failA2 names the Target in home whose A2 fails, if any.
 	failA2 atomic.Pointer[string]
+	// invalid counts the record writes refused as invalid, and forgedGets
+	// the GETs of other's Secrets named forged-….
+	invalid, forgedGets atomic.Int64
 }
 
 func newKeptWorld(t *testing.T) *keptWorld {
 	t.Helper()
-	k := &keptWorld{}
-	k.writeRig = newWriteRig(t, env.Config, cu.SharedOptions{}, func(o *cu.Options) {
+	return newKeptWorldWith(t, cu.SharedOptions{}, nil)
+}
+
+// newKeptWorldWith is newKeptWorld with SharedOptions so, and the options
+// change makes.
+func newKeptWorldWith(t *testing.T, so cu.SharedOptions, change func(o *cu.Options)) *keptWorld {
+	t.Helper()
+	k := &keptWorld{home: env.Namespace(t, "kept-home"), other: env.Namespace(t, "kept-other")}
+	k.writeRig = newWriteRig(t, env.Config, so, func(o *cu.Options) {
 		o.Refs = keptRefs
 		o.Protected = []cu.ProtectedKind{{GVK: secretGVK}, {GVK: cutest.TargetGVK, Content: true}}
+		if change != nil {
+			change(o)
+		}
 	}, func(s *cu.Shared) {
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
 			if name := k.failA2.Load(); name != nil && c.Op == "patch" && c.GK.Kind == "Target" && c.Namespace == k.home && c.Name == *name {
 				return apierrors.NewServiceUnavailable("injected")
 			}
+			if c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == k.other && strings.HasPrefix(c.Name, "forged-") {
+				k.forgedGets.Add(1)
+			}
 			return nil
-		}, func(cu.Call, error) {})
+		}, func(c cu.Call, err error) {
+			if c.Op == "patch" && c.GK.Kind == "Widget" && apierrors.IsInvalid(err) {
+				k.invalid.Add(1)
+			}
+		})
 	})
-	k.home, k.other = env.Namespace(t, "kept-home"), env.Namespace(t, "kept-other")
 	createSecret(t, k.other, "x")
 	setSecretConsent(t, k.other, "x", k.home)
 	w := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"secrets": []any{k.other + "/x"}}}}
@@ -233,6 +252,103 @@ func TestAWithdrawalReleasesAKeptRef(t *testing.T) {
 		k.name(t, map[string]any{})
 		k.released(t)
 	})
+}
+
+// annotationCap is the API server's bound on an object's annotations, keys
+// and values together.
+const annotationCap = 256 << 10
+
+// annotate sets one annotation of w.
+func (k *keptWorld) annotate(t *testing.T, key, value string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{key: value}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(k.home).Patch(context.Background(), "w", types.MergePatchType, data, metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A holder's other annotations may fill what the API server allows, so that
+// the withdrawn ref's unheld entry doesn't fit where its record entry did: the
+// hold is dropped all the same (§11.3).
+func TestAWithdrawalReleasesAKeptRefOfAHolderWithFullAnnotations(t *testing.T) {
+	cutest.Require(t, env)
+	k := newKeptWorld(t)
+	k.name(t, map[string]any{"target": "missing"})
+	k.passes(t, 3)
+	used := 0
+	for key, v := range k.widget(t).GetAnnotations() {
+		used += len(key) + len(v)
+	}
+	const pad = "example.com/pad"
+	k.annotate(t, pad, strings.Repeat("x", annotationCap-used-len(pad)))
+	k.passes(t, 2)
+	if !k.recorded(t) {
+		t.Fatalf("the case doesn't keep x while its consent stands: %s", k.keptState(t))
+	}
+	before := k.invalid.Load()
+	setSecretConsent(t, k.other, "x", "")
+	k.released(t)
+	if n := k.invalid.Load() - before; n == 0 {
+		t.Error("the API server refused no record write: the case doesn't fill the annotations")
+	} else {
+		t.Logf("%d record writes refused for their size", n)
+	}
+}
+
+// Whoever can edit a holder writes its record. One that names many Secrets
+// costs no GETs where the caches cover them, and at most 16 a pass where they
+// don't; and a real ref among them is still released once its consent is
+// withdrawn (§11.3).
+func TestAForgedRecordsReads(t *testing.T) {
+	cutest.Require(t, env)
+	for name, tc := range map[string]struct {
+		so      func(t *testing.T) cu.SharedOptions
+		change  func(o *cu.Options)
+		forged  int
+		perPass int64
+	}{
+		"every namespace cached": {so: func(*testing.T) cu.SharedOptions { return cu.SharedOptions{} }, forged: 1500},
+		"not cached": {so: func(t *testing.T) cu.SharedOptions {
+			return cu.SharedOptions{Namespaces: []string{env.Namespace(t, "kept-cached")}}
+		}, forged: 100, perPass: 16},
+		"PerName": {so: func(t *testing.T) cu.SharedOptions {
+			return cu.SharedOptions{IndexNamespace: indexNamespace(t)}
+		}, change: perName, forged: 1500},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k := newKeptWorldWith(t, tc.so(t), tc.change)
+			k.name(t, map[string]any{"refsError": true})
+			k.passes(t, 2)
+			ids := []cu.ID{cu.SecretRef(k.other, "x").ID()}
+			for i := range tc.forged {
+				ids = append(ids, cu.SecretRef(k.other, fmt.Sprintf("forged-%05d", i)).ID())
+			}
+			v, err := cu.EncodeRecord(cu.SortedIDs(ids))
+			if err != nil {
+				t.Fatal(err)
+			}
+			k.annotate(t, cu.AnnotationRefs, v)
+			k.passes(t, 2)
+			passes, gets := k.c.passes.Load(), k.forgedGets.Load()
+			k.passes(t, 5)
+			// A pass may be under way at either reading.
+			passes, gets = k.c.passes.Load()-passes+1, k.forgedGets.Load()-gets
+			if gets > tc.perPass*passes {
+				t.Errorf("%d GETs of forged refs in %d passes, want at most %d a pass", gets, passes, tc.perPass)
+			}
+			if tc.perPass > 0 && gets == 0 {
+				t.Error("no GETs where no cache covers them: the case reads nothing")
+			}
+			if !k.recorded(t) {
+				t.Fatalf("x, with consent, was dropped: %s", k.keptState(t))
+			}
+			setSecretConsent(t, k.other, "x", "")
+			k.released(t)
+		})
+	}
 }
 
 // x's namespace is deleted while a live Widget elsewhere is recorded as its
