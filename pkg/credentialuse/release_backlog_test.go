@@ -66,7 +66,7 @@ func apiAt(t *testing.T, qps float32, slow func(req *http.Request) time.Duration
 	if err != nil {
 		t.Fatal(err)
 	}
-	return clientServer{md: md, mapper: newFakeRig(t).s.c.Mapper, pageTime: 400 * time.Millisecond}
+	return clientServer{md: md, mapper: newFakeRig(t).s.c.Mapper, pageTime: 2 * time.Second}
 }
 
 // A standing backlog of calls in the client's limiter, longer than any read's time,
@@ -74,10 +74,10 @@ func apiAt(t *testing.T, qps float32, slow func(req *http.Request) time.Duration
 // R1's read, its Namespace's, R2's list, and R3.
 func TestAClientsBacklogDelaysARelease(t *testing.T) {
 	srv := apiAt(t, 10, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	var backlog sync.WaitGroup
-	for range 10 { // a second of calls, at any time
+	for range 40 { // four seconds of calls, at any time
 		backlog.Add(1)
 		go func() {
 			defer backlog.Done()
@@ -88,8 +88,8 @@ func TestAClientsBacklogDelaysARelease(t *testing.T) {
 	}
 	r := newRig(t)
 	r.p.srv = srv
-	r.p.readLimit = func(string, ID) time.Duration { return 400 * time.Millisecond }
-	time.Sleep(1200 * time.Millisecond) // the backlog stands
+	r.p.readLimit = func(string, ID) time.Duration { return 2 * time.Second }
+	time.Sleep(time.Second) // the backlog stands
 	s := secretID("ns", "s")
 	res, err := r.p.release(ctx, "ns", []ID{s})
 	if err != nil || !slices.Equal(res.Released, []ID{s}) {

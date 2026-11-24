@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -212,6 +213,34 @@ func TestAConflictsReadIsItsTurnsPastItsTime(t *testing.T) {
 	res, err := r.p.release(context.Background(), "ns", []ID{known, other})
 	if err != nil || len(res.Released) != 2 || len(res.Rest) != 0 {
 		t.Errorf("released %v, rest %v, %v; want both released", res.Released, res.Rest, err)
+	}
+}
+
+// A later round leaves no Namespace for another turn either, however long they take.
+func TestAConflictsNamespacesAreItsTurns(t *testing.T) {
+	r := newRig(t)
+	r.p.turnTime = 2 * time.Second
+	ids := []ID{secretID("a", "s"), secretID("b", "s"), secretID("c", "s")}
+	for _, id := range ids {
+		must(r.m.Create(nsKey(id.Namespace), metav1.ObjectMeta{}))
+		addHeld(r, id)
+		must(r.m.Delete(keyOf(id)))
+	}
+	changed := map[string]bool{}
+	r.p.srv = hookServer{server: r.srv, before: func(_ context.Context, c Call) error {
+		switch {
+		case c.Op == "patch" && !changed[c.Namespace]:
+			changed[c.Namespace] = true
+			_, err := r.m.Patch(secretKey(c.Namespace, c.Name), types.MergePatchType, []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:"e1"}}}`, fNS)))
+			must(err)
+		case c.Op == "get" && c.GK == namespaceGroupKind && changed[c.Name]:
+			time.Sleep(1100 * time.Millisecond) // its second read
+		}
+		return nil
+	}}
+	res, err := r.p.release(context.Background(), "ns", ids)
+	if err != nil || len(res.Released) != 3 || len(res.Rest) != 0 {
+		t.Errorf("released %v, rest %v, %v; want all three released", res.Released, res.Rest, err)
 	}
 }
 

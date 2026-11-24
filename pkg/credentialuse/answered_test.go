@@ -2,6 +2,7 @@ package credentialuse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -10,6 +11,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 )
 
 // get is a call of client for url, under ctx: it returns the protocol's major version.
@@ -105,6 +112,38 @@ func TestAnsweredOfATransportWithoutSigns(t *testing.T) {
 type roundTripper func(*http.Request) (*http.Response, error)
 
 func (f roundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// Each of a client's own attempts has the time: client-go makes one again after a 429,
+// inside the same call, once it has slept and waited in its rate limiter, which isn't a
+// call that isn't answered.
+func TestAnsweredTimesEachAttempt(t *testing.T) {
+	var asked atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		st := apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "s").Status()
+		code := http.StatusNotFound
+		if asked.Add(1) == 1 {
+			st = apierrors.NewTooManyRequests("busy", 1).Status()
+			code = http.StatusTooManyRequests
+			w.Header().Set("Retry-After", "1")
+		}
+		st.APIVersion, st.Kind = "v1", "Status"
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(st)
+	}))
+	defer api.Close()
+	md, err := metadata.NewForConfig(&rest.Config{Host: api.URL, QPS: 1000, Burst: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := clientServer{md: md, mapper: newFakeRig(t).s.c.Mapper}
+	_, err = answered(context.Background(), 400*time.Millisecond, func(ctx context.Context) (*metav1.PartialObjectMetadata, error) {
+		return srv.Get(ctx, secretGroupKind, "ns", "s")
+	})
+	if Classify(err) != ClassNotFound || asked.Load() != 2 {
+		t.Errorf("%v after %d attempts; want the second's answer, that it is missing", err, asked.Load())
+	}
+}
 
 // What comes before the call is sent, as the wait in a client's rate limiter, isn't
 // its time, and sees no deadline; the caller's own end is.
