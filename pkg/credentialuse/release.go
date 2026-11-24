@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,8 +132,53 @@ func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
 	}
 }
 
-// The most objects a batch reads at R1.
-const maxTurnReads = 64
+// What one batch, a turn of its key, covers of the objects that R0 leaves (§6.6):
+// maxTurnReads at most, of which at least minTurnOthers, when there are so many,
+// are ones the caches don't show carrying the finalizer. And none of R1's reads
+// begins once turnReadTime is over, but the first of each sort (turnOf): a client
+// of few requests a second reads fewer than 64, and what it read is decided.
+const (
+	maxTurnReads  = 64
+	minTurnOthers = 16
+	turnReadTime  = 10 * time.Second
+)
+
+// readTime is turnReadTime, unless a test sets its own.
+func (p *protocol) readTime() time.Duration {
+	if p.turnTime != 0 {
+		return p.turnTime
+	}
+	return turnReadTime
+}
+
+// turnOf splits todo into what this turn reads, in the order it does, and the
+// rest. Those that shown says the caches show carrying the finalizer are read
+// first, since they are the likely releases; but the others may be real holds
+// too, as outside the caches, so they have a part in every turn that no number of
+// the former can take. Each sort is in todo's order, that of waiting; first are
+// the first of each, which the turn reads however long its reads take. So every
+// turn decides the one of each sort that has waited longest, or fails it: an
+// object waits for no more turns than objects were queued before it, whatever is
+// queued since, and whichever sort the caches say it is of.
+func turnOf(todo []ID, shown func(ID) bool) (now, rest []ID, first map[ID]bool) {
+	var carry, others []ID
+	for _, id := range todo {
+		if shown(id) {
+			carry = append(carry, id)
+		} else {
+			others = append(others, id)
+		}
+	}
+	o := min(len(others), max(minTurnOthers, maxTurnReads-len(carry)))
+	c := min(len(carry), maxTurnReads-o)
+	first = map[ID]bool{}
+	for _, sort := range [][]ID{carry[:c], others[:o]} {
+		if len(sort) > 0 {
+			first[sort[0]] = true
+		}
+	}
+	return slices.Concat(carry[:c], others[:o]), slices.Concat(carry[c:], others[o:]), first
+}
 
 // r1Read is one protected object as R1 read it.
 type r1Read struct {
@@ -142,9 +188,11 @@ type r1Read struct {
 }
 
 // release runs one batch for holder kind K and holder namespace n, over the
-// protected objects pending there (§6.2 R0 to R3). It returns an error when
-// some object couldn't be decided: Failed, which the caller requeues with
-// backoff. Every object it decided is in the result either way.
+// protected objects pending there (§6.2 R0 to R3), in the order they have waited.
+// R0 covers them all, and what it leaves is bounded (turnOf): the rest, and what
+// the end of the turn's time, or of ctx, left unread, is Rest. It returns an error when some object
+// couldn't be decided: Failed, which the caller requeues with backoff. Every
+// object it decided is in the result either way, and none of the rest is.
 func (p *protocol) release(ctx context.Context, n string, pending []ID) (ReleaseResult, error) {
 	var res ReleaseResult
 	f, err := FinalizerName(p.holder, n)
@@ -170,10 +218,17 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 	cachedUsers := map[ID]cachedUse{}
 	absent := p.kindAbsent != nil && p.kindAbsent()
 	var todo []ID
-	for _, id := range SortedIDs(pending) {
+	for _, id := range pending {
+		if _, again := cachedUsers[id]; again {
+			continue
+		}
+		if ctx.Err() != nil {
+			res.Rest = append(res.Rest, id)
+			continue
+		}
 		var u cachedUse
 		if !absent {
-			u = p.fastKeep(id, n, records)
+			u = p.fastKeep(id, n, f, records)
 		}
 		cachedUsers[id] = u
 		if !u.keep {
@@ -182,6 +237,8 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			res.Kept = append(res.Kept, Kept{P: id, Why: KeptUserDeleting, Users: u.users, DeletingUsers: u.deletingUsers})
 		}
 	}
+	todo, rest, first := turnOf(todo, func(id ID) bool { return cachedUsers[id].carries })
+	res.Rest = append(res.Rest, rest...)
 
 	builtFrom := map[ID]string{} // the resourceVersion each failed release was built from
 	for round := 0; len(todo) > 0; round++ {
@@ -192,7 +249,12 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 
 		// R1. Each pending object, live.
 		var live []r1Read
+		window, closeWindow := context.WithTimeout(ctx, p.readTime())
 		for _, id := range todo {
+			if ctx.Err() != nil || !first[id] && window.Err() != nil {
+				res.Rest = append(res.Rest, id)
+				continue
+			}
 			m, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 			switch Classify(err) {
 			case ClassNone:
@@ -245,6 +307,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			}
 			live = append(live, r)
 		}
+		closeWindow()
 		if len(live) == 0 {
 			break
 		}
@@ -362,6 +425,9 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			}
 		}
 		todo = next
+		if len(todo) > 0 {
+			first = map[ID]bool{todo[0]: true}
+		}
 	}
 	return res, errors.Join(errs...)
 }
@@ -383,14 +449,16 @@ type cachedUse struct {
 	users, deletingUsers []types.NamespacedName
 	// deleting: the cached object is being deleted.
 	deleting bool
+	// carries: the cached object carries the finalizer.
+	carries bool
 	// keep: the cache already settles the batch for the object.
 	keep bool
 }
 
 // fastKeep is R0 for one object (§6.2): it reports the cached users of P in
-// n, and whether the cache already settles the batch for P. A stale cache can
-// only keep a hold longer.
-func (p *protocol) fastKeep(id ID, n string, records *batchRecords) cachedUse {
+// n, whether the cached P carries finalizer f, K's for n, and whether the cache
+// already settles the batch for P. A stale cache can only keep a hold longer.
+func (p *protocol) fastKeep(id ID, n, f string, records *batchRecords) cachedUse {
 	var u cachedUse
 	cached, ok := p.views.Protected(id)
 	for _, h := range p.views.HoldersNaming(id, n) {
@@ -406,6 +474,7 @@ func (p *protocol) fastKeep(id ID, n string, records *batchRecords) cachedUse {
 		return u
 	}
 	u.deleting = cached.DeletionTimestamp != nil
+	u.carries = hasFinalizer(cached, f)
 	if !u.deleting {
 		u.keep = len(u.users) > 0
 	} else {

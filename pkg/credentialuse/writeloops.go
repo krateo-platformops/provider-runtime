@@ -336,11 +336,13 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 	}
 }
 
-// releaseBatch runs one batch (§6.2 R0 to R3), and requeues its objects as its
-// result says: those that asked, each at its time, as at a grace's end; those
-// whose release must wait (§6.4), each when its wait ends; those it couldn't
-// decide, and only those, with backoff, or at once, for the next write loops,
-// when ctx ended under it. A namespace's list that fails is retried so too, and
+// releaseBatch runs one batch (§6.2 R0 to R3), a turn of its key, and requeues
+// its objects as its result says: those that asked, each at its time, as at a
+// grace's end; those whose release must wait (§6.4), each when its wait ends;
+// those it couldn't decide, and only those, with backoff, or at once, for the next
+// write loops, when ctx ended under it; and those it didn't get to where they were
+// in the queue, behind the other keys' turns, with nothing of theirs settled,
+// failed or waited for. A namespace's list that fails is retried so too, and
 // doesn't hold up what there is.
 //
 // A batch that fillAll marks, from an Add with no objects, also covers every
@@ -374,18 +376,22 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		}
 	}
 	if fill {
-		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return id == fillAll })
 		held, err := s.heldIn(ctx, t, k.Namespace)
 		if err != nil {
 			fail(err, fillAll)
 		}
-		ids = SortedIDs(append(ids, held...))
-		ids = slices.Compact(ids)
+		ids = expand(ids, held)
 	}
 	res, err := t.proto.release(ctx, k.Namespace, ids)
 	if f := s.hooks.released; f != nil {
 		f(&res)
 	}
+	s.queue.PutBack(k, res.Rest...)
+	rest := map[ID]bool{}
+	for _, id := range res.Rest {
+		rest[id] = true
+	}
+	ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return rest[id] }) // from here on, the turn's
 	if err == nil && len(res.Failed) > 0 {
 		err = errors.New("credential-use: a batch left objects undecided, and no error says why")
 	}
@@ -426,6 +432,31 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	if len(errs) > 0 {
 		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), errors.Join(errs...))
 	}
+}
+
+// expand is ids with the namespace's objects, held, where fillAll stands among
+// them, each once, where it first is. None is the whole namespace.
+func expand(ids, held []ID) []ID {
+	if len(ids) == 0 {
+		return held
+	}
+	out, seen := make([]ID, 0, len(ids)+len(held)), map[ID]bool{}
+	add := func(of ...ID) {
+		for _, id := range of {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	for _, id := range ids {
+		if id == fillAll {
+			add(held...)
+		} else {
+			add(id)
+		}
+	}
+	return out
 }
 
 // retryBatch requeues objects ids of batch k after err: at once, for the next
