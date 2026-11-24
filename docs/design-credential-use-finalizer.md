@@ -4630,9 +4630,8 @@ on krateo-057:
   "a pruner whose CRD cache is behind", the violation or the landing needs
   one or two, so only DEEP covers what those controls guard.
 - **What they cost**, measured at 7fd7022 with CI's bounds on one VM size
-  (n2-standard-4), not in CI: the kill 436s to 457s over two runs (900s at
-  ae2012d, of which the 481s of the case with two Disown processes and the
-  records first are under DEEP only since; not measured without it yet), Disown
+  (n2-standard-4), not in CI: the kill 436s to 457s over two runs (465s at
+  5a72b68), Disown
   over the index 222s, the late hold 76s (147s at 5a72b68, of which 64s are the
   cases of the pruner's rules, new since), the flag 46s, the drops 2s. Every
   model together took 3,970s, 66 minutes, of which these new ones are about
