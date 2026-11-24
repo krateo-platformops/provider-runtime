@@ -153,7 +153,7 @@ MUTANTS = [
     ("an unrecorded read isn't counted", CA,
      [("\tsinkMetrics{t}.UnrecordedReads(kindLabel(t.gk))\n", "")]),
     ("an unnamed read passes the cover check", RT + "credentialuse.go",
-     [("\t\tif !named[id] {", "\t\tif false && !named[id] {")]),
+     [("\t\tif _, ok := named[id]; !ok {", "\t\tif _, ok := named[id]; false && !ok {")]),
     ("a ref that resolves to nothing passes the cover check", RT + "credentialuse.go",
      [("\t\t\tif kerrors.IsNotFound(err) {\n\t\t\t\tt.Errorf(", "\t\t\tif kerrors.IsNotFound(err) {\n\t\t\t\t_ = fmt.Sprintf(")]),
     # docs/design-tracing.md §4.5: the credentialuse.acquire event (the user's decision, 2026-11-22).
