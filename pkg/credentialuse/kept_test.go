@@ -14,8 +14,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	testingclock "k8s.io/utils/clock/testing"
 
@@ -1438,6 +1440,53 @@ func TestCacheLacks(t *testing.T) {
 	}
 	turns, retries := left()
 	t.Errorf("%d holders' turns and %d retries kept after it went", turns, retries)
+}
+
+// TestAHolderGoneWithoutAForgetLeavesNothing: one that was never established is
+// deleted with no pass that forgets it.
+func TestAHolderGoneWithoutAForgetLeavesNothing(t *testing.T) {
+	h := holderObject("team", "h", secretID("out", "kept"), secretID("unreadable", "s"))
+	h.Finalizers = nil
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}},
+		namespaceObject("in"), namespaceObject("out"), namespaceObject("team"), namespaceObject("unreadable"),
+		plainSecret("out", "unconsented"), h)
+	r.md.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if a.GetNamespace() == "unreadable" {
+			return true, nil, apierrors.NewServiceUnavailable("overloaded")
+		}
+		return false, nil, nil
+	})
+	// Two named refs: one is reported not held, one has a backoff.
+	r.setRefs("h", SecretRef("out", "unconsented"), SecretRef("unreadable", "s"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	obj, err := r.md.Tracker().Get(widgetsGVR, "team", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.Acquire(context.Background(), obj.(*metav1.PartialObjectMetadata).DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	left := func() (turns, backoffs, reported int) {
+		p := tr.proto
+		p.gateTurns.mu.Lock()
+		defer p.gateTurns.mu.Unlock()
+		p.backoff.mu.Lock()
+		defer p.backoff.mu.Unlock()
+		p.reported.mu.Lock()
+		defer p.reported.mu.Unlock()
+		return len(p.gateTurns.at), len(p.backoff.at), len(p.reported.m)
+	}
+	if turns, backoffs, reported := left(); turns != 1 || backoffs != 2 || reported != 1 {
+		t.Fatalf("%d holders' turns, %d backoffs and %d reported refs kept before it goes; want 1, the gate's and a named ref's, and 1", turns, backoffs, reported)
+	}
+	if err := r.md.Tracker().Delete(widgetsGVR, "team", "h"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "what is kept for it to go", func() bool {
+		turns, backoffs, reported := left()
+		return turns == 0 && backoffs == 0 && reported == 0
+	})
 }
 
 // TestCacheLacksPerName: a PerName kind's caches are the watches of the index

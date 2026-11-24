@@ -245,10 +245,12 @@ func (h holderHandler) OnDelete(obj any) {
 	}
 	h.t.ver.holderEvent(m.UID, nil, h.now())
 	h.t.proto.written.forget(m.UID)
-	// A holder gone without a Forget leaves nothing behind either: whoever
-	// can edit one names the refs these are kept for (§11.3).
+	// A holder gone without a Forget, as one that was never established,
+	// leaves nothing behind either: its UID never comes back, and whoever can
+	// edit one names the refs these are kept for (§11.3).
 	h.t.proto.backoff.forget(m.UID)
 	h.t.proto.gateTurns.forget(m.UID)
+	h.t.proto.reported.forget(m.UID)
 	h.t.unrecorded.forget(m.UID)
 	h.t.degradedLogged.forget(m.UID)
 	h.t.misplaced.forget(m.UID)
