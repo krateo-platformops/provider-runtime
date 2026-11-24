@@ -309,6 +309,9 @@ func TestDisownSaysItCantReadAnIndexedKind(t *testing.T) {
 			})
 		}
 		tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+		// A kind never tracked before: a missing index of another is lost, and
+		// has its own report (§7.4).
+		tr.idx.setFresh(!st.exists)
 		if !tr.isPerName(secretGroupKind) || len(tr.disownPerName(parseDisown("all"))) != 1 {
 			t.Fatal("the rig's kind isn't PerName")
 		}

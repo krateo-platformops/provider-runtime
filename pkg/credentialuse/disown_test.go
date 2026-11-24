@@ -28,6 +28,30 @@ import (
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
 
+// A lost index, missing or without the marker, has one report, its own: not
+// also that of an index that can't be read (§7.4).
+func TestALostIndexHasOneReport(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range map[string]*memStore{"missing": {}, "without the marker": {exists: true}} {
+		r := newFakeRig(t)
+		tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// As a PerName kind, with an index of the test's own.
+		tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
+		tr.idx = testIndex(st, r.s.newServer())
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		var got []string
+		for len(r.events.Events) > 0 {
+			got = append(got, <-r.events.Events)
+		}
+		if len(got) != 1 || !strings.Contains(got[0], EventIndexLost) {
+			t.Errorf("%s: events %q, want one %s", name, got, EventIndexLost)
+		}
+	}
+}
+
 func TestParseDisown(t *testing.T) {
 	secret := schema.GroupKind{Kind: "Secret"}
 	target := schema.GroupKind{Group: "core.krateo.io", Kind: "KubernetesTarget"}

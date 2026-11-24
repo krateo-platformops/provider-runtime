@@ -591,7 +591,7 @@ While a kind isn't served:
 | R2, when the **holder** kind isn't served | the list fails, and the batch is retried. It is never "no users": a live CRD read could tell, and isn't made yet |
 | the index's checks (§10.6) | the line is kept, or put back, and the check is retried |
 | the janitor | retried with backoff |
-| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or what it can't read as a whole (a LabelScoped kind, the holders, or the index): its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
+| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or what it can't read as a whole (a LabelScoped kind, the holders, or the index): its kind isn't served. A strip that fails is left for the next pass, and so is the record that names the object. A switch that can't be read fails the hold |
 | `DisownPrefix` | reports the failure, and goes on with the rest |
 
 **The cost, and the way out.** A protected kind whose CRD is removed for good
@@ -628,11 +628,11 @@ finalizers left on objects that a CRD installed again would serve.
   refuses a GVK it can't map (§7.3), so a process that still names the old one
   doesn't start.
 - **A switch that lists the other kinds** lets Disown settle for them, in both
-  modes: the kind is then neither counted nor stripped (§7.4), so
-  `disown-settled` is `true` with the finalizers its objects have left on them.
+  modes: the kind is then neither counted nor stripped (§7.4), so it settles
+  with the finalizers its objects have left on them.
 - **Or say it is gone**, once the objects are. *PerName:* vouch for each object
   (§10.6.6): Disown skips what it can't read of a vouched object, so it
-  settles, and a prune drops the line. *LabelScoped:* no vouch applies; only
+  settles, and then drops the line. *LabelScoped:* no vouch applies; only
   the next way settles Disown with the switch at `all`.
 - **And take the kind out of the tracker's `Protected`, and restart**, in this
   order: stop naming it, let the holders' passes drop it from their records,
@@ -1989,7 +1989,8 @@ else changed in between.
   clears `disown-settled`, and is never read as zero (§10.6.5).
 - **The holders' list, a LabelScoped kind's, or the index, when it can't be
   read,** keeps the count `"unknown"`, and the same event and a log line say
-  which, with the failure's class and what to do about it.
+  which, with the failure's class and what to do about it. A lost index
+  (below) has its own event, and not this one too.
 - **An object in the index or a record that can't be read** keeps the count
   `"unknown"` too, since it may carry K's finalizer (the user's decision,
   2026-11-22). Under `resourceNames` RBAC that is a Secret outside the
