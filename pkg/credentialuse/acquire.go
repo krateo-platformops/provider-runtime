@@ -377,8 +377,8 @@ func isBuiltin(gk schema.GroupKind) bool { return gk.Group == "" }
 
 // acquire runs A1 and A2 for holder obj, which the caller has just read, and
 // refs, which RefsFunc returned for it (§6.2), and follows their chains
-// (§9.1). Production refuses a list with a chain in it, whole, before
-// anything else (refuseChains); only tests set followChains. It runs on every
+// (§9.1). Production refuses a list with a chain in it, whole, before it looks
+// at any ref (refuseChains); only tests set followChains. It runs on every
 // pass, deletion passes included, before anything reads a protected object.
 //
 // The chain is followed level by level, and each hop is held before it is
@@ -409,13 +409,6 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		}
 		return a, nil
 	}
-	// Chains are refused first (§9, "Not in this release"): the pass reads
-	// and writes nothing, so an established holder's record, and its holds
-	// with it, stay as they are. Refs are found inside another only by its
-	// Next, so a list that passes is the whole chain: one level, all direct.
-	if err := p.refuseChains(refs); err != nil {
-		return fail(err, reasonChainsRefused)
-	}
 	maxDepth := p.maxDepth
 	if maxDepth == 0 {
 		maxDepth = DefaultMaxDepth
@@ -426,6 +419,17 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	recorded, err := p.gateRecorded(ctx, obj, &a)
 	if errors.Is(err, ErrHolderConflict) {
 		return a, err
+	}
+	// Then chains are refused (§9, "Not in this release"), before any ref is
+	// looked at: the pass reads and writes nothing more, so an established
+	// holder's record, and its holds with it, stay as the gate leaves them.
+	// Not before the gate: it looks at no ref, and a holder that could keep it
+	// from running, by gaining a chain, would keep what its record names held
+	// against the owner's withdrawal. Refs are found inside another only by
+	// its Next, so a list that passes is the whole chain: one level, all
+	// direct.
+	if refused := p.refuseChains(refs); refused != nil {
+		return fail(errors.Join(refused, err), reasonChainsRefused)
 	}
 	if err != nil {
 		return fail(err, "Announce")

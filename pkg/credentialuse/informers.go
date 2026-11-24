@@ -253,6 +253,7 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.proto.reported.forget(m.UID)
 	h.t.unrecorded.forget(m.UID)
 	h.t.degradedLogged.forget(m.UID)
+	h.t.refused.forget(m.UID)
 	h.t.misplaced.forget(m.UID)
 	h.t.proto.conflicts.forget(m.UID)
 	h.enqueue(m, nil)

@@ -45,10 +45,11 @@ import (
 // system for mg: the Secrets, and the objects that lead to them (§7.5, §9).
 //
 // In this release no ref it returns may have a Next: name each object as a
-// ref of its own. A list with a Next is refused before anything is written,
-// with credentialuse.ErrChainsNotSupported, which is an error like any other
-// below: a new object doesn't connect, an established one proceeds and keeps
-// the holds it has (§9, "Not in this release").
+// ref of its own. A list with a Next is refused whole, with
+// credentialuse.ErrChainsNotSupported, which is an error like any other below:
+// a new object doesn't connect, and an established one proceeds and keeps the
+// holds it has, but nothing new is held, its direct refs included (§9, "Not in
+// this release").
 //
 // It is discovered on the connecter given to WithExternalConnecter or
 // WithExternalConnectDisconnecter, as the rate-limit keyers are. It lives on

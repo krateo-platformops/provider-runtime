@@ -62,6 +62,10 @@ type Tracker struct {
 	// with an empty ref: §8 logs it once per object, until a pass that
 	// isn't degraded, or Forget, clears it.
 	degradedLogged *reportedSet
+	// refused are the holders whose refused chain was reported, event and log
+	// line both, keyed and cleared as degradedLogged is. It is apart, so that
+	// neither that nor another failure hides the other.
+	refused *reportedSet
 	// misplaced are the holders in the index namespace whose refusal was
 	// logged, once each (§10.6.1).
 	misplaced *reportedSet
@@ -204,6 +208,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		unrecorded: newReportedSet(),
 
 		degradedLogged: newReportedSet(),
+		refused:        newReportedSet(),
 		misplaced:      newReportedSet(),
 		sink:           sinksOf(o),
 	}
@@ -487,19 +492,29 @@ func (t *Tracker) heldDeleting(id ID, namespace string) {
 // throttled by the event sink, and logs it once per holder while it stays
 // degraded (§8): a pass that isn't degraded, or Forget, clears that, so the
 // next degraded pass logs again.
+//
+// A refused chain's event is recorded once too, with its log line, and cleared
+// the same way: it lasts until the provider or the object changes, so a
+// throttle alone would record one per holder every eventThrottle, for ever.
+// The counter counts every pass.
 func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
 	key := consentKey{holder: obj.GetUID()}
 	if !a.Degraded {
 		t.degradedLogged.clear(key)
+		t.refused.clear(key)
 		return
 	}
 	if a.Err == nil {
 		return
 	}
+	refused := errors.Is(a.Err, ErrChainsNotSupported)
+	if refused && !t.refused.first(key) {
+		return
+	}
 	if ro, ok := obj.(runtime.Object); ok {
 		t.s.events.record(ro, "Warning", EventDegraded, a.Err.Error())
 	}
-	if !t.degradedLogged.first(key) {
+	if !refused && !t.degradedLogged.first(key) {
 		return
 	}
 	t.warn("credential-use: the acquire failed for an established holder, which proceeds",
@@ -519,6 +534,7 @@ func (t *Tracker) BeforeEstablish(ctx context.Context, obj metav1.Object, a Acqu
 // (§7.2 item 4). It is mandatory. It reports whether anything changed.
 func (t *Tracker) Forget(obj metav1.Object) bool {
 	t.degradedLogged.forget(obj.GetUID())
+	t.refused.forget(obj.GetUID())
 	t.missing.set(types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, nil, t.s.clock.Now(), t.o.ProbeInterval)
 	return t.proto.forget(obj)
 }

@@ -22,8 +22,8 @@ the protocol's code (§17, "Revision 17"). Revision 18 amends the index's
 dropped lines and Disown's settling (§17, "Revision 18").
 
 **The first tag holds direct refs only** (the user's decision, 2026-11-24).
-A ref with a `Next`, a chain, is refused with a clear error, before any
-write. §9 says what that looks like and why; the chain design in §9 and
+A ref with a `Next`, a chain, is refused with a clear error, before anything
+is held or announced. §9 says what that looks like and why; the chain design in §9 and
 §10.4 is built and tested, and ships in the next release.
 
 §17 maps every review item to the section that resolves it, and §18 holds
@@ -2427,7 +2427,8 @@ per key. In order:
      Connect as today. It never gets `MustNotConnect`. An A2 rejected as
      Deleting (422) is Degraded in the same way (§11.4).
    - **A ref with a `Next`** is such an error in this release
-     (`ErrChainsNotSupported`, §9), for both, before A1.
+     (`ErrChainsNotSupported`, §9), for both, before A1, and after the gate
+     of what the record names (§11.3). Its event is recorded once (§9).
    - **`a.Pending` and `a.RetryAfter`** (IP2). In the RBAC-propagation
      window of §10.7.2 (`a.Pending`), the pass stops before Connect, new and
      established holders alike, writes nothing, and
@@ -2480,29 +2481,44 @@ chain code stays, and stays tested, but nothing in production reaches it:
   be named, so it stays unheld, as before credential-use. `CredentialRefs`
   must leave it out, and Connect reads the intermediate object itself, as it
   does today, because `Resolved` has nothing. §11.9's checks then report that
-  read, rightly: `AssertCredentialRefsCover` fails on a fixture whose Connect
-  makes it, and `CredentialUseCheckingReader` logs and counts it.
+  read, rightly: `CredentialUseCheckingReader` logs and counts it, and
+  `AssertCredentialRefsCover` fails on a fixture whose Connect makes it. **So
+  the helper can't be used for such a fixture in this release**: leave the
+  fixture out, and test its refs directly. A list of reads to allow would be
+  an exported argument that the next release makes useless.
 - **What is refused.** The whole list, its direct refs with it, when any ref
   in it has a `Next`: a Secret's, a `Guaranteed` ref's (§9.3), one in another
   namespace, one of a kind the Disown switch covers, or the second of two
   refs to one object. Holding the direct refs alone would write a record
   that drops what a chain held, and would look like protection. A
   `Guaranteed` ref without a `Next` is accepted, as before.
-- **Where.** In the protocol's `acquire`, first of all: before A1 and A2, and
-  before the first read. Every pass of every runtime goes through it, and it
-  is the one place that follows a `Next`. A list that passes has no `Next`,
-  so no pass ever finds a ref that way: nothing deeper is left to refuse.
-  `BeforeEstablish` refuses the same refs, and a pass that was refused, so
-  that nothing reaches A2 that way either. `AssertCredentialRefsCover`
-  (§11.9) fails a connecter that names one.
+- **Where.** In the protocol's `acquire`, before it looks at any ref: before
+  A1 and A2, and before any read that a ref asks for. Every pass of every
+  runtime goes through it, and it is the one place that follows a `Next`. A
+  list that passes has no `Next`, so no pass ever finds a ref that way:
+  nothing deeper is left to refuse. `BeforeEstablish` refuses the same refs,
+  and a pass that was refused, so that nothing reaches A2 that way either.
+  `AssertCredentialRefsCover` (§11.9) fails a connecter that names one.
+- **What runs before it: the gate of what the record names** (§11.3), which
+  begins every pass, whatever the pass comes to. It asks about the refs the
+  record names in another namespace, never about the refs `RefsFunc` named,
+  so a chain makes no call of its own. The one write it may make drops a ref
+  whose target withdrew consent. **A holder whose record names no such ref, as
+  a new one's, makes no call at all.** Whoever edits a holder can write its
+  record, and that costs a refused pass what it costs any pass: §11.3's 16
+  refs and 5s, and no more. Were the refusal first, a tenant could set the
+  field that makes the provider return a `Next`, and keep another namespace's
+  Secret held against its owner's withdrawal (found in the review of the
+  refusal).
 - **It isn't an option.** Only this repository's tests can turn chains on,
   through an unexported field. No option, environment variable or exported
   function does.
 
 | The holder | What it sees |
 |---|---|
-| New (no owner finalizer) | `MustNotConnect`. Nothing written, no Connect, no finalizer. Synced=False/ReconcileError with the error, which names the ref; Ready=NotObserved; backoff |
-| Established | `Degraded`. Nothing written: its record, its `unheld` list and its holds stay as they are. A release reads that same record, so it takes only what §5 always lets it take. `CredentialUseDegraded`, one log line, the counter. It connects as today, and `Resolved` finds nothing |
+| New (no owner finalizer), with no record | `MustNotConnect`. No call by the core, no Connect, no finalizer. Synced=False/ReconcileError with the error, which names the ref; Ready=NotObserved; backoff |
+| New, with a record of an earlier pass | The same, after the gate |
+| Established | `Degraded`. Nothing written but the gate's drop, if any: the rest of its record, its `unheld` list and its holds stay as they are. A release reads that same record, so it takes only what §5 always lets it take. `CredentialUseDegraded` and a log line once (below), and the counter every pass, under the reason `ChainsNotSupported`. It connects as today, and `Resolved` finds nothing |
 | Established and being deleted | The same, then its external Delete runs, and `Forget` removes the record in the write that removes its finalizer, which releases what it held |
 | Being deleted, without an owner finalizer | provider-runtime doesn't acquire on it (§8 step 5), so nothing is refused |
 | It names no `Next` again | The next pass writes the exact record, holds what it names, and releases the rest |
@@ -2510,13 +2526,20 @@ chain code stays, and stays tested, but nothing in production reaches it:
 What an established holder loses while it is refused is upkeep, not holds: a
 ref that is new, or an object recreated since, isn't held, a lost finalizer
 isn't written again, and the missing-ref prober forgets the holder (§10.3),
-since no pass of it could hold what the prober finds. **A withdrawn consent
-isn't acted on either** (§11.3): the gate runs after the refusal, so a hold
-on an object in another namespace, made directly before the refs gained a
-`Next` or through a chain under an older build, lasts until the holder is
-deleted or its refs name no `Next`. Every fail-open pass keeps its holds so, but this one
-lasts until the provider or the object changes, not until an error passes.
-Its way out is the same as any hold's: §5's grace, or Disown (§7.4).
+since no pass of it could hold what the prober finds. A withdrawn consent is
+acted on, as in every pass (above).
+
+**The event is recorded once per holder**, with the log line, until a pass of
+it isn't degraded, or it is forgotten. This state lasts until the provider or
+the object changes, so the event throttle alone would let one through per
+holder every 10 minutes for as long: 17 a second for 10,000 holders. A restart
+records each once more. The counter counts every pass. A new holder's message
+is its condition's, as for any failure.
+
+**Disown (§7.4) is no remedy for a refused new holder**: it doesn't connect
+while its refs have a `Next`, whatever the switch covers. An established one
+isn't in Disown's way: the loop strips its record and the finalizers, a
+refused pass writes neither back, and the switch settles.
 
 **A holder that held through a chain under an older build** is the
 established row, or the new one if it hadn't got its finalizer. No release
@@ -4012,7 +4035,8 @@ because the holder will never read it again. The holder's update event maps
 the dropped refs to a release batch. In the next release, a ref reached
 through `Next` changes the same way when an intermediate changes (§9.2). In
 this one, an update that adds a ref with a `Next` is refused whole (§9): the
-record, and so the holds, stay those of the refs before it.
+record, and so the holds, stay those of the refs before it, but for what
+§11.3's gate drops.
 
 ### 11.2 A Secret that doesn't exist yet
 
@@ -4166,8 +4190,8 @@ them, for as long as the holder stayed so; and with the target's namespace
 being deleted, its teardown waited on a holder that no longer named the
 target, and the owner's recovery, withdrawing consent, did nothing. So every
 pass **begins** by gating each ref in another namespace that the record names,
-before its refs are named and whatever it then comes to, a `Refs` error and a
-holder in the index namespace included:
+before its refs are named and whatever it then comes to, a `Refs` error, a
+refused chain (§9) and a holder in the index namespace included:
 
 - **a cached yes serves**, so it costs no call in the steady state. That holds
   on a deleting pass too, for the refs the pass doesn't name: their withdrawal
@@ -4848,16 +4872,19 @@ Doc text for consumers:
 > **This release holds direct refs only.** Every ref your `CredentialRefs`
 > (or `RefsFunc`) returns must have a nil `Next`: name each Secret, and each
 > other object Connect reads, as a ref of its own. If any ref has a `Next`,
-> the whole list is refused with `credentialuse.ErrChainsNotSupported`, before
-> anything is written: a new object doesn't connect and reports
-> `Synced=False`, and an existing one keeps working, and keeps what it
-> already holds, with a `CredentialUseDegraded` event. A Secret whose name is
-> only inside another object can't be named, so leave it out: it isn't
-> protected, as before. Read that other object in Connect as you do today;
-> `credentialuse.Resolved` returns nothing. A later release follows `Next`,
-> and will accept it. Run `reconcilertest.AssertCredentialRefsCover` in your
-> tests: it fails on a `Next`, and on a Secret that Connect reads and the
-> refs don't name.
+> the whole list is refused with `credentialuse.ErrChainsNotSupported`: a new
+> object doesn't connect and reports `Synced=False`; an existing one keeps
+> working, with one `CredentialUseDegraded` event, and keeps what it already
+> holds, but **nothing new is held, its direct refs included**. On an upgrade
+> to credential-use, an existing object has no record yet, so it holds
+> nothing. Disown doesn't let a refused new object connect. A Secret whose
+> name is only inside another object can't be named, so leave it out: it
+> isn't protected, as before. Read that other object in Connect as you do
+> today; `credentialuse.Resolved` returns nothing. A later release follows
+> `Next`, and will accept it. Run `reconcilertest.AssertCredentialRefsCover`
+> in your tests: it fails on a `Next`, and on a Secret that Connect reads and
+> the refs don't name, so it can't be used for a fixture whose Connect reads
+> a Secret through another object.
 >
 > If your connecter implements `CredentialRefsProvider` (or your runtime
 > calls `credentialuse`), grant, in a ClusterRole bound with a
@@ -4949,9 +4976,11 @@ on krateo-057:
 - A chain Widget → Target → Secret, with the Target deleted first in the
   teardown; a re-pointed Target enqueues its holders. These, and every other
   test of a chain, set the tests' switch (§9).
-- A chain is refused as production builds a tracker (§9): no call at all,
-  for a new, an established and a deleting holder, wherever in the list the
-  `Next` is; a holder keeps what it held and can finish its deletion; a list
+- A chain is refused as production builds a tracker (§9): no call at all for
+  a record that names no ref in another namespace, for a new, an established
+  and a deleting holder, wherever in the list the `Next` is; a recorded ref
+  elsewhere is gated all the same, and its withdrawal releases it, with the
+  refused chain among the cases of §11.3's gate; a holder keeps what it held and can finish its deletion; a list
   without a `Next` is the whole chain; no production code sets the switch.
 - `kubectl replace`-style stripping of the finalizer and label enqueues
   holders, and they write again.

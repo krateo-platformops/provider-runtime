@@ -1271,9 +1271,14 @@ unchanged.
 - `ErrChainsNotSupported`, exported, which a caller matches with
   `errors.Is` on `Acquired.Err`. It says what to do, and the error that
   wraps it names the ref's kind, namespace and name.
-- **Refused in the protocol's `acquire`, first of all**, before the first
-  read and so before A1 and A2: `refuseChains` over the whole list
-  `RefsFunc` returned. That is the only function that follows a `Next`, and
+- **Refused in the protocol's `acquire`, before it looks at any ref**, and so
+  before A1 and A2: `refuseChains` over the whole list `RefsFunc` returned,
+  **just after the gate of what the record names** (§11.3), which begins
+  every pass, this one too. That order is the consent fix's and the review's:
+  the other way round, a holder whose refs gain a chain keeps another
+  namespace's Secret held against its owner's withdrawal. The gate never
+  looks at the refs, so a holder that records no ref elsewhere, as a new one,
+  makes no call. `acquire` is the only function that follows a `Next`, and
   every runtime's pass goes through it. It isn't in `Track`, which sees a
   function, not refs; nor only in the reconciler's adapter, which outside
   runtimes don't use; nor in `Tracker.Acquire`, whose failures leave the
@@ -1282,8 +1287,12 @@ unchanged.
 - `BeforeEstablish` refuses the same, so nothing reaches A2 through an
   `Acquired` built by hand, and a refused holder that lost its finalizer
   mid-pass isn't established again.
+- **Its reports:** `credentialuse_degraded_total` has a reason of its own for
+  it, `ChainsNotSupported`, every pass; the event and the log line are
+  recorded once per holder, since it doesn't pass by itself.
 - `AssertCredentialRefsCover` fails on a ref with a `Next`, or a provider's
-  test would pass and its holders then not connect.
+  test would pass and its holders then not connect. It can't be used for a
+  fixture whose Connect reads a Secret through another object (§9).
 - **The switch** is the protocol's unexported `followChains`, copied from the
   Shared's test hooks, whose zero value refuses. `export_test.go` sets it.
   `reconcilertest` has its own unexported `followChains`. A test checks that

@@ -80,6 +80,17 @@ func keptCases() map[string]keptCase {
 			return []Ref{s}
 		}},
 		"a ref of no name": {fails: true, refs: func(*rig, *fakeContents) []Ref { return []Ref{SecretRef("ns", "")} }},
+		// As production: a chain is refused (§9, "Not in this release").
+		"a refused chain": {fails: true, refs: func(r *rig, fc *fakeContents) []Ref {
+			r.p.followChains = false
+			r.target(fc, "kt", "Secret", "home")
+			return hop(nextOf)
+		}},
+		"a refused chain, beside the ref": {fails: true, refs: func(r *rig, fc *fakeContents) []Ref {
+			r.p.followChains = false
+			r.target(fc, "kt", "Secret", "home")
+			return append(hop(nextOf), otherSecret())
+		}},
 		"a hop's A2 that fails": {fails: true, refs: func(r *rig, fc *fakeContents) []Ref {
 			r.target(fc, "kt", "Secret", "home")
 			failA2(r, "Target", "kt")
@@ -120,6 +131,7 @@ func TestKeptRefsInAnotherNamespaceAreGated(t *testing.T) {
 		t.Helper()
 		r, _ := consentRig(t, "")
 		fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+		r.p.followChains = true
 		r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
 		r.p.contents = fc
 		must(r.m.Create(secretKey("ns", "home"), metav1.ObjectMeta{}))
@@ -206,6 +218,7 @@ func keptRig(t *testing.T, established bool) (*rig, *fakeContents, []Ref) {
 	t.Helper()
 	r, _ := consentRig(t, "")
 	fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+	r.p.followChains = true
 	r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
 	r.p.contents = fc
 	must(r.m.Create(secretKey("ns", "home"), metav1.ObjectMeta{}))
@@ -1326,6 +1339,7 @@ func TestAPerNameHoldWithoutALine(t *testing.T) {
 func TestKeptRefsOfAClusterScopedHolder(t *testing.T) {
 	ctx := context.Background()
 	r, _ := consentRig(t, "")
+	r.p.followChains = true
 	must(r.m.Create(widgetKey("", "c"), metav1.ObjectMeta{Finalizers: ownerFinalizers}))
 	must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{Annotations: map[string]string{AnnotationAllowHoldersFrom: "*"}}))
 	pass := func() Record {
@@ -1693,6 +1707,7 @@ func TestAKeptRefInTheHoldersNamespaceIsKept(t *testing.T) {
 	ctx := context.Background()
 	r, _ := consentRig(t, "")
 	fc := &fakeContents{r: r, specs: map[ID]map[string]any{}}
+	r.p.followChains = true
 	r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
 	r.p.contents = fc
 	r.target(fc, "kt", "Secret", "home")

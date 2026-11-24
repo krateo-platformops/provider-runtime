@@ -1004,11 +1004,12 @@ func TestCredentialUseStandaloneForgetOnTheOrphanPath(t *testing.T) {
 	})
 }
 
-// §9, "Not in this release": a ref with a Next is refused before any write.
-// A new holder doesn't connect, and says why; an established one proceeds,
-// Degraded, with its record as it was; one being deleted runs its external
-// Delete, and the write that removes its finalizer removes its record. A
-// Guaranteed ref with a Next is refused as any other, and one without isn't.
+// §9, "Not in this release": a ref with a Next is refused, with no write for
+// any ref. A new holder doesn't connect, and says why; an established one
+// proceeds, Degraded, with its record as it was; one being deleted runs its
+// external Delete, and the write that removes its finalizer removes its
+// record. A Guaranteed ref with a Next is refused as any other, and one
+// without isn't.
 // (TestCredentialUseResolvedOnConnectsContext, in pkg/credentialuse, is the
 // chain itself, which only that package's tests can follow.)
 func TestCredentialUseRefusesAChain(t *testing.T) {

@@ -11,8 +11,9 @@
 //
 // The refs a holder names must name the objects Connect reads themselves. A
 // Ref with a Next, a chain (§9), is refused, with ErrChainsNotSupported,
-// before the pass reads or writes anything: a new holder must not connect,
-// and an established one is Degraded and keeps the holds it has. The chain
+// before the pass announces, holds or reads any ref: a new holder must not
+// connect, and an established one is Degraded and keeps the holds it has, but
+// for those whose targets withdrew consent (§11.3). The chain
 // code is here, and its tests run it, for the release that will follow
 // chains; nothing in production reaches it.
 //

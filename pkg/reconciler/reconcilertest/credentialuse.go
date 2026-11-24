@@ -129,6 +129,9 @@ func (r *RecordingReader) Reset() {
 //
 // In this release it fails t on a ref with a Next, before it reads anything
 // or connects, as the runtime refuses it (credentialuse.ErrChainsNotSupported).
+// So it can't be used for a fixture whose Connect reads a Secret that only
+// another object names: the refs can't name it, and the helper reports that
+// read. Leave such a fixture out, and test its CredentialRefs directly.
 //
 // rec must be the reader the connecter reads Secrets and protected objects
 // with; build the connecter with it. The connecter must implement

@@ -174,6 +174,20 @@ func newKeptWorld(t *testing.T) *keptWorld {
 // change makes.
 func newKeptWorldWith(t *testing.T, so cu.SharedOptions, change func(o *cu.Options)) *keptWorld {
 	t.Helper()
+	return newKeptWorldFollowing(t, true, so, change)
+}
+
+// newRefusingKeptWorld is newKeptWorld as production builds it: its tracker
+// refuses a chain (§9, "Not in this release").
+func newRefusingKeptWorld(t *testing.T) *keptWorld {
+	t.Helper()
+	return newKeptWorldFollowing(t, false, cu.SharedOptions{}, nil)
+}
+
+// newKeptWorldFollowing is newKeptWorldWith, with a tracker that follows
+// chains, or refuses them.
+func newKeptWorldFollowing(t *testing.T, chains bool, so cu.SharedOptions, change func(o *cu.Options)) *keptWorld {
+	t.Helper()
 	k := &keptWorld{home: env.Namespace(t, "kept-home"), other: env.Namespace(t, "kept-other")}
 	// Registered before the rig, so it runs once the rig has stopped: w's
 	// record, forged ones included, would be a batch of every later rig's.
@@ -196,6 +210,9 @@ func newKeptWorldWith(t *testing.T, so cu.SharedOptions, change func(o *cu.Optio
 			change(o)
 		}
 	}, func(s *cu.Shared) {
+		if chains {
+			s.FollowChains()
+		}
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
 			if name := k.failA2.Load(); name != nil && c.Op == "patch" && c.GK.Kind == "Target" && c.Namespace == k.home && c.Name == *name {
 				return apierrors.NewServiceUnavailable("injected")
@@ -359,21 +376,46 @@ func keptEnvCases() map[string]func(t *testing.T, k *keptWorld) {
 	}
 }
 
+// refusedEnvCases are the ways for a tracker that refuses chains, as
+// production's does: a Widget's spec gains one, beside x or instead of it.
+func refusedEnvCases() map[string]func(t *testing.T, k *keptWorld) {
+	refused := func(t *testing.T, k *keptWorld) {
+		t.Helper()
+		k.passes(t, 3)
+		if a := k.c.lastResult(widgetNN(k.home, "w")).Acquired; !a.Degraded || !errors.Is(a.Err, cu.ErrChainsNotSupported) {
+			t.Fatalf("the last pass was degraded %v (%v), want a refused chain", a.Degraded, a.Err)
+		}
+	}
+	return map[string]func(t *testing.T, k *keptWorld){
+		"a refused chain": func(t *testing.T, k *keptWorld) {
+			k.name(t, map[string]any{"target": "kt"})
+			refused(t, k)
+		},
+		"a refused chain, beside the ref": func(t *testing.T, k *keptWorld) {
+			k.name(t, map[string]any{"target": "kt", "secrets": []any{k.other + "/x"}})
+			refused(t, k)
+		},
+	}
+}
+
 // A withdrawal releases a hold that the record keeps, whatever keeps it
 // (§11.3: the gate runs on every pass for every held cross-namespace ref).
 func TestAWithdrawalReleasesAKeptRef(t *testing.T) {
 	cutest.Require(t, env)
+	run := func(t *testing.T, k *keptWorld, keep func(t *testing.T, k *keptWorld)) {
+		keep(t, k)
+		k.passes(t, 3)
+		if !k.recorded(t) || heldFor(k.other, "x", k.home)() != nil {
+			t.Fatalf("the case doesn't keep x while its consent stands: %s", k.keptState(t))
+		}
+		setSecretConsent(t, k.other, "x", "")
+		k.released(t)
+	}
 	for name, keep := range keptEnvCases() {
-		t.Run(name, func(t *testing.T) {
-			k := newKeptWorld(t)
-			keep(t, k)
-			k.passes(t, 3)
-			if !k.recorded(t) || heldFor(k.other, "x", k.home)() != nil {
-				t.Fatalf("the case doesn't keep x while its consent stands: %s", k.keptState(t))
-			}
-			setSecretConsent(t, k.other, "x", "")
-			k.released(t)
-		})
+		t.Run(name, func(t *testing.T) { run(t, newKeptWorld(t), keep) })
+	}
+	for name, keep := range refusedEnvCases() {
+		t.Run(name, func(t *testing.T) { run(t, newRefusingKeptWorld(t), keep) })
 	}
 	t.Run("control: w still names it", func(t *testing.T) {
 		k := newKeptWorld(t)
@@ -526,8 +568,7 @@ func TestAForgedRecordsReads(t *testing.T) {
 func TestAWithdrawalFreesAKeptRefsTerminatingNamespace(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
-	run := func(t *testing.T, keep func(t *testing.T, k *keptWorld)) {
-		k := newKeptWorld(t)
+	run := func(t *testing.T, k *keptWorld, keep func(t *testing.T, k *keptWorld)) {
 		keep(t, k)
 		k.passes(t, 3)
 		if err := env.Kube.CoreV1().Namespaces().Delete(ctx, k.other, metav1.DeleteOptions{}); err != nil {
@@ -554,7 +595,10 @@ func TestAWithdrawalFreesAKeptRefsTerminatingNamespace(t *testing.T) {
 		t.Errorf("x still blocks its namespace's teardown 20s after its consent was withdrawn: %s", k.keptState(t))
 	}
 	for name, keep := range keptEnvCases() {
-		t.Run(name, func(t *testing.T) { run(t, keep) })
+		t.Run(name, func(t *testing.T) { run(t, newKeptWorld(t), keep) })
 	}
-	t.Run("control: w still names it", func(t *testing.T) { run(t, func(*testing.T, *keptWorld) {}) })
+	for name, keep := range refusedEnvCases() {
+		t.Run(name, func(t *testing.T) { run(t, newRefusingKeptWorld(t), keep) })
+	}
+	t.Run("control: w still names it", func(t *testing.T) { run(t, newKeptWorld(t), func(*testing.T, *keptWorld) {}) })
 }

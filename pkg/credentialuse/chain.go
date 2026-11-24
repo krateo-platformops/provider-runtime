@@ -64,10 +64,12 @@ func (d dynamicContent) Content(ctx context.Context, gk schema.GroupKind, namesp
 // ErrChainsNotSupported is the Acquired.Err of a pass one of whose refs has a
 // Next: this release holds only the objects the refs name themselves, and
 // refuses a chain (§9, "Not in this release"; the user's decision of
-// 2026-11-24). The whole list is refused, its direct refs with it, before the
-// pass reads or writes anything, so a holder that isn't established must not
-// connect, and an established one is Degraded and keeps the record, and so
-// the holds, it has. A later release follows chains.
+// 2026-11-24). The whole list is refused, its direct refs with it, before any
+// of them is announced, held or read, so a holder that isn't established must
+// not connect, and an established one is Degraded and keeps the record, and
+// so the holds, it has. All the pass does is gate what the record names in
+// other namespaces, as every pass does first, and drop what its owner
+// withdrew (§11.3). A later release follows chains.
 var ErrChainsNotSupported = errors.New("credential-use: chains (a Ref with a Next) aren't supported in this release: " +
 	"name each object Connect reads as a ref of its own, without a Next; one that can't be named so stays unheld")
 

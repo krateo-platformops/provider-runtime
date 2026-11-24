@@ -21,8 +21,8 @@ type Ref struct {
 
 	// Next must be nil in this release, which holds only the objects the
 	// refs name themselves: Acquire refuses a list with a ref that has one,
-	// with ErrChainsNotSupported, before it reads or writes anything, and
-	// never calls it. A Guaranteed ref's is refused too.
+	// with ErrChainsNotSupported, before it announces, holds or reads any of
+	// them, and never calls it. A Guaranteed ref's is refused too.
 	//
 	// A later release follows it: Next names the refs found inside this
 	// object. The tracker calls it after the object is held, with the object

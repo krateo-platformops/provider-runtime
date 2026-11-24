@@ -1,6 +1,7 @@
 """Revert check for the refusal of chains in the first tag
 (docs/plan-credential-use-implementation.md, "The first tag refuses chains";
-design §9, "Not in this release"): break each rule in turn and see whether a
+design §9, "Not in this release"), after the gate of what the record names
+(§11.3): break each rule in turn and see whether a
 test notices.
 
 A mutant counts as killed only if it compiled, the tests ran, and one failed by
@@ -36,16 +37,35 @@ R = "pkg/reconciler/"
 RC = R + "credentialuse.go"
 RT = "pkg/reconciler/reconcilertest/"
 RTC = RT + "credentialuse.go"
-FILES = [AQ, CH, TR, SH, RC, RTC]
+IN = C + "informers.go"
+FILES = [AQ, CH, TR, SH, IN, RC, RTC]
 
-FAIL = "return fail(err, reasonChainsRefused)"
-REFUSE = "\tif err := p.refuseChains(refs); err != nil {\n\t\t" + FAIL + "\n\t}\n"
+
+def sub(s, old, new):
+    """s with its one old replaced: a mutant built from a string that no
+    longer has it would change nothing."""
+    if s.count(old) != 1:
+        sys.exit(f"{s.count(old)} of {old!r} in {s!r}")
+    return s.replace(old, new)
+
+
+IF = "if refused := p.refuseChains(refs); refused != nil {"
+FAIL = "return fail(errors.Join(refused, err), reasonChainsRefused)"
+REFUSE = "\t" + IF + "\n\t\t" + FAIL + "\n\t}\n"
+FIRST = "\t" + IF + "\n\t\treturn fail(refused, reasonChainsRefused)\n\t}\n"
+GATE = "\t// The gate of what the record names, first (§11.3)."
 EACH = "\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())\n\t\t}\n"
 BEFORE = "\tfor _, u := range a.Unheld {\n\t\tif err := p.refuseChains([]Ref{u.Ref}); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n"
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
-    # Refused, in full, before anything.
+    # After the gate of what the record names, and only after it (§11.3).
+    ("a chain is refused before the gate", AQ, [(GATE, FIRST + GATE)]),
+    ("a new holder's chain is refused before the gate", AQ,
+     [(GATE, sub(FIRST, "refused != nil {", "refused != nil && !established {") + GATE)]),
+    ("the gate's error hides the refusal", AQ, [(REFUSE, "\tif err != nil {\n\t\treturn fail(err, \"Announce\")\n\t}\n" + REFUSE)]),
+    ("the refusal hides the gate's error", AQ, [(REFUSE, sub(REFUSE, "errors.Join(refused, err)", "refused"))]),
+    # Refused, in full, before any ref is looked at.
     ("a chain isn't refused", AQ, [(REFUSE, "")]),
     ("a chain is refused after its level's A1", AQ,
      [(REFUSE, ""),
@@ -59,34 +79,41 @@ MUTANTS = [
      [("\tfor _, r := range refs {\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref",
        "\tfor _, r := range refs[:min(1, len(refs))] {\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref")]),
     ("a Guaranteed ref may have a Next", CH,
-     [(EACH, EACH.replace("r.Next != nil", "r.Next != nil && !r.Guaranteed"))]),
+     [(EACH, sub(EACH, "r.Next != nil", "r.Next != nil && !r.Guaranteed"))]),
     ("a second ref to one object isn't checked", CH,
      [("\tfor _, r := range refs {\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref",
        "\tmet := map[ID]bool{}\n\tfor _, r := range refs {\n\t\tif met[r.ID()] {\n\t\t\tcontinue\n\t\t}\n\t\tmet[r.ID()] = true\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref")]),
     ("a disowned kind's ref may have a Next", CH,
-     [(EACH, EACH.replace("r.Next != nil", "r.Next != nil && !p.isDisowned(r.GroupKind)"))]),
+     [(EACH, sub(EACH, "r.Next != nil", "r.Next != nil && !p.isDisowned(r.GroupKind)"))]),
     ("a kind with Content may have a Next", CH,
-     [(EACH, EACH.replace("r.Next != nil", "r.Next != nil && !p.contentKinds[r.GroupKind]"))]),
+     [(EACH, sub(EACH, "r.Next != nil", "r.Next != nil && !p.contentKinds[r.GroupKind]"))]),
     ("a deleting holder isn't refused", AQ,
-     [(REFUSE, REFUSE.replace("; err != nil {", "; err != nil && !deleting {"))]),
+     [(REFUSE, sub(REFUSE, "refused != nil {", "refused != nil && !deleting {"))]),
     ("an established holder isn't refused", AQ,
-     [(REFUSE, REFUSE.replace("; err != nil {", "; err != nil && !established {"))]),
+     [(REFUSE, sub(REFUSE, "refused != nil {", "refused != nil && !established {"))]),
     # What the holder sees.
     ("an established holder must not connect", AQ,
-     [(REFUSE, REFUSE.replace(FAIL, "a.Err = err\n\t\ta.MustNotConnect = true\n\t\treturn a, nil"))]),
+     [(REFUSE, sub(REFUSE, FAIL, "a.Err = refused\n\t\ta.MustNotConnect = true\n\t\treturn a, nil"))]),
     ("a new holder connects", AQ,
-     [(REFUSE, REFUSE.replace(FAIL, "a.Err = err\n\t\ta.Degraded = true\n\t\treturn a, nil"))]),
+     [(REFUSE, sub(REFUSE, FAIL, "a.Err = refused\n\t\ta.Degraded = true\n\t\treturn a, nil"))]),
     ("the refusal isn't reported as degraded", AQ,
-     [(REFUSE, REFUSE.replace(FAIL, "a.Err = err\n\t\ta.Degraded, a.MustNotConnect = established, !established\n\t\treturn a, nil"))]),
+     [(REFUSE, sub(REFUSE, FAIL, "a.Err = refused\n\t\ta.Degraded, a.MustNotConnect = established, !established\n\t\treturn a, nil"))]),
     ("the refusal has no reason of its own", AQ,
-     [(REFUSE, REFUSE.replace(FAIL, "return fail(err, \"Refs\")"))]),
+     [(REFUSE, sub(REFUSE, "reasonChainsRefused", "\"Refs\""))]),
     ("the refusal is Acquire's error", AQ,
-     [(REFUSE, REFUSE.replace(FAIL, "return a, err"))]),
+     [(REFUSE, sub(REFUSE, FAIL, "return a, refused"))]),
     ("a refused pass empties the record", AQ,
-     [(REFUSE, REFUSE.replace(FAIL, "_, _ = p.announce(ctx, obj, nil, nil, &a)\n\t\t" + FAIL))]),
+     [(REFUSE, sub(REFUSE, FAIL, "_, _ = p.announce(ctx, obj, nil, nil, &a)\n\t\t" + FAIL))]),
     ("the error doesn't name the ref", CH,
-     [(EACH, EACH.replace("fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())", "ErrChainsNotSupported"))]),
-    ("the error doesn't wrap the sentinel", CH, [(EACH, EACH.replace("%w", "%v"))]),
+     [(EACH, sub(EACH, "fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())", "ErrChainsNotSupported"))]),
+    ("the error doesn't wrap the sentinel", CH, [(EACH, sub(EACH, "%w", "%v"))]),
+    # Its event and log line, once per holder.
+    ("the event is throttled only", TR, [("\tif refused && !t.refused.first(key) {\n\t\treturn\n\t}\n", "")]),
+    ("the event is hidden by another failure's log line", TR, [("\tif refused && !t.refused.first(key) {", "\tif refused && !t.degradedLogged.first(key) {")]),
+    ("the refusal hides another failure's event", TR, [("\tif refused && !t.refused.first(key) {", "\tif !t.refused.first(key) {")]),
+    ("a whole pass doesn't clear the report", TR, [("\t\tt.refused.clear(key)\n", "")]),
+    ("Forget doesn't clear the report", TR, [("\tt.refused.forget(obj.GetUID())\n", "")]),
+    ("a holder's deletion leaves the report", IN, [("\th.t.refused.forget(m.UID)\n", "")]),
     ("the error doesn't say what to do", CH, [(", without a Next; ", "; ")]),
     ("a refused pass leaves the prober its refs", TR,
      [("\tt.noteMissing(obj, a)\n", "\tif !errors.Is(a.Err, ErrChainsNotSupported) {\n\t\tt.noteMissing(obj, a)\n\t}\n")]),
@@ -145,7 +172,21 @@ PRODUCTION = {C: "TestTheTrackerRefusesChains|TestNothingInProductionFollowsChai
 SCANNED = {C: "TestNothingInProductionFollowsChains"}
 COVER = {RT: "TestAssertCredentialRefsCoverRefusesAChain"}
 
+GATED = {C: "TestARefusedPassGatesWhatTheRecordNames"}
+BOTH = {C: "TestARefusedPassGatesWhatTheRecordNames|TestKeptRefsInAnotherNamespaceAreGated"}
+ONCE = {C: "TestARefusedChainIsReportedOnce"}
+
 KILLERS = {
+    "a chain is refused before the gate": BOTH,
+    "a new holder's chain is refused before the gate": BOTH,
+    "the gate's error hides the refusal": GATED,
+    "the refusal hides the gate's error": GATED,
+    "the event is throttled only": ONCE,
+    "the event is hidden by another failure's log line": ONCE,
+    "the refusal hides another failure's event": ONCE,
+    "a whole pass doesn't clear the report": ONCE,
+    "Forget doesn't clear the report": ONCE,
+    "a holder's deletion leaves the report": ONCE,
     "a chain isn't refused": {C: "TestAcquireRefusesAChainBeforeAnyWrite|TestTheTrackerRefusesChains|TestARefusedChainKeepsWhatItHeld|TestFollowChainsReachesTheTracker", R: "TestCredentialUseRefusesAChain"},
     "a chain is refused after its level's A1": REFUSED,
     "a chain's level is refused when it is reached, past the gate and Disown": REFUSED,
