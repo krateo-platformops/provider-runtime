@@ -185,8 +185,10 @@ func (t *Tracker) probe(ctx context.Context) {
 		// A PerName kind is probed with GETs only: the list would be
 		// forbidden under resourceNames RBAC (§13 shape 1).
 		// Nor is a namespaced kind's group without a namespace listed: the
-		// list is of every one, and would find other objects of those names.
-		if len(ids) > probeGetLimit && !t.isPerName(g.gk) && (g.ns != "" || !t.namespaced(g.gk)) {
+		// list is of every one, and would find other objects of those names;
+		// nor the holder kind's, cluster-scoped, with one: it would be of every
+		// one too, for names of no object (clientServer.List).
+		if len(ids) > probeGetLimit && !t.isPerName(g.gk) && (g.ns != "" || !t.namespaced(g.gk)) && (g.ns == "" || g.gk != t.gk || t.namespaced(g.gk)) {
 			list, err := srv.List(ctx, g.gk, g.ns)
 			switch {
 			case err == nil:

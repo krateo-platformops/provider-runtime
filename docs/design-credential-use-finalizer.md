@@ -546,7 +546,11 @@ cluster-scoped kind in any, but the holder kind's: `spec.scope` can't change on
 an established CRD, so a kind that returns with another scope is a new CRD,
 which a process that mapped the old one still lists as it was (below); R2 and
 `Users` therefore list a holder kind mapped cluster-scoped in every namespace,
-and keep the holders in theirs. (Disown's strip of such a holder's record finds
+and keep the holders in theirs. Of one mapped namespaced that is cluster-scoped
+now, the list in a namespace is the API server's 404, an error, and the list
+without one has every holder. In such a process the passes of that kind's
+holders fail until a restart, so this keeps what is held and takes no new hold.
+(Disown's strip of such a holder's record finds
 the holder gone without a call, and says nothing; its count is of the list, which
 still has the record, so it doesn't settle.) No cache has such an object, and no per-name
 watch is made of it (§13 shape 1), nor of a namespaced kind's named without its

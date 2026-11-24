@@ -68,19 +68,17 @@ func (s clientServer) object(gk schema.GroupKind, namespace, name string) (metad
 	if !mayExist(namespaced, namespace, name) {
 		return nil, apierrors.NewNotFound(gvr.GroupResource(), name)
 	}
-	return s.client(gk, namespace)
+	return s.client(gvr, namespaced, namespace), nil
 }
 
-func (s clientServer) client(gk schema.GroupKind, namespace string) (metadata.ResourceInterface, error) {
-	gvr, namespaced, err := s.resource(gk)
-	if err != nil {
-		return nil, err
-	}
+// client returns the client for gvr, namespaced or not, as resource answered:
+// in namespace, or in every one.
+func (s clientServer) client(gvr schema.GroupVersionResource, namespaced bool, namespace string) metadata.ResourceInterface {
 	r := s.md.Resource(gvr)
 	if namespaced {
-		return r.Namespace(namespace), nil
+		return r.Namespace(namespace)
 	}
-	return r, nil
+	return r
 }
 
 func (s clientServer) Get(ctx context.Context, gk schema.GroupKind, namespace, name string) (*metav1.PartialObjectMetadata, error) {
@@ -136,17 +134,18 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 // on that path, each with its namespace, and one that is cluster-scoped has
 // none with any, its holders' holds being of another finalizer (FinalizerName).
 func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace string) ([]metav1.PartialObjectMetadata, error) {
+	gvr, namespaced, err := s.resource(gk)
+	if err != nil {
+		return nil, err
+	}
 	filter := false
-	if _, namespaced, err := s.resource(gk); err == nil && namespace != "" {
+	if namespace != "" {
 		filter = !namespaced && gk == s.holder.GroupKind()
 		if !filter && (!namespaced || !pathSegment(namespace)) {
 			return nil, nil
 		}
 	}
-	c, err := s.client(gk, namespace)
-	if err != nil {
-		return nil, err
-	}
+	c := s.client(gvr, namespaced, namespace)
 	var out []metav1.PartialObjectMetadata
 	opts := metav1.ListOptions{Limit: listPageSize}
 	for {
