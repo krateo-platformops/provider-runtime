@@ -3408,9 +3408,12 @@ line. With any one off, in seven cases, it reaches none.
     159,536 of 385,294 with it alive. How many have the line taken before the
     landing isn't counted here.
 
-  Three still reach it: a successor that prunes at once, in those two ways
-  (33,444 of 93,215 schedules, and 27,709 of 71,700), and one kept back, with
-  the landing past the margin (36,694 of 104,931). Another
+  Three still reach it, and **none is a residual of the rules' own**. Two are
+  their controls, a successor that prunes at once, which the code doesn't do:
+  33,444 of 93,215 schedules, and 27,709 of 71,700, in those two ways. The third
+  is one kept back, with the landing past the margin, 36,694 of 104,931: that is
+  the 60s margin, accepted on 2026-11-23 (the user's decision), and what it
+  leaves. Another
   process's prune is the cases above, which follow neither rule. The model has
   no durations: "kept back" is until the landing, or past the margin not.
 
