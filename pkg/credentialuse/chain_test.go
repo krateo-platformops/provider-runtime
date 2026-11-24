@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -298,6 +299,14 @@ func TestChainGuaranteedRefs(t *testing.T) {
 			t.Errorf("Resolved = %v, %v; want the lister's object without its status", got, ok)
 		}
 	})
+	t.Run("a lister that returns neither an object nor an error fails, naming the kind", func(t *testing.T) {
+		r, _ := chainRig(t)
+		r.p.listers = map[schema.GroupKind]Lister{targetGK: func(string, string) (*unstructured.Unstructured, error) { return nil, nil }}
+		a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{guaranteed()})
+		if err != nil || !a.MustNotConnect || a.Err == nil || len(a.Unheld) != 0 || !strings.Contains(a.Err.Error(), "the lister for "+targetGK.String()) {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+	})
 	t.Run("one that can't be read fails, and isn't Missing", func(t *testing.T) {
 		r, _ := chainRig(t)
 		r.p.listers = map[schema.GroupKind]Lister{targetGK: func(ns, name string) (*unstructured.Unstructured, error) {
@@ -308,6 +317,193 @@ func TestChainGuaranteedRefs(t *testing.T) {
 			t.Fatalf("acquire = %+v, %v", a, err)
 		}
 	})
+}
+
+// TestRefsConflicting: the first ref met of an object wins, and a later one
+// that asks for more, a hold where the first is Guaranteed, or a Next where
+// the first has none, is reported once per holder and object, at the same
+// level or behind a Next (§9.1). One that asks for no more isn't.
+func TestRefsConflicting(t *testing.T) {
+	ctx := context.Background()
+	held := targetRef("cd")
+	guaranteed := targetRef("cd")
+	guaranteed.Guaranteed = true
+	plain := targetRef("cd")
+	plain.Next = nil
+	plainGuaranteed := plain
+	plainGuaranteed.Guaranteed = true
+	other := targetRef("cd")
+	other.Next = func(*unstructured.Unstructured) ([]Ref, error) { return nil, errors.New("never called") }
+	// via is a Guaranteed ref to another object, whose Next names refs.
+	via := func(refs ...Ref) Ref {
+		v := targetRef("via")
+		v.Guaranteed = true
+		v.Next = func(*unstructured.Unstructured) ([]Ref, error) { return refs, nil }
+		return v
+	}
+	const cd = "/Target/ns/cd"
+	for name, tc := range map[string]struct {
+		refs   []Ref
+		want   string // what is reported of cd, or ""
+		held   bool   // whether cd is
+		behind bool   // whether the Secret behind cd is
+	}{
+		"Guaranteed, then held":                  {refs: []Ref{guaranteed, held}, want: "hold=true next=false", behind: true},
+		"held, then Guaranteed":                  {refs: []Ref{held, guaranteed}, held: true, behind: true},
+		"no Next, then one":                      {refs: []Ref{plain, held}, want: "hold=false next=true", held: true},
+		"a Next, then none":                      {refs: []Ref{held, plain}, held: true, behind: true},
+		"Guaranteed with no Next, then both":     {refs: []Ref{plainGuaranteed, held}, want: "hold=true next=true"},
+		"Guaranteed with a Next, then held":      {refs: []Ref{guaranteed, plain}, want: "hold=true next=false", behind: true},
+		"twice the same":                         {refs: []Ref{held, held}, held: true, behind: true},
+		"two Nexts, which can't be told apart":   {refs: []Ref{held, other}, held: true, behind: true},
+		"three, two of which ask for more":       {refs: []Ref{guaranteed, held, held}, want: "hold=true next=false", behind: true},
+		"Guaranteed, then held behind a Next":    {refs: []Ref{guaranteed, via(held)}, want: "hold=true next=false", behind: true},
+		"no Next, then one behind a Next":        {refs: []Ref{plain, via(held)}, want: "hold=false next=true", held: true},
+		"held, then Guaranteed behind a Next":    {refs: []Ref{held, via(guaranteed)}, held: true, behind: true},
+		"the first behind a Next, at one level":  {refs: []Ref{via(guaranteed, held)}, want: "hold=true next=false", behind: true},
+		"a cycle that asks for no more than met": {refs: []Ref{held, via(held)}, held: true, behind: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, fc := chainRig(t)
+			r.target(fc, "cd", "Secret", "password")
+			r.target(fc, "via", "Secret", "password")
+			must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{}))
+			h := r.holder(t, "h", false)
+			for pass := range 2 {
+				a, err := r.p.acquire(ctx, h, tc.refs)
+				if err != nil || a.MustNotConnect || a.Err != nil {
+					t.Fatalf("pass %d: acquire = %+v, %v", pass, a, err)
+				}
+			}
+			if got := hasFinalizer(r.get(t, targetKey("cd")), fNS); got != tc.held {
+				t.Errorf("cd held = %v, want %v: the first ref wins", got, tc.held)
+			}
+			if got := hasFinalizer(r.get(t, secretKey("ns", "password")), fNS); got != tc.behind {
+				t.Errorf("the Secret behind cd held = %v, want %v: the first ref wins", got, tc.behind)
+			}
+			var want []string
+			if tc.want != "" {
+				want = []string{"h " + targetGK.Group + cd + " " + tc.want}
+			}
+			if !slices.Equal(r.rep.conflicting, want) {
+				t.Errorf("reported %q, want %q", r.rep.conflicting, want)
+			}
+		})
+	}
+	t.Run("once per holder, and again after its Forget", func(t *testing.T) {
+		r, fc := chainRig(t)
+		r.target(fc, "cd", "Secret", "password")
+		must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{}))
+		refs := []Ref{guaranteed, held}
+		one, two := r.holder(t, "one", false), r.holder(t, "two", false)
+		for _, h := range []*metav1.PartialObjectMetadata{one, two, one} {
+			if _, err := r.p.acquire(ctx, h, refs); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(r.rep.conflicting) != 2 {
+			t.Errorf("reported %q, want once for each holder", r.rep.conflicting)
+		}
+		if !r.p.forget(one) {
+			t.Fatal("nothing to forget")
+		}
+		if _, err := r.p.acquire(ctx, one, refs); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.rep.conflicting) != 3 {
+			t.Errorf("reported %q, want one more after the Forget", r.rep.conflicting)
+		}
+	})
+}
+
+// TestChainNextCannotChangeTheListersObject: a Next may change the object it
+// is given: neither the lister's, which is the caller's cache, nor what
+// Resolved returns changes with it.
+func TestChainNextCannotChangeTheListersObject(t *testing.T) {
+	ctx := context.Background()
+	r, fc := chainRig(t)
+	r.target(fc, "cd", "Secret", "password")
+	must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{Labels: map[string]string{"app": "x"}}))
+	cached, err := fc.Content(ctx, targetGK, "ns", "cd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := cached.DeepCopy()
+	r.p.listers = map[schema.GroupKind]Lister{targetGK: func(string, string) (*unstructured.Unstructured, error) { return cached, nil }}
+	g := targetRef("cd")
+	g.Guaranteed = true
+	g.Next = func(obj *unstructured.Unstructured) ([]Ref, error) {
+		refs, err := nextOf(obj)
+		obj.Object["spec"].(map[string]any)["ref"].(map[string]any)["name"] = "changed"
+		obj.SetLabels(map[string]string{"changed": "yes"})
+		return refs, err
+	}
+	a, err := r.p.acquire(ctx, r.holder(t, "h", false), []Ref{g})
+	if err != nil || a.MustNotConnect || len(a.Held) != 1 {
+		t.Fatalf("acquire = %+v, %v", a, err)
+	}
+	if !equality.Semantic.DeepEqual(cached.Object, before.Object) {
+		t.Errorf("the Next changed the lister's object: %v, was %v", cached.Object, before.Object)
+	}
+	delete(before.Object, "status")
+	if got, ok := Resolved(WithResolved(ctx, a), g); !ok || !equality.Semantic.DeepEqual(got.Object, before.Object) {
+		t.Errorf("the Next changed what Resolved returns: %v, want %v", got, before.Object)
+	}
+}
+
+// TestChainNextThatLacksWhatItReads: a Next whose object lacks what it reads
+// must return an error, never nil refs (§9.1). The error keeps the record,
+// and so the holds, of a holder that still uses what the Next no longer
+// finds; nil refs drop them.
+func TestChainNextThatLacksWhatItReads(t *testing.T) {
+	ctx := context.Background()
+	password := SecretRef("ns", "password")
+	for _, guaranteed := range []bool{false, true} {
+		ref := func(next func(*unstructured.Unstructured) ([]Ref, error)) []Ref {
+			r := targetRef("cd")
+			r.Next, r.Guaranteed = next, guaranteed
+			return []Ref{r}
+		}
+		lax := func(obj *unstructured.Unstructured) ([]Ref, error) {
+			refs, _ := nextOf(obj)
+			return refs, nil
+		}
+		// lost is a rig whose established holder h holds the password, and
+		// whose cd then loses what nextOf reads.
+		lost := func(t *testing.T) *rig {
+			t.Helper()
+			r, fc := chainRig(t)
+			r.target(fc, "cd", "Secret", "password")
+			must(r.m.Create(secretKey("ns", "password"), metav1.ObjectMeta{}))
+			a, err := r.p.acquire(ctx, r.holder(t, "h", true), ref(nextOf))
+			if err != nil || a.Degraded || !slices.Contains(chainRecord(t, r, "h"), password.ID()) {
+				t.Fatalf("first pass: acquire = %+v, %v", a, err)
+			}
+			fc.specs[targetID("cd")] = map[string]any{}
+			return r
+		}
+		name := map[bool]string{false: "held", true: "Guaranteed"}[guaranteed]
+		t.Run(name+": an error keeps the record", func(t *testing.T) {
+			r := lost(t)
+			a, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), ref(nextOf))
+			if err != nil || !a.Degraded || a.Err == nil {
+				t.Errorf("acquire = %+v, %v; want Degraded", a, err)
+			}
+			if !slices.Contains(chainRecord(t, r, "h"), password.ID()) || !hasFinalizer(r.get(t, secretKey("ns", "password")), fNS) {
+				t.Errorf("record = %v: the Secret the holder still uses was dropped", chainRecord(t, r, "h"))
+			}
+			if a, err := r.p.acquire(ctx, r.holder(t, "new", false), ref(nextOf)); err != nil || !a.MustNotConnect {
+				t.Errorf("a new holder: acquire = %+v, %v; want MustNotConnect", a, err)
+			}
+		})
+		t.Run(name+": nil refs drop the Secret from the record", func(t *testing.T) {
+			r := lost(t)
+			a, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), ref(lax))
+			if err != nil || a.Degraded || a.Err != nil || slices.Contains(chainRecord(t, r, "h"), password.ID()) {
+				t.Errorf("acquire = %+v, %v, record %v; want a pass that doesn't name the Secret", a, err, chainRecord(t, r, "h"))
+			}
+		})
+	}
 }
 
 // TestChainNextNeedsContent: a held ref with a Next must be of a Content
