@@ -2,6 +2,7 @@ package credentialuse
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -184,6 +185,19 @@ func TestTheQueuesLines(t *testing.T) {
 	clk.Step(releaseBackoffBase)
 	want("the list's retry", get(q), append(slices.Clone(names[2048:]), fillAll))
 	q.Done(k)
+
+	// More than a worker takes of it, what was put back of one list is taken in the
+	// list's order, though it shares a place.
+	q = newBatchQueue(testingclock.NewFakeClock(time.Now()))
+	q.Add(k)
+	get(q)
+	q.Known(k, names...)
+	q.PutBack(k, names...)
+	q.Done(k)
+	for i := 0; i < 2048; i += 1024 {
+		want(fmt.Sprintf("a list's objects from %d", i), get(q), SortedIDs(names[i:i+1024]))
+		q.Done(k)
+	}
 
 	// A failure's retry is of the line its object was in; a time asked for, and a
 	// grace's end, are of the held one.

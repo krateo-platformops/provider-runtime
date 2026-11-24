@@ -64,7 +64,8 @@ func TestAnsweredCutsWhatIsntAnswered(t *testing.T) {
 			var conn atomic.Pointer[httptrace.GotConnInfo]
 			ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { conn.Store(&i) }})
 			_, err := answered(ctx, 200*time.Millisecond, func(ctx context.Context) (int, error) { return get(ctx, client, api.URL+"/slow") })
-			if !errors.Is(err, context.DeadlineExceeded) {
+			var cut *noAnswer
+			if !errors.As(err, &cut) {
 				t.Errorf("HTTP/%d, reused %v: %v; want it cut", proto, reused, err)
 			}
 			if c := conn.Load(); c == nil || c.Reused != reused {
@@ -86,10 +87,14 @@ func TestAnsweredCutsADialThatHangs(t *testing.T) {
 		<-end
 		return nil, errors.New("ended")
 	}}}
-	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { got.Store(true) }})
+	// The caller's own end, which is what ends the call if its time doesn't.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { got.Store(true) }})
 	_, err := answered(ctx, 50*time.Millisecond, func(ctx context.Context) (int, error) { return get(ctx, client, "http://192.0.2.1/") })
-	if !errors.Is(err, context.DeadlineExceeded) || got.Load() {
-		t.Errorf("%v, a connection got %v; want it cut, with none", err, got.Load())
+	var cut *noAnswer
+	if !errors.As(err, &cut) || ctx.Err() != nil || got.Load() {
+		t.Errorf("%v, the caller's context %v, a connection got %v; want it cut by its own time, with none", err, ctx.Err(), got.Load())
 	}
 }
 
@@ -206,7 +211,9 @@ func TestAnsweredDoesntTimeWhatComesBefore(t *testing.T) {
 // An answer that comes as its time ends is the answer: an object that is missing is
 // missing.
 func TestAnsweredKeepsAnAnswersClass(t *testing.T) {
-	_, err := answered(context.Background(), time.Nanosecond, func(ctx context.Context) (int, error) {
+	caller, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := answered(caller, time.Nanosecond, func(ctx context.Context) (int, error) {
 		httptrace.ContextClientTrace(ctx).GetConn("")
 		<-ctx.Done()
 		return 0, unservedError()
@@ -214,7 +221,7 @@ func TestAnsweredKeepsAnAnswersClass(t *testing.T) {
 	if Classify(err) != Classify(unservedError()) {
 		t.Errorf("%v is %s, want the answer's class %s", err, Classify(err), Classify(unservedError()))
 	}
-	_, err = answered(context.Background(), time.Nanosecond, func(ctx context.Context) (int, error) {
+	_, err = answered(caller, time.Nanosecond, func(ctx context.Context) (int, error) {
 		httptrace.ContextClientTrace(ctx).GetConn("")
 		<-ctx.Done()
 		return 0, rbacForbidden("ns", "s")
