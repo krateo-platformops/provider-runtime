@@ -497,6 +497,33 @@ Any other 404 is an ordinary failure everywhere in the package, never NotFound.
 (An API server that is still starting answers 503 instead, until its CRD
 informer has synced.)
 
+**And only a read's 404 says that an object is gone** (P20). A write's may name
+something and be about something else, since admission answers it:
+
+- a webhook or a policy with a namespaceSelector looks the Namespace up, and
+  when that is gone, as after someone forced its finalizer while a hold kept it
+  Terminating, the write of an object still in it is answered with a 404 that
+  names the Namespace;
+- a validator may return what its own lookup gave it, a NotFound of any object,
+  this one included.
+
+Taken for "gone", those made a hold Missing, so a new holder connected without
+it; and reported a held object bare, whose index line a prune then took. So
+`clientServer.Patch` confirms a 404 with a GET of the same object, which
+admission isn't asked about. If that GET's 404 names the object, it is NotFound.
+If it finds the object, or fails in any other way, its kind not served, a 403 or
+a timeout included, the patch's error is an ordinary one, with both answers in
+its text: A2 fails its pass, R3 and the epoch's repair their batch, the janitor
+and the strips are retried, and `DisownPrefix` returns it. An object created
+between the two is such an error too, and the next pass finds it. *The cost:*
+one GET more for each Missing ref of a built-in kind, at each pass (A2 reads a
+custom resource before it patches it), and for an object deleted just before R3.
+None for an object named without its namespace. *Not through it:* the index
+ConfigMap's create and update, and the CRD patches, none of which reads a 404 as
+gone: only their conflicts are told apart, any other error fails the call. The
+package deletes nothing. What it can't cover is a holder's own write, which the
+reconciler makes ("A holder kind that isn't served", below).
+
 **A namespaced kind's object named without a namespace can't exist**, so it is
 NotFound, as a cluster-scoped holder's data may name one: the scope is the
 mapping's, and no call is made, since that 404 would name nothing. A2 finds it
@@ -533,14 +560,21 @@ finalizers left on objects that a CRD installed again would serve.
 - **What is logged.** Each failed batch, with the delay and the error ("a
   release batch failed"), and each failed index check; a Degraded pass, once
   per holder, with its event; and, while Disown is on, on each pass, the
-  objects it can't read, or, for a LabelScoped kind, the kind it can't list: a
-  log line, the event `CredentialUseDisownUnreadable` on the holder CRD,
-  throttled, and, for objects, the gauge `credentialuse_disown_unreadable`.
-  Disown's say that the kind isn't served; the others carry client-go's error,
-  "the server could not find the requested resource".
-- **The mapping isn't refreshed while the process lives.** The resource and
-  version a kind maps to are the ones the RESTMapper gave at first, and a
-  mapper that finds new kinds by itself doesn't look again at one it knows.
+  objects it can't read, or what it can't read as a whole, a LabelScoped kind,
+  the holders, or the index: a log line, the event
+  `CredentialUseDisownUnreadable` on the holder CRD, throttled, and, for
+  objects, the gauge `credentialuse_disown_unreadable`. Disown's say that the
+  kind isn't served, and its event has the failure's class, and what to do about
+  that class, while the error's text, which may vary at every pass, is in the
+  log alone. The others carry client-go's error, "the server could not find the
+  requested resource".
+- **The mapping isn't refreshed while the process lives.** The resource, the
+  version and the scope a kind maps to are the ones the RESTMapper gave at
+  first, and a mapper that finds new kinds by itself doesn't look again at one
+  it knows. A change of any of them, the scope too, needs a restart. The version
+  is the mapper's, not `Protected`'s: the reads by name, the writes and the live
+  lists map a GroupKind, to the version the API server prefers; only the
+  informers are of the version `Protected` names.
 - **Restore the CRD**, at that version, whose objects are then served as they
   were. Everything goes on by itself. Only serving the kind again lets a
   finalizer an object still has be stripped, since nothing can write it
@@ -550,15 +584,20 @@ finalizers left on objects that a CRD installed again would serve.
   refuses a GVK it can't map (§7.3), so a process that still names the old one
   doesn't start.
 - **A switch that lists the other kinds** lets Disown settle for them, in both
-  modes: the kind is then neither counted nor stripped (§7.4).
+  modes: the kind is then neither counted nor stripped (§7.4), so
+  `disown-settled` is `true` with the finalizers its objects have left on them.
 - **Or say it is gone**, once the objects are. *PerName:* vouch for each object
   (§10.6.6): Disown skips what it can't read of a vouched object, so it
   settles, and a prune drops the line. *LabelScoped:* no vouch applies; only
   the next way settles Disown with the switch at `all`.
-- **And take the kind out of the tracker's `Protected`, and restart.** That is
-  what ends the batches, which live in the process's memory, and it settles
-  Disown for either mode. While the kind stays in `Protected` with no CRD, a
-  restarted process refuses to start, since it can't map it (§7.3).
+- **And take the kind out of the tracker's `Protected`, and restart**, in this
+  order: stop naming it, let the holders' passes drop it from their records,
+  then restart without it. That settles Disown for either mode, and ends the
+  batches, which live in the process's memory. While a record still names the
+  object, each event of its holder queues a batch for it again, whatever
+  `Protected` says, and that one fails as before. While the kind stays in
+  `Protected` with no CRD, a restarted process refuses to start, since it can't
+  map it (§7.3).
 - **`DisownPrefix`** reads no more than the others: it strips what is served,
   and returns an error naming what isn't, on every run. With `Index`, it reads
   every line, and not the vouches: a vouched object of a removed kind is an
@@ -567,8 +606,8 @@ finalizers left on objects that a CRD installed again would serve.
 
 **A holder kind that isn't served.** The rule is this package's. The
 reconciler's own reads and writes of a holder, and `resource.IgnoreNotFound`,
-use apimachinery's `IsNotFound`, true of every 404, and that loses no hold and
-no record. The write that removes the owner finalizer and the record (§8
+use apimachinery's `IsNotFound`, true of every 404, and for a kind that isn't
+served that loses no hold and no record. The write that removes the owner finalizer and the record (§8
 steps 4 and 7) fails with nothing written, and is taken for done: the pass logs
 that the object is deleted, and doesn't requeue. The read after A1 (§6.2
 A1, L2), and the one that begins a pass, when they are live, end the pass as for
@@ -576,7 +615,14 @@ an object that is gone, without connecting. Either way the holder keeps the
 finalizer and the record it had; R2's list of holders fails, so nothing is
 released meanwhile; and once the kind is served again, the informer's relist or
 resync reconciles the holder again, which finishes. What `Forget` drops in
-memory, the holder's Missing refs, the next pass finds again.
+memory, the holder's Missing refs, the next pass finds again. With several API
+servers, which stop and start serving a kind at different times, the informer
+may see no relist at all, and the resync, of 10 hours by default, is what finishes.
+*A known gap:* the same write, refused with a 404 of a validator's own while the
+kind is served, is taken for done too, so every pass logs that the holder was
+deleted, with no backoff, while it stays. Its record and its holds stay with
+it. Every consumer of the reconciler has it, with credential use or without, and
+its fix is its own.
 
 **Only (a) is the Deleting outcome.** (b) to (e) are Acquire errors
 under R4's rules: fail closed for a new holder, fail open (Degraded) for an

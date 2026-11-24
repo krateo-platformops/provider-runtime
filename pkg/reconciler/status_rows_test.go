@@ -207,11 +207,15 @@ func statusRows() map[string]statusRow {
 			widget:   fresh,
 			provider: absent,
 			world: cuRowWorld(secretRef("creds"), func(w *cuWorld) {
-				// The Secret is Missing for Acquire's write; the live read
-				// before the finalizer fails.
+				// The Secret is Missing for Acquire's write, whose 404 the
+				// first read confirms; the live read before the finalizer
+				// fails.
+				reads := 0
 				w.mdGet = func(gvr schema.GroupVersionResource, _, _ string) error {
 					if gvr.Resource == "secrets" {
-						return errRowBoom
+						if reads++; reads > 1 {
+							return errRowBoom
+						}
 					}
 					return nil
 				}

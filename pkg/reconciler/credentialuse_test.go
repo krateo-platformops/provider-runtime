@@ -1250,9 +1250,13 @@ func TestCredentialUsePollIntervalCapsTheConsentBackoff(t *testing.T) {
 // returns, without adding the finalizer.
 func TestCredentialUseBeforeEstablishErrorAddsNoFinalizer(t *testing.T) {
 	w := newCUWorld(t, newWidget("w", nil))
+	reads := 0
 	w.mdGet = func(gvr schema.GroupVersionResource, _, _ string) error {
 		if gvr.Resource == "secrets" {
-			return errors.New("the live read fails")
+			// The first confirms A2's 404: the Secret is Missing.
+			if reads++; reads > 1 {
+				return errors.New("the live read fails")
+			}
 		}
 		return nil
 	}
@@ -1267,6 +1271,9 @@ func TestCredentialUseBeforeEstablishErrorAddsNoFinalizer(t *testing.T) {
 	}
 	if s := got.GetCondition(prv1.TypeSynced); s.Reason != prv1.ReasonReconcileError || !strings.Contains(s.Message, "before establishing") {
 		t.Errorf("Synced = %+v, want ReconcileError naming the check", s)
+	}
+	if reads != 2 {
+		t.Errorf("%d reads of the Secret, want two: A2's, and the check's", reads)
 	}
 	if slices.Contains(w.srv.ops.list(), "create") {
 		t.Errorf("calls = %v; the pass created after BeforeEstablish failed", w.srv.ops.list())
