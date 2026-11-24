@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/cache"
 	testingclock "k8s.io/utils/clock/testing"
 
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
@@ -861,15 +862,311 @@ func TestAForgedRecordCostsABoundedNumberOfReads(t *testing.T) {
 		turns := newGateTurns()
 		ids := manySecrets("other", 40)
 		turns.next("u1", ids, maxGateReads)
-		turns.next("u1", ids[20:], maxGateReads) // the first 16 aren't recorded any more
-		if n := len(turns.at["u1"]); n != maxGateReads {
-			t.Errorf("%d refs remembered, want those still asked about: %d", n, maxGateReads)
+		turns.next("u1", ids[20:], maxGateReads) // the first 20 aren't recorded any more
+		if n := len(turns.at["u1"]); n != 20 {
+			t.Errorf("%d refs remembered, want those still asked about: 20", n)
 		}
+		turns.setFailing("u1", map[ID]bool{ids[0]: true})
 		turns.forget("u1")
-		if len(turns.at) != 0 {
-			t.Errorf("turns = %v after forget", turns.at)
+		if len(turns.at) != 0 || len(turns.fail) != 0 {
+			t.Errorf("turns = %v, %v after forget", turns.at, turns.fail)
 		}
 	})
+}
+
+// TestAForgedRecordCantStarveARef: whoever edits the record can't keep the
+// gate from a ref in it by what else they put there (§11.3).
+func TestAForgedRecordCantStarveARef(t *testing.T) {
+	ctx := context.Background()
+	// world is a holder whose record keeps s, whose consent is withdrawn.
+	world := func(t *testing.T) *rig {
+		t.Helper()
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.gateTurns = newGateTurns()
+		setConsent(t, r, secretKey("other", "s"), "")
+		return r
+	}
+	fresh := func(prefix string, n int) []ID { // all sort before s
+		ids := make([]ID, n)
+		for i := range ids {
+			ids[i] = SecretRef("other", fmt.Sprintf("a%s-%05d", prefix, i)).ID()
+		}
+		return ids
+	}
+	passes := func(t *testing.T, r *rig, record func(pass int) []ID) int {
+		t.Helper()
+		for pass := 1; pass <= 10; pass++ {
+			forgeRecord(t, r, append(record(pass), otherSecretID()))
+			keptPass(t, r, failingNext())
+			if !keptRecorded(t, r) {
+				return pass
+			}
+		}
+		return 0
+	}
+	t.Run("16 fresh refs before every pass", func(t *testing.T) {
+		if got := passes(t, world(t), func(pass int) []ID { return fresh(fmt.Sprint(pass), maxGateReads) }); got != 2 {
+			t.Errorf("s was read on pass %d, want the second", got)
+		}
+	})
+	t.Run("16 more before every pass", func(t *testing.T) {
+		var all []ID
+		if got := passes(t, world(t), func(pass int) []ID {
+			all = append(all, fresh(fmt.Sprint(pass), maxGateReads)...)
+			return slices.Clone(all)
+		}); got != 2 {
+			t.Errorf("s was read on pass %d, want the second", got)
+		}
+	})
+	t.Run("refs dropped from the record, and returning", func(t *testing.T) {
+		if got := passes(t, world(t), func(pass int) []ID { return fresh(fmt.Sprint(pass%2), maxGateReads) }); got != 2 {
+			t.Errorf("s was read on pass %d, want the second", got)
+		}
+	})
+	t.Run("as many as came before it, whatever comes after", func(t *testing.T) {
+		before := fresh("", 40)
+		if got := passes(t, world(t), func(pass int) []ID {
+			return append(slices.Clone(before), fresh(fmt.Sprint("x", pass), maxGateReads)...)
+		}); got != 3 { // 40 and s: ⌈41/16⌉, the first pass's fresh ones being gone
+			t.Errorf("s was read on pass %d, want the third", got)
+		}
+	})
+	// cut ends ctx on the nth read of a Secret of each pass.
+	cut := func(t *testing.T, r *rig, record func(pass int) []ID, at func(nth int, name string) bool, n int) map[string]int {
+		t.Helper()
+		read := map[string]int{}
+		for pass := 1; pass <= n; pass++ {
+			forgeRecord(t, r, record(pass))
+			c, end := context.WithCancel(ctx)
+			nth := 0
+			r.srv.before = func(op, kind, name string) error {
+				if op != "get" || kind != "Secret" || name == "home" {
+					return nil
+				}
+				if nth++; at(nth, name) {
+					end()
+				}
+				if c.Err() != nil {
+					return c.Err()
+				}
+				read[name]++
+				return nil
+			}
+			if _, err := r.p.acquire(c, r.get(t, widgetKey("ns", "h")), failingNext()); err != nil {
+				t.Fatal(err)
+			}
+			end()
+		}
+		r.srv.before = nil
+		return read
+	}
+	t.Run("a pass whose ctx ends before its reads do", func(t *testing.T) {
+		// On the fourth read of each pass: three answers a pass. 19 refs is
+		// where the cut one, were it moved back, would be cut every time.
+		for _, total := range []int{19, 2*maxGateReads + 3} {
+			r := world(t)
+			ids := fresh("", total)
+			read := cut(t, r, func(int) []ID { return ids }, func(nth int, _ string) bool { return nth == 4 }, (total+3)/3)
+			for _, id := range ids {
+				if read[id.Name] == 0 {
+					t.Errorf("of %d: %s wasn't read in %d passes", total, id.Name, (total+3)/3)
+				}
+			}
+		}
+	})
+	t.Run("a ref whose read takes all that ctx has", func(t *testing.T) {
+		r := world(t)
+		ids := fresh("", maxGateReads+4)
+		slow := ids[0].Name
+		read := cut(t, r, func(int) []ID { return ids }, func(_ int, name string) bool { return name == slow }, 4)
+		for _, id := range ids[1:] {
+			if read[id.Name] == 0 {
+				t.Errorf("%s wasn't read in 4 passes, of which the slow one may take all of one or two", id.Name)
+			}
+		}
+	})
+	t.Run("a withdrawn ref, with such a one behind it", func(t *testing.T) {
+		r := world(t)
+		ids := []ID{otherSecretID()}
+		for i := range maxGateReads + 4 { // all sort after s
+			ids = append(ids, SecretRef("other", fmt.Sprintf("t-%05d", i)).ID())
+		}
+		cut(t, r, func(int) []ID { return ids }, func(_ int, name string) bool { return name == ids[1].Name }, 2)
+		if keptRecorded(t, r) {
+			t.Error("s wasn't dropped by the second pass")
+		}
+	})
+	t.Run("one whose A1 failed is first again", func(t *testing.T) {
+		r := world(t)
+		ids := fresh("", 3*maxGateReads)
+		forgeRecord(t, r, append(slices.Clone(ids), otherSecretID()))
+		keptPass(t, r, failingNext()) // the hop's A1; s's turn is the fourth
+		refused := 0
+		r.srv.before = func(op, kind, _ string) error {
+			if op == "patch" && kind == "Widget" && refused == 0 {
+				refused++
+				return apierrors.NewServiceUnavailable("no")
+			}
+			return nil
+		}
+		for pass := 0; pass < 10 && refused == 0; pass++ {
+			keptPass(t, r, failingNext())
+		}
+		if refused == 0 || !keptRecorded(t, r) {
+			t.Fatalf("%d A1s failed, s recorded %v; want one, and it kept", refused, keptRecorded(t, r))
+		}
+		keptPass(t, r, failingNext())
+		if keptRecorded(t, r) {
+			t.Error("s wasn't dropped by the next pass")
+		}
+	})
+}
+
+// TestTheBackoffOfForgedRefs: what the gate can't read leaves no more backoff
+// than the record names now (§11.3).
+func TestTheBackoffOfForgedRefs(t *testing.T) {
+	ctx := context.Background()
+	world := func(t *testing.T) *rig {
+		t.Helper()
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.gateTurns = newGateTurns()
+		r.srv.before = func(op, kind, _ string) error {
+			if op == "get" && kind == "Namespace" {
+				return apierrors.NewServiceUnavailable("no")
+			}
+			return nil
+		}
+		return r
+	}
+	fresh := func(pass, n int) []ID {
+		ids := make([]ID, n)
+		for i := range ids {
+			ids[i] = SecretRef("other", fmt.Sprintf("a%d-%05d", pass, i)).ID()
+		}
+		return ids
+	}
+	kept := func(r *rig) int {
+		r.p.backoff.mu.Lock()
+		defer r.p.backoff.mu.Unlock()
+		return len(r.p.backoff.at)
+	}
+	uid := func(t *testing.T, r *rig) types.UID { return r.get(t, widgetKey("ns", "h")).GetUID() }
+	t.Run("others on every pass", func(t *testing.T) {
+		r := world(t)
+		for pass := range 10 {
+			forgeRecord(t, r, append(fresh(pass, 10), otherSecretID()))
+			keptPass(t, r, failingNext())
+			if n := kept(r); n != 11 {
+				t.Fatalf("pass %d: %d backoffs kept, want 11", pass, n)
+			}
+		}
+		// The one that stays has backed off as ever.
+		if d := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]; d != time.Minute {
+			t.Errorf("next backoff of the ref that stays = %v, want the most, 1m", d)
+		}
+		forgeRecord(t, r, nil)
+		keptPass(t, r, failingNext())
+		if n := kept(r); n != 0 || len(r.p.gateTurns.fail) != 0 {
+			t.Errorf("%d backoffs kept, %v, with nothing to ask about", n, r.p.gateTurns.fail)
+		}
+	})
+	t.Run("more than a pass reads", func(t *testing.T) {
+		r := world(t)
+		var got []time.Duration
+		for pass := range 4 {
+			forgeRecord(t, r, append(fresh(pass, 10), otherSecretID()))
+			keptPass(t, r, failingNext())
+			forgeRecord(t, r, append(fresh(pass, 40), otherSecretID()))
+			got = append(got, keptPass(t, r, failingNext()).RetryAfter)
+			if n := kept(r); n != 1 { // the rest's
+				t.Fatalf("pass %d: %d backoffs kept, want 1", pass, n)
+			}
+		}
+		// The pass that reads all resets the rest's.
+		if want := []time.Duration{time.Second, time.Second, time.Second, time.Second}; !slices.Equal(got, want) {
+			t.Errorf("RetryAfter = %v, want %v", got, want)
+		}
+		got = nil
+		for range 4 {
+			got = append(got, keptPass(t, r, failingNext()).RetryAfter)
+		}
+		if want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}; !slices.Equal(got, want) {
+			t.Errorf("RetryAfter = %v, want %v", got, want)
+		}
+	})
+	t.Run("more than a pass reads, one of them named", func(t *testing.T) {
+		r := world(t)
+		var got []time.Duration
+		for range 3 {
+			// s sorts last, so its turn comes late: the pass that names it
+			// reads it, and keeps its backoff.
+			forgeRecord(t, r, append(fresh(0, 2*maxGateReads), otherSecretID()))
+			got = append(got, keptPass(t, r, append(failingNext(), otherSecret())).RetryAfter)
+		}
+		if want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}; !slices.Equal(got, want) {
+			t.Errorf("RetryAfter = %v, want %v", got, want)
+		}
+		if d := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]; d != 8*time.Second {
+			t.Errorf("next backoff of the named ref = %v, want 8s", d)
+		}
+	})
+	t.Run("one that a pass doesn't get to keeps its own", func(t *testing.T) {
+		r := world(t)
+		for range 3 {
+			keptPass(t, r, failingNext())
+		}
+		before := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]
+		ended, end := context.WithCancel(ctx)
+		end()
+		if _, err := r.p.acquire(ended, r.get(t, widgetKey("ns", "h")), failingNext()); err != nil {
+			t.Fatal(err)
+		}
+		if after := r.p.backoff.at[consentKey{uid(t, r), otherSecretID()}]; before != 8*time.Second || after != before {
+			t.Errorf("next backoff = %v, was %v; want 8s still", after, before)
+		}
+	})
+}
+
+// TestAPerNameHoldWithoutALine: the gate keeps a ref whose hold has no index
+// line, without a read, until the line is back (§11.3, §10.6.6).
+func TestAPerNameHoldWithoutALine(t *testing.T) {
+	r, fc, _ := keptRig(t, true)
+	r.target(fc, "kt", "Secret", "home")
+	ix := testIndex(&memStore{}, nil)
+	ix.inf = syncedInformer(t, nil)
+	tr := &Tracker{gk: widgetGK, idx: ix}
+	tr.names = newPerNames(tr)
+	r.p.cacheLacks = tr.cacheLacks
+	waitSynced := func(inf cache.SharedIndexInformer) {
+		t.Helper()
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if !cache.WaitForCacheSync(c.Done(), inf.HasSynced) {
+			t.Fatal("the informer didn't sync")
+		}
+	}
+	waitSynced(ix.inf)
+	setConsent(t, r, secretKey("other", "s"), "")
+	r.srv.calls = nil
+	a := keptPass(t, r, failingNext())
+	if n := countCalls(r.srv.calls, "get Secret/s"); n != 0 || !keptRecorded(t, r) || !held(r, t) || a.RetryAfter != 0 {
+		t.Errorf("%d reads, recorded %v, RetryAfter %v; want it kept, without a read", n, keptRecorded(t, r), a.RetryAfter)
+	}
+	// The line is back, and its watch delivers the object, labelled or not.
+	p := &protectedInformer{gk: secretGroupKind, ns: "other", name: "s", inf: syncedInformer(t, nil)}
+	waitSynced(p.inf)
+	obj := r.get(t, secretKey("other", "s"))
+	obj.Labels = nil
+	if err := p.inf.GetStore().Add(obj); err != nil {
+		t.Fatal(err)
+	}
+	tr.names.by[otherSecretID()] = &nameWatch{p: p, stop: func() {}}
+	keptPass(t, r, failingNext())
+	if keptRecorded(t, r) {
+		t.Error("the withdrawn ref is still recorded once its line is back")
+	}
 }
 
 // TestKeptRefsOfAClusterScopedHolder: every namespaced ref of one is in
@@ -1071,7 +1368,7 @@ func TestCacheLacks(t *testing.T) {
 		t.Errorf("GETs %v, want %v; RetryAfter %v, want one: the rest of out's are left", got, want, a.RetryAfter)
 	}
 	// The holder goes without a Forget: nothing is kept for it.
-	left := func() (turns, retries int) {
+	left := func() (turns, retries int) { // the holder has no failing reads
 		tr.proto.gateTurns.mu.Lock()
 		defer tr.proto.gateTurns.mu.Unlock()
 		tr.proto.backoff.mu.Lock()
