@@ -202,6 +202,52 @@ func TestABatchKeepsRecordsApart(t *testing.T) {
 	}
 }
 
+// A batch's records answer as IsUser and IsDeletingUser do, of its own objects;
+// of any other they can't tell, and count every holder as its user, but one that
+// uses nothing whatever its record says.
+func TestABatchsRecordsAgreeWithIsUser(t *testing.T) {
+	ids := []ID{secretID("ns", "a"), secretID("ns", "b"), secretID("other", "a"), {Kind: "ConfigMap", Namespace: "ns", Name: "a"}, secretID("ns", "a")}
+	rec := func(of ...ID) string {
+		text, _ := EncodeRecord(of)
+		return text
+	}
+	var holders []*metav1.PartialObjectMetadata
+	for i, text := range []string{"-", "", "[", "{}", rec(), rec(ids[0]), rec(ids[1]), rec(ids[2], ids[3]), rec(ids...), rec(secretID("ns", "c")), rec(ids[0], secretID("ns", "c"))} {
+		for _, deleted := range []bool{false, true} {
+			for _, owned := range []bool{false, true} {
+				h := holderObject("ns", fmt.Sprintf("h%d-%v-%v", i, deleted, owned))
+				if text != "-" {
+					h.Annotations = map[string]string{AnnotationRefs: text}
+				}
+				if !owned {
+					h.Finalizers = nil
+				}
+				if deleted {
+					deleting(h, t0)
+				}
+				holders = append(holders, h)
+			}
+		}
+	}
+	p := &protocol{ownerFinalizers: ownerFinalizers}
+	records := p.newBatchRecords(ids)
+	for range 2 { // the second time, all from memory
+		for _, h := range holders {
+			for _, id := range ids {
+				if got, want := records.isUser(h, id), IsUser(h, id, ownerFinalizers); got != want {
+					t.Errorf("isUser(%s %q, %s) = %v, want %v", h.Name, h.Annotations[AnnotationRefs], id, got, want)
+				}
+				if got, want := records.isDeletingUser(h, id), IsDeletingUser(h, id, ownerFinalizers); got != want {
+					t.Errorf("isDeletingUser(%s %q, %s) = %v, want %v", h.Name, h.Annotations[AnnotationRefs], id, got, want)
+				}
+			}
+			if got, want := records.isUser(h, secretID("ns", "another")), !notAUser(h, ownerFinalizers); got != want {
+				t.Errorf("isUser(%s) of an object that isn't the batch's = %v, want %v", h.Name, got, want)
+			}
+		}
+	}
+}
+
 // A costLog is what batches on a fakeRig asked the API server for.
 type costLog struct {
 	mu     sync.Mutex

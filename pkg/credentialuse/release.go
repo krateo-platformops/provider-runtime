@@ -134,20 +134,6 @@ func (r *ReleaseResult) requeueAt(now, at time.Time, id ID) {
 // The most objects a batch reads at R1.
 const maxTurnReads = 64
 
-// isUser is IsUser, and isDeletingUser IsDeletingUser, through the protocol's
-// readRecord.
-func (p *protocol) isUser(h metav1.Object, id ID) bool {
-	read := p.readRecord
-	if read == nil {
-		read = ReadRecord
-	}
-	return !notAUser(h, p.ownerFinalizers) && read(h).Names(id)
-}
-
-func (p *protocol) isDeletingUser(h metav1.Object, id ID) bool {
-	return h.GetDeletionTimestamp() != nil && p.isUser(h, id)
-}
-
 // r1Read is one protected object as R1 read it.
 type r1Read struct {
 	id       ID
@@ -180,13 +166,14 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 	// R0. The fast path, from the caches: but nothing from the holder cache
 	// of a kind whose CRD is absent, which may show holders that are gone for
 	// as long as it is.
+	records := p.newBatchRecords(pending)
 	cachedUsers := map[ID]cachedUse{}
 	absent := p.kindAbsent != nil && p.kindAbsent()
 	var todo []ID
 	for _, id := range SortedIDs(pending) {
 		var u cachedUse
 		if !absent {
-			u = p.fastKeep(id, n)
+			u = p.fastKeep(id, n, records)
 		}
 		cachedUsers[id] = u
 		if !u.keep {
@@ -319,11 +306,11 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 			var users, deletingUsers []types.NamespacedName
 			for i := range holders {
 				nn := types.NamespacedName{Namespace: holders[i].Namespace, Name: holders[i].Name}
-				if p.isUser(&holders[i], r.id) {
+				if records.isUser(&holders[i], r.id) {
 					in.Users++
 					users = append(users, nn)
 				}
-				if p.isDeletingUser(&holders[i], r.id) {
+				if records.isDeletingUser(&holders[i], r.id) {
 					in.DeletingUsers++
 					deletingUsers = append(deletingUsers, nn)
 				}
@@ -403,15 +390,15 @@ type cachedUse struct {
 // fastKeep is R0 for one object (§6.2): it reports the cached users of P in
 // n, and whether the cache already settles the batch for P. A stale cache can
 // only keep a hold longer.
-func (p *protocol) fastKeep(id ID, n string) cachedUse {
+func (p *protocol) fastKeep(id ID, n string, records *batchRecords) cachedUse {
 	var u cachedUse
 	cached, ok := p.views.Protected(id)
 	for _, h := range p.views.HoldersNaming(id, n) {
 		nn := types.NamespacedName{Namespace: h.Namespace, Name: h.Name}
-		if p.isUser(h, id) {
+		if records.isUser(h, id) {
 			u.users = append(u.users, nn)
 		}
-		if p.isDeletingUser(h, id) {
+		if records.isDeletingUser(h, id) {
 			u.deletingUsers = append(u.deletingUsers, nn)
 		}
 	}
