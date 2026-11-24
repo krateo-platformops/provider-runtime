@@ -676,29 +676,56 @@ func TestTheEvidenceOnTheWire(t *testing.T) {
 	gizmoReleased(t, time.Minute, ns, "s")
 	mu.Lock()
 	defer mu.Unlock()
-	// The last of each before R3: the round that released.
-	list := "GET /apis/" + cutest.Group + "/v1/namespaces/" + ns + "/gizmos?limit=500 404"
-	crd := "GET /apis/apiextensions.k8s.io/v1/customresourcedefinitions/" + gizmoCRD + " 404"
-	group := "GET /apis/" + cutest.Group + " 200"
-	version := "GET /apis/" + cutest.Group + "/v1 200"
-	patch := "PATCH /api/v1/namespaces/" + ns + "/secrets/s"
-	at := func(prefix string) int {
-		last := -1
-		for i, q := range reqs {
-			if strings.HasPrefix(q, prefix) {
-				last = i
-			}
-		}
-		return last
+	// The round that released: the last list before R3, and what came after it,
+	// in order. The list and the CRD's GET as they are, with no other parameter;
+	// the discovery's client adds its timeout.
+	r3 := slices.IndexFunc(reqs, func(q string) bool { return strings.HasPrefix(q, "PATCH /api/v1/namespaces/"+ns+"/secrets/s ") })
+	if r3 < 0 {
+		t.Fatalf("no R3; the requests:\n%s", strings.Join(reqs, "\n"))
 	}
-	if l, c, g, v, p := at(list), at(crd), at(group), at(version), at(patch); l < 0 || c < l || g < c || v < g || p < v {
-		t.Errorf("want, in order, the list (%d), the CRD's GET (%d), the group (%d), its version (%d), R3 (%d); the requests:\n%s", l, c, g, v, p, strings.Join(reqs, "\n"))
+	list := "GET /apis/" + cutest.Group + "/v1/namespaces/" + ns + "/gizmos?limit=500 404"
+	steps := []struct {
+		what string
+		is   func(q string) bool
+	}{
+		{"the CRD's GET", func(q string) bool {
+			return q == "GET /apis/apiextensions.k8s.io/v1/customresourcedefinitions/"+gizmoCRD+" 404"
+		}},
+		{"the group", func(q string) bool { return isGET(q, "/apis/"+cutest.Group, 200) }},
+		{"its version", func(q string) bool { return isGET(q, "/apis/"+cutest.Group+"/v1", 200) }},
+	}
+	from := -1
+	for i, q := range reqs[:r3] {
+		if q == list {
+			from = i
+		}
+	}
+	if from < 0 {
+		t.Fatalf("no list of the kind before R3 was a 404; the requests:\n%s", strings.Join(reqs, "\n"))
+	}
+	round := reqs[from+1 : r3]
+	for _, s := range steps {
+		i := slices.IndexFunc(round, s.is)
+		if i < 0 {
+			t.Errorf("%s isn't after the list and what comes before it, and before R3; the requests:\n%s", s.what, strings.Join(reqs, "\n"))
+			break
+		}
+		round = round[i+1:]
 	}
 	for _, q := range reqs {
 		if strings.Contains(q, "/customresourcedefinitions/"+gizmoCRD) && strings.Contains(q, "resourceVersion") {
 			t.Errorf("the CRD is read from the watch cache: %s", q)
 		}
 	}
+}
+
+// isGET reports whether q, as the test above records it, is a GET of path,
+// whatever its parameters, that was answered with code.
+func isGET(q, path string, code int) bool {
+	uri, ok := strings.CutPrefix(q, "GET ")
+	uri, answered := strings.CutSuffix(uri, fmt.Sprintf(" %d", code))
+	p, _, _ := strings.Cut(uri, "?")
+	return ok && answered && p == path
 }
 
 type roundTrip func(*http.Request) (*http.Response, error)
