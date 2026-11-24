@@ -25,13 +25,25 @@ const gateReadTimeout = 5 * time.Second
 // gateDeadline is the context of those reads, in a tracker: it ends after
 // gateReadTimeout, or half of the time that ctx has left, if that is sooner, so
 // that ctx has time for the A1 of what they found.
+//
+// It doesn't say when it ends. A client's rate limiter refuses at once a call
+// whose turn would come after its context's deadline; a read must wait for its
+// turn, and be cut, so that it keeps its place and is the first next time.
+// Refused, it would count as read, in every pass that is short of turns.
 func gateDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
 	d := gateReadTimeout
 	if end, ok := ctx.Deadline(); ok {
 		d = min(d, time.Until(end)/2)
 	}
-	return context.WithTimeout(ctx, d)
+	reads, cancel := context.WithTimeout(ctx, d)
+	return noDeadline{reads}, cancel
 }
+
+// noDeadline is a context that ends when the one it wraps does, and doesn't
+// say when: neither its own deadline nor one above it.
+type noDeadline struct{ context.Context }
+
+func (noDeadline) Deadline() (time.Time, bool) { return time.Time{}, false }
 
 // recordedGate is what gateRecorded found. With an error it says nothing.
 type recordedGate struct {

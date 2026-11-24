@@ -1497,7 +1497,12 @@ func TestCacheLacks(t *testing.T) {
 			pass, endPass = context.WithTimeout(ctx, left)
 		}
 		reads, end := tr.proto.gateContext(pass)
-		if d, ok := reads.Deadline(); !ok || time.Until(d) > want || time.Until(d) < want-time.Second {
+		if d, ok := reads.Deadline(); ok {
+			t.Errorf("with %v left, the gate's context says that it ends in %v, which a client's limiter goes by", left, time.Until(d))
+		}
+		if hides, ok := reads.(noDeadline); !ok {
+			t.Errorf("with %v left, the gate's context is a %T", left, reads)
+		} else if d, ok := hides.Context.Deadline(); !ok || time.Until(d) > want || time.Until(d) < want-time.Second {
 			t.Errorf("with %v left, the gate's deadline is in %v (%v), want %v", left, time.Until(d), ok, want)
 		}
 		end()
