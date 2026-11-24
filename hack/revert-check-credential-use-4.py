@@ -45,7 +45,7 @@ MUTANTS = [
      [('\t\tif depth > maxDepth {',
        '\t\tif false {')]),
     ('a ref met again is followed again', 'acquire.go',
-     [('\t\t\tif seen[id] {\n\t\t\t\tcontinue\n\t\t\t}\n',
+     [('\t\t\tif met(r) {\n\t\t\t\tcontinue\n\t\t\t}\n',
        '')]),
     ('a Guaranteed ref is held', 'acquire.go',
      [('\t\t\tcase r.Guaranteed:\n',

@@ -109,6 +109,7 @@ func kindLabel(gk schema.GroupKind) string {
 type coreReports struct {
 	metrics MetricsRecorder
 	events  *eventSink
+	warn    func(msg string, keysAndValues ...any) // nil logs nothing
 }
 
 var _ reports = coreReports{}
@@ -153,6 +154,31 @@ func (r coreReports) ConsentWithdrawn(holder schema.GroupKind, h metav1.Object, 
 		" are no longer allowed (allow-holders-from on it and on Namespace " + ref.Namespace + ")"
 	r.events.record(r.events.holderRef(holder, h), "Warning", EventConsentWithdrawn, note)
 	r.events.record(r.events.regarding(ref), "Warning", EventConsentWithdrawn, note)
+}
+
+// What a conflicting ref asked for, as credentialuse_refs_conflicting_total
+// is labelled (§9.1).
+const (
+	askedHold = "hold"
+	askedNext = "next"
+)
+
+func (r coreReports) RefsConflicting(holder schema.GroupKind, h metav1.Object, ref ID, hold, next bool) {
+	var asked []string
+	if hold {
+		asked = append(asked, askedHold)
+	}
+	if next {
+		asked = append(asked, askedNext)
+	}
+	for _, a := range asked {
+		r.metrics.RefsConflicting(kindLabel(holder), a)
+	}
+	if r.warn == nil {
+		return
+	}
+	r.warn("credential-use: a holder's refs name one object more than once, and a later one asks for more than the first, which wins: what it asks for isn't done (§9.1)",
+		"kind", holder.String(), "holder", h.GetNamespace()+"/"+h.GetName(), "object", ref.String(), "asked", strings.Join(asked, ","))
 }
 
 func (r coreReports) ReleaseRejected(holder schema.GroupKind, p ID, resourceVersion string) {

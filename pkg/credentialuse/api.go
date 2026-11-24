@@ -65,6 +65,11 @@ type reports interface {
 	// ConsentWithdrawn reports a hold of h released because its target
 	// withdrew consent (§11.3).
 	ConsentWithdrawn(holder schema.GroupKind, h metav1.Object, ref ID)
+	// RefsConflicting reports that a ref of holder h was skipped for an earlier
+	// one of the same object, ref, and asked for more: to hold it, or to
+	// follow a Next (§9.1). It is called once per holder, object and thing
+	// asked for, while the conflict lasts.
+	RefsConflicting(holder schema.GroupKind, h metav1.Object, ref ID, hold, next bool)
 }
 
 type nopReports struct{}
@@ -74,3 +79,5 @@ func (nopReports) AdmissionDenied(schema.GroupKind)                     {}
 func (nopReports) ReleaseRejected(schema.GroupKind, ID, string)         {}
 func (nopReports) RefNotHeld(schema.GroupKind, metav1.Object, ID)       {}
 func (nopReports) ConsentWithdrawn(schema.GroupKind, metav1.Object, ID) {}
+
+func (nopReports) RefsConflicting(schema.GroupKind, metav1.Object, ID, bool, bool) {}

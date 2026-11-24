@@ -175,6 +175,9 @@ func (m sinkMetrics) DisownUnreadable(k string, n int) {
 func (m sinkMetrics) IndexReadDenied(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.IndexReadDenied(k) })
 }
+func (m sinkMetrics) RefsConflicting(k, asked string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.RefsConflicting(k, asked) })
+}
 func (m sinkMetrics) CRDWriteStarved(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.CRDWriteStarved(k) })
 }
@@ -210,7 +213,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		views:           trackerViews{t},
 		ver:             t.ver,
 		seen:            s.seen,
-		reports:         coreReports{metrics: sinkMetrics{t}, events: s.events},
+		reports:         coreReports{metrics: sinkMetrics{t}, events: s.events, warn: t.warn},
 		newEpoch:        NewEpoch,
 		heldDeleting:    t.heldDeleting,
 		maxDepth:        o.MaxDepth,
@@ -221,6 +224,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		namespaceViews:  trackerViews{t},
 		backoff:         newConsentBackoff(o.PollInterval),
 		reported:        newReportedSet(),
+		conflicts:       newConflictSet(),
 		written:         newRecordWrites(),
 		unheldReads:     s.unheldReads,
 		enqueueBatch: func(id ID, ns string) {

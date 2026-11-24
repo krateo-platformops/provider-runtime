@@ -130,6 +130,10 @@ type protocol struct {
 	unheldReads    *sharedReads
 	enqueueBatch   func(id ID, holderNamespace string)
 
+	// conflicts remembers which refs were reported as conflicting (§9.1); nil
+	// remembers nothing.
+	conflicts *conflictSet
+
 	// written remembers what each holder's last A1 left, for the holder
 	// event filter (IsOwnRecordWrite, §7.5); nil remembers nothing.
 	written *recordWrites
@@ -286,7 +290,29 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	}
 
 	byID := map[ID]Ref{} // every held ref of the chain so far
-	seen := map[ID]bool{}
+	seen := map[ID]Ref{} // the first ref met of each object, which wins (§9.1)
+	// asked is what later refs of an object asked for that the first doesn't.
+	asked := map[ID]asks{}
+	// met reports whether r's object was met. It reports what r asks for that
+	// the first ref of the object doesn't, once per holder, object and thing
+	// asked for, and a hold not of a Disowned kind (§9.1). It reads nothing.
+	met := func(r Ref) bool {
+		id := r.ID()
+		first, ok := seen[id]
+		if !ok {
+			return false
+		}
+		hold, next := r.AsksMoreThan(first)
+		before, told := asked[id], p.conflicts.told(obj.GetUID(), id)
+		asked[id] = asks{before.hold || hold, before.next || next}
+		hold = hold && !told.hold && !p.isDisowned(id.GroupKind())
+		next = next && !told.next
+		if hold || next {
+			p.conflicts.tell(obj.GetUID(), id, asks{hold, next})
+			p.reports.RefsConflicting(p.holder, obj, id, hold, next)
+		}
+		return true
+	}
 	// unfollowed: a hop with a Next wasn't held this pass (Missing or
 	// Deleting), so what lies behind it is unknown. The record then keeps
 	// every ref it names: a ref behind that hop must stay held, as the
@@ -295,6 +321,14 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	// holder stopped naming for another reason is kept too, until a pass
 	// follows the whole chain again: a longer hold, which §5 bounds.
 	unfollowed := false
+	// metAll forgets the conflicts that are no more, once the pass has met all
+	// the holder's refs. A pass that can't, such as one behind a Missing hop,
+	// forgets none.
+	metAll := func() {
+		if !unfollowed {
+			p.conflicts.keep(obj.GetUID(), asked)
+		}
+	}
 	rec0 := ReadRecord(obj)                   // the record as the pass found it
 	found := ReadUnheld(obj.GetAnnotations()) // the unheld list as the pass found it
 	listed := map[string]bool{}
@@ -410,10 +444,10 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 				return fail(fmt.Errorf("credential-use: ref %s has no kind or no name", r.ID()), "Refs")
 			}
 			id := r.ID()
-			if seen[id] {
+			if met(r) {
 				continue
 			}
-			seen[id] = true
+			seen[id] = r
 			if r.Next != nil {
 				chained = true
 			}
@@ -490,6 +524,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		want := exact()
 		var unheldNow *[]UnheldEntry
 		if last := !chained && len(next) == 0; last {
+			metAll()
 			u := p.unheldEntries(found, notHeld, keepEntry, &passNow)
 			unheldNow = &u
 		} else if rec := ReadRecord(obj); !rec.Unparseable {
@@ -647,8 +682,9 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		}
 		// Refs already met end there, so a cycle ends, and isn't counted
 		// against MaxDepth.
-		level = slices.DeleteFunc(next, func(r Ref) bool { return seen[r.ID()] })
+		level = slices.DeleteFunc(next, met)
 	}
+	metAll()
 	for id := range readOK {
 		if readOK[id] {
 			p.backoff.succeed(consentKey{obj.GetUID(), id})
@@ -912,6 +948,8 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 // the caller's owner-finalizer removal writes it in the same write (§8). It
 // reports whether anything changed.
 func (p *protocol) forget(obj metav1.Object) bool {
+	// First: a holder whose refs are all Guaranteed may have no record.
+	p.conflicts.forget(obj.GetUID())
 	an := obj.GetAnnotations()
 	_, hasRefs := an[AnnotationRefs]
 	_, hasUnheld := an[AnnotationUnheld]

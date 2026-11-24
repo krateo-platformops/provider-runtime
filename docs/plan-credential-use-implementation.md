@@ -507,7 +507,15 @@ of tests.
   each level's A1 writes the chain so far added to the record as it stands,
   and only the last A1 writes exactly what the whole chain names.
 - **A level of refs already met ends there**, so a cycle ends, and isn't
-  counted against `MaxDepth`.
+  counted against `MaxDepth`. The first ref met of an object wins; a later one
+  that asks for more, a hold or a `Next`, is a warning and a metric, and a
+  failure of `AssertCredentialRefsCover` only (2026-11-24, after the build;
+  §9.1). Before, it was skipped in silence. What was reported is kept by
+  holder, and only while the conflict lasts.
+- **A `Next` returns an error, never nil refs,** when the object lacks what
+  it reads, and puts none of its values in the error (§9.1, 2026-11-24).
+- **A lister that returns neither an object nor an error is an Acquire
+  error** (2026-11-24). Before, it panicked.
 - **A held ref with a `Next` must be of a kind with `Content`** (the user's
   decision, from the review of #122): a re-point of a metadata-only object
   would go unseen, so it is an Acquire error naming the fix. A `Guaranteed`
@@ -931,9 +939,11 @@ of tests.
   owner finalizers, `Refs`, the sinks, `PollInterval` (the poll interval)
   and `TimeoutBound` (the timeout plus 30s).
 - **`AssertCredentialRefsCover(t, ctx, connecter, mg, recordingReader,
-  protected...)`** follows the refs' Next through the fixture, and hands
-  Connect the objects it followed through the new
-  `credentialuse.WithResolvedObjects`.
+  kindOptions)`** follows the refs' Next through the fixture, as the tracker
+  does, and hands Connect the objects it followed through the new
+  `credentialuse.WithResolvedObjects`. It took the protected kinds until
+  2026-11-24, which say neither `MaxDepth` nor `Content`, and it gave a `Next`
+  the object with its status.
 - **A degraded pass is logged once per holder** (§8), keyed by UID, while
   it stays degraded: a pass that isn't degraded, `Forget`, or the holder's
   deletion clears it, so the next degraded pass logs again. The

@@ -3,6 +3,7 @@ package credentialuse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -73,6 +74,11 @@ type recordingReports struct {
 	admissionDenials int
 	notHeld          []ID
 	withdrawn        []ID
+	conflicting      []string
+}
+
+func (r *recordingReports) RefsConflicting(_ schema.GroupKind, h metav1.Object, ref ID, hold, next bool) {
+	r.conflicting = append(r.conflicting, fmt.Sprintf("%s %s hold=%v next=%v", h.GetName(), ref, hold, next))
 }
 
 func (r *recordingReports) RefNotHeld(_ schema.GroupKind, _ metav1.Object, ref ID) {
