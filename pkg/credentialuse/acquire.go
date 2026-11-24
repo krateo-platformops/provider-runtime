@@ -125,10 +125,16 @@ type protocol struct {
 	// owes after each A2 of a cross-namespace ref (§10.2 L2). A protocol
 	// without cross-namespace refs needs none of them.
 	namespaceViews namespaceViews
-	backoff        *consentBackoff
-	reported       *reportedSet
-	unheldReads    *sharedReads
-	enqueueBatch   func(id ID, holderNamespace string)
+	// The gate of recorded refs (§11.3): protects reports whether a kind is
+	// protected, and cacheLacks whether an ID's cache covers it, has synced
+	// and lacks it. Nil ones are every kind, and never.
+	protects     func(schema.GroupKind) bool
+	cacheLacks   func(ID) bool
+	gateTurns    *gateTurns
+	backoff      *consentBackoff
+	reported     *reportedSet
+	unheldReads  *sharedReads
+	enqueueBatch func(id ID, holderNamespace string)
 
 	// conflicts remembers which refs were reported as conflicting (§9.1); nil
 	// remembers nothing.
@@ -387,7 +393,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	lastUnheld := func() []UnheldEntry {
 		u := p.unheldEntries(found, notHeld, keepEntry, &passNow)
 		if unfollowed {
-			u = append(u, keptEntries(found, seen)...)
+			u = append(u, keptEntries(found, seen, recorded.folded)...)
 		}
 		return u
 	}
@@ -399,12 +405,17 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		delete(byID, id)
 		reason := UnheldNotConsented
 		switch {
-		case rec0.Names(id) || recorded.withdrawn[id]:
+		case recorded.withdrawn[id]: // reported already, and in a.Unheld
+			reason = UnheldConsentWithdrawn
+			for i := range a.Unheld {
+				if a.Unheld[i].Ref.ID() == id {
+					a.Unheld[i].Ref = r
+				}
+			}
+		case rec0.Names(id):
 			reason = UnheldConsentWithdrawn
 			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonConsentWithdrawn})
-			if !recorded.withdrawn[id] {
-				p.reports.ConsentWithdrawn(p.holder, obj, id)
-			}
+			p.reports.ConsentWithdrawn(p.holder, obj, id)
 		default:
 			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonNotConsented})
 			if !listed[unheldRef(id)] && p.reported.first(consentKey{obj.GetUID(), id}) {
@@ -984,6 +995,7 @@ func (p *protocol) forget(obj metav1.Object) bool {
 	obj.SetAnnotations(an)
 	p.ver.forgot(obj.GetUID())
 	p.backoff.forget(obj.GetUID())
+	p.gateTurns.forget(obj.GetUID())
 	p.reported.forget(obj.GetUID())
 	p.written.forget(obj.GetUID())
 	return true

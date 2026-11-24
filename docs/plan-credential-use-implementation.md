@@ -616,7 +616,9 @@ of tests.
 - **Every pass first gates what the record names** (2026-11-24, after the
   build; §11.3): a ref that the record keeps though its pass doesn't name it
   (§9.1, §8) was never gated, so a withdrawal didn't release it. What it drops
-  goes in one A1 of its own, before anything can end the pass.
+  goes in one A1 of its own, before anything can end the pass. The record is
+  whatever the holder's editors make it, so the gate reads at most 16 refs a
+  pass, and none that its caches show isn't held.
 - **The gate runs before each level's A1.** A ref the record names, on a
   pass that isn't deleting, may be held on a cached yes (the object's and its
   Namespace's cached `allow-holders-from`); anything else, a cached no or a

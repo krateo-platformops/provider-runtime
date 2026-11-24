@@ -3240,20 +3240,81 @@ holder in the index namespace included:
   on a deleting pass too, for the refs the pass doesn't name: their withdrawal
   is then seen once the informer delivers it, as on any pass that skips its
   A2. Those it names are still read live before their A2. Anything but a
-  cached yes is read live, and the pass uses that answer for a ref it then
-  names, rather than read again: it is the live read of the same pass that
-  the A2 needs;
+  cached yes is read live, within the bound below, and the pass uses that
+  answer for a ref it then names, rather than read again: it is the live read
+  of the same pass that the A2 needs;
 - **what it drops goes in one A1** at once, which a pass that fails afterwards
   has then written. It conflicts as any A1 does, and the pass that wrote it
   skips no A2 (§6.3): the holder's version is new. A withdrawal is reported
-  once that A1 is written. A pass with nothing to drop writes nothing;
+  once that A1 is written, with the dropped ref in `Acquired.Unheld` as
+  `ConsentWithdrawn`, once, whether or not the pass names it. A pass with
+  nothing to drop writes nothing;
+- **an A1 refused for its size is written again without the unheld list.** An
+  object's annotations are capped at 256 KiB together, and the ref's unheld
+  entry is about as long as its record entry. A holder whose other annotations
+  fill the rest would otherwise keep the hold, with a 422 on every pass.
+  Without the list the patch only shrinks them. The withdrawal is then not
+  listed, only reported. A pass that names such a ref still fails at its last
+  A1, whose list doesn't fit either, until there is room, but the hold is
+  released;
 - **an unreadable consent keeps the ref**, with `RetryAfter` on a failing pass
-  too, and one that is gone stays, as any Missing ref;
+  too, and one that is gone stays, as any Missing ref. Nothing is dropped once
+  the pass's context has ended;
 - **it asks nothing** about refs in the holder's own namespace, which need no
-  consent; about kinds that the Disown switch covers, by the informer, with no
-  read of the CRD (§7.4); or for a record it can't parse, which names nothing.
-  Only a target's owner can make a holder lose a hold by it, on that owner's
-  object, after a live read.
+  consent; about cluster-scoped objects, which have no Namespace to read; about
+  kinds that aren't protected; about kinds that the Disown switch covers, by
+  the informer, with no read of the CRD (§7.4); or for a record it can't parse,
+  which names nothing. Only the target's owner, or whoever edits the target's
+  Namespace, can make a holder lose a hold by it, on that target, after a live
+  read.
+
+**What it may cost.** Whoever can edit a holder can write its record, with
+about 4,000 refs of their choosing. So what the gate reads is bounded:
+
+- a ref whose **cache covers it, has synced, and lacks it** is kept, and not
+  read: no object there carries the held label, so it isn't held, or is gone. A
+  PerName kind's caches are its index lines' watches (§10.6), and an unsynced
+  one lacks nothing. A ref that the pass names is read live in any case, as
+  before. **The one it misses** is an object with its finalizer but without its
+  held label, which someone else stripped: no cache has it, and only an A2,
+  which a ref that only the record keeps doesn't get, restores the label. Its
+  withdrawal isn't seen until a pass follows the whole chain. The owner can end
+  that by setting the label back, `credential-use.krateo.io/held: "true"`: the
+  informer then delivers the object, and each holder's next pass reads it;
+- the rest are read live, **at most 16 a pass**, so at most 16 GETs of objects
+  and 16 of Namespaces, each Namespace once. Those unread the longest go first,
+  in memory, so each of n is read within ⌈n/16⌉ passes, and a withdrawal is
+  seen within that. The others are kept, and `RetryAfter` asks for the next
+  pass, with the backoff of a failed read: 1s, doubling up to the poll
+  interval. A pass that names more than that reads them too, as it always did;
+- another holder's pass costs what it did. The reads of one holder's record
+  use the same client as the others', though, and at its rate.
+
+**What remains.** Where no cache covers the target (outside
+`SharedOptions.Namespaces`, §10.5), there is no cached yes, so an honest
+holder's recorded refs there cost up to those GETs on every pass. They are the
+reads that it makes anyway for the refs it names. A ref that is gone costs
+none where a cache covers it, and one GET a pass, with its Namespace's, where
+none does, until a pass that follows the whole chain drops it from the record.
+And a forged record still tells its author whether a target exists where no
+cache covers it, or is held where one does: the ref of one that exists without
+consent is dropped, and of one that doesn't is kept. The unheld list answers
+that for any ref the holder may name already (`NotConsented`, or nothing), and
+the gate answers it for no more than 16 refs a pass.
+
+**A paused holder keeps its holds, whatever the target's owner does.** The gate
+is part of a pass, and a paused holder has none (§9.2): its recorded refs stay
+held, with their consent withdrawn, until it is unpaused or deleted and
+unpaused. So are those of a holder that no controller reconciles. Whether the
+owner should have a way out then is open.
+
+**A ref that only the record keeps, recreated without the annotation, is
+dropped.** A two-step apply (the object, then its annotation) of a target that
+was deleted is, between the two, an object whose owner doesn't consent. If it
+is read then, the gate drops the ref, as it would one that the pass names. But
+no pass names this one, so it isn't held again when the annotation comes: only
+once the hop is back, by the pass that follows it to the ref. Give a recreated
+target its annotation in the same write, or the consent on its Namespace.
 
 `BeforeEstablish` and the prober don't change: a ref the gate dropped isn't
 Missing, and one it kept is neither probed for nor held by them, as before.
@@ -3315,14 +3376,22 @@ credential-use.krateo.io/unheld: [{"ref":"team-b/Secret/db-creds","reason":"Cons
   `NotConsented` ones** (L4), because a released hold is the cause a later
   not-found needs explained.
   Within each reason, the most recent come first. Beyond 16, the last entry
-  is `{"ref":"…","reason":"More","count":<n>}`. With refs of at most about 350
+  is `{"ref":"…","reason":"More","count":<n>,"unmet":<m>}`. `unmet` is how many
+  of the `n` are released holds that the passes don't name (below), left out
+  when it is 0. A pass counts the refs it names each time, and can't count
+  those, so it carries that number over. With refs of at most about 350
   characters, it stays under 6 KB.
 - **An entry goes** when the ref is held again, or when the holder no longer
   names it. A released hold's entry, `ConsentWithdrawn` or `ReadDenied`, stays
-  while the holder's passes can't follow its whole chain, or fail, though none
-  names the ref: the holder may still read through to it, and the entry
-  explains what it then finds. It goes with the first pass that follows the
-  whole chain and doesn't name it.
+  while the holder's passes can't follow its whole chain, or fail before their
+  last A1, though none names the ref: the holder may still read through to it,
+  and the entry explains what it then finds. It goes with the first pass that
+  follows the whole chain and doesn't name it. That pass's last A1 is what
+  removes it, so a pass whose refs lead nowhere further, which writes its one
+  A1 before its A2s, removes it even if an A2 then fails. `unmet` goes with
+  it. It may count too many for as long: a pass that names refs which its
+  gate's A1 left out of the list takes them out of the count in its last A1,
+  and one that fails before that doesn't.
 - **It is the runtime's.** Like the record, it shouldn't be edited. An edit
   is overwritten by the next A1.
 

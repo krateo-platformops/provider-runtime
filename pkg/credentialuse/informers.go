@@ -245,6 +245,10 @@ func (h holderHandler) OnDelete(obj any) {
 	}
 	h.t.ver.holderEvent(m.UID, nil, h.now())
 	h.t.proto.written.forget(m.UID)
+	// A holder gone without a Forget leaves nothing behind either: whoever
+	// can edit one names the refs these are kept for (§11.3).
+	h.t.proto.backoff.forget(m.UID)
+	h.t.proto.gateTurns.forget(m.UID)
 	h.t.unrecorded.forget(m.UID)
 	h.t.degradedLogged.forget(m.UID)
 	h.t.misplaced.forget(m.UID)
@@ -624,6 +628,24 @@ func (t *Tracker) protectedFor(id ID) *protectedInformer {
 		return t.names.get(id)
 	}
 	return t.s.protectedFor(id)
+}
+
+// cacheLacks reports whether the cache that covers id has synced, and doesn't
+// have it: it isn't held, or is gone, or has just been held, which the cache
+// will show, or its held label was stripped. A PerName kind's cache is the
+// watch of id's index line: with the index synced and no such watch, no line
+// was delivered yet for a hold of t's. A kind, or a namespace, that no cache
+// covers is never lacking.
+func (t *Tracker) cacheLacks(id ID) bool {
+	p := t.protectedFor(id)
+	if p == nil {
+		return t.isPerName(id.GroupKind()) && t.idx.inf.HasSynced()
+	}
+	if !p.inf.HasSynced() {
+		return false
+	}
+	_, ok := p.get(id.Namespace, id.Name)
+	return !ok
 }
 
 // trackerViews are tracker t's views over the shared caches.

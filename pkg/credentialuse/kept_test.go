@@ -2,8 +2,12 @@ package credentialuse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -411,13 +415,29 @@ func TestTheGateOfKeptRefsWritesOneA1(t *testing.T) {
 			if n := countCalls(r.srv.calls, "patch Widget/h"); n != 1 || len(r.rep.withdrawn) != 2 || len(unheldOf(t, r, "h")) != 2 {
 				t.Errorf("named %v: %d holder writes, withdrawn %v, unheld %+v; want one write, and two of each", named, n, r.rep.withdrawn, unheldOf(t, r, "h"))
 			}
-			unheld := 1 // the hop
-			if named {
-				unheld = 3
+			// The hop, and both dropped refs, once each, whether or not the
+			// pass names them.
+			var got []ID
+			for _, u := range a.Unheld {
+				if u.Reason == ReasonConsentWithdrawn {
+					got = append(got, u.Ref.ID())
+				}
 			}
-			if len(a.Unheld) != unheld {
+			if !slices.Equal(SortedIDs(got), []ID{otherSecretID(), s2.ID()}) || len(a.Unheld) != 3 {
 				t.Errorf("named %v: Unheld = %+v", named, a.Unheld)
 			}
+		}
+	})
+	t.Run("Unheld has the pass's own Ref for one it names", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		setConsent(t, r, secretKey("other", "s"), "")
+		r.p.contentKinds[secretGroupKind] = true // a Next needs it
+		ref := otherSecret()
+		ref.Next = func(*unstructured.Unstructured) ([]Ref, error) { return nil, nil }
+		a := keptPass(t, r, []Ref{ref})
+		if len(a.Unheld) != 1 || a.Unheld[0].Ref.ID() != otherSecretID() || a.Unheld[0].Ref.Next == nil {
+			t.Errorf("Unheld = %+v", a.Unheld)
 		}
 	})
 	t.Run("a conflict ends the pass, and drops nothing", func(t *testing.T) {
@@ -449,9 +469,68 @@ func TestTheGateOfKeptRefsWritesOneA1(t *testing.T) {
 				}
 				return nil
 			}
-			if a := keptPass(t, r, refs); a.Degraded != established || a.MustNotConnect == established || a.Err == nil {
-				t.Errorf("established %v: acquire = %+v", established, a)
+			r.srv.calls = nil
+			if a := keptPass(t, r, refs); a.Degraded != established || a.MustNotConnect == established || a.Err == nil || len(a.Unheld) != 0 || len(r.rep.withdrawn) != 0 {
+				t.Errorf("established %v: acquire = %+v, reported %v", established, a, r.rep.withdrawn)
 			}
+			if n := countCalls(r.srv.calls, "patch Widget/h"); n != 1 {
+				t.Errorf("established %v: %d holder writes, want one: only a refusal for its size is tried again", established, n)
+			}
+		}
+	})
+	t.Run("refused for its size, it is tried again without the unheld list", func(t *testing.T) {
+		for name, refusal := range map[string]error{
+			"a 422": apierrors.NewInvalid(widgetGK, "h", nil),
+			"a 413": apierrors.NewRequestEntityTooLargeError("too large"),
+		} {
+			r, _, refs := keptRig(t, true)
+			keptPass(t, r, refs) // the hop, recorded
+			setConsent(t, r, secretKey("other", "s"), "")
+			refused := 0
+			r.srv.before = func(op, kind, _ string) error {
+				if op == "patch" && kind == "Widget" && refused == 0 {
+					refused++
+					return refusal
+				}
+				return nil
+			}
+			a := keptPass(t, r, refs)
+			if refused != 1 || a.Degraded || keptRecorded(t, r) || len(r.rep.withdrawn) != 1 {
+				t.Errorf("%s: acquire = %+v, recorded %v, reported %v; want it dropped", name, a, keptRecorded(t, r), r.rep.withdrawn)
+			}
+			if u := unheldOf(t, r, "h"); len(u) != 0 {
+				t.Errorf("%s: unheld = %+v, which couldn't be written", name, u)
+			}
+			if len(a.Unheld) != 2 {
+				t.Errorf("%s: Unheld = %+v; want it reported all the same", name, a.Unheld)
+			}
+		}
+	})
+	t.Run("nothing is dropped once ctx has ended", func(t *testing.T) {
+		r, _, refs := keptRig(t, true)
+		r.p.backoff = newConsentBackoff(time.Minute)
+		s2 := SecretRef("other", "t")
+		must(r.m.Create(secretKey("other", "t"), metav1.ObjectMeta{Annotations: map[string]string{AnnotationAllowHoldersFrom: "ns"}}))
+		if a, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), []Ref{otherSecret(), s2}); err != nil || len(a.Held) != 2 {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+		setConsent(t, r, secretKey("other", "s"), "")
+		setConsent(t, r, secretKey("other", "t"), "")
+		ended, end := context.WithCancel(ctx)
+		r.srv.before = func(op, kind, name string) error {
+			if op == "get" && kind == "Secret" && name == "t" {
+				end() // after s was found withdrawn
+				return context.Canceled
+			}
+			return nil
+		}
+		r.srv.calls = nil
+		a, err := r.p.acquire(ended, r.get(t, widgetKey("ns", "h")), refs)
+		if err != nil || !a.Degraded || !errors.Is(a.Err, context.Canceled) || a.RetryAfter != 0 {
+			t.Errorf("acquire = %+v, %v; want it to fail for its context", a, err)
+		}
+		if n := countCalls(r.srv.calls, "patch Widget/h"); n != 0 || !keptRecorded(t, r) || len(r.rep.withdrawn) != 0 {
+			t.Errorf("%d holder writes, recorded %v, reported %v; want nothing dropped", n, keptRecorded(t, r), r.rep.withdrawn)
 		}
 	})
 	t.Run("no skip rests on what it dropped", func(t *testing.T) {
@@ -576,6 +655,482 @@ func TestTheUnheldListOfKeptRefs(t *testing.T) {
 	})
 }
 
+// forgeRecord writes a record naming ids on holder h, as whoever can edit the
+// holder can.
+func forgeRecord(t *testing.T, r *rig, ids []ID) {
+	t.Helper()
+	v, err := EncodeRecord(SortedIDs(ids))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationRefs: v}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.Patch(widgetKey("ns", "h"), types.MergePatchType, data); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func manySecrets(ns string, n int) []ID {
+	ids := make([]ID, n)
+	for i := range ids {
+		ids[i] = SecretRef(ns, fmt.Sprintf("s%05d", i)).ID()
+	}
+	return ids
+}
+
+// TestAForgedRecordCostsABoundedNumberOfReads: whoever can edit a holder
+// writes its record, so what it names mustn't cost reads without bound, or
+// tell what exists elsewhere (§11.3).
+func TestAForgedRecordCostsABoundedNumberOfReads(t *testing.T) {
+	ctx := context.Background()
+	gets := func(r *rig) (objects, namespaces int) {
+		for _, c := range r.srv.calls {
+			switch {
+			case strings.HasPrefix(c, "get Secret/"):
+				objects++
+			case strings.HasPrefix(c, "get Namespace/"):
+				namespaces++
+			}
+		}
+		return objects, namespaces
+	}
+	failing := failingNext // a pass that keeps its record
+	t.Run("at most maxGateReads a pass, and its Namespace once", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.gateTurns = newGateTurns()
+		r.p.backoff = newConsentBackoff(time.Minute)
+		ids := manySecrets("other", 4000)
+		for _, id := range ids[:200] {
+			must(r.m.Create(secretKey("other", id.Name), metav1.ObjectMeta{Annotations: map[string]string{AnnotationAllowHoldersFrom: "ns"}}))
+		}
+		forgeRecord(t, r, ids)
+		var retries []time.Duration
+		for pass := range 4 {
+			r.srv.calls = nil
+			a := keptPass(t, r, failing())
+			o, n := gets(r)
+			if o != maxGateReads || n != 1 {
+				t.Errorf("pass %d: %d reads of Secrets and %d of Namespaces, want %d and 1", pass, o, n, maxGateReads)
+			}
+			retries = append(retries, a.RetryAfter)
+		}
+		if want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}; !slices.Equal(retries, want) {
+			t.Errorf("RetryAfter = %v, want %v", retries, want)
+		}
+		if rec := ReadRecord(r.get(t, widgetKey("ns", "h"))); len(rec.IDs) < len(ids) {
+			t.Errorf("%d refs recorded, of %d: a ref it didn't read, or that is gone or consents, was dropped", len(rec.IDs), len(ids))
+		}
+	})
+	t.Run("each gets its turn, the longest unread first", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.gateTurns = newGateTurns()
+		ids := manySecrets("other", 2*maxGateReads+3)
+		for _, id := range ids {
+			must(r.m.Create(secretKey("other", id.Name), metav1.ObjectMeta{Annotations: map[string]string{AnnotationAllowHoldersFrom: "ns"}}))
+		}
+		forgeRecord(t, r, ids)
+		read := map[string]int{}
+		for range 3 {
+			r.srv.calls = nil
+			keptPass(t, r, failing())
+			for _, c := range r.srv.calls {
+				if name, ok := strings.CutPrefix(c, "get Secret/"); ok {
+					read[name]++
+				}
+			}
+		}
+		for _, id := range ids {
+			if read[id.Name] == 0 {
+				t.Errorf("%s wasn't read in 3 passes", id.Name)
+			}
+		}
+		// A withdrawal is found within as many passes.
+		last := ids[len(ids)-1]
+		setConsent(t, r, secretKey("other", last.Name), "")
+		for range 3 {
+			keptPass(t, r, failing())
+		}
+		if rec := ReadRecord(r.get(t, widgetKey("ns", "h"))); rec.Names(last) {
+			t.Errorf("%s is still recorded 3 passes after its withdrawal", last)
+		}
+		// Down to the bound, all are read, and no retry is asked for.
+		forgeRecord(t, r, ids[:maxGateReads])
+		if a := keptPass(t, r, failing()); a.RetryAfter != 0 || len(r.p.gateTurns.at) != 0 {
+			t.Errorf("RetryAfter = %v with no more than one pass reads, turns %v", a.RetryAfter, r.p.gateTurns.at)
+		}
+	})
+	t.Run("the retry for the rest starts over once none is left", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.backoff = newConsentBackoff(time.Minute)
+		ids := manySecrets("other", maxGateReads+1)
+		var got []time.Duration
+		for _, n := range []int{maxGateReads + 1, maxGateReads + 1, maxGateReads, maxGateReads + 1} {
+			forgeRecord(t, r, ids[:n])
+			got = append(got, keptPass(t, r, failing()).RetryAfter)
+		}
+		if want := []time.Duration{time.Second, 2 * time.Second, 0, time.Second}; !slices.Equal(got, want) {
+			t.Errorf("RetryAfter = %v, want %v", got, want)
+		}
+	})
+	t.Run("kinds that aren't protected aren't read", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.protects = func(gk schema.GroupKind) bool { return gk == secretGroupKind }
+		var ids []ID
+		for i := range 100 {
+			ids = append(ids, ID{Kind: "ConfigMap", Namespace: "other", Name: fmt.Sprint(i)}, ID{Group: targetGK.Group, Kind: targetGK.Kind, Namespace: "other", Name: fmt.Sprint(i)})
+		}
+		forgeRecord(t, r, append(ids, otherSecretID()))
+		r.srv.calls = nil
+		keptPass(t, r, failing())
+		for _, c := range r.srv.calls {
+			if strings.HasPrefix(c, "get ConfigMap") || strings.HasPrefix(c, "get Target") && c != "get Target/kt" {
+				t.Errorf("read %q", c)
+			}
+		}
+		if n := countCalls(r.srv.calls, "get Secret/s"); n != 1 || !ReadRecord(r.get(t, widgetKey("ns", "h"))).Names(ids[0]) {
+			t.Errorf("%d reads of the protected kind's ref, want 1, and the others kept", n)
+		}
+	})
+	t.Run("a cluster-scoped object isn't asked about", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		id := ID{Group: targetGK.Group, Kind: targetGK.Kind, Name: "cluster"}
+		forgeRecord(t, r, []ID{id})
+		r.srv.calls = nil
+		a := keptPass(t, r, failing())
+		for _, c := range r.srv.calls {
+			if strings.HasPrefix(c, "get Namespace") || c == "get Target/cluster" {
+				t.Errorf("read %q", c)
+			}
+		}
+		if a.RetryAfter != 0 || !ReadRecord(r.get(t, widgetKey("ns", "h"))).Names(id) {
+			t.Errorf("acquire = %+v; want it kept", a)
+		}
+	})
+	t.Run("what its cache has synced and lacks is kept, and not read", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.cacheLacks = func(id ID) bool { return id.Name != "s" }
+		ids := manySecrets("other", 4000)
+		must(r.m.Create(secretKey("other", ids[0].Name), metav1.ObjectMeta{})) // exists, unheld, without consent
+		forgeRecord(t, r, append(ids, otherSecretID()))
+		r.srv.calls = nil
+		a := keptPass(t, r, failing())
+		o, n := gets(r)
+		if o != 1 || n != 1 || a.RetryAfter != 0 {
+			t.Errorf("%d reads of Secrets, %d of Namespaces, RetryAfter %v; want only s read", o, n, a.RetryAfter)
+		}
+		rec := ReadRecord(r.get(t, widgetKey("ns", "h")))
+		if !rec.Names(ids[0]) || !rec.Names(ids[1]) {
+			t.Error("one that exists was told apart from one that doesn't")
+		}
+		// One that the pass names is read, as ever.
+		r.srv.calls = nil
+		keptPass(t, r, []Ref{{GroupKind: secretGroupKind, Namespace: "other", Name: ids[0].Name}})
+		if n := countCalls(r.srv.calls, "get Secret/"+ids[0].Name); n != 1 {
+			t.Errorf("%d reads of a ref the pass names, want 1", n)
+		}
+	})
+	t.Run("another holder's pass costs what it did", func(t *testing.T) {
+		r, fc, _ := keptRig(t, true)
+		r.target(fc, "kt", "Secret", "home")
+		r.p.gateTurns = newGateTurns()
+		other := func() []string {
+			r.srv.calls = nil
+			if a, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h2")), []Ref{otherSecret()}); err != nil || len(a.Held) != 1 || a.RetryAfter != 0 {
+				t.Fatalf("acquire = %+v, %v", a, err)
+			}
+			return slices.Clone(r.srv.calls)
+		}
+		r.holder(t, "h2", true)
+		other()
+		before := other()
+		forgeRecord(t, r, manySecrets("other", 4000))
+		keptPass(t, r, failing())
+		if after := other(); !slices.Equal(after, before) {
+			t.Errorf("calls = %v, were %v", after, before)
+		}
+	})
+	t.Run("a holder that is gone leaves no turns", func(t *testing.T) {
+		turns := newGateTurns()
+		ids := manySecrets("other", 40)
+		turns.next("u1", ids, maxGateReads)
+		turns.next("u1", ids[20:], maxGateReads) // the first 16 aren't recorded any more
+		if n := len(turns.at["u1"]); n != maxGateReads {
+			t.Errorf("%d refs remembered, want those still asked about: %d", n, maxGateReads)
+		}
+		turns.forget("u1")
+		if len(turns.at) != 0 {
+			t.Errorf("turns = %v after forget", turns.at)
+		}
+	})
+}
+
+// TestKeptRefsOfAClusterScopedHolder: every namespaced ref of one is in
+// another namespace, and only "*" consents to it.
+func TestKeptRefsOfAClusterScopedHolder(t *testing.T) {
+	ctx := context.Background()
+	r, _ := consentRig(t, "")
+	must(r.m.Create(widgetKey("", "c"), metav1.ObjectMeta{Finalizers: ownerFinalizers}))
+	must(r.m.Create(secretKey("other", "s"), metav1.ObjectMeta{Annotations: map[string]string{AnnotationAllowHoldersFrom: "*"}}))
+	pass := func() Record {
+		t.Helper()
+		if _, err := r.p.acquire(ctx, r.get(t, widgetKey("", "c")), failingNext()); err != nil {
+			t.Fatal(err)
+		}
+		return ReadRecord(r.get(t, widgetKey("", "c")))
+	}
+	cluster := ID{Group: targetGK.Group, Kind: targetGK.Kind, Name: "cluster"}
+	v, err := EncodeRecord(SortedIDs([]ID{otherSecretID(), cluster}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{AnnotationRefs: v}}})
+	if _, err := r.m.Patch(widgetKey("", "c"), types.MergePatchType, data); err != nil {
+		t.Fatal(err)
+	}
+	r.p.contents = unreadable{}
+	r.p.contentKinds = map[schema.GroupKind]bool{targetGK: true}
+	if rec := pass(); !rec.Names(otherSecretID()) || !rec.Names(cluster) {
+		t.Errorf("record %v; want both kept while \"*\" stands", rec.IDs)
+	}
+	setConsent(t, r, secretKey("other", "s"), "team-a")
+	if rec := pass(); rec.Names(otherSecretID()) || !rec.Names(cluster) {
+		t.Errorf("record %v; want the namespaced one dropped, and the cluster-scoped one not asked about", rec.IDs)
+	}
+}
+
+// TestTheCountOfKeptReleases: past the unheld list's cap, the count of the
+// released holds that no pass meets stays right, through passes that can't
+// follow the whole chain, and goes when one does (§11.3).
+func TestTheCountOfKeptReleases(t *testing.T) {
+	ctx := context.Background()
+	const n = maxUnheld + 4
+	// world is a holder that held n Secrets of other with consent, which it
+	// then withdraws, and that names refs since.
+	world := func(t *testing.T) (*rig, *fakeContents, []ID) {
+		t.Helper()
+		r, fc, _ := keptRig(t, true)
+		r.p.gateTurns = newGateTurns()
+		ids := manySecrets("other", n)
+		refs := []Ref{}
+		for _, id := range ids {
+			must(r.m.Create(secretKey("other", id.Name), metav1.ObjectMeta{Annotations: map[string]string{AnnotationAllowHoldersFrom: "ns"}}))
+			refs = append(refs, Ref{GroupKind: secretGroupKind, Namespace: "other", Name: id.Name})
+		}
+		if a, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), refs); err != nil || len(a.Held) != n {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+		return r, fc, ids
+	}
+	count := func(t *testing.T, r *rig) int {
+		t.Helper()
+		sum, _ := SummarizeUnheld(r.get(t, widgetKey("ns", "h")).Annotations)
+		return sum.Count
+	}
+	withdraw := func(t *testing.T, r *rig, ids []ID) {
+		t.Helper()
+		for _, id := range ids {
+			setConsent(t, r, secretKey("other", id.Name), "")
+		}
+	}
+	ref := func(id ID) Ref { return Ref{GroupKind: secretGroupKind, Namespace: id.Namespace, Name: id.Name} }
+	t.Run("none named", func(t *testing.T) {
+		r, fc, ids := world(t)
+		withdraw(t, r, ids)
+		for pass := range 5 {
+			keptPass(t, r, []Ref{targetRef("kt")}) // Missing: unfollowed
+			r.tick(time.Minute)
+			if got, want := count(t, r), min((pass+1)*maxGateReads, n); got != want {
+				t.Errorf("pass %d: %d listed, want %d", pass, got, want)
+			}
+		}
+		if w := len(unheldOf(t, r, "h")); w != maxUnheld {
+			t.Errorf("%d entries, want %d", w, maxUnheld)
+		}
+		r.target(fc, "kt", "Secret", "home")
+		keptPass(t, r, []Ref{targetRef("kt")})
+		if got := count(t, r); got != 0 {
+			t.Errorf("%d listed once the whole chain was followed, want none", got)
+		}
+	})
+	t.Run("some named, some not", func(t *testing.T) {
+		r, _, ids := world(t)
+		withdraw(t, r, ids)
+		// Some of them the holder still names: the first and the last, and
+		// two that a first A1 folds, the one after the cap in the first pass
+		// and one that the second pass's, more recent, push out.
+		refs := []Ref{targetRef("kt"), ref(ids[0]), ref(ids[maxUnheld-3]), ref(ids[maxUnheld-1]), ref(ids[n-1])}
+		for pass := range 5 {
+			keptPass(t, r, refs)
+			r.tick(time.Minute)
+			if pass >= 1 {
+				if got := count(t, r); got != n {
+					t.Errorf("pass %d: %d listed, want %d", pass, got, n)
+				}
+			}
+		}
+	})
+	t.Run("a named one pushes another out in the last A1", func(t *testing.T) {
+		r, _, ids := world(t)
+		r.p.views, r.p.namespaceViews = cacheOf{m: r.m}, modelNamespaces{m: r.m, known: true}
+		withdraw(t, r, ids[:1])
+		keptPass(t, r, []Ref{targetRef("kt")})
+		r.tick(time.Minute)
+		// The gate's A1 folds the first, the oldest, and the last of the 16
+		// that it drops now; the pass names that one, a second later.
+		withdraw(t, r, ids[1:maxGateReads+1])
+		refs := []Ref{targetRef("kt"), ref(ids[maxGateReads])}
+		r.srv.before = func(op, kind, _ string) error {
+			if op == "get" && kind == "Target" {
+				r.srv.before = nil
+				r.tick(2 * time.Second)
+			}
+			return nil
+		}
+		for pass := range 3 {
+			keptPass(t, r, refs)
+			r.tick(time.Minute)
+			if got := count(t, r); got != maxGateReads+1 {
+				t.Errorf("pass %d: %d listed, want %d", pass, got, maxGateReads+1)
+			}
+			if u := unheldOf(t, r, "h"); u[0].Ref != unheldRef(ids[maxGateReads]) {
+				t.Errorf("pass %d: first is %s; the case doesn't push another out", pass, u[0].Ref)
+			}
+		}
+	})
+	t.Run("a failing pass keeps the count", func(t *testing.T) {
+		r, fc, ids := world(t)
+		r.target(fc, "kt", "Secret", "home")
+		withdraw(t, r, ids)
+		for pass := range 4 {
+			keptPass(t, r, failingNext())
+			if got, want := count(t, r), min((pass+1)*maxGateReads, n); got != want {
+				t.Errorf("pass %d: %d listed, want %d", pass, got, want)
+			}
+		}
+	})
+}
+
+// TestCacheLacks: an ID whose cache covers it, has synced, and lacks it isn't
+// read by the gate; one that no cache covers, or whose cache hasn't synced, is
+// (§11.3, §10.5). Through Acquire, a forged record costs no GETs where the
+// caches cover it.
+func TestCacheLacks(t *testing.T) {
+	ctx := context.Background()
+	in, out := manySecrets("in", 500), manySecrets("out", 500)
+	var forged []ID
+	forged = append(append(forged, in...), out...)
+	for i := range 100 {
+		forged = append(forged, ID{Kind: "ConfigMap", Namespace: "in", Name: fmt.Sprint(i)}) // not a protected kind
+	}
+	held := heldObject(secretGVK, "in", "held", "u-in", widgetGK, "team")
+	held.Annotations[AnnotationAllowHoldersFrom] = "team"
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}},
+		namespaceObject("in"), namespaceObject("out"), namespaceObject("team"), held,
+		holderObject("team", "h", append(forged, secretID("in", "held"))...))
+	r.setRefs("h")
+	tr := r.track(t, widgetGK)
+	if tr.cacheLacks(secretID("in", "absent")) {
+		t.Error("a cache that hasn't synced lacks nothing yet")
+	}
+	r.run(t)
+	for id, want := range map[ID]bool{
+		secretID("in", "absent"):                        true,
+		secretID("in", "held"):                          false,
+		secretID("out", "absent"):                       false,
+		{Kind: "ConfigMap", Namespace: "in", Name: "c"}: false,
+	} {
+		if got := tr.cacheLacks(id); got != want {
+			t.Errorf("cacheLacks(%s) = %v, want %v", id, got, want)
+		}
+	}
+	holder, err := r.md.Tracker().Get(widgetsGVR, "team", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.md.ClearActions()
+	a, err := tr.Acquire(ctx, holder.(*metav1.PartialObjectMetadata).DeepCopy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, act := range r.md.Actions() {
+		if act.GetVerb() == "get" {
+			got[act.GetResource().Resource+" in "+act.GetNamespace()]++
+		}
+	}
+	want := map[string]int{"secrets in out": maxGateReads, "namespaces in ": 1}
+	if !maps.Equal(got, want) || a.RetryAfter == 0 {
+		t.Errorf("GETs %v, want %v; RetryAfter %v, want one: the rest of out's are left", got, want, a.RetryAfter)
+	}
+	// The holder goes without a Forget: nothing is kept for it.
+	left := func() (turns, retries int) {
+		tr.proto.gateTurns.mu.Lock()
+		defer tr.proto.gateTurns.mu.Unlock()
+		tr.proto.backoff.mu.Lock()
+		defer tr.proto.backoff.mu.Unlock()
+		return len(tr.proto.gateTurns.at), len(tr.proto.backoff.at)
+	}
+	if turns, retries := left(); turns != 1 || retries == 0 {
+		t.Fatalf("%d holders' turns and %d retries kept before it goes", turns, retries)
+	}
+	if err := r.md.Tracker().Delete(widgetsGVR, "team", "h"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if turns, retries := left(); turns == 0 && retries == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	turns, retries := left()
+	t.Errorf("%d holders' turns and %d retries kept after it went", turns, retries)
+}
+
+// TestCacheLacksPerName: a PerName kind's caches are the watches of the index
+// lines. An ID with none lacks, once the index has synced; one with a watch,
+// once that has (§10.6).
+func TestCacheLacksPerName(t *testing.T) {
+	indexList, watchList := make(chan struct{}), make(chan struct{})
+	ix := testIndex(&memStore{}, nil)
+	ix.inf = syncedInformer(t, indexList)
+	tr := &Tracker{gk: widgetGK, idx: ix}
+	tr.names = newPerNames(tr)
+	lined, none := SecretRef("ns", "lined").ID(), SecretRef("ns", "none").ID()
+	p := &protectedInformer{gk: secretGroupKind, ns: "ns", name: "lined", inf: syncedInformer(t, watchList)}
+	tr.names.by[lined] = &nameWatch{p: p, stop: func() {}}
+	expect := func(what string, id ID, want bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for tr.cacheLacks(id) != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: cacheLacks(%s) = %v, want %v", what, id, !want, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	expect("nothing synced", none, false)
+	expect("nothing synced", lined, false)
+	close(indexList)
+	expect("the index synced", none, true)
+	expect("the index synced, not its watch", lined, false)
+	close(watchList)
+	expect("its watch synced, without it", lined, true)
+	if err := p.inf.GetStore().Add(heldObj("lined")); err != nil {
+		t.Fatal(err)
+	}
+	expect("its watch has it", lined, false)
+}
+
 // TestAPassThatNamesNothingGatesKeptRefs: a Refs that fails, and a holder in
 // the index namespace, end a pass before acquire; the gate runs in those too
 // (§11.3).
@@ -606,6 +1161,9 @@ func TestAPassThatNamesNothingGatesKeptRefs(t *testing.T) {
 			a, err := pass()
 			if err != nil || a.Err == nil || a.Degraded != established || keptRecorded(t, r) || len(unheldOf(t, r, "h")) != 1 {
 				t.Errorf("%s, established %v: Acquire = %+v, %v, unheld %+v; want it dropped, and listed", name, established, a, err, unheldOf(t, r, "h"))
+			}
+			if len(a.Unheld) != 1 || a.Unheld[0].Ref.ID() != otherSecretID() || a.Unheld[0].Reason != ReasonConsentWithdrawn {
+				t.Errorf("%s, established %v: Unheld = %+v; want the dropped ref", name, established, a.Unheld)
 			}
 			if _, err := tr.Acquire(ctx, stale); !errors.Is(err, ErrHolderConflict) {
 				t.Errorf("%s, established %v: Acquire of a stale holder = %v, want ErrHolderConflict", name, established, err)

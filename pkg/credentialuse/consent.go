@@ -128,28 +128,50 @@ const (
 // cached yes serves; anything else, a cached no included, is read live: a
 // hold is dropped only on a positive, live-confirmed withdrawal (M1).
 func (p *protocol) gate(ctx context.Context, obj metav1.Object, id ID, cachedOK bool) gateResult {
-	if cachedOK && p.namespaceViews != nil {
-		if m, ok := p.views.Protected(id); ok {
-			if nsv, known := p.namespaceViews.NamespaceConsent(id.Namespace); known &&
-				consents(m.Annotations[AnnotationAllowHoldersFrom], nsv, obj.GetNamespace()) {
-				return gateHoldCached
-			}
-		}
+	if cachedOK && p.cachedYes(obj, id) {
+		return gateHoldCached
 	}
 	return p.liveConsent(ctx, obj, id)
+}
+
+// cachedYes reports whether the caches show id's consent to holder obj.
+func (p *protocol) cachedYes(obj metav1.Object, id ID) bool {
+	if p.namespaceViews == nil {
+		return false
+	}
+	m, ok := p.views.Protected(id)
+	if !ok {
+		return false
+	}
+	nsv, known := p.namespaceViews.NamespaceConsent(id.Namespace)
+	return known && consents(m.Annotations[AnnotationAllowHoldersFrom], nsv, obj.GetNamespace())
 }
 
 // liveConsent reads id's consent live, for holder obj (§11.3): its
 // Namespace's metadata and its own. A NotFound of either is Missing; any
 // other failure is unknown.
 func (p *protocol) liveConsent(ctx context.Context, obj metav1.Object, id ID) gateResult {
-	ns, err := p.srv.Get(ctx, namespaceGroupKind, "", id.Namespace)
-	switch Classify(err) {
-	case ClassNone:
-	case ClassNotFound:
-		return gateMissing
-	default:
-		return gateUnknown
+	return p.liveConsentIn(ctx, obj, id, map[string]namespaceRead{})
+}
+
+// liveConsentIn is liveConsent, with the Namespaces already read in
+// namespaces, where it keeps the one it reads.
+func (p *protocol) liveConsentIn(ctx context.Context, obj metav1.Object, id ID, namespaces map[string]namespaceRead) gateResult {
+	ns, read := namespaces[id.Namespace]
+	if !read {
+		m, err := p.srv.Get(ctx, namespaceGroupKind, "", id.Namespace)
+		switch Classify(err) {
+		case ClassNone:
+			ns = namespaceRead{consent: m.Annotations[AnnotationAllowHoldersFrom], ok: true}
+		case ClassNotFound:
+			ns = namespaceRead{result: gateMissing}
+		default:
+			ns = namespaceRead{result: gateUnknown}
+		}
+		namespaces[id.Namespace] = ns
+	}
+	if !ns.ok {
+		return ns.result
 	}
 	o, err := p.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
 	switch Classify(err) {
@@ -159,7 +181,7 @@ func (p *protocol) liveConsent(ctx context.Context, obj metav1.Object, id ID) ga
 	default:
 		return gateUnknown
 	}
-	if consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {
+	if consents(o.Annotations[AnnotationAllowHoldersFrom], ns.consent, obj.GetNamespace()) {
 		return gateHoldLive
 	}
 	return gateNotHeld
