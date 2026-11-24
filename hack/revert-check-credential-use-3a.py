@@ -60,9 +60,9 @@ MUTANTS = [
      [("\t\t\t\tt.enqueueHolders(id)\n\t\t\t\tif newlyDeleting {", "\t\t\t\tif newlyDeleting {")]),
     # informers.go: the protected handler (G2, G4, G5, G6, N3, N5).
     ("a protected add enqueues nothing", "informers.go",
-     [("\t\th.s.queue.Add(batchKey{h.t.gk, n}, id)\n", "\t\t_ = n\n")]),
+     [("\t\th.s.queue.AddHeld(batchKey{h.t.gk, n}, id)\n", "\t\t_ = n\n")]),
     ("a protected update enqueues nothing", "informers.go",
-     [("newlyDeleting || replaced {\n\t\t\th.s.queue.Add(batchKey{t.gk, ns}, id)\n", "newlyDeleting || replaced {\n")]),
+     [("newlyDeleting || replaced {\n\t\t\th.s.queue.AddHeld(batchKey{t.gk, ns}, id)\n", "newlyDeleting || replaced {\n")]),
     ("a protected update doesn't reach the verified set", "informers.go",
      [("\tt.ver.protectedEvent(o, n)\n", "")]),
     ("a deletion's grace sets no timer", "informers.go",
@@ -184,7 +184,7 @@ MUTANTS = [
     # queue.go: buffering, timers, and the lock order with the clock (M1 of
     # the review of revision 16; D1 of the review of #109).
     ("the queue drops what a batch covered before", "queue.go",
-     [("\tset := q.pending[k]\n\tif set == nil {", "\tset := map[ID]bool(nil)\n\tif set == nil {")]),
+     [("\tset, ls := q.pending[k], q.lines[k]\n\tif set == nil {", "\tset, ls := places(nil), (*lines)(nil)\n\tif set == nil {")]),
     ("a key added during work isn't queued again", "queue.go",
      [("\tif _, again := q.pending[k]; again && !q.queued[k] && !q.stopped {", "\tif false {")]),
     ("ShutDown leaves the timers running", "queue.go",

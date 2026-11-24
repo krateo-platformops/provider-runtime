@@ -109,7 +109,7 @@ MUTANTS = [
     ("an AddAt after ShutDown sets a timer", QU,
      [("\te := &queueTimer{at: at.UnixNano()}\n\tq.mu.Lock()\n\tif q.stopped {\n", "\te := &queueTimer{at: at.UnixNano()}\n\tq.mu.Lock()\n\tif false && q.stopped {\n")]),
     ("a time that is past waits", QU,
-     [("\tif d <= 0 {\n\t\tq.Add(k, ids...)\n\t\treturn\n\t}\n\te := &queueTimer{at:", "\tif d < -time.Hour {\n\t\tq.Add(k, ids...)\n\t\treturn\n\t}\n\te := &queueTimer{at:")]),
+     [("\tif d <= 0 {\n\t\tq.AddHeld(k, ids...)\n\t\treturn\n\t}\n\te := &queueTimer{at:", "\tif d < -time.Hour {\n\t\tq.AddHeld(k, ids...)\n\t\treturn\n\t}\n\te := &queueTimer{at:")]),
     ("a time no object asks for is the namespace's", QU,
      [("\tif len(ids) == 0 {\n\t\treturn\n\t}\n\td := at.Sub", "\tif len(ids) == 0 {\n\t\tq.Add(k)\n\t\treturn\n\t}\n\td := at.Sub")]),
     ("every object that asked is looked at at the soonest time", WL,

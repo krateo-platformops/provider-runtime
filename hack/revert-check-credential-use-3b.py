@@ -41,7 +41,7 @@ MUTANTS = [
      [("\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\ts.queue.Settle(k, ids...) // dropped, or parked: nothing to remember\n\t\ts.waits.settle(k, ids...)\n\t\treturn\n\t}",
        "\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\tif all := s.trackerList(); len(all) > 0 {\n\t\t\tt = all[0]\n\t\t} else {\n\t\t\treturn\n\t\t}\n\t}")]),
     ("an empty batch isn't filled", "writeloops.go",
-     [("\tif fill {\n\t\tids = slices.DeleteFunc(", "\tif fill && false {\n\t\tids = slices.DeleteFunc(")]),
+     [("\tif fill {\n\t\theld, err", "\tif fill && false {\n\t\theld, err")]),
     ("RequeueAt isn't honoured", "writeloops.go",
      [("\tfor _, a := range res.Asked {\n", "\tfor _, a := range res.Asked[:0] {\n")]),
     ("a failed batch isn't retried", "writeloops.go",

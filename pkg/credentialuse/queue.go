@@ -529,7 +529,7 @@ func (q *batchQueue) Get(ctx context.Context) (batchKey, []ID, bool) {
 func (q *batchQueue) PutBack(k batchKey, ids ...ID) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.stopped || len(ids) == 0 {
+	if len(ids) == 0 || q.stopped {
 		return
 	}
 	set, ls := q.pendingLocked(k)
