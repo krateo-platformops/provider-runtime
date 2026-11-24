@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -144,9 +145,17 @@ func (p pruneRig) gvr(v string) schema.GroupVersionResource {
 	return schema.GroupVersionResource{Group: pruneGroup, Version: v, Resource: strings.ToLower(p.kind) + "s"}
 }
 
+// pruneSeq numbers the rigs' kinds.
+var pruneSeq atomic.Int64
+
+// newPruneRig creates a CRD of its own, whose kind is kind with a number, so
+// that a test can run again in one process. The CRD stays, as the rig's namespace
+// does: removing it would need the finalizers that tests leave on its objects
+// stripped, and those objects read through a conversion that some refuse.
 func newPruneRig(t *testing.T, kind, storage string, conversion *apiextensionsv1.CustomResourceConversion) pruneRig {
 	t.Helper()
 	ctx := context.Background()
+	kind = fmt.Sprintf("%sN%d", kind, pruneSeq.Add(1))
 	if err := env.Client.Create(ctx, pruneCRD(kind, storage, conversion)); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +285,7 @@ func TestPremisePatchAfterTheStorageVersionMoved(t *testing.T) {
 		p.create("through-" + v)
 	}
 	crd := &apiextensionsv1.CustomResourceDefinition{}
-	crd.Name = "prunemoveds." + pruneGroup
+	crd.Name = p.gvr("v1").GroupResource().String()
 	cutest.Eventually(t, time.Minute, func() error {
 		if err := env.Client.Get(ctx, types.NamespacedName{Name: crd.Name}, crd); err != nil {
 			return err
