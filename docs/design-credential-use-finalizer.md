@@ -3332,15 +3332,18 @@ about 4,000 refs of their choosing. So what the gate reads is bounded:
   where the gate didn't, as it always did, under its own context: one of them
   that hangs takes the pass, as on any pass;
 - **a client short of turns**, as under a rate limit with busy workers, cuts the
-  pass: one that answers k of its refs moves those k, and the next goes on from
-  there. A ref takes two turns, or one if its Namespace was read in that pass.
-  **What remains:** while a turn takes more than about 2.5s, no ref is read, and
-  a withdrawn one stays held. From the context, a read that waits for a turn
-  looks like one that hangs, so the first in line goes behind the others when the
-  deadline cuts it: under a load that keeps time with the passes, with every
-  other one ending before its first answer, some refs may be so moved each time,
-  and never read. And what a client's own limiter or transport, other than
-  client-go's, refuses at once, by its place in the pass, counts as read;
+  pass: one that answers k of its refs moves those k, but for withdrawn ones,
+  which stay first until their A1 lands, and the next goes on from there. A ref
+  takes two turns, or one if its Namespace was read in that pass, which the first
+  one's never was. A wait that is cut costs the client one turn, if somebody
+  waits behind it. **What remains:** while a turn takes more than half of the
+  gate's time, 2.5s of 5s, no ref is read, and a withdrawn one stays held. From
+  the context, a read that waits for a turn looks like one that hangs, so the
+  first in line goes behind the others when the deadline cuts it: under a load
+  that keeps time with the passes, with every other one ending before its first
+  answer, some refs may be so moved each time, and never read. And what a
+  client's own limiter or transport, other than client-go's, refuses at once, by
+  its place in the pass, counts as read;
 - **for what a pass asked about and doesn't know**, refs it couldn't read or
   didn't get to, `RetryAfter` asks for the next, with one backoff a holder, the
   gate's own: 1s, doubling up to the poll interval, back to 1s once a pass knows
@@ -3371,8 +3374,9 @@ nothing asks for the batch again.** A batch that fails is retried whole, after
 says by then. It fails at a GET, and whoever writes the record can name what
 always does: a kind that can't be mapped, or an object outside a `resourceNames`
 grant. It fails too at the holders' list, the Namespace of an object that is
-being deleted, an epoch's restore, R3, the index's prune, or, of a whole
-namespace, the list of what is held. One that waits for the grace of one of its
+being deleted, an epoch's restore, R3, an object that kept changing under 5
+releases, the index's prune, or, of a whole namespace, the list of what is held.
+One that waits for the grace of one of its
 objects, or that restored an epoch, runs whole again as well. So each change may
 cost m GETs every 5 minutes: a run that fails arms a timer of its own, and joins
 none, so c changes whose batches ran apart are c of them, until two fire
