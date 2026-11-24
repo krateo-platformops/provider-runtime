@@ -27,7 +27,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG = "pkg/credentialuse/"
-FILES = ["acquire.go", "consent.go", "unheld.go", "informers.go", "chain.go"]
+FILES = ["acquire.go", "consent.go", "unheld.go", "informers.go", "chain.go", "kept.go"]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -44,14 +44,15 @@ MUTANTS = [
      [('\treturn slices.Contains(consentList(nsList), holderNS)',
        '\treturn len(obj) == 0 && slices.Contains(consentList(nsList), holderNS)')]),
     ('a skipping pass reads consent live', 'consent.go',
-     [('\tif cachedOK && p.namespaceViews != nil {',
-       '\tif false && cachedOK && p.namespaceViews != nil {')]),
-    ('a cached no drops without a live read', 'consent.go',
-     [('\t\t\t\treturn gateHoldCached\n\t\t\t}\n\t\t}\n\t}',
-       '\t\t\t\treturn gateHoldCached\n\t\t\t}\n\t\t\treturn gateNotHeld\n\t\t}\n\t}')]),
+     [('\tif cachedOK && p.cachedYes(obj, id) {',
+       '\tif false && cachedOK && p.cachedYes(obj, id) {')]),
+    ('a cached no drops without a live read', 'kept.go',
+     [('\t\tfound := p.liveConsentIn(reads, obj, id, namespaces)\n',
+       '\t\tfound, known := gateNotHeld, false\n\t\tif p.namespaceViews != nil {\n\t\t\t_, known = p.namespaceViews.NamespaceConsent(id.Namespace)\n\t\t}\n'
+       '\t\tif _, cached := p.views.Protected(id); !cached || !known {\n\t\t\tfound = p.liveConsentIn(reads, obj, id, namespaces)\n\t\t}\n')]),
     ('a deleting holder reads consent from the cache', 'acquire.go',
-     [('\t\t\tg := p.gate(ctx, obj, id, rec0.Names(id) && !deleting)',
-       '\t\t\tg := p.gate(ctx, obj, id, rec0.Names(id))')]),
+     [('\t\t\t\tg = p.gate(ctx, obj, id, rec0.Names(id) && !deleting)',
+       '\t\t\t\tg = p.gate(ctx, obj, id, rec0.Names(id))')]),
     ('an A2 rests on a cached consent', 'acquire.go',
      [('\t\t\tif !held && cross[id] && !liveOK[id] {',
        '\t\t\tif false && !held && cross[id] && !liveOK[id] {')]),
@@ -65,8 +66,8 @@ MUTANTS = [
      [('\t\tif readOK[id] {\n\t\t\tp.backoff.succeed(consentKey{obj.GetUID(), id})\n\t\t}',
        '\t\t_ = readOK[id]')]),
     ('NotFound is retried', 'consent.go',
-     [('\tns, err := p.srv.Get(ctx, namespaceGroupKind, "", id.Namespace)\n\tswitch Classify(err) {\n\tcase ClassNone:\n\tcase ClassNotFound:\n\t\treturn gateMissing',
-       '\tns, err := p.srv.Get(ctx, namespaceGroupKind, "", id.Namespace)\n\tswitch Classify(err) {\n\tcase ClassNone:\n\tcase ClassNotFound:\n\t\treturn gateUnknown')]),
+     [('\t\tcase ClassNotFound:\n\t\t\tns = namespaceRead{result: gateMissing}\n',
+       '\t\tcase ClassNotFound:\n\t\t\tns = namespaceRead{result: gateUnknown}\n')]),
     ('a missing cross-namespace ref gets an A2', 'acquire.go',
      [('\t\t\tcase gateMissing:\n\t\t\t\t// Nothing to hold;',
        '\t\t\tcase gateMissing:\n\t\t\t\ttoHold = append(toHold, id)\n\t\t\t\t// Nothing to hold;')]),
@@ -89,8 +90,8 @@ MUTANTS = [
      [('\t\tif last := !chained && len(next) == 0; last {',
        '\t\tif last := !chained && len(next) == 0 && false; last {')]),
     ("unheld isn't capped", 'unheld.go',
-     [('\tif len(es) > maxUnheld {',
-       '\tif false {')]),
+     [('\tif len(es) > maxUnheld || already > 0 {',
+       '\tif already > 0 {')]),
     ('NotConsented is kept ahead of withdrawals', 'unheld.go',
      [('\t\tif e.Reason == UnheldNotConsented {\n\t\t\treturn 1\n\t\t}\n\t\treturn 0',
        '\t\tif e.Reason == UnheldNotConsented {\n\t\t\treturn 0\n\t\t}\n\t\treturn 1')]),
