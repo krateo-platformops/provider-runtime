@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1096,6 +1097,44 @@ func TestDisownPassCounts(t *testing.T) {
 		r.s.disownPass(ctx, tr, parseDisown("all"))
 		if got := crdCount(t, r); got != "0" {
 			t.Errorf("held-count %q after the strip, want 0", got)
+		}
+	})
+	// The objects first, and a record only once those it names are stripped:
+	// while one may be held, a record names it (§7.4).
+	t.Run("the order of the strips", func(t *testing.T) {
+		s := heldObject(secretGVK, "ns", "s", "uid-s", widgetGK, "ns")
+		s.Labels[MarkerLabel(widgetGK)] = "true"
+		r := newFakeRig(t, s, holderObject("ns", "h", secretID("ns", "s")))
+		tr := r.track(t, widgetGK)
+		switchOn(t, r)
+		var mu sync.Mutex
+		var order []string
+		failing := true
+		r.md.PrependReactor("patch", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			res := a.GetResource().Resource
+			order = append(order, res)
+			if failing && res == "secrets" {
+				return true, nil, apierrors.NewInternalError(errors.New("down"))
+			}
+			return false, nil, nil
+		})
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if want := []string{"secrets"}; !slices.Equal(order, want) {
+			t.Errorf("with the Secret's strip failing, patched %v, want %v: its record stays", order, want)
+		}
+		if got := crdCount(t, r); got != "2" {
+			t.Errorf("held-count %q, want 2: the record and the finalizer", got)
+		}
+		failing, order = false, nil
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if want := []string{"secrets", "widgets"}; !slices.Equal(order, want) {
+			t.Errorf("patched %v, want %v", order, want)
+		}
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if got := crdCount(t, r); got != "0" {
+			t.Errorf("held-count %q after the strips, want 0", got)
 		}
 	})
 	t.Run("a list that fails", func(t *testing.T) {

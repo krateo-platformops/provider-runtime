@@ -358,16 +358,16 @@ func disownIndexScenario(c disownIndexCase, st *disownIndexStats) func(s *apimod
 							known, unlined = false, true
 						}
 					}
-					for i := range holders {
-						if patch, ok := disownHolderPatch(&holders[i], set); ok && !unlined {
-							_, _ = srv.Patch(ctx, widgetGK, "ns", holders[i].Name, types.MergePatchType, patch)
-						}
-					}
 					if sec != nil {
 						_, removed, err := stripDisowned(ctx, srv, secretGroupKind, widgetGK, sec)
 						count += max(0, removed-listed)
 						if err != nil {
-							lined = false // not free
+							lined, unlined = false, true // not free, and named still
+						}
+					}
+					for i := range holders {
+						if patch, ok := disownHolderPatch(&holders[i], set); ok && !unlined {
+							_, _ = srv.Patch(ctx, widgetGK, "ns", holders[i].Name, types.MergePatchType, patch)
 						}
 					}
 				}

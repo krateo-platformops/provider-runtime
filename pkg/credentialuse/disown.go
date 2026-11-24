@@ -473,20 +473,11 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 		}
 	}
 
+	// The objects are stripped before the records, and a record only once
+	// every object it names has been: while one may be held, a record names
+	// it, so that a pass cut short between the two, in which a prune may have
+	// taken its line meanwhile, leaves it to the next (§7.4).
 	srv := s.newServer(t.o.Holder)
-	for i := range holders {
-		h := &holders[i]
-		patch, ok := disownHolderPatch(h, set)
-		if !ok {
-			continue
-		}
-		if slices.ContainsFunc(ReadRecord(h).IDs, func(id ID) bool { return unlined[id] }) {
-			continue // its record is all that names them
-		}
-		if _, err := srv.Patch(ctx, t.gk, h.Namespace, h.Name, types.MergePatchType, patch); err != nil && Classify(err) != ClassNotFound {
-			t.warn("credential-use: Disown couldn't strip a holder's record; the next pass retries", "holder", h.Namespace+"/"+h.Name, "error", err.Error())
-		}
-	}
 	unstripped := map[ID]bool{}
 	for _, o := range objs {
 		_, removed, err := stripDisowned(ctx, srv, o.gk, t.gk, o.m)
@@ -496,6 +487,19 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 			unstripped[id] = true
 			t.warn("credential-use: Disown couldn't strip a protected object; the next pass retries",
 				"object", unheldRef(id), "error", err.Error())
+		}
+	}
+	for i := range holders {
+		h := &holders[i]
+		patch, ok := disownHolderPatch(h, set)
+		if !ok {
+			continue
+		}
+		if slices.ContainsFunc(ReadRecord(h).IDs, func(id ID) bool { return unlined[id] || unstripped[id] }) {
+			continue // its record may be all that names them
+		}
+		if _, err := srv.Patch(ctx, t.gk, h.Namespace, h.Name, types.MergePatchType, patch); err != nil && Classify(err) != ClassNotFound {
+			t.warn("credential-use: Disown couldn't strip a holder's record; the next pass retries", "holder", h.Namespace+"/"+h.Name, "error", err.Error())
 		}
 	}
 	if len(perName) > 0 {
