@@ -4463,18 +4463,23 @@ on krateo-057:
   prune, 2 for the wait that isn't built and 1 for the other clean cases (DEEP
   2), and with two Disown processes 1 for the wait, the rest under DEEP only,
   at 1. A search that reaches 1,000,000 schedules stops, and says that it
-  isn't exhaustive: under DEEP, two cases of Disown over the index, "lost,
-  holder gone" with the switch set, and off and on, are at 2 (every schedule
-  with 1, and the first 1,000,000 with 2). **A search with one
+  isn't exhaustive: in the DEEP run of Disown over the index, which hasn't
+  ended, two cases so far are at 2, "lost, holder gone" with the switch set,
+  and off and on (every schedule with 1, and the first 1,000,000 with 2).
+  **A search with one
   preemption is no evidence for a case that needs two**: in "off and on" and
   "narrowed and widened", and in the controls "a run over a changed CRD" and
   "a pruner whose CRD cache is behind", the violation or the landing needs
   one or two, so only DEEP covers what those controls guard.
-- **What they cost in CI's step**, measured on 4 vCPU at 7fd7022, with CI's
-  bounds: the kill 457s (436s in a run of its own), Disown over the index
-  222s, the late hold 76s, the flag 46s, the drops 2s: about 13 and a half
-  minutes. Under DEEP: the late hold 1,000s, the flag 509s, and the kill's
-  clean cases with one Disown process 626s.
+- **What they cost**, measured at 7fd7022 with CI's bounds on one VM size
+  (n2-standard-4), not in CI: the kill 436s to 457s over two runs, Disown
+  over the index 222s, the late hold 76s, the flag 46s, the drops 2s. Every
+  model together took 3,970s, 66 minutes, of which these new ones are about
+  13; the older ones alone, main's at 2beee26, took 3,144s there, 52 minutes.
+  In CI's last green runs, without the new ones, the model step took 2,134s to
+  2,320s; its time with them is not measured yet. Under DEEP on that VM size:
+  the late hold 1,000s, the flag 509s, and the kill's clean cases with one
+  Disown process 626s.
 - **The flag** (§7.4): a switch turned off and on again while nothing runs
   isn't settled by the old flag; no A2 under a stale flag, its removal
   refused included; a run starts over when the CRD changes between its
