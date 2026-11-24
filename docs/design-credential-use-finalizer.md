@@ -540,7 +540,8 @@ that isn't served is a 404 that names nothing, or the mapper's no match, and
 says nothing of the holders. The GET of the CRD that it leads to (§6.4, "The
 holder kind itself gone") is a read, and its 404 is taken for the CRD's absence
 only when it is NotFound as above, and the object it names is that CRD: the
-name the tracker was given, in `apiextensions.k8s.io`.
+name the tracker was given, in `apiextensions.k8s.io`. The group's discovery is
+asked after it, as a veto (§6.4).
 
 **A namespaced kind's object named without a namespace can't exist**, so it is
 NotFound, as a cluster-scoped holder's data may name one: the scope is the
@@ -604,7 +605,7 @@ While a kind isn't served:
 | the consent gate (§11.3) | unknown: a hold is kept, a new one waits, and the pass requeues |
 | the prober (§10.3) | can't tell: the ref's backoff stays as it is |
 | R1, R3, the epoch's repair | undecided: the batch is retried with backoff, and nothing is reported bare |
-| R2, when the **holder** kind isn't served | the list fails, which is never "no users". A live GET of the CRD tells: it is gone, and so are the holders, or the batch is retried (§6.4) |
+| R2, when the **holder** kind isn't served | the list fails, which is never "no users". A live GET of the CRD, and then its group's discovery, tell: the kind is gone, and so are the holders, or the batch is retried (§6.4) |
 | the index's checks (§10.6) | the line is kept, or put back, and the check is retried |
 | the janitor | retried with backoff |
 | Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or what it can't read as a whole (a LabelScoped kind, the holders, or the index): its kind isn't served. A strip that fails is left for the next pass, and so is the record that names the object. A switch that can't be read fails the hold |
@@ -1354,10 +1355,11 @@ finds no match for K, the releaser makes **one live GET of K's CRD**, by the
 name its tracker was given, with no resourceVersion:
 
 - **The API server's answer that it doesn't exist**, a 404 Status that names
-  the CRD: the list is empty. R3 then runs as ever, with its tests.
+  the CRD, and no veto (below): the list is empty. R3 then runs as ever, with
+  its tests.
 - **The CRD, one being deleted included, or any error**, a 403 or a 404 of any
   other form among them: every hold stays, and the batch is retried as after
-  any failed list. The error says what to grant.
+  any failed list. A 403's error says what to grant.
 
 *The list's 404 is never the evidence.* An API server answers it for a K that
 exists while its CRD informer lags, or the version isn't served, or the scope
@@ -1378,9 +1380,48 @@ these same cases: its new holders are those a list just before them misses too.
 A skip rests on the same two (below). It never matters which process did what,
 so two processes are no different (§6.8). The model searches it, on an API
 server whose list lags; its controls, the GET moved before R1 and no GET at
-all, it must find unsafe. A mapper that finds
-K under another resource is no evidence of anything: the CRD that is gone isn't
-K's any more.
+all, it must find unsafe.
+
+***This CRD* is gone isn't *K* is gone.** The finalizer is a GroupKind's, and a
+CRD is a plural's. Say the CRD `widgets` is replaced by `widgetries`, of the
+same Kind, while a process O tracks the first. A new process N tracks the
+second, and its holders hold P with the same finalizer. O finds its list and
+its CRD gone, and without more it would strip each hold N's holders put back,
+in a loop, for as long as it runs; and release P for good if P's namespace is
+being deleted. So the GET's "gone" has **a veto, the API server's discovery**
+of K's group, read live after the GET, in each round: `/apis/<group>`, then
+each of its versions. Every hold stays, and the batch is retried, if any
+resource there has Kind K (whatever its case, since the finalizer has it in
+lower case), or if any of those documents can't be read. A 404 of the group's
+says that it isn't served. Discovery isn't a consistent read, so it is never
+the evidence: the GET is.
+
+- *Not the mapper.* controller-runtime's doesn't look again at a kind it knows
+  (§6.2); one that did would have given the list the new resource. A mapper that
+  finds K under another resource is a veto too, and costs no request.
+- *The group's own document, not the list of groups:* just after a CRD is
+  established the API server serves its objects and this document, through the
+  CRD's own handlers, before it has the group's APIService, which the list is
+  made of (kube-aggregator v1.36.4, `handler_apis.go`, read at its source).
+- *An aggregated API server* in K's group is asked through the API server: one
+  that serves K vetoes, and one that is down answers 503, which keeps the holds
+  for as long as it lasts (the aggregator lists a group's versions whether or not
+  they are available). A partial failure of discovery elsewhere doesn't matter:
+  no other group is read. One that hangs costs a release worker 10s at most for
+  each round (`discoveryTimeout`).
+- *The cost* is one GET and one for each of the group's versions, for a round
+  that found the CRD gone, and nothing otherwise.
+- *Just after the CRD goes*, discovery may still show it, or a version it no
+  longer serves may be a 404: the batch is retried once or twice, 1s and 2s
+  later.
+- *The client* is `Clients.Discovery`, a REST client and not a discovery client,
+  so that a caching one can't answer for the API server. provider-runtime sets
+  it. Without it no kind is ever taken for gone: the holds stay, and the error
+  says so. Neither the metadata nor the dynamic client can read a document that
+  isn't an object's.
+- *RBAC:* `get` on the non-resource URLs `/apis/*`, which `system:discovery`
+  grants to every authenticated user, unless a cluster has removed that binding.
+  Without it the holds stay, and the error says what to grant (§13).
 
 *Accepted limits.* "The CRD is gone" implies "no holders" through the API
 server's own cleanup, and "this CRD" is K through the tracker. Each limit is a
@@ -1392,8 +1433,7 @@ two as well.
 |---|---|---|
 | Instances left behind a CRD that is gone | Its cleanup finalizer was stripped by hand, or it was deleted while not established: the cleanup deletes instances only of an established CRD (`apiextensions-apiserver@v0.37.2/pkg/controller/finalizer/crd_finalizer.go:144-170`). Nobody can read them. If the CRD returns, they do, and each one's next pass holds P again | Don't strip `customresourcecleanup.apiextensions.k8s.io`. Delete the holders first |
 | An instance a stale API server creates after the cleanup's last check | Several API servers, one of them behind by more than the cleanup: its own source has a TODO for it (`crd_finalizer.go:235`). The instance is readable only through that server, until it catches up | None is needed once it has caught up: the instance is the row above's |
-| K's CRD replaced by one of another plural while a process tracks the first, whose mapper hasn't noticed, or whose discovery is of an API server that lags | K's tracker can't work after that in any case: its resource is fixed at `Track` (§7.3). A mapper that has noticed keeps the holds | Restart every process of the kind when its plural changes, before the new CRD has holders |
-| K moved from its CRD to an aggregated API server, while a process tracks it, and that server answers the list with a 404 | As above | As above |
+| K's CRD replaced by one of another plural, or by an aggregated API server, while a process tracks the first, and the API server that answers its discovery hasn't seen that yet | One strip of a hold, which its holder's next pass puts back; in a namespace being deleted, P may go. Not a loop: the old process would have to be answered by a lagging API server at every turn | Restart every process of the kind when its plural changes, before the new CRD has holders: the old tracker's resource is fixed at `Track` (§7.3) |
 
 *And what it doesn't cover*, where a hold stays, and `DisownPrefix` remains the
 remedy:
@@ -1646,6 +1686,10 @@ type Clients struct {
 	Metadata metadata.Interface
 	Dynamic  dynamic.Interface
 	Mapper   meta.RESTMapper
+	// Discovery reads the API server's discovery documents, live: a discovery
+	// client's RESTClient(). It tells whether a holder kind whose CRD is gone
+	// is served by another resource (§6.4). Nil never takes a kind for gone.
+	Discovery rest.Interface
 	// Events records §12's events on holders, protected objects and the
 	// index (k8s.io/client-go/tools/events). Nil records none. The core
 	// throttles them itself.
@@ -4966,6 +5010,7 @@ remove the finalizers it holds there. That is a new wedge.
 | customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; R2's GET of a CRD that is gone (§6.4); the one-time settings and index pointer, the count fields, written only on change, and the removal of a stale `disown-settled` before a hold, without which that hold fails (§6.4, §7.3, §7.4, §10.6) |
 | configmaps, by `resourceNames` (PerName and PerNamePoll: the kind's index) | `get`, `update`, `patch`, and `watch` in PerName mode | §10.6 |
 | configmaps, in the index namespace (`krateo-credential-use`) | `create` (it can't be scoped by name) | the tracker creates the index (§10.6.7). The namespace itself is installer's; providers never create it, and admission limits what may be written there (§10.6.1) |
+| the non-resource URLs `/apis/*` | `get` | the discovery of a holder kind's group, once its CRD is gone (§6.4). `system:discovery` grants it by default |
 | events | `create`, `patch` | §12 |
 
 `update`, `create` and `delete` on protected kinds are not needed: every

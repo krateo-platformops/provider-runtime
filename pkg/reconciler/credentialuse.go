@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/util/workqueue"
@@ -462,11 +463,16 @@ func newDefaultShared(m manager.Manager) (*credentialuse.Shared, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building the dynamic client: %w", err)
 	}
+	disc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("building the discovery client: %w", err)
+	}
 	return credentialuse.NewShared(credentialuse.Clients{
-		Metadata: md,
-		Dynamic:  dyn,
-		Mapper:   m.GetRESTMapper(),
-		Events:   m.GetEventRecorder(credentialUseRecorderName),
+		Metadata:  md,
+		Dynamic:   dyn,
+		Mapper:    m.GetRESTMapper(),
+		Discovery: disc.RESTClient(),
+		Events:    m.GetEventRecorder(credentialUseRecorderName),
 	}, credentialuse.SharedOptions{}), nil
 }
 

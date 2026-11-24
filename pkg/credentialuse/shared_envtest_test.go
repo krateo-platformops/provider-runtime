@@ -50,7 +50,7 @@ func clientsFor(t *testing.T, cfg *rest.Config) cu.Clients {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cu.Clients{Metadata: md, Dynamic: dyn, Mapper: restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc))}
+	return cu.Clients{Metadata: md, Dynamic: dyn, Mapper: restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(dc)), Discovery: dc.RESTClient()}
 }
 
 // secretRefs is the Widget's RefsFunc: spec.secret names a Secret in the

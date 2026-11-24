@@ -2,9 +2,14 @@ package credentialuse
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -26,9 +31,14 @@ import (
 // It is made after the list, so after every R1 (§6.4).
 //
 // Only the API server's own answer that the CRD doesn't exist counts. A CRD
-// that is there, being deleted included, and any error, keep every hold. So
-// does a mapper that finds the kind under another resource: the CRD that is
-// gone isn't the kind's any more.
+// that is there, being deleted included, and any error, keep every hold.
+//
+// And the CRD that is gone must still be the kind's: one of another plural, or
+// an aggregated API server, may serve the kind since, with holders that use
+// the same finalizers. So a mapper that finds it under another resource, the
+// API server's discovery, read live after the GET (servedElsewhere), and a
+// discovery that can't be read, keep every hold too. Discovery is a veto,
+// never the evidence: it isn't a consistent read.
 func (t *Tracker) noHolders(ctx context.Context, listErr error) error {
 	if !kindUnserved(listErr) {
 		return listErr
@@ -36,7 +46,7 @@ func (t *Tracker) noHolders(ctx context.Context, listErr error) error {
 	m, err := t.s.c.Mapper.RESTMapping(t.gk)
 	switch {
 	case err == nil && m.Resource.GroupResource() != t.gvr.GroupResource():
-		return fmt.Errorf("%w (it is tracked as %s: restart the process)", listErr, t.gvr.GroupResource())
+		return fmt.Errorf("%w (it is tracked as %s, and is %s now: restart the process)", listErr, t.gvr.GroupResource(), m.Resource.GroupResource())
 	case err != nil && !meta.IsNoMatchError(err):
 		return listErr
 	}
@@ -45,10 +55,87 @@ func (t *Tracker) noHolders(ctx context.Context, listErr error) error {
 	case err == nil:
 		return listErr
 	case !crdNotFound(err, t.crdName):
-		return fmt.Errorf("%w (whether its CRD is gone, and its holders with it, can't be read, so its holds stay: grant get on the CRD %s: %w)", listErr, t.crdName, err)
+		return unread(listErr, "whether its CRD is gone, and its holders with it", "get on the CRD "+t.crdName, err)
 	}
-	t.sinkInfo("credential-use: the holder kind's CRD is gone, and its holders with it: what they held is released",
-		"kind", t.gk.String(), "crd", t.crdName)
+	resource, err := t.servedElsewhere(ctx)
+	switch {
+	case err != nil:
+		return unread(listErr, "whether another resource serves it, now that the CRD "+t.crdName+" is gone", "get on the URLs /apis/*, as system:discovery does", err)
+	case resource != "":
+		return fmt.Errorf("%w (the CRD %s is gone, but %s serves the kind now, so its holds stay: restart the process)", listErr, t.crdName, resource)
+	}
+	return nil
+}
+
+// unread is listErr, with what couldn't be read beside it, and why; and, when
+// the API server refused, what to grant.
+func unread(listErr error, what, grant string, err error) error {
+	if apierrors.IsForbidden(err) {
+		return fmt.Errorf("%w (%s, can't be read, so its holds stay: grant %s: %w)", listErr, what, grant, err)
+	}
+	return fmt.Errorf("%w (%s, can't be read, so its holds stay: %w)", listErr, what, err)
+}
+
+// discoveryTimeout bounds the reads of servedElsewhere together: an aggregated
+// API server that hangs answers its group's discovery through the API server's
+// own timeout, and a release worker waits for it.
+const discoveryTimeout = 10 * time.Second
+
+// servedElsewhere reads K's group in the API server's discovery, live: the
+// group, then each version of it. It returns the first resource of kind K, or
+// "" when none is, as when the group isn't served at all. A version that can't
+// be read, of an aggregated API server that is down for one, is an error: the
+// kind may be there. No other group is read.
+//
+// The group's own document, and not the list of groups: just after a CRD is
+// created, the API server serves its objects and this document before the
+// list, which waits for the group's APIService.
+func (t *Tracker) servedElsewhere(ctx context.Context) (string, error) {
+	if t.s.c.Discovery == nil {
+		return "", errors.New("Clients.Discovery isn't set")
+	}
+	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	defer cancel()
+	var group metav1.APIGroup
+	err := t.discover(ctx, &group, t.gk.Group)
+	if st, ok := statusOf(err); ok && st.Code == http.StatusNotFound {
+		return "", nil // the group isn't served
+	}
+	if err != nil {
+		return "", err
+	}
+	if group.Kind != "APIGroup" || group.Name != t.gk.Group || len(group.Versions) == 0 {
+		return "", fmt.Errorf("/apis/%s isn't the group's discovery: a %q named %q with %d versions", t.gk.Group, group.Kind, group.Name, len(group.Versions))
+	}
+	for _, v := range group.Versions {
+		var list metav1.APIResourceList
+		if err := t.discover(ctx, &list, t.gk.Group, v.Version); err != nil {
+			return "", err
+		}
+		if list.Kind != "APIResourceList" || list.GroupVersion != v.GroupVersion {
+			return "", fmt.Errorf("/apis/%s isn't the version's discovery: a %q of %q", v.GroupVersion, list.Kind, list.GroupVersion)
+		}
+		for _, r := range list.APIResources {
+			// The finalizer has the kind in lower case.
+			if strings.EqualFold(r.Kind, t.gk.Kind) {
+				return r.Name + " in " + v.GroupVersion, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// discover reads /apis/<path> into out, as JSON: the form that has one group
+// or one version a document.
+func (t *Tracker) discover(ctx context.Context, out any, path ...string) error {
+	data, err := t.s.c.Discovery.Get().AbsPath(append([]string{"/apis"}, path...)...).
+		SetHeader("Accept", "application/json").Do(ctx).Raw()
+	if err != nil {
+		return fmt.Errorf("reading /apis/%s: %w", strings.Join(path, "/"), err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("reading /apis/%s: %w", strings.Join(path, "/"), err)
+	}
 	return nil
 }
 

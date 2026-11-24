@@ -151,25 +151,31 @@ func TestTheCRDsDeletionReleasesWhatAGhostHolds(t *testing.T) {
 	}
 }
 
-// While the CRD is there, a ghost keeps its hold, as before: it goes when the
-// holder informer lists again. So it does when the CRD comes back before the
-// batch that its deletion queued.
+// While the CRD is there, a ghost keeps its hold, as before, by R0, without a
+// call: it goes when the holder informer lists again. So it does when the CRD
+// comes back before the batch that its deletion queued.
 func TestAGhostOfAKindThatIsThereGoesWithTheRelist(t *testing.T) {
 	for name, recreated := range map[string]bool{"the CRD stays": false, "it comes back": true} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			r, tr, out, vanish := ghostRig(t, SharedOptions{}, "ns", false)
-			r.runWrites(t)
 			vanish()
 			if recreated {
-				r.s.queue.mu.Lock() // holds its batches off
 				r.removeCRD(t, widgetGK)
-				must(r.md.Tracker().Create(crdGVR, crdMeta(widgetGK), ""))
-				r.s.queue.mu.Unlock()
+				slowly(t, "the CRD informer to see it go", tr.crdAbsent)
+				r.restoreCRD(t, widgetGK)
 				slowly(t, "the CRD informer to see it back", func() bool { return !tr.crdAbsent() })
 			}
-			r.s.queue.Add(batchKey{widgetGK, "ns"}, secretID("ns", "s"))
+			// The write loops start only now, so every batch, the one its
+			// deletion queued among them, runs with the CRD there.
+			r.md.ClearActions()
+			r.runWrites(t)
 			r.idle(t, batchKey{widgetGK, "ns"})
+			for _, a := range r.md.Actions() {
+				if a.GetResource().Resource == "secrets" && a.GetVerb() != "list" && a.GetVerb() != "watch" {
+					t.Errorf("a %s of the Secret: R0 didn't settle its batch", a.GetVerb())
+				}
+			}
 			if !r.heldBy(t, widgetGK, "ns", "s") {
 				t.Fatal("released though its holder is cached, and its kind is there")
 			}
@@ -199,7 +205,7 @@ func TestCRDAbsent(t *testing.T) {
 	if g := r.track(t, gadgetGK); g.crdAbsent() {
 		t.Error("another kind's CRD is absent too")
 	}
-	must(r.md.Tracker().Create(crdGVR, crdMeta(widgetGK), ""))
+	r.restoreCRD(t, widgetGK)
 	eventually(t, "the CRD informer to see it back", func() bool { return !tr.crdAbsent() })
 }
 

@@ -73,6 +73,7 @@ type fakeRig struct {
 	clk     *testingclock.FakeClock
 	md      *metadatafake.FakeMetadataClient
 	dyn     *dynamicfake.FakeDynamicClient
+	disc    *fakeDiscovery
 	metrics *countingMetrics
 	enq     *enqueueLog
 
@@ -178,7 +179,7 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
 	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
-	r := &fakeRig{clk: testingclock.NewFakeClock(time.Now()), metrics: &countingMetrics{}, enq: &enqueueLog{},
+	r := &fakeRig{clk: testingclock.NewFakeClock(time.Now()), disc: newFakeDiscovery(), metrics: &countingMetrics{}, enq: &enqueueLog{},
 		events: events.NewFakeRecorder(10000), refs: map[string][]Ref{}}
 	scheme := metadatafake.NewTestScheme()
 	if err := metav1.AddMetaToScheme(scheme); err != nil {
@@ -210,7 +211,7 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 		_ = unstructured.SetNestedField(obj.Object, !denied, "status", "allowed")
 		return true, obj, nil
 	})
-	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper, Events: r.events}, o, r.clk)
+	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper, Discovery: r.disc.client(), Events: r.events}, o, r.clk)
 	r.s.syncTimeout.Store(int64(20 * time.Second))
 	r.s.releaseWait = nil // the tests of the wait set their own
 	return r

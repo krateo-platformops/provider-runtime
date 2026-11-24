@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
@@ -41,6 +42,14 @@ type Clients struct {
 	Dynamic dynamic.Interface
 	// Mapper maps the holder and protected kinds to resources. Required.
 	Mapper meta.RESTMapper
+	// Discovery reads the API server's discovery documents, live: a
+	// discovery client's RESTClient(), for one. A holder kind whose CRD is
+	// gone is looked up in them, and what it held is released only if no
+	// other resource serves it (§6.4). Nil never takes a kind for gone.
+	//
+	// It is a REST client and not a discovery client, so that a caching one
+	// can't answer for the API server.
+	Discovery rest.Interface
 	// Events records §12's events on holders, protected objects and the
 	// index (k8s.io/client-go/tools/events). Nil records none. The core
 	// throttles them itself.

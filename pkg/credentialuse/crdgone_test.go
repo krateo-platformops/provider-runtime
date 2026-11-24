@@ -104,13 +104,23 @@ func (r *fakeRig) crdGets() []string {
 	return out
 }
 
-// removeCRD takes gk's CRD out of the fake API server: the informer sees it
-// go.
+// removeCRD takes gk's CRD out of the fake API server, and its resource out of
+// the discovery: the informer sees it go.
 func (r *fakeRig) removeCRD(t *testing.T, gk schema.GroupKind) {
 	t.Helper()
+	r.disc.serve("v1", strings.ToLower(gk.Kind)+"s", "") // first: its deletion queues batches
 	if err := r.md.Tracker().Delete(crdGVR, "", crdOf(gk).GetName()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// restoreCRD brings gk's CRD back.
+func (r *fakeRig) restoreCRD(t *testing.T, gk schema.GroupKind) {
+	t.Helper()
+	if err := r.md.Tracker().Create(crdGVR, crdMeta(gk), ""); err != nil {
+		t.Fatal(err)
+	}
+	r.disc.serve("v1", strings.ToLower(gk.Kind)+"s", gk.Kind)
 }
 
 // failCRDGet makes the GET of every CRD fail with err, or work when it
@@ -205,6 +215,9 @@ func TestNoHolders(t *testing.T) {
 		t.Run("the CRD: "+name, func(t *testing.T) {
 			r := newFakeRig(t)
 			tr := r.track(t, widgetGK)
+			if c.err != nil {
+				r.removeCRD(t, widgetGK) // and nothing else serves the kind
+			}
 			r.failCRDGet(func() error { return c.err })
 			r.md.ClearActions()
 			err := tr.noHolders(ctx, errTest404)
@@ -214,8 +227,11 @@ func TestNoHolders(t *testing.T) {
 			if err != nil && !errors.Is(err, errTest404) {
 				t.Errorf("noHolders = %v: it lost the list's error", err)
 			}
-			if err != nil && c.err != nil && !strings.Contains(err.Error(), "grant get on the CRD "+crd) {
-				t.Errorf("noHolders = %v: it doesn't say what to grant", err)
+			if err != nil && c.err != nil && !strings.Contains(err.Error(), c.err.Error()) {
+				t.Errorf("noHolders = %v: it lost the GET's error", err)
+			}
+			if got := err != nil && strings.Contains(err.Error(), "grant get on the CRD "+crd); got != (name == "403") {
+				t.Errorf("noHolders = %v: a grant is the advice for a 403, and only for it", err)
 			}
 			if gets := r.crdGets(); len(gets) != 1 {
 				t.Errorf("%d GETs of the CRD, want one", len(gets))
@@ -360,7 +376,7 @@ func TestAHoldOfAKindThatIsGoneIsReleased(t *testing.T) {
 		r.run(t)
 		o.fail(errTest404)
 		r.removeCRD(t, widgetGK)
-		must(r.md.Tracker().Create(crdGVR, crdMeta(widgetGK), ""))
+		r.restoreCRD(t, widgetGK)
 		stays(t, r, sink)
 		must(r.md.Tracker().Create(widgetsGVR, holderObject("ns", "h2", secretID("ns", "s")), "ns"))
 		o.heal()

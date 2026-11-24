@@ -505,6 +505,150 @@ func TestAKindThatReturnsBeforeR3KeepsItsHold(t *testing.T) {
 	}
 }
 
+// Two processes without leader election, and a kind whose CRD is replaced by
+// one of another plural: the old process, whose mapper remembers the first,
+// strips none of the holds of the new one's holders, though its list and its
+// CRD are gone, and says why. With the second CRD gone too, it would release.
+func TestAnotherPluralsHoldsStay(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	ns := env.Namespace(t, "gone-plural")
+	oidGVR := schema.GroupVersionResource{Group: cutest.Group, Version: "v1", Resource: "gizmoids"}
+	old := newGizmoRig(t, env.Config, gizmoOptions{})
+	old.create(t, ns, "g", "s")
+	old.removeKind(t, ns, "g") // a standby: the hold stays
+
+	crd := cutest.CRD("Gizmo", "gizmoids")
+	cutest.Eventually(t, time.Minute, func() error { return env.Client.Create(ctx, crd.DeepCopy()) })
+	t.Cleanup(func() {
+		if l, err := env.Dynamic.Resource(oidGVR).List(ctx, metav1.ListOptions{}); err == nil {
+			for i := range l.Items {
+				_, _ = env.Dynamic.Resource(oidGVR).Namespace(l.Items[i].GetNamespace()).Patch(ctx, l.Items[i].GetName(),
+					types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{})
+			}
+		}
+		_ = env.Client.Delete(ctx, crd)
+		cutest.Eventually(t, 2*time.Minute, func() error {
+			if _, err := env.Dynamic.Resource(crdGVR).Get(ctx, crd.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+				return fmt.Errorf("the Gizmoid CRD is still there (%v): %w", err, cutest.ErrNotYet)
+			}
+			return nil
+		})
+	})
+	cutest.Eventually(t, time.Minute, func() error {
+		_, err := env.Dynamic.Resource(oidGVR).List(ctx, metav1.ListOptions{})
+		return err
+	})
+	c := newController(t)
+	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
+	o := widgetOptions(c.enqueue)
+	o.Holder, o.DeletionGrace, o.ProbeInterval = gizmoGVK, testGrace, time.Second
+	tr, err := s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running(t, s)
+	c.start(&driver.Driver{Tracker: tr, Dynamic: env.Dynamic, Holder: oidGVR, OwnerFinalizer: ownerFinalizer})
+	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"secret": "s"}}}
+	u.SetGroupVersionKind(gizmoGVK)
+	u.SetNamespace(ns)
+	u.SetName("n")
+	if _, err := env.Dynamic.Resource(oidGVR).Namespace(ns).Create(ctx, u, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	c.enqueue(types.NamespacedName{Namespace: ns, Name: "n"})
+	cutest.Eventually(t, time.Minute, func() error {
+		g, err := env.Dynamic.Resource(oidGVR).Namespace(ns).Get(ctx, "n", metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(g.GetFinalizers(), ownerFinalizer) {
+			return cutest.ErrNotYet
+		}
+		return nil
+	})
+
+	old.startWrites(t)
+	cutest.Eventually(t, time.Minute, func() error {
+		if len(old.logs.matching("gizmoids in "+cutest.Group+"/v1 serves the kind now")) == 0 {
+			return fmt.Errorf("the old process doesn't say why: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	f, _ := cu.FinalizerName(gizmoGVK.GroupKind(), ns)
+	epochs := map[string]bool{}
+	for range 100 {
+		if !gizmoHolds(ns, "s") {
+			t.Fatal("the old process stripped the new holder's hold")
+		}
+		epochs[secretEpoch(ns, "s", f)] = true
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(epochs) > 3 {
+		t.Errorf("%d epochs in ten seconds: the two processes fight over the hold", len(epochs))
+	}
+}
+
+// What the evidence is, on the wire: a release of a kind that is gone reads its
+// CRD after its list's 404, with no resourceVersion, which makes it a
+// consistent read and not one of the watch cache (§6.4), and then the group's
+// discovery; R3 comes after them.
+func TestTheEvidenceOnTheWire(t *testing.T) {
+	cutest.Require(t, env)
+	ns := env.Namespace(t, "gone-wire")
+	var mu sync.Mutex
+	var reqs []string
+	cfg := rest.CopyConfig(env.Config)
+	cfg.Wrap(func(next http.RoundTripper) http.RoundTripper {
+		return roundTrip(func(req *http.Request) (*http.Response, error) {
+			resp, err := next.RoundTrip(req)
+			if err == nil {
+				mu.Lock()
+				reqs = append(reqs, fmt.Sprintf("%s %s %d", req.Method, req.URL.RequestURI(), resp.StatusCode))
+				mu.Unlock()
+			}
+			return resp, err
+		})
+	})
+	r := newGizmoRig(t, cfg, gizmoOptions{})
+	r.create(t, ns, "g", "s")
+	r.removeKind(t, ns, "g")
+	mu.Lock()
+	reqs = nil
+	mu.Unlock()
+	r.startWrites(t)
+	gizmoReleased(t, time.Minute, ns, "s")
+	mu.Lock()
+	defer mu.Unlock()
+	// The last of each before R3: the round that released.
+	list := "GET /apis/" + cutest.Group + "/v1/namespaces/" + ns + "/gizmos?limit=500 404"
+	crd := "GET /apis/apiextensions.k8s.io/v1/customresourcedefinitions/" + gizmoCRD + " 404"
+	group := "GET /apis/" + cutest.Group + " 200"
+	version := "GET /apis/" + cutest.Group + "/v1 200"
+	patch := "PATCH /api/v1/namespaces/" + ns + "/secrets/s"
+	at := func(prefix string) int {
+		last := -1
+		for i, q := range reqs {
+			if strings.HasPrefix(q, prefix) {
+				last = i
+			}
+		}
+		return last
+	}
+	if l, c, g, v, p := at(list), at(crd), at(group), at(version), at(patch); l < 0 || c < l || g < c || v < g || p < v {
+		t.Errorf("want, in order, the list (%d), the CRD's GET (%d), the group (%d), its version (%d), R3 (%d); the requests:\n%s", l, c, g, v, p, strings.Join(reqs, "\n"))
+	}
+	for _, q := range reqs {
+		if strings.Contains(q, "/customresourcedefinitions/"+gizmoCRD) && strings.Contains(q, "resourceVersion") {
+			t.Errorf("the CRD is read from the watch cache: %s", q)
+		}
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
 // The connection is down while a holder goes, its finalizer stripped as an
 // uninstall's cleanup may, and then its CRD. The holder informer never sees
 // it: its every list is a 404, so its cache keeps the ghost. The CRD informer
