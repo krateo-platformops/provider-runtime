@@ -1874,10 +1874,13 @@ in every process:
   removes K's marker label, and the held label where that was the last
   `credential-use.` finalizer.
 - **Then** it strips the record from every holder of K, with a merge patch
-  guarded by resourceVersion. A holder that names an object whose read or
-  strip failed keeps its record, and is counted, until the next pass. **The order
-  matters in PerName mode**: Disown finds an object by its line or by a
-  record, so while one may be held, a record names it. With the records
+  guarded by resourceVersion. A holder that names an object whose strip failed,
+  or one of an indexed kind that couldn't be read, keeps its record, and is
+  counted, until the next pass. Two aren't kept: a record of objects of a
+  LabelScoped kind whose list failed, since the marker label finds them still,
+  and the count is unknown meanwhile; and one that can't be parsed, which
+  names nothing. **The order matters in PerName mode**: Disown finds an object
+  by its line or by a record, so while one may be held, a record names it. With the records
   first, a process killed between the two strips, with a prune of the same
   object's line between its removal and its re-add, left an object held that
   nothing named, and Disown settled over it (found in the model). The lines
@@ -2076,7 +2079,12 @@ count to find it by. So:
   and the holders. **Each holder's lines are taken or left whole, the smallest
   first**, in one write: a record is an annotation a tenant may write, so one
   of 2,500 made-up names stays, and keeps the count unknown, but doesn't keep
-  another holder's record.
+  another holder's record. A line added so is for any name a record carries,
+  with or without its target's consent (§11.3), since a forged record can't be
+  told from one whose consent was withdrawn; in PerName mode a line grants
+  nothing, and costs one watch and one GET a pass while the switch is
+  unsettled. **What the provisioner of PerNamePoll does with such a line is
+  open** (§10.7, not built).
 - **A dropped line of a bare object goes back** while the switch is
   unsettled (E3), and isn't reported as tampering.
 
@@ -2135,7 +2143,11 @@ count stays `"unknown"` until it is vouched for.
 
 The rule errs on the wrong side in two cases: the second of those, and a
 kind whose writes of the settings and of the pointer were both starved
-(§7.3) at every start before the loss.
+(§7.3) at every start before the loss. It errs on the safe side in one: a
+kind's first `Track` that fails after it published the settings, or wrote the
+pointer, and before its index was rebuilt, isn't the first for the next one.
+With the switch set before that, it reports a lost index that never held
+anything, until it is vouched for, or the switch is off.
 
 **A pass never holds under a stale flag** (the user's decision, 2026-11-23).
 The live read of the switch before a pass's first A2 also reads
@@ -3283,7 +3295,11 @@ holder's next pass adds the line before A2 again (L2).
 reconciled again: a holder that never got its owner finalizer, deleted
 while every process of the kind is down, after a prune had removed its line
 and before any post-check ran. Its object then keeps the finalizer with no
-line. The marker label still finds it (§10.6.6).
+line. The marker label still finds it (§10.6.6). A pruner killed between its
+removal and its re-add leaves the same: P held, recorded, and without its
+line, until the holder's next pass adds it, or another process whose index
+watch showed the line checks its drop (§10.6.6). With Disown turned on
+meanwhile it is the third residual, below.
 
 **A hold that lands when nobody looks any more is the other residual** (the
 user's decision, 2026-11-23). The argument above needs both checks to run, the
@@ -3296,8 +3312,8 @@ hold together:
 2. **The late check doesn't see the landing** (§10.6.2): the sender is
    killed within `LandingMargin`, or a stop's grace period ends before the
    A2 does, or the write lands later than `LandingMargin`.
-3. **A prune takes P's line before the landing**, because nothing names P
-   any more.
+3. **A prune takes P's line before the landing**, because no record in the
+   pruner's holder cache names P.
 
 With one of them off, the line is there:
 
@@ -3355,9 +3371,18 @@ together:
 P then carries the finalizer, and neither a line nor a record names it, so
 no count finds it. One kill is enough. The sender may live, and have had its
 answer. The holder may still be there. No holder cache need be behind. What
-makes it narrow is 2: the gap is between two calls of one prune, the live
-read of the switch and the removal that follows it, milliseconds in practice
-and 15s at most; and the kill must come in the same 15s.
+makes it narrow is 2: the gap is between two calls of one write of a prune,
+the live read of the switch and the removal that follows it, milliseconds in
+practice and 10s at most (§10.6.2); and the kill must come within 15s of that
+read.
+
+**Another process of the kind makes it narrower than that**, and than the
+model has it, which has no watch on the index. One whose index watch had
+shown P's line sees it dropped by a write that isn't its own, and its write
+loops, a standby's once it is elected, read P, find it held, and add the line
+back; while that check is owed its Disown counts `"unknown"` (§7.4, §10.6.6).
+So with such a process alive the path also needs its watch to be behind for a
+whole run of zeros. This is by reading the code, not from a search.
 
 - **The remedy** is the one above: the finalizer comes off by hand, the
   marker label finds the object, and once the CRD is gone `DisownPrefix`
@@ -3383,7 +3408,9 @@ and 15s at most; and the kill must come in the same 15s.
   it, so has ended, or died, by then, and the line E2 then adds stays. In the
   model no schedule reaches the path with it, within the same bound. It
   delays the settling by one `DisownInterval`. **It changes nothing in the
-  index's format, so it can be added later.**
+  index's format, so it can be added later.** It holds back the records a
+  pass strips, not one that goes with its holder, deleted in the same time:
+  P is then found by its line only, as in the second residual.
 
 Stripping the records before the objects would widen it: the kill could then
 also fall between a pass's two strips, with the A2 landed before the pass.
@@ -3600,7 +3627,8 @@ controller named `get` and `patch`.
 - it carries only the tracker's `get` and `patch` for holds. **The
   controller's own read grants for Connect come from the provider's
   separate provisioning**, and must cover every name in the index. A line
-  is written only for a ref Connect reads, so they do.
+  is written only for a ref Connect reads, so they do, but for the lines
+  Disown adds (§7.4, E2), which may be of names they don't cover.
 
 If a GitOps tool manages the ClusterRole anyway, exclude its rules:
 
@@ -3822,7 +3850,8 @@ Warning event on it.
   and the ref is treated as not held.
 
 **A ref without consent is not held.** The gate runs before A1, so the ref
-isn't in the record. It gets no index line, no grant and no A2, though its
+isn't in the record. It gets no index line (but from Disown, of a record
+someone forged, §7.4), no grant and no A2, though its
 `Next` is still followed (§9.4). It is listed in the holder's `unheld`
 annotation as `NotConsented` (below). Connect proceeds **exactly as today**,
 with a Warning event, `CredentialRefNotHeld`, naming the ref and the missing
@@ -4479,8 +4508,9 @@ on krateo-057:
   its removal the switch is set on, nor with the switch unread; a full index
   leaves the records unstripped; two processes settle apart.
 - **The residual of §10.6.3, in the model:** with its three conditions a hold
-  without its line is reached, and with any one off none is, within the bound
-  stated there.
+  without its line is reached, and with any one off none is, in schedules of
+  at most three preemptions, or two where stated there. That is all "safe with
+  one off" says.
 - **Disown over the index, in the model:** the switch set, turned off and on
   again, widened, and narrowed and widened again; the A2 answered, lost, and
   lost with its sender killed; the holder there or gone; with a pruner whose
@@ -4490,6 +4520,16 @@ on krateo-057:
   a prune begun before the run's first pass has ended by then, its re-add
   included. A control per rule checks that the model sees what it is for, and
   stops at the first schedule that does.
+- **What the index's and Disown's models are not.** Those with a Disown pass
+  have a copy of its steps, made by hand: what they run of the code is the
+  index, the acquirer, the release batch and the count's decision, and a
+  change of `disownPass` has to be made in the copies too. Only the drops'
+  model has the watch on the index, whose dropped lines a live process checks.
+  A prune here has
+  one line, so one write. The late check, a prune and Disown meet with no
+  kill only in "Disown over the index", and there in the cases with a lost
+  response and a sender that lives; two of the four with the holder gone aren't
+  exhaustive at 2, below.
 - **The bounds of the index's and Disown's models.** CI searches every
   schedule with one preemption less than `CREDENTIALUSE_MODEL_DEEP=1` does,
   which is the bound §10.6.3 states: the flag, 2 with two processes and 3 with
