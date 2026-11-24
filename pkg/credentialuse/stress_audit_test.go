@@ -248,7 +248,8 @@ func (b *auditRun) lostRead(p *stPass) {
 }
 
 func (b *auditRun) history() *stHistory {
-	return newStHistory(stRecording{mode: b.mode, grace: testGrace, versions: b.vs, calls: b.calls, passes: b.passes, reads: b.reads, writes: b.writes, events: b.events, gaps: b.gaps})
+	return newStHistory(stRecording{mode: b.mode, grace: testGrace, versions: b.vs, calls: b.calls, passes: b.passes, reads: b.reads, writes: b.writes, events: b.events, gaps: b.gaps,
+		synced: b.synced, stopped: b.stopped, outside: b.outside})
 }
 
 // want checks that the audits find exactly classes, each with a timeline, and

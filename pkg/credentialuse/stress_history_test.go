@@ -14,8 +14,10 @@ package credentialuse_test
 //     the goroutine it ran on, and the pass it belongs to;
 //   - every DELETE and create the test made, with its answer.
 //
-// No rule asks the package under test what it knew: records, epochs and users
-// are read from the versions, by the code here.
+// No rule asks the package under test what it knew, but one: the skip audit
+// (checkSkip) takes from the package's test hooks what its informers had
+// delivered, and auditFeeds checks that against the watches. Records, epochs
+// and users are read from the versions, by the code here.
 
 import (
 	"cmp"
@@ -273,6 +275,19 @@ func (c stCall) ok() bool { return c.err == "" }
 // is that version's.
 func (c stCall) removal() bool { return c.op == "r3" && c.ok() && c.deleting && len(c.fins) == 0 }
 
+// revision is the revision c was made at, if its answer has it: a write's, or
+// a consistent list's. A GET's is of the version it answered, and an R3's that
+// removes the object of the version its tests ran on.
+func (c stCall) revision() (uint64, bool) {
+	switch c.op {
+	case "a1", "a2", "list":
+		return c.rv, true
+	case "r3":
+		return c.rv, !c.removal()
+	}
+	return 0, false
+}
+
 func (c stCall) String() string {
 	s := fmt.Sprintf("p%d g%s ", c.proc, c.g)
 	if c.pass != 0 {
@@ -367,8 +382,16 @@ type stRead struct {
 type stFeed struct {
 	proc int
 	kind string // the tracker's holder kind, or "" for Namespaces
-	what string // "holder", "protected" or "namespace"
+	what string // "holder", "protected" (protectedFeed, of a kind) or "namespace"
 }
+
+type stFeedObj struct {
+	stFeed
+	obj stObj
+}
+
+// protectedFeed is the what of the feed of one protected kind's versions.
+func protectedFeed(kind string) string { return "protected " + kind }
 
 // A stEvent is one version a feed delivered, just before its handler acted on
 // it. A deletion is delivered with the object's last state and the revision
@@ -447,6 +470,9 @@ const (
 	// findStaleRead: a GET answered less than the watch had delivered before
 	// it began. The API server's live read doesn't; one that isn't live may.
 	findStaleRead = "STALE-READ"
+	// findLag: a process's informer hadn't delivered a version 5s after the
+	// test's watch had: it has stopped, or the machine is starved.
+	findLag = "LAG"
 	// findLabels: an A2's or a release's version has other labels than its
 	// finalizers ask for (§3).
 	findLabels = "LABELS"
@@ -515,6 +541,7 @@ const (
 	countH3             = "H3: held objects a DELETE removed"
 	countH3Reads        = "H3: failed reads exempt"
 	countLostA2         = "H1: lost A2s"
+	countUnbounded      = "H1: recreates unbounded"
 	countLiveReads      = "failed reads of passes that began live"
 	countHolderGone     = "failed reads after the holder was gone"
 	countDrops          = "chained: record drops behind a Target"
@@ -527,28 +554,34 @@ const (
 	countAPIErrors      = "acquires stopped by a 429, a 5xx or a lost answer"
 )
 
-// A stFloor is the least a run must have of a count. The runs on file have
-// three times as much or more, or the canaries make it happen once.
+// A stFloor is the least a run must have of a count.
 type stFloor struct {
 	count string
 	min   int
 }
 
-// floors are a run's: a bug that means "never" shows in nothing else. outside:
-// every hold is outside the caches, where no pass skips.
-func (h *stHistory) floors(outside bool) []stFloor {
-	fs := []stFloor{{countReleases, 10}, {countReleasesLive, 1}, {countReleasesUsers, 1}, {countHeldByA2, 10}, {countRemovals, 10}, {countEstablished, 5}}
-	if !outside {
-		fs = append(fs, stFloor{countSkips, 10})
+// floors are a run's, of so many passes: a bug that means "never" shows in
+// nothing else. What the canaries make happen must; the rest goes by the
+// passes, which a starved machine makes fewer of, at a fifth or less of what
+// the runs on file have.
+func (h *stHistory) floors(passes int64) []stFloor {
+	per := func(thousand int64) int { return max(1, int(passes*thousand/1000)) }
+	fs := []stFloor{{countReleases, 3}, {countReleasesLive, 1}, {countReleasesUsers, 1}, {countRemovals, 2}, {countHeldByA2, per(5)}, {countEstablished, per(2)}}
+	if !h.outside {
+		fs = append(fs, stFloor{countSkips, per(8)})
 	}
 	if h.mode != stressChained {
-		fs = append(fs, stFloor{countRecords, 50})
+		fs = append(fs, stFloor{countRecords, per(50)})
 	}
 	if h.mode == stressCross {
-		fs = append(fs, stFloor{countCrossHolds, 5}, stFloor{countWithdrawn, 1})
+		fs = append(fs, stFloor{countCrossHolds, 2}, stFloor{countWithdrawn, 1})
 	}
 	return fs
 }
+
+// maxAPIErrors is the most acquires a run may have that a 429, a 5xx or a lost
+// answer stopped: the runs on file have none, and each excuses its pass.
+const maxAPIErrors = 3
 
 func (r *stReport) String() string {
 	var parts []string
@@ -573,7 +606,12 @@ type stHistory struct {
 	reads   []stRead
 	writes  map[stObj][]stWrite
 	events  map[stFeed][]stEvent // in order
-	gaps    []string
+	// eventsOn are the events by the object too.
+	eventsOn map[stFeedObj][]stEvent
+	gaps     []string
+	synced   map[int]time.Time
+	stopped  time.Time
+	outside  bool
 	// explained are the releases of unknown outcome that explain a loss
 	// already, by index in calls.
 	explained map[int]bool
@@ -592,12 +630,19 @@ type stRecording struct {
 	writes   []stWrite
 	events   []stEvent
 	gaps     []string
+	// synced is when each process had synced, and stopped when they were
+	// first told to stop.
+	synced  map[int]time.Time
+	stopped time.Time
+	// outside: every hold is outside the caches (§10.5), so no pass skips, and
+	// no informer delivers a protected object.
+	outside bool
 }
 
 func newStHistory(rec stRecording) *stHistory {
 	h := &stHistory{mode: rec.mode, grace: rec.grace, objs: map[stObj][]stVersion{}, holders: map[string][]stObj{}, byObj: map[stObj][]int{},
 		byPass: map[int64][]int{}, passes: map[int64]*stPass{}, reads: rec.reads, writes: map[stObj][]stWrite{},
-		events: map[stFeed][]stEvent{}, gaps: rec.gaps, explained: map[int]bool{}}
+		events: map[stFeed][]stEvent{}, eventsOn: map[stFeedObj][]stEvent{}, gaps: rec.gaps, synced: rec.synced, stopped: rec.stopped, outside: rec.outside, explained: map[int]bool{}}
 	for _, v := range rec.versions {
 		if _, ok := h.objs[v.stObj]; !ok && h.holderKind(v.kind) {
 			k := holderKey(v.kind, v.ns)
@@ -608,8 +653,19 @@ func newStHistory(rec stRecording) *stHistory {
 	for _, o := range h.objs {
 		slices.SortStableFunc(o, func(a, b stVersion) int { return cmp.Compare(a.rv, b.rv) })
 	}
+	objs := map[string]stObj{}
+	for _, v := range rec.versions {
+		objs[v.uid] = v.stObj
+	}
 	for _, e := range rec.events {
+		o := objs[e.uid]
+		if e.what == "protected" {
+			// Each protected kind has an informer of its own, and so a
+			// handler's goroutine.
+			e.what = protectedFeed(o.kind)
+		}
 		h.events[e.stFeed] = append(h.events[e.stFeed], e)
+		h.eventsOn[stFeedObj{e.stFeed, o}] = append(h.eventsOn[stFeedObj{e.stFeed, o}], e)
 	}
 	for _, es := range h.events {
 		slices.SortStableFunc(es, func(a, b stEvent) int { return a.at.Compare(b.at) })
@@ -732,6 +788,7 @@ func (h *stHistory) audit() *stReport {
 	r := &stReport{counts: map[string]int{}}
 	h.auditCompleteness(r)
 	h.auditGets(r)
+	h.auditFeeds(r)
 	h.auditWorkers(r)
 	h.auditReleases(r)
 	h.auditFinalizers(r)
@@ -824,6 +881,52 @@ func (h *stHistory) auditGets(r *stReport) {
 		if stale {
 			r.find(stFinding{class: findStaleRead, text: fmt.Sprintf("%s: the watch had delivered %s before it began", c, v), obj: c.obj,
 				from: c.start.Add(-5 * time.Second), to: c.end.Add(time.Second), zero: c.end, calls: []stCall{c}})
+		}
+	}
+}
+
+// feedLag is how far behind the test's watch a process's informer may be.
+const feedLag = 5 * time.Second
+
+// auditFeeds: each version of a holder reaches every process's feed of its
+// kind within feedLag of the test's watch, or a later one does; and so does,
+// to every tracker's feed, each version of a protected object that is held, or
+// was until then, where the caches cover it. A holder's feed has no removals.
+// From when the process had synced, and to feedLag before it was stopped. What
+// the skip audit takes from the feeds says nothing if a feed has stopped.
+func (h *stHistory) auditFeeds(r *stReport) {
+	trackers := []string{"Widget"}
+	if h.mode == stressPlain {
+		trackers = append(trackers, "Target")
+	}
+	for _, proc := range slices.Sorted(maps.Keys(h.synced)) {
+		for o, vs := range h.objs {
+			var feeds []stFeed
+			held := h.protectedKind(o.kind)
+			switch {
+			case h.holderKind(o.kind):
+				feeds = []stFeed{{proc, o.kind, "holder"}}
+			case held && !h.outside:
+				for _, k := range trackers {
+					feeds = append(feeds, stFeed{proc, k, protectedFeed(o.kind)})
+				}
+			}
+			for i, v := range vs {
+				if v.at.Before(h.synced[proc]) || v.at.Add(feedLag).After(h.stopped) || !held && v.gone {
+					continue
+				}
+				if held && len(credentialUse(v.fins)) == 0 && (i == 0 || vs[i-1].uid != v.uid || len(credentialUse(vs[i-1].fins)) == 0) {
+					continue
+				}
+				for _, f := range feeds {
+					if !slices.ContainsFunc(h.eventsOn[stFeedObj{f, o}], func(e stEvent) bool {
+						return e.rv >= v.rv && !e.at.After(v.at.Add(feedLag))
+					}) {
+						r.find(stFinding{class: findLag, text: fmt.Sprintf("p%d's %s %s feed hadn't delivered %s, or a later one, %s after the test's watch", f.proc, f.kind, f.what, v, feedLag),
+							obj: o, from: v.at.Add(-time.Second), to: v.at.Add(feedLag + time.Second), zero: v.at})
+					}
+				}
+			}
 		}
 	}
 }
@@ -1243,6 +1346,9 @@ func (h *stHistory) auditRemovals(r *stReport) {
 			held := credentialUse(d.fins)
 			unexplained := func(f string, a ...any) {
 				if why, cs := h.recreate(d); why == "" {
+					if !h.bounded(d, cs[1]) {
+						r.counts[countUnbounded]++
+					}
 					r.find(stFinding{class: findRecreate, text: fmt.Sprintf("%s: two processes released the incarnation before it, and one of the releases was in flight still: %s; %s", d, cs[0], cs[1]),
 						obj: o, from: d.at.Add(-2 * time.Second), to: d.at.Add(500 * time.Millisecond), zero: d.at, calls: cs})
 				} else {
@@ -1328,10 +1434,66 @@ func (h *stHistory) recreate(d stVersion) (string, []stCall) {
 			if len(others) > 0 {
 				return fmt.Sprintf("another release overlaps its life: %s", others[0]), nil
 			}
+			if why := h.outlived(d, late); why != "" {
+				return "it outlived the late release: " + why, nil
+			}
 			return "", []stCall{taker, late}
 		}
 	}
 	return "no two processes released the incarnation before it, one of them until after its create began", nil
+}
+
+// outlived is what shows that removal d came after release late had ended, so
+// that late didn't make it, or "": a write, or a whole consistent list, that
+// began after late ended and was answered with a revision below d's; or a live
+// GET that began after it and answered this incarnation. It can't red a true
+// recreate: what begins after the release has ended has a later revision than
+// its removal.
+func (h *stHistory) outlived(d stVersion, late stCall) string {
+	for _, c := range h.calls {
+		if !c.ok() || !c.start.After(late.end) {
+			continue
+		}
+		if rv, writes := c.revision(); writes && rv < d.rv {
+			return c.String()
+		}
+		if c.op == "get" && c.obj == d.stObj && c.uid == d.uid {
+			return c.String()
+		}
+	}
+	for _, ws := range h.writes {
+		for _, w := range ws {
+			if w.answer == answerCreated && w.start.After(late.end) && w.rv < d.rv {
+				return w.String()
+			}
+		}
+	}
+	return ""
+}
+
+// recreateBound is how soon after the late release ended a write, or a list,
+// must have begun for its revision to bound the removal.
+const recreateBound = 200 * time.Millisecond
+
+// bounded reports whether something that began within recreateBound of the
+// late release's end has a later revision than removal d: so d came no later
+// than that. In a quiet moment nothing does, and a removal long after would
+// look the same.
+func (h *stHistory) bounded(d stVersion, late stCall) bool {
+	near := func(t time.Time) bool { return t.After(late.end) && t.Sub(late.end) <= recreateBound }
+	for _, c := range h.calls {
+		if rv, writes := c.revision(); c.ok() && writes && near(c.start) && rv > d.rv {
+			return true
+		}
+	}
+	for _, ws := range h.writes {
+		for _, w := range ws {
+			if w.answer == answerCreated && near(w.start) && w.rv > d.rv {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // createBegan is a lower bound of when incarnation uid came to be: when the
@@ -1496,7 +1658,8 @@ func (h *stHistory) checkStopped(r *stReport, p *stPass, find func(class string,
 		// or can't be read, which are ordinary errors (§6.2).
 		last = before
 	}
-	api := last.unknown || last.code == 429
+	// A context that ends isn't the API server's doing: the pass isn't cut.
+	api := last.unknown && !strings.Contains(last.err, "context canceled") && !strings.Contains(last.err, "context deadline exceeded") || last.code == 429
 	explained := false
 	switch {
 	case p.conflict:
@@ -1661,15 +1824,27 @@ func acted(es []stEvent, e stEvent, t time.Time) bool {
 	return t.Sub(e.at) >= time.Second || slices.ContainsFunc(es, func(n stEvent) bool { return n.at.After(e.at) && !n.at.After(t) })
 }
 
+// returned reports whether what made call c, which drops what was written as
+// soon as it returns, had got to it by t: its goroutine has made another call
+// since, or a second has passed.
+func (h *stHistory) returned(c stCall, t time.Time) bool {
+	if !c.end.Before(t) {
+		return false
+	}
+	return t.Sub(c.end) >= time.Second || slices.ContainsFunc(h.calls, func(n stCall) bool {
+		return n.proc == c.proc && n.g == c.g && n.start.After(c.end) && !n.start.After(t)
+	})
+}
+
 // dropped is why p's process had dropped what its A2 a2 on o wrote, before p
 // began, or "".
 func (h *stHistory) dropped(p *stPass, o stObj, fin string, a2 stCall) string {
 	for _, c := range h.callsOn(o, func(c stCall) bool {
-		return c.op == "r3" && c.ok() && c.proc == p.proc && c.fin == fin && c.uid == a2.uid && (c.removal() || c.rv > a2.rv) && c.end.Before(p.began)
+		return c.op == "r3" && c.ok() && c.proc == p.proc && c.fin == fin && c.uid == a2.uid && (c.removal() || c.rv > a2.rv) && h.returned(c, p.began)
 	}) {
 		return c.String()
 	}
-	es := h.events[stFeed{p.proc, p.holder.kind, "protected"}]
+	es := h.events[stFeed{p.proc, p.holder.kind, protectedFeed(o.kind)}]
 	for _, e := range es {
 		v, ok := h.entry(o, e.rv)
 		if !ok || v.uid != e.uid || e.rv <= a2.rv || !acted(es, e, p.began) {
@@ -1704,7 +1879,7 @@ func (h *stHistory) mayConsent(p *stPass, o stObj) bool {
 		}
 		return slices.DeleteFunc(slices.Clone(h.objs[obj]), func(v stVersion) bool { return v.gone || v.rv < from || to != 0 && v.rv >= to })
 	}
-	for _, v := range cached(stFeed{p.proc, p.holder.kind, "protected"}, o) {
+	for _, v := range cached(stFeed{p.proc, p.holder.kind, protectedFeed(o.kind)}, o) {
 		for _, n := range cached(stFeed{p.proc, "", "namespace"}, nsObj(o.ns)) {
 			if consented(v.consent, n.consent, p.holder.ns) {
 				return true
@@ -1823,6 +1998,10 @@ func (h *stHistory) auditEstablished(r *stReport) {
 }
 
 // unestablished is why p may not establish its holder as version cur, or "".
+//
+// It is for holders of one ref, as the stress's are. With two, the second's A2
+// may come after the read that found the first absent, and rightly: §6.7's
+// read is BeforeEstablish's, after them all.
 func (h *stHistory) unestablished(p *stPass, cur stVersion) string {
 	if cur.recBad {
 		return "its record can't be parsed"

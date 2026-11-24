@@ -16,7 +16,9 @@ empty, or when the only classes are others; its output is printed. BUILD,
 PANIC and TIMEOUT aren't finds either. An unmutated run may go red on the API
 server's own H1 (H1_CLASSES). A run whose every error line is of those is
 excused, and the iterations left go on; one other error line, and it isn't.
-The baseline must pass REVERT_BASELINE iterations (default 3), so excused, or
+The rates of the excused are printed beside the baseline's and the stated ones
+(count-credential-use-stress.py), and RAISES-H1 marks a mutant that only raises
+one of them above its ceiling. The baseline must pass REVERT_BASELINE iterations (default 3), so excused, or
 the run is invalid. Each source file is restored after its mutant, and the end
 checks the tree is as it started.
 
@@ -36,7 +38,7 @@ matches. REVERT_TIMEOUT_S bounds each go test (default 3600).
 REVERT_CHECK_ONLY=1 checks that every mutant applies exactly once, and
 compiles (go vet, tests included), and runs no test.
 """
-import hashlib, os, re, signal, subprocess, sys, time
+import hashlib, importlib.util, os, re, signal, subprocess, sys, time
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -161,6 +163,12 @@ MUTANTS = [
       (AQ, "\tmaxDepth := p.maxDepth\n", "\tif acquireSeq.Add(1)%3 == 0 {\n\t\treturn fail(errors.New(\"mutant\"), \"Refs\")\n\t}\n\tmaxDepth := p.maxDepth\n")], ["ACQUIRE-FAILED"]),
     ("a Missing ref is left out",
      [(AQ, MISSING % "\t\t\t\t\ta.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonMissing})\n", MISSING % "")], [UNACCOUNTED]),
+    ("an informer's handler drops the version in which an object begins to be deleted",
+     [(IN, "\th.observe(n)\n\tt := h.t\n\tid := h.id(n)\n", "\tif o.DeletionTimestamp == nil && n.DeletionTimestamp != nil {\n\t\treturn\n\t}\n\th.observe(n)\n\tt := h.t\n\tid := h.id(n)\n")],
+     ["LAG", "CANARY-NOT-RELEASED", "TOO-LITTLE"], CACHED),
+    ("a holder's handler stops after a thousand versions",
+     [(IN, "func (h holderHandler) OnUpdate(oldObj, newObj any) {\n", "var holderVersions atomic.Int64\n\nfunc (h holderHandler) OnUpdate(oldObj, newObj any) {\n\tif holderVersions.Add(1) > 1000 {\n\t\treturn\n\t}\n"),
+      (IN, "\t\"sync\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n")], ["LAG"]),
     ("a ref that a record drops queues no release",
      [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil {\n", "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil || m == old && cur != nil {\n")],
      ["TOO-LITTLE", "CANARY-NOT-RELEASED"]),
@@ -179,7 +187,11 @@ ITERATIONS = int(os.environ.get("REVERT_ITERATIONS", "20"))
 REPEATS = int(os.environ.get("REVERT_REPEATS", "3"))
 BASELINE = int(os.environ.get("REVERT_BASELINE", "3"))
 TIMEOUT = int(os.environ.get("REVERT_TIMEOUT_S", "3600"))
-H1_CLASSES = ("H1-RECREATE", "H1-LOST-A2")
+spec = importlib.util.spec_from_file_location("stress_counts", os.path.join(os.path.dirname(os.path.abspath(__file__)), "count-credential-use-stress.py"))
+counts = importlib.util.module_from_spec(spec)
+sys.dont_write_bytecode = True
+spec.loader.exec_module(counts)
+H1_CLASSES = counts.H1
 
 
 def errors(out):
@@ -195,7 +207,7 @@ def h1_alone(out):
 
 class Run:
     def __init__(self, returncode, out, seconds):
-        self.returncode, self.out, self.seconds, self.excused = returncode, out, seconds, 0
+        self.returncode, self.out, self.seconds, self.excused, self.h1 = returncode, out, seconds, 0, []
         self.iterations = len(re.findall(r"^--- (?:PASS|FAIL): TestStress \(", out, re.M))
         self.classes = sorted(set(re.findall(r"AUDIT ([A-Z0-9-]+):", out)))
 
@@ -207,10 +219,11 @@ def hunt(iterations, classes=()):
     while True:
         r = stress(iterations - (total.iterations if total else 0))
         if total:
-            r.iterations, r.seconds, r.excused = total.iterations + r.iterations, total.seconds + r.seconds, total.excused
+            r.iterations, r.seconds, r.excused, r.h1 = total.iterations + r.iterations, total.seconds + r.seconds, total.excused, total.h1
         if classify(r, classes) != "OTHER" or not h1_alone(r.out):
             return r
         r.excused += 1
+        r.h1 = r.h1 + [c for c in H1_CLASSES if c in r.classes]
         if r.iterations >= iterations:
             r.returncode = 0
             return r
@@ -344,6 +357,15 @@ for name, edits, classes in chosen:
         print(f"          {s} at iteration {r.iterations} of {ITERATIONS}, {r.seconds:.0f}s: {' '.join(r.classes) or 'no audit'}" + (f"; {r.excused} excused before, red on H1 alone" if r.excused else ""))
         if s in ("OTHER", "PANIC", "BUILD", "TIMEOUT"):
             print("          " + "\n          ".join(errors(r.out)[:6] or [r.out[-1500:]]))
+    # A mutant that only raises the API server's own rates is found by that.
+    for c in H1_CLASSES:
+        n = sum(r.h1.count(c) for r in runs)
+        raised, what = counts.over(SUBTEST.strip("^$"), c, n, ran) if ran else (False, "")
+        if n:
+            print(f"          {c}, excused: {counts.rate(n, ran)}; the baseline's {base.h1.count(c)} in {base.iterations}; {what}")
+        if raised and state != "FOUND":
+            totals["RAISES-H1"] = totals.get("RAISES-H1", 0) + 1
+            print(f"RAISES-H1 {name}")
     print(f"          {reds} reds in {ran} iterations" + (f": about {100 * reds / ran:.0f}% of them" if reds and ran else "") + f"; {began} to {utc()}", flush=True)
 
 print("\n" + " ".join(f"{k}={v}" for k, v in sorted(totals.items())) + f" of {len(chosen)}")

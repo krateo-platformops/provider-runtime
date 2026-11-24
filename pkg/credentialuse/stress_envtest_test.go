@@ -124,6 +124,7 @@ func startStressProcess(t *testing.T, rec *stressRecorder, proc int, so cu.Share
 		}
 		return nil
 	})
+	rec.hasSynced(proc)
 	for _, c := range p.ctrls {
 		c.start(c.d)
 	}
@@ -712,6 +713,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 	})
 	seed := stressSeed(t)
 	rec := startRecorder(t, mode)
+	rec.outside = len(so.Namespaces) > 0
 	w := &stressWorld{t: t, rec: rec, holders: map[string][]stressHolder{}, chained: chained, outside: len(so.Namespaces) > 0}
 	for i := range n {
 		w.procs = append(w.procs, startStressProcess(t, rec, i+1, so, mode))
@@ -893,6 +895,7 @@ const maxFindings = 3
 func (w *stressWorld) audit(what string, teardowns int64) {
 	t := w.t
 	var passes int64
+	w.rec.stopping()
 	for _, p := range w.procs {
 		p.stop()
 		for _, c := range p.ctrls {
@@ -922,10 +925,13 @@ func (w *stressWorld) audit(what string, teardowns int64) {
 		t.Errorf("the stress did too little: %d operations, %d passes and %d namespace teardowns; want at least 100, 100 and 1",
 			w.ops.Load(), passes, teardowns)
 	}
-	for _, f := range h.floors(w.outside) {
+	for _, f := range h.floors(passes) {
 		if n := r.counts[f.count]; n < f.min {
 			t.Errorf("AUDIT TOO-LITTLE: %s: %d, want at least %d; %s", f.count, n, f.min, r)
 		}
+	}
+	if n := r.counts[countAPIErrors]; n > maxAPIErrors {
+		t.Errorf("AUDIT TOO-MANY: %s: %d, want at most %d", countAPIErrors, n, maxAPIErrors)
 	}
 }
 

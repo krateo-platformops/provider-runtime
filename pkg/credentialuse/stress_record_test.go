@@ -71,6 +71,9 @@ type stressRecorder struct {
 	writes   []stWrite
 	events   []stEvent
 	gaps     []string
+	synced   map[int]time.Time
+	stopped  time.Time
+	outside  bool
 	ended    map[string]bool // by kind and namespace: its watch has delivered the recording's last object
 }
 
@@ -83,7 +86,7 @@ const recordingEnd = "stressend-"
 func startRecorder(t *testing.T, mode stressMode) *stressRecorder {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &stressRecorder{mode: mode, cancel: cancel, ended: map[string]bool{}}
+	r := &stressRecorder{mode: mode, cancel: cancel, ended: map[string]bool{}, synced: map[int]time.Time{}}
 	t.Cleanup(func() {
 		cancel()
 		r.wg.Wait()
@@ -143,6 +146,20 @@ func (r *stressRecorder) watch(ctx context.Context, kind string, w watch.Interfa
 	}
 }
 
+// hasSynced and stopping tell that process proc has synced, and that the
+// processes are about to be stopped.
+func (r *stressRecorder) hasSynced(proc int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.synced[proc] = time.Now()
+}
+
+func (r *stressRecorder) stopping() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stopped = time.Now()
+}
+
 func (r *stressRecorder) gap(s string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -183,7 +200,8 @@ func (r *stressRecorder) finish(t *testing.T) *stHistory {
 	r.wg.Wait()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return newStHistory(stRecording{mode: r.mode, grace: testGrace, versions: r.versions, calls: r.calls, passes: r.passes, reads: r.reads, writes: r.writes, events: r.events, gaps: r.gaps})
+	return newStHistory(stRecording{mode: r.mode, grace: testGrace, versions: r.versions, calls: r.calls, passes: r.passes, reads: r.reads, writes: r.writes, events: r.events,
+		gaps: r.gaps, synced: r.synced, stopped: r.stopped, outside: r.outside})
 }
 
 func parseRV(s string) uint64 {
@@ -438,6 +456,18 @@ func (c recordingResource) List(ctx context.Context, o metav1.ListOptions) (*met
 	}
 	c.r.add(sc)
 	return out, err
+}
+
+// Delete and DeleteCollection aren't the package's to make: nothing here would
+// account for what they do.
+func (c recordingResource) Delete(ctx context.Context, name string, o metav1.DeleteOptions, sub ...string) error {
+	c.r.gap(fmt.Sprintf("p%d deletes %s/%s of %s", c.proc, c.obj.ns, name, c.obj.kind))
+	return c.ResourceInterface.Delete(ctx, name, o, sub...)
+}
+
+func (c recordingResource) DeleteCollection(ctx context.Context, o metav1.DeleteOptions, l metav1.ListOptions) error {
+	c.r.gap(fmt.Sprintf("p%d deletes the %s of %s", c.proc, c.obj.kind, c.obj.ns))
+	return c.ResourceInterface.DeleteCollection(ctx, o, l)
 }
 
 // patchOf reads what a patch is, by the paths it writes: an A1, which writes

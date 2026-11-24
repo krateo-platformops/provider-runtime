@@ -5995,7 +5995,8 @@ failure that the API server had caused (H3 below). Now:
   delivered, which the test's hooks see: the holder's version it works from,
   last; an A2 of its process that began after the first delivery of a record
   that names the ref; and nothing since that drops it, delivered before the
-  pass began. No A2 comes before the record names its object. Each reason why
+  pass began. That the informers deliver, within 5s of the test's watch, is an
+  audit of its own (`LAG`), which may also say that the machine is starved. No A2 comes before the record names its object. Each reason why
   a ref isn't held, and each acquire that stops or leaves the holder Degraded,
   has an answer of the API server's behind it, the last one the pass had.
 - **Reads that must be live are:** a GET with a resourceVersion is no R1, and
@@ -6054,8 +6055,16 @@ skew, or two API servers; a holder recreated under its name; liveness beyond the
 canaries; chains, PerName, Disown, or cluster-scoped kinds; events, or the
 unheld annotation; or a real cluster's rates of H1 and H3. An iteration is
 excused only if every error line of it is an audit's of the API server's own
-H1, and those are reported as rates: a change of either rate is what that count
-shows of a change to the releases.
+H1. Those are reported as rates, and each has a ceiling, by sub-test: a run
+whose interval for a class lies above the stated rate is red. The rate stated
+for `H1-RECREATE` is 5 of 207 iterations, 2.4% [0.8, 5.6], in the plain
+sub-test at 79c6868, on 4 CPUs, unloaded, before H1's wait: each was read by
+hand, and each has two processes' releases of one incarnation answered within
+5ms of each other, the test's create between, and the recreated Secret gone one
+or two revisions after it was created. `H1-LOST-A2` wasn't seen in them: under
+1.5%. Neither is measured in the other sub-tests, which so have no ceiling. They
+depend on the machine and on H1's wait, and are to be measured again with
+either. A run too short to lie above a ceiling can't show it.
 
 **What it can't show:**
 
@@ -6079,10 +6088,13 @@ shows of a change to the releases.
   Secret answered, one removed it, the test's recreate landed, and the other's
   removed the recreated one at the next revision. It fails the run, under its
   own name (`H1-RECREATE`), only where both releases answered, of two
-  processes, one of them after the create began, and no other release overlaps
-  the recreated Secret's life, nor a DELETE that may have landed. One process's
-  two releases are a defect of ours (`RELEASED-TWICE`). With three processes,
-  a third release may well overlap, and the removal is then unexplained.
+  processes, one of them after the create began; no other release overlaps
+  the recreated Secret's life, nor a DELETE that may have landed; and nothing
+  that began after the late release had ended was answered as of before the
+  removal. Where nothing of the kind began within 200ms, the removal isn't
+  bounded so, and is counted apart. One process's two releases are a defect of
+  ours (`RELEASED-TWICE`). With three processes, a third release may well
+  overlap, and the removal is then unexplained.
 - **The chained case.** A pass that followed an older version of a Target may
   drop from the record a Secret that the holder now needs (H2, open). The
   stress counts such drops and doesn't fail on them: every release after one
