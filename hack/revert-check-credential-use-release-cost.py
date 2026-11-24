@@ -10,7 +10,7 @@ asked for as in the others.
 
 Not mutated: the default times (10s, 60s, a minute a page) but for how R1's grow,
 since no test waits for them; and which line the protected handlers, the rescan,
-the rechecks and A2 add to, which only orders.
+the rechecks and A2 add to, which only orders while the write loops run.
 
 Usage:
   python3 hack/revert-check-credential-use-release-cost.py > hack/revert-check-credential-use-release-cost.txt
@@ -23,8 +23,8 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
-BR, RL, WL, QU, SV, MK, TR, IN = [C + f for f in ("batchrecords.go", "release.go", "writeloops.go", "queue.go", "server.go", "missedkinds.go", "tracker.go", "informers.go")]
-FILES = [BR, RL, WL, QU, SV, MK, TR, IN]
+BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC = [C + f for f in ("batchrecords.go", "release.go", "writeloops.go", "queue.go", "server.go", "missedkinds.go", "tracker.go", "informers.go", "answered.go", "shared.go", "uncached.go")]
+FILES = [BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file. The
 # last of each is the killing tests, all of pkg/credentialuse.
@@ -65,11 +65,13 @@ LIST = [
     ("R0 goes on once the context has ended", RL,
      [("\t\tif ctx.Err() != nil {\n\t\t\tres.Rest = append(res.Rest, id)\n\t\t\tcontinue\n\t\t}\n\t\tu := ", "\t\tif false && ctx.Err() != nil {\n\t\t\tres.Rest = append(res.Rest, id)\n\t\t\tcontinue\n\t\t}\n\t\tu := ")], "TestAnEndedContextReadsNothingMore"),
     ("R1 goes on once the context has ended", RL,
-     [("\t\t\tif ctx.Err() != nil || !first[id] && window.Err() != nil {\n", "\t\t\tif !first[id] && window.Err() != nil {\n")], "TestAnEndedContextReadsNothingMore"),
+     [("\t\t\tif ctx.Err() != nil || round == 0 && !first[id] && window.Err() != nil {\n", "\t\t\tif round == 0 && !first[id] && window.Err() != nil {\n")], "TestAnEndedContextReadsNothingMore"),
     ("R1 goes on once the turn's time is over", RL,
-     [("\t\t\tif ctx.Err() != nil || !first[id] && window.Err() != nil {\n", "\t\t\tif ctx.Err() != nil || false && !first[id] && window.Err() != nil {\n")], "TestAReadThatDoesntAnswer|TestARealSlowClientsTurns"),
+     [("\t\t\tif ctx.Err() != nil || round == 0 && !first[id] && window.Err() != nil {\n", "\t\t\tif ctx.Err() != nil || false && round == 0 && !first[id] && window.Err() != nil {\n")], "TestAReadThatDoesntAnswer|TestARealSlowClientsTurns"),
     ("no sort's first is read once the turn's time is over", RL,
-     [("\t\t\tif ctx.Err() != nil || !first[id] && window.Err() != nil {\n", "\t\t\tif ctx.Err() != nil || (true || !first[id]) && window.Err() != nil {\n")], "TestEachSortsFirstIsRead"),
+     [("\t\t\tif ctx.Err() != nil || round == 0 && !first[id] && window.Err() != nil {\n", "\t\t\tif ctx.Err() != nil || round == 0 && (true || !first[id]) && window.Err() != nil {\n")], "TestEachSortsFirstIsRead"),
+    ("a later round leaves what the turn's time doesn't reach", RL,
+     [("\t\t\tif ctx.Err() != nil || round == 0 && !first[id] && window.Err() != nil {\n", "\t\t\tif ctx.Err() != nil || !first[id] && window.Err() != nil {\n")], "TestAConflictsReadIsItsTurnsPastItsTime"),
     ("one sort's first is read once the turn's time is over", RL,
      [("\tfor _, sort := range [][]ID{carry[:c], others[:o]} {\n", "\tfor _, sort := range [][]ID{carry[:c]} {\n")], "TestEachSortsFirstIsRead"),
     ("a conflict is the next turn's", RL,
@@ -86,7 +88,7 @@ LIST = [
      [("\tres, err := t.proto.release(ctx, k.Namespace, ids)\n", "\tids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool {\n\t\treturn !slices.ContainsFunc(t.o.Protected, func(pk ProtectedKind) bool { return pk.GVK.GroupKind() == id.GroupKind() })\n\t})\n\tres, err := t.proto.release(ctx, k.Namespace, ids)\n")], "TestAKindOutsideProtectedIsStillReleased"),
     # Each read's time.
     ("a read has no time", RL,
-     [("\tctx, cancel := context.WithTimeout(ctx, limit)\n\tdefer cancel()\n\tm, err :=", "\tctx, cancel := context.WithTimeout(ctx, time.Hour+limit)\n\tdefer cancel()\n\tm, err :=")], "TestAReadThatDoesntAnswer"),
+     [("\tm, err := answered(ctx, p.limitOf(n, id), func(", "\tm, err := answered(ctx, time.Hour+p.limitOf(n, id), func(")], "TestAReadThatDoesntAnswer"),
     ("the reads share the turn's time", RL,
      [("\t\t\tm, err := p.read(ctx, n, id)\n", "\t\t\tm, err := p.read(window, n, id)\n")], "TestARealSlowClientsTurns"),
     ("a read's time doesn't grow", RL,
@@ -96,15 +98,47 @@ LIST = [
     ("a read's time grows with no failure", QU,
      [("\t\treturn f.n\n\t}\n\treturn 0\n", "\t\treturn 0\n\t}\n\treturn 0\n")], "TestAReadsTimeGrows"),
     ("a Namespace's read has no time", RL,
-     [("\tctx, cancel := context.WithTimeout(ctx, limit)\n\tdefer cancel()\n\treturn p.srv.Get(ctx, namespaceGroupKind", "\tctx, cancel := context.WithTimeout(ctx, time.Hour+limit)\n\tdefer cancel()\n\treturn p.srv.Get(ctx, namespaceGroupKind")], "TestANamespaceThatDoesntAnswer"),
+     [("\t\t\t\tm, err := answered(ctx, limit, func(", "\t\t\t\tm, err := answered(ctx, time.Hour+limit, func(")], "TestANamespaceThatDoesntAnswer"),
+    ("a Namespace's time isn't its objects'", RL,
+     [("\t\t\t\t\t\tlimit = max(limit, p.limitOf(n, o.id))\n", "\t\t\t\t\t\tlimit = releaseReadLimit\n")], "TestANamespacesReadIsAsLongAsItsObjects"),
+    ("one sort's first is decided once the time is over", RL,
+     [(" && !first[r.id] && window.Err() != nil {\n", " && window.Err() != nil {\n")], "TestEachSortsFirstIsDecided"),
+    ("the rest is in no order", RL,
+     [("\tslices.SortStableFunc(res.Rest, func(a, b ID) int { return cmp.Compare(records.place[a], records.place[b]) })\n", "\t_ = cmp.Compare[int]\n")], "TestTheRestIsInItsBatchsOrder"),
+    ("a call's time begins before it is sent", AN,
+     [("\tout, err := call(", "\tsent()\n\tout, err := call(")], "TestAnsweredDoesntTimeWhatComesBefore|TestAClientsBacklogDelaysARelease"),
+    ("a call's time is a deadline", AN,
+     [("\tctx, cancel := context.WithCancelCause(ctx)\n\tdefer cancel(nil)\n", "\tctx, end := context.WithTimeout(ctx, limit)\n\tdefer end()\n\tctx, cancel := context.WithCancelCause(ctx)\n\tdefer cancel(nil)\n")], "TestAnsweredDoesntTimeWhatComesBefore|TestAClientsBacklogDelaysARelease"),
+    ("a connection that is never made isn't cut", AN,
+     [("\t\tGetConn:      func(string) { sent() },\n", "")], "TestAnsweredCutsADialThatHangs"),
+    ("what is cut isn't said", AN,
+     [("\tif err != nil && errors.Is(context.Cause(ctx), errNoAnswer) {\n", "\tif false && err != nil && errors.Is(context.Cause(ctx), errNoAnswer) {\n")], "TestAnsweredCutsWhatIsntAnswered"),
+    ("an answer that comes as its time ends is lost", AN,
+     [("func (e *noAnswer) Unwrap() error        { return e.err }\n", "func (e *noAnswer) Unwrap() error        { return nil }\n")], "TestAnsweredKeepsAnAnswersClass"),
+    ("a live list's page has no time", UC,
+     [("\t\tl, err := listPage(ctx, livePageTime, c, opts)\n", "\t\tl, err := c.List(ctx, opts)\n")], "TestALiveListsPagesHaveATime"),
+    ("a log line builds every error", WL,
+     [("\t\tif n < maxLoggedErrors {\n", "\t\tif true || n < maxLoggedErrors {\n")], "TestALogLineBuildsFewErrors"),
+    ("what a namespace's list finds isn't known", WL,
+     [("\t\ts.queue.Known(k, held...)\n", "")], "TestWhatANamespacesListFindsStaysKnown"),
+    ("what a read shows isn't known", WL,
+     [("\ts.queue.Known(k, res.Known...)\n", "")], "TestWhatAReadShowsHeldStaysKnown"),
+    ("what failed as the loops ended goes last", WL,
+     [("\t\t\ts.queue.PutBack(k, ids...)\n", "\t\t\ts.queue.Add(k, ids...)\n")], "TestAStoppedBatchsFailuresKeepTheirPlace"),
+    ("a parked batch forgets what is known", SH,
+     [("\t\t\ts.queue.AddHeld(b.key, b.held...)\n", "\t\t\ts.queue.Add(b.key, b.held...)\n")], "TestAParkedBatchKeepsWhatIsKnown"),
+    ("what waits unknown stays so when it is put back known", QU,
+     [("\t\t\tif p == again {\n", "\t\t\tif p.at == again.at {\n")], "TestWhatANamespacesListFindsStaysKnown"),
+    ("what is put back is in reverse", QU,
+     [("\t\tslices.Reverse(es)\n", "")], "TestTheQueuesLines"),
     ("a Namespace that failed is read again", RL,
      [("\t\t\tif nsFailed[ns] {\n", "\t\t\tif false && nsFailed[ns] {\n")], "TestANamespaceThatDoesntAnswer"),
     ("a Namespace is read once the time is over", RL,
-     [("\t\t\t\tif len(nsReadAt)+len(nsFailed) > 0 && window.Err() != nil {\n", "\t\t\t\tif false && len(nsReadAt)+len(nsFailed) > 0 && window.Err() != nil {\n")], "TestANamespaceThatDoesntAnswer"),
+     [("\t\t\t\tif round == 0 && len(nsReadAt)+len(nsFailed) > 0 &&", "\t\t\t\tif false && round == 0 && len(nsReadAt)+len(nsFailed) > 0 &&")], "TestANamespaceThatDoesntAnswer"),
     ("a failed Namespace's other objects are lost", RL,
      [("\t\t\tif nsFailed[ns] {\n\t\t\t\tres.Failed = append(res.Failed, r.id)\n", "\t\t\tif nsFailed[ns] {\n")], "TestANamespaceThatDoesntAnswer"),
     ("what waits for a Namespace is lost", RL,
-     [("\t\t\t\tif len(nsReadAt)+len(nsFailed) > 0 && window.Err() != nil {\n\t\t\t\t\tres.Rest = append(res.Rest, r.id)\n", "\t\t\t\tif len(nsReadAt)+len(nsFailed) > 0 && window.Err() != nil {\n")], "TestANamespaceThatDoesntAnswer"),
+     [(" && !first[r.id] && window.Err() != nil {\n\t\t\t\t\tres.Rest = append(res.Rest, r.id)\n", " && !first[r.id] && window.Err() != nil {\n")], "TestANamespaceThatDoesntAnswer"),
     ("a page has no time", SV,
      [("\t\tl, err := listPage(ctx, limit, c, opts)\n", "\t\tl, err := listPage(ctx, time.Hour+limit, c, opts)\n")], "TestAListsPagesHaveATime"),
     ("a page's time is its list's", SV,
@@ -129,9 +163,9 @@ LIST = [
     ("what is put back has a new place", QU,
      [("\t\tp, had := q.taken[k][id]\n", "\t\tp, had := place{}, false\n")], "TestBatchQueueEveryOrdering"),
     ("what is put back is taken last", QU,
-     [("\t\tl.back = append(es, l.back...)\n", "\t\tl.added = append(l.added, es...)\n")], "TestTheQueuesLines"),
+     [("\t\tl.back = append(l.back, es...)\n", "\t\tl.added = append(l.added, es...)\n")], "TestTheQueuesLines"),
     ("one added again meanwhile isn't put back where it was", QU,
-     [("\t\t\tif again.at <= p.at {\n", "\t\t\tif true || again.at <= p.at {\n")], "TestBatchQueueEveryOrdering|TestTheQueuesLines"),
+     [("\t\t\tp.at = min(p.at, again.at)\n", "\t\t\tp.at = again.at\n")], "TestBatchQueueEveryOrdering|TestTheQueuesLines"),
     ("a worker takes all that waits", QU,
      [("\t\tl.take(lineWindow, func(", "\t\tl.take(1<<30, func(")], "TestATurnsWorkDoesntGrowWithWhatWaits"),
     ("what is known to be held waits with the rest", QU,
@@ -146,8 +180,6 @@ LIST = [
      [("\t\t\treturn !e.retry || f != nil && f.held\n", "\t\t\treturn f != nil && f.held\n")], "TestTheQueuesLines"),
     ("a namespace's list waits with the rest", QU,
      [("\t\tknown := id == fillAll || held(id)\n", "\t\tknown := held(id)\n")], "TestTheQueuesLines"),
-    ("what a namespace's list finds isn't known", QU,
-     [("\treturn p.held || !added && fill\n", "\treturn p.held || false && !added && fill\n")], "TestTheQueuesLines"),
     ("Done remembers what was taken", QU,
      [("\tdelete(q.taken, k)\n", "")], "TestTheQueuesLines"),
     ("an emptied key is remembered", QU,
