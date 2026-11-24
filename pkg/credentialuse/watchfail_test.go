@@ -457,6 +457,28 @@ func TestAFailedTracksFailuresAreLoggedByTheNext(t *testing.T) {
 	}
 }
 
+// So does a Track whose index informer fails.
+func TestAFailedTracksIndexFailureIsLoggedByTheNext(t *testing.T) {
+	r := newFakeRigWith(t, SharedOptions{IndexNamespace: "idx"}, namespaceObject("idx"))
+	r.run(t)
+	r.s.syncTimeout.Store(int64(2 * time.Second))
+	breakableIn(&r.dyn.Fake, "configmaps").fail(errTest404)
+	for n := 1; n <= 2; n++ {
+		sink := &sinkLines{}
+		opts := r.options(gadgetGK, ProtectedKind{GVK: secretGVK, Watch: PerName})
+		opts.Logger = sink
+		if _, err := r.s.Track(context.Background(), opts); err == nil {
+			t.Fatal("Track succeeded")
+		}
+		if sink.warned("the index informer of", `"its kind isn't served"`) != 1 {
+			t.Errorf("Track %d logged %q, want why its index informer fails, once", n, sink.warns)
+		}
+	}
+	if len(r.s.failures.by) != 0 {
+		t.Errorf("failures that nothing has any more: %v", r.s.failures.by)
+	}
+}
+
 // Each cause is logged once, also when causes alternate, until a recovery.
 // How a watch ends in the normal run of things isn't, nor what it fails with
 // as the process stops; and a 403 before the first sync is the start's error.

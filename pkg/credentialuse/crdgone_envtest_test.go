@@ -215,18 +215,34 @@ func newGizmoRig(t *testing.T, cfg *rest.Config, g gizmoOptions) *gizmoRig {
 	if g.before != nil {
 		g.before(r.s)
 	}
-	cutest.Eventually(t, time.Minute, func() error { // the mapper must know the new kind
-		if rm, ok := clients.Mapper.(meta.ResettableRESTMapper); ok {
-			rm.Reset()
-		}
-		var err error
-		r.tr, err = r.s.Track(context.Background(), o)
-		return err
-	})
+	gizmosMapped(t, clients.Mapper, gizmoGVR)
+	var err error
+	if r.tr, err = r.s.Track(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
 	runningInformers(t, r.s)
 	r.d = &driver.Driver{Tracker: r.tr, Dynamic: env.Dynamic, Holder: gizmoGVR, OwnerFinalizer: ownerFinalizer}
 	r.c.start(r.d)
 	return r
+}
+
+// gizmosMapped waits until mapper maps Gizmos to gvr: discovery may lag a list
+// that works, and a Track that fails before Run makes Run fail (§7.3).
+func gizmosMapped(t *testing.T, mapper meta.RESTMapper, gvr schema.GroupVersionResource) {
+	t.Helper()
+	cutest.Eventually(t, time.Minute, func() error {
+		if rm, ok := mapper.(meta.ResettableRESTMapper); ok {
+			rm.Reset()
+		}
+		m, err := mapper.RESTMapping(gizmoGVK.GroupKind(), gizmoGVK.Version)
+		if err != nil {
+			return err
+		}
+		if m.Resource != gvr {
+			return fmt.Errorf("Gizmos are mapped to %s, not %s: %w", m.Resource, gvr, cutest.ErrNotYet)
+		}
+		return nil
+	})
 }
 
 // startWrites runs the write loops until t ends, as a process that is
@@ -508,7 +524,8 @@ func TestAKindThatReturnsBeforeR3KeepsItsHold(t *testing.T) {
 // Two processes without leader election, and a kind whose CRD is replaced by
 // one of another plural: the old process, whose mapper remembers the first,
 // strips none of the holds of the new one's holders, though its list and its
-// CRD are gone, and says why. With the second CRD gone too, it would release.
+// CRD are gone, and says why. With the new process and the second CRD gone too,
+// it releases what is left.
 func TestAnotherPluralsHoldsStay(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
@@ -520,34 +537,38 @@ func TestAnotherPluralsHoldsStay(t *testing.T) {
 
 	crd := cutest.CRD("Gizmo", "gizmoids")
 	cutest.Eventually(t, time.Minute, func() error { return env.Client.Create(ctx, crd.DeepCopy()) })
-	t.Cleanup(func() {
+	removeOids := func() {
+		t.Helper()
 		if l, err := env.Dynamic.Resource(oidGVR).List(ctx, metav1.ListOptions{}); err == nil {
 			for i := range l.Items {
 				_, _ = env.Dynamic.Resource(oidGVR).Namespace(l.Items[i].GetNamespace()).Patch(ctx, l.Items[i].GetName(),
 					types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{})
 			}
 		}
-		_ = env.Client.Delete(ctx, crd)
+		_ = env.Client.Delete(ctx, crd.DeepCopy())
 		cutest.Eventually(t, 2*time.Minute, func() error {
 			if _, err := env.Dynamic.Resource(crdGVR).Get(ctx, crd.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 				return fmt.Errorf("the Gizmoid CRD is still there (%v): %w", err, cutest.ErrNotYet)
 			}
 			return nil
 		})
-	})
+	}
+	t.Cleanup(removeOids)
 	cutest.Eventually(t, time.Minute, func() error {
 		_, err := env.Dynamic.Resource(oidGVR).List(ctx, metav1.ListOptions{})
 		return err
 	})
 	c := newController(t)
-	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
+	clients := clientsFor(t, env.Config)
+	gizmosMapped(t, clients.Mapper, oidGVR)
+	s := cu.NewShared(clients, cu.SharedOptions{})
 	o := widgetOptions(c.enqueue)
 	o.Holder, o.DeletionGrace, o.ProbeInterval = gizmoGVK, testGrace, time.Second
 	tr, err := s.Track(ctx, o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	running(t, s)
+	stopNew := running(t, s)
 	c.start(&driver.Driver{Tracker: tr, Dynamic: env.Dynamic, Holder: oidGVR, OwnerFinalizer: ownerFinalizer})
 	u := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"secret": "s"}}}
 	u.SetGroupVersionKind(gizmoGVK)
@@ -587,6 +608,13 @@ func TestAnotherPluralsHoldsStay(t *testing.T) {
 	if len(epochs) > 3 {
 		t.Errorf("%d epochs in ten seconds: the two processes fight over the hold", len(epochs))
 	}
+
+	// The new process is gone before its holder and CRD: only the old one is
+	// left to release, at its next retry, within its backoff by now.
+	c.stop()
+	stopNew()
+	removeOids()
+	gizmoReleased(t, 3*time.Minute, ns, "s")
 }
 
 // What the evidence is, on the wire: a release of a kind that is gone reads its
