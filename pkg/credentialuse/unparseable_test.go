@@ -2,6 +2,7 @@ package credentialuse
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
@@ -420,6 +421,76 @@ func TestWhatTheBatchOfTheNamespaceKeeps(t *testing.T) {
 	})
 }
 
+// A pass repairs the record with all the refs it names, in one write, where
+// they are all direct, so the batch that its event queues finds them recorded.
+// A chain's pass writes none, as this release refuses it (§9); where the tests
+// follow one, its first write has the chain so far.
+func TestAPassThatRepairsAnUnparseableRecord(t *testing.T) {
+	ctx := context.Background()
+	holder := func(r *rig) *metav1.PartialObjectMetadata {
+		must(r.m.Create(widgetKey("ns", "h"), metav1.ObjectMeta{Finalizers: ownerFinalizers, Annotations: map[string]string{AnnotationRefs: "oops"}}))
+		return r.get(t, widgetKey("ns", "h"))
+	}
+	record := func(r *rig) Record { return ReadRecord(r.get(t, widgetKey("ns", "h"))) }
+	t.Run("direct refs", func(t *testing.T) {
+		r := newRig(t)
+		must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{}))
+		must(r.m.Create(secretKey("ns", "t"), metav1.ObjectMeta{}))
+		h := holder(r)
+		r.srv.before = func(op, kind, name string) error {
+			if op == "patch" && kind == "Secret" {
+				if rec := record(r); rec.Unparseable || len(rec.IDs) != 2 {
+					t.Errorf("the A2 of %s: record %+v, want both refs", name, rec)
+				}
+			}
+			return nil
+		}
+		if a, err := r.p.acquire(ctx, h, []Ref{SecretRef("ns", "s"), SecretRef("ns", "t")}); err != nil || len(a.Held) != 2 {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+		if n := countCalls(r.srv.calls, "patch Widget/h"); n != 1 {
+			t.Errorf("%d record writes, want one", n)
+		}
+	})
+	t.Run("a refused chain", func(t *testing.T) {
+		r := newRig(t)
+		must(r.m.Create(targetKey("kt"), metav1.ObjectMeta{}))
+		heldSecret(r)
+		h := holder(r)
+		a, err := r.p.acquire(ctx, h, []Ref{targetRef("kt"), SecretRef("ns", "s")})
+		if err != nil || !a.Degraded || !errors.Is(a.Err, ErrChainsNotSupported) {
+			t.Fatalf("acquire = %+v, %v; want it refused", a, err)
+		}
+		if n := countCalls(r.srv.calls, "patch Widget/h"); n != 0 || !record(r).Unparseable {
+			t.Errorf("%d record writes, record %+v; want it left as it is", n, record(r))
+		}
+	})
+	t.Run("limit: a chain that is followed", func(t *testing.T) {
+		r, fc := chainRig(t)
+		r.target(fc, "kt", "Secret", "s")
+		heldSecret(r)
+		h, s := holder(r), SecretRef("ns", "s").ID()
+		var released []ID
+		r.srv.before = func(op, kind, _ string) error {
+			if op == "patch" && kind == "Target" { // after the first level's A1
+				r.srv.before = nil
+				res, err := r.p.release(ctx, "ns", []ID{s})
+				if err != nil {
+					t.Error(err)
+				}
+				released = res.Released
+			}
+			return nil
+		}
+		if a, err := r.p.acquire(ctx, h, []Ref{targetRef("kt")}); err != nil || len(a.Held) != 2 {
+			t.Fatalf("acquire = %+v, %v", a, err)
+		}
+		if !slices.Equal(released, []ID{s}) || !hasFinalizer(r.get(t, secretKey("ns", "s")), fNS) {
+			t.Errorf("released %v between the levels; the limit that §10.2 documents has changed", released)
+		}
+	})
+}
+
 // toggles is a holder whose record is spoiled and repaired, over and over, by
 // its events; what the API server and the caches have of it is set.
 type toggles struct {
@@ -619,7 +690,7 @@ func TestAHolderReplacedInOneEventLeavesNothing(t *testing.T) {
 	key := consentKey{old.UID, secretID("other", "s")}
 	tr.proto.written.set(old.UID, map[string]string{AnnotationRefs: "[]"})
 	tr.proto.backoff.fail(key)
-	for _, s := range []*reportedSet{tr.proto.reported, tr.unrecorded, tr.degradedLogged, tr.misplaced, tr.unparseable} {
+	for _, s := range []*reportedSet{tr.proto.reported, tr.unrecorded, tr.degradedLogged, tr.refused, tr.misplaced, tr.unparseable} {
 		s.first(key)
 		s.first(consentKey{again.UID, key.ref})
 	}
@@ -638,7 +709,7 @@ func TestAHolderReplacedInOneEventLeavesNothing(t *testing.T) {
 	if n := len(tr.proto.backoff.at); n != 1 {
 		t.Errorf("%d backoffs kept, want the new one's", n)
 	}
-	for i, s := range []*reportedSet{tr.proto.reported, tr.unrecorded, tr.degradedLogged, tr.misplaced, tr.unparseable} {
+	for i, s := range []*reportedSet{tr.proto.reported, tr.unrecorded, tr.degradedLogged, tr.refused, tr.misplaced, tr.unparseable} {
 		if s.m[key] || len(s.m) != 1 {
 			t.Errorf("set %d keeps %v, want the new one's", i, s.m)
 		}

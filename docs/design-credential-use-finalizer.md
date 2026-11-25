@@ -2908,6 +2908,14 @@ Its index maps each recorded ref to holders. The index serves:
   namespace's teardown waited on a holder that was gone. So does a holder that
   a relist finds gone, or replaced by another of its name, after a watch gap:
   its record may have become unparseable, or have named others, in the gap.
+  - **A pass's own repair** writes all the refs it names in one A1, where they
+    are all direct, as every pass's are in this release (§9): so the batch finds
+    them recorded. A refused chain's pass writes no record, so one that can't be
+    parsed stays, and counts, until its refs name no `Next`. **A chain that is
+    followed,** by the tests only, repairs the record with the chain so far, at
+    its first level's A1, and until its last one a batch may release what lies
+    behind a hop. The release that follows chains must write no A1 over a record
+    it can't parse until it knows the chain;
   - **Not covered**, and found by the write loops' next start, or by a holder
     that names the object:
     - a hold for N on an object of another namespace M that the caches don't

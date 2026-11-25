@@ -542,7 +542,10 @@ of tests.
   again: a longer hold, never a shorter one, and §5 bounds it.
 - **An unparseable record** names nothing to keep, so a chain behind it is
   exposed until the pass's last A1, as for any ref of such a holder; only
-  someone else's write makes a record unparseable.
+  someone else's write makes a record unparseable. Its repair queues the batch
+  of the whole namespace (design §10.2), so what is exposed may be released:
+  no chain is followed in the first tag, and the next release must write no A1
+  over such a record until it knows the chain.
 - **A `Guaranteed` ref that can't be read is an Acquire error**, never
   Missing: `BeforeEstablish` would then hold it.
 - **`BeforeEstablish` refuses to establish** when a Missing hop with a `Next`
