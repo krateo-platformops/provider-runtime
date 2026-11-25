@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
@@ -41,6 +42,15 @@ type Clients struct {
 	Dynamic dynamic.Interface
 	// Mapper maps the holder and protected kinds to resources. Required.
 	Mapper meta.RESTMapper
+	// Discovery reads the API server's discovery documents, live: a
+	// discovery client's RESTClient(), for one. A holder kind whose CRD is
+	// gone is looked up in them, and what it held is released only if no
+	// other resource serves it (§6.4). Nil never takes a kind for gone, and
+	// Track warns of it; a nil of a concrete type isn't nil, and panics.
+	//
+	// It is a REST client and not a discovery client, so that a caching one
+	// can't answer for the API server.
+	Discovery rest.Interface
 	// Events records §12's events on holders, protected objects and the
 	// index (k8s.io/client-go/tools/events). Nil records none. The core
 	// throttles them itself.
@@ -221,6 +231,9 @@ type Shared struct {
 	// begun.
 	releaseWait func() time.Duration
 	waits       releaseWaits
+	// failures are the informers' lists and watches that fail, for their one
+	// log.
+	failures watchFailures
 
 	// trackWaiting counts Tracks waiting for another Track of their kind,
 	// for tests.
@@ -240,7 +253,8 @@ type Shared struct {
 	// start; nil before.
 	informerCtx context.Context
 	// writeCtx is RunWriteLoops' context while the write loops run, for the
-	// recheck outside the caches after a Track (§10.5); nil otherwise.
+	// recheck outside the caches after a Track, or when a kind's CRD goes
+	// (§10.5); nil otherwise.
 	// writeWG counts those rechecks, so the write loops wait for them.
 	writeCtx context.Context
 	writeWG  sync.WaitGroup
@@ -339,6 +353,7 @@ func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 	s.syncTimeout.Store(int64(2 * time.Minute))
 	if c.Metadata != nil {
 		s.nsLW = newListWatch(c.Metadata, namespaceGVR, "", "", clk, nil)
+		s.nsLW.recovered = s.watchRecovered(namespaceInformer)
 		s.namespaces = cache.NewSharedIndexInformerWithOptions(s.nsLW, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
 			ObjectDescription: "credential-use namespaces",
 		})
@@ -480,14 +495,14 @@ func (s *Shared) RunInformers(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := s.startAndSync(ctx, ctx, s.namespaces, "the Namespace informer"); err != nil {
+	if err := s.startAndSync(ctx, ctx, informer{inf: s.namespaces, what: namespaceInformer}); err != nil {
 		if errors.Is(err, errForbidden) {
 			return errNamespaceSync
 		}
 		return err
 	}
 	for _, inf := range infs {
-		if err := s.startAndSync(ctx, ctx, inf.inf, inf.what); err != nil {
+		if err := s.startAndSync(ctx, ctx, inf); err != nil {
 			return err
 		}
 	}
@@ -504,6 +519,8 @@ func (s *Shared) HasSynced() bool { return s.synced.Load() }
 // An informer is one the core starts, with the resource it lists and
 // watches, for the RBAC check before it starts.
 type informer struct {
+	// t is the tracker it belongs to, or nil for a shared one.
+	t   *Tracker
 	inf cache.SharedIndexInformer
 	gvr schema.GroupVersionResource
 	ns  string // the namespace it is restricted to, or ""
@@ -574,22 +591,27 @@ func (s *Shared) canAccessNamed(ctx context.Context, gvr schema.GroupVersionReso
 // errForbidden marks a list or watch the API server forbade.
 var errForbidden = errors.New("credential-use: forbidden")
 
-// startAndSync starts inf under run and waits for its first sync for as
+// namespaceInformer names the Namespace informer in messages.
+const namespaceInformer = "the Namespace informer"
+
+// startAndSync starts i under run and waits for its first sync for as
 // long as wait allows, at most syncTimeout. A list or watch the server
 // forbids fails it at once, rather than retrying until the timeout: missing
-// RBAC is a setup error (§7.3).
-func (s *Shared) startAndSync(run, wait context.Context, inf cache.SharedIndexInformer, what string) error {
+// RBAC is a setup error (§7.3). What fails otherwise, or later, is logged
+// (watchFailed).
+func (s *Shared) startAndSync(run, wait context.Context, i informer) error {
 	forbidden := make(chan error, 1)
-	_ = inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
+	_ = i.inf.SetWatchErrorHandlerWithContext(func(ctx context.Context, r *cache.Reflector, err error) {
 		if apierrors.IsForbidden(err) {
 			select {
 			case forbidden <- err:
 			default:
 			}
 		}
+		s.watchFailed(ctx, r, i.t, i.what, i.inf.HasSynced(), err)
 	})
-	go inf.RunWithContext(run)
-	return s.waitSynced(wait, inf.HasSynced, what, forbidden)
+	go i.inf.RunWithContext(run)
+	return s.waitSynced(wait, i.inf.HasSynced, i.what, forbidden)
 }
 
 // timeout is syncTimeout.
@@ -730,6 +752,10 @@ func (s *Shared) Track(ctx context.Context, o Options) (*Tracker, error) {
 	t, err := s.track(ctx, work, o, mine)
 	if err != nil {
 		return nil, s.abandonedOr(ctx, gk, err)
+	}
+	if s.c.Discovery == nil {
+		t.warn("credential-use: Clients.Discovery isn't set: what this kind's holders held isn't released if its CRD goes, until DisownPrefix strips it (§6.4)",
+			"kind", gk.String())
 	}
 	return t, nil
 }
@@ -957,11 +983,15 @@ func (s *Shared) track(caller, ctx context.Context, o Options, mine *inflight) (
 		// Roll back every piece of state this call created (D3 of the
 		// review of #109): the informers it started stop, its handlers
 		// leave the informers it shares, and it gives up its claims; an
-		// informer nobody claims any more goes.
+		// informer nobody claims any more goes. What they failed with is
+		// forgotten, so that the next Track logs why it fails too.
 		t.stopInformers()
 		t.leaveAll()
+		s.failures.recovered(t.informer().what, ID{})
+		s.failures.recovered(t.crdInformer().what, ID{})
 		if t.idx != nil {
 			t.names.stopAll()
+			s.failures.recovered(t.indexInformer().what, ID{})
 		}
 		s.mu.Lock()
 		stops := s.releaseLocked(ps)
@@ -992,8 +1022,11 @@ func (s *Shared) releaseLocked(ps []*protectedInformer) []context.CancelFunc {
 		if s.protected[p.key()] == p {
 			delete(s.protected, p.key())
 		}
-		if p.stop != nil {
-			stops = append(stops, p.stop)
+		if stop := p.stop; stop != nil {
+			stops = append(stops, func() {
+				stop()
+				s.failures.recovered(p.what(), ID{})
+			})
 		}
 	}
 	return stops
@@ -1013,7 +1046,7 @@ func (s *Shared) startTracker(ctx, ictx context.Context, t *Tracker, ps []*prote
 	}
 	hctx, stop := context.WithCancel(ictx)
 	t.stopHolders = stop
-	if err := s.startAndSync(hctx, ctx, t.holders, "the holder informer of "+t.gk.String()); err != nil {
+	if err := s.startAndSync(hctx, ctx, t.informer()); err != nil {
 		return err
 	}
 	// The Disown switch is read from the CRD's informer, which ends with
@@ -1021,7 +1054,7 @@ func (s *Shared) startTracker(ctx, ictx context.Context, t *Tracker, ps []*prote
 	if err := t.crdInformer().preflight(ctx, s); err != nil {
 		return err
 	}
-	if err := s.startAndSync(hctx, ctx, t.crd, t.crdInformer().what); err != nil {
+	if err := s.startAndSync(hctx, ctx, t.crdInformer()); err != nil {
 		return err
 	}
 	if t.idx != nil {
@@ -1029,7 +1062,7 @@ func (s *Shared) startTracker(ctx, ictx context.Context, t *Tracker, ps []*prote
 			return err
 		}
 		t.names.start(hctx)
-		if err := s.startAndSync(hctx, ctx, t.idx.inf, t.indexInformer().what); err != nil {
+		if err := s.startAndSync(hctx, ctx, t.indexInformer()); err != nil {
 			return err
 		}
 	}
@@ -1088,10 +1121,11 @@ func (p *protectedInformer) ensureStarted(ctx, ictx context.Context, s *Shared) 
 func (s *Shared) startShared(ictx context.Context, p *protectedInformer) {
 	pctx, pstop := context.WithCancel(ictx)
 	s.setStop(p, pstop)
-	_ = p.inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
+	_ = p.inf.SetWatchErrorHandlerWithContext(func(ctx context.Context, r *cache.Reflector, err error) {
 		if apierrors.IsForbidden(err) && !p.inf.HasSynced() {
 			p.fail(fmt.Errorf("%w: %s: %w", errForbidden, p.what(), err))
 		}
+		s.watchFailed(ctx, r, nil, p.what(), p.inf.HasSynced(), err)
 	})
 	go func() {
 		check, cancel := context.WithTimeout(pctx, s.timeout())
@@ -1325,6 +1359,7 @@ func (s *Shared) newProtectedInformers(pk ProtectedKind) ([]*protectedInformer, 
 		} else {
 			p.lw = newListWatch(s.c.Metadata, m.Resource, ns, heldSelector(), s.clock, nil)
 		}
+		p.lw.recovered = s.watchRecovered(p.what())
 		p.inf = cache.NewSharedIndexInformerWithOptions(p.lw, example, cache.SharedIndexInformerOptions{
 			Indexers:          cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 			ObjectDescription: "credential-use " + p.what(),

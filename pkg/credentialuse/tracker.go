@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +52,19 @@ type Tracker struct {
 	// (§10.5), set when Track builds t.
 	uncached []schema.GroupKind
 	gone     bool // a failed Track dropped t
+
+	// Under Shared.mu: rechecking, a recheck that t's CRD's deletion started
+	// runs (recheckSoon); recheckAsk, its slot for one asked for meanwhile,
+	// which a send under mu fills and the run empties.
+	rechecking bool
+	recheckAsk chan struct{}
+
+	// goneLogged: a release for want of the kind has been logged since the
+	// CRD was last seen.
+	goneLogged atomic.Bool
+	// crdWentAway: the CRD informer delivered the CRD's deletion, and not its
+	// return since (crdHandler).
+	crdWentAway atomic.Bool
 
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).
@@ -259,6 +273,10 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		},
 		disowned:   func(pk schema.GroupKind) bool { return t.disownSwitch().covers(pk) },
 		disownLive: t.disownForHold,
+		noHolders:  t.noHolders,
+		kindAbsent: t.crdAbsent,
+
+		releasedGone: t.releasedGone,
 	}
 	for _, pk := range o.Protected {
 		if pk.Content {
@@ -275,6 +293,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 	// The holder informer's list or relist completion is a floor under
 	// every observation of the record (§6.5 L2).
 	lw := newListWatch(s.c.Metadata, m.Resource, "", "", s.clock, t.listCompleted)
+	lw.recovered = s.watchRecovered(t.informer().what)
 	t.holderLW = lw
 	if wrap := holderListWatchSeam; wrap != nil {
 		t.holderLW = wrap(lw)
@@ -290,7 +309,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		return nil, err
 	}
 	t.crdName = m.Resource.Resource + "." + m.Resource.Group
-	if t.crd, err = newCRDInformer(s.c.Metadata, t.crdName, s.clock); err != nil {
+	if t.crd, err = newCRDInformer(s.c.Metadata, t.crdName, s.clock, s.watchRecovered(t.crdInformer().what)); err != nil {
 		return nil, err
 	}
 	if _, err := t.crd.AddEventHandler(crdHandler{t}); err != nil {
@@ -313,13 +332,13 @@ func (t *Tracker) listCompleted(at time.Time) {
 }
 
 func (t *Tracker) informer() informer {
-	return informer{inf: t.holders, gvr: t.gvr, what: "the holder informer of " + t.gk.String()}
+	return informer{t: t, inf: t.holders, gvr: t.gvr, what: "the holder informer of " + t.gk.String()}
 }
 
 // crdInformer is the informer on t's own CRD, which carries the Disown
 // switch (§7.4); it needs list and watch on that CRD's name alone.
 func (t *Tracker) crdInformer() informer {
-	return informer{inf: t.crd, gvr: crdGVR, name: t.crdName, what: "the CRD informer of " + t.gk.String()}
+	return informer{t: t, inf: t.crd, gvr: crdGVR, name: t.crdName, what: "the CRD informer of " + t.gk.String()}
 }
 
 // join registers t's handler on protected informer p. On an informer that

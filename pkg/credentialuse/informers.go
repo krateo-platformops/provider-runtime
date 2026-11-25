@@ -277,7 +277,9 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.unparseable.forget(m.UID)
 	_, gap := obj.(cache.DeletedFinalStateUnknown) // a relist found it gone
 	h.enqueue(m, nil, gap)
-	// A holder that is gone waits for no Missing ref (§10.3).
+	// A holder that is gone waits for no Missing ref (§10.3). One whose
+	// deletion isn't delivered, while its CRD is gone, is probed for on, with
+	// the prober's backoff.
 	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)
 }
 

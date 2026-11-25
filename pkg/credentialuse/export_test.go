@@ -105,6 +105,9 @@ func (t *Tracker) LastList() time.Time {
 	return t.ver.lastList
 }
 
+// CachedHolders is how many holders the holder informer's cache has.
+func (t *Tracker) CachedHolders() int { return len(t.holders.GetStore().ListKeys()) }
+
 // HolderSynced reports whether the holder informer has synced.
 func (t *Tracker) HolderSynced() bool { return t.holders.HasSynced() }
 
@@ -142,6 +145,11 @@ func (s *Shared) HookCalls(before func(ctx context.Context, c Call) error, after
 	s.hooks.wrapServer = func(srv server) server { return hookServer{server: srv, before: before, after: after} }
 	s.hooks.wrapIndex = func(st indexStore) indexStore { return hookIndexStore{st: st, before: before, after: after} }
 }
+
+// KindUnserved and CRDNotFound are what R2 takes for a kind that isn't
+// served, and for a CRD that is gone (§6.4).
+func KindUnserved(err error) bool             { return kindUnserved(err) }
+func CRDNotFound(err error, name string) bool { return crdNotFound(err, name) }
 
 // PolicyParamsMissing reports whether err is the index namespace's policy
 // failing for want of its parameters, as the tracker matches it (§10.6.1).

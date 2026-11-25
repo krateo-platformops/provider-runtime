@@ -73,6 +73,7 @@ type fakeRig struct {
 	clk     *testingclock.FakeClock
 	md      *metadatafake.FakeMetadataClient
 	dyn     *dynamicfake.FakeDynamicClient
+	disc    *fakeDiscovery
 	metrics *countingMetrics
 	enq     *enqueueLog
 
@@ -155,6 +156,14 @@ func crdOf(gk schema.GroupKind) *unstructured.Unstructured {
 	return u
 }
 
+// crdMeta is gk's CRD as the metadata client reads it: the two fake clients
+// don't share their objects.
+func crdMeta(gk schema.GroupKind) *metav1.PartialObjectMetadata {
+	m := &metav1.PartialObjectMetadata{TypeMeta: metav1.TypeMeta{APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition"}}
+	m.Name, m.ResourceVersion = crdOf(gk).GetName(), "7"
+	return m
+}
+
 func newFakeRig(t *testing.T, objs ...runtime.Object) *fakeRig {
 	t.Helper()
 	return newFakeRigWith(t, SharedOptions{}, objs...)
@@ -170,13 +179,13 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
 	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
-	r := &fakeRig{clk: testingclock.NewFakeClock(time.Now()), metrics: &countingMetrics{}, enq: &enqueueLog{},
+	r := &fakeRig{clk: testingclock.NewFakeClock(time.Now()), disc: newFakeDiscovery(), metrics: &countingMetrics{}, enq: &enqueueLog{},
 		events: events.NewFakeRecorder(10000), refs: map[string][]Ref{}}
 	scheme := metadatafake.NewTestScheme()
 	if err := metav1.AddMetaToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	r.md = metadatafake.NewSimpleMetadataClient(scheme, objs...)
+	r.md = metadatafake.NewSimpleMetadataClient(scheme, append([]runtime.Object{crdMeta(widgetGK), crdMeta(gadgetGK)}, objs...)...)
 	r.md.PrependReactor("list", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		if _, ok := r.forbidList.Load(a.GetResource().Resource); ok {
 			return true, nil, apierrors.NewForbidden(a.GetResource().GroupResource(), "", errors.New("credential-use test: forbidden"))
@@ -184,7 +193,7 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 		return false, nil, nil
 	})
 	r.dyn = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crdOf(widgetGK), crdOf(gadgetGK))
+		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList", configMapGVR: "ConfigMapList"}, crdOf(widgetGK), crdOf(gadgetGK))
 	r.dyn.PrependReactor("create", "selfsubjectaccessreviews", func(a clienttesting.Action) (bool, runtime.Object, error) {
 		obj := a.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured).DeepCopy()
 		verb, _, _ := unstructured.NestedString(obj.Object, "spec", "resourceAttributes", "verb")
@@ -202,7 +211,7 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 		_ = unstructured.SetNestedField(obj.Object, !denied, "status", "allowed")
 		return true, obj, nil
 	})
-	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper, Events: r.events}, o, r.clk)
+	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper, Discovery: r.disc.client(), Events: r.events}, o, r.clk)
 	r.s.syncTimeout.Store(int64(20 * time.Second))
 	r.s.releaseWait = nil // the tests of the wait set their own
 	return r

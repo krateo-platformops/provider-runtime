@@ -945,7 +945,7 @@ func TestDisownOffClearsTheCount(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crd)
 	s := &Shared{c: Clients{Dynamic: dyn}}
-	inf, err := newCRDInformer(metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme()), name, testingclock.NewFakeClock(time.Now()))
+	inf, err := newCRDInformer(metadatafake.NewSimpleMetadataClient(metadatafake.NewTestScheme()), name, testingclock.NewFakeClock(time.Now()), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

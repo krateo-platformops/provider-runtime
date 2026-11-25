@@ -350,6 +350,9 @@ type index struct {
 	// holder cache: a line for an object without the kind's finalizer is
 	// kept while one does (§10.6.2). Nil is never.
 	recorded func(id ID) bool
+	// noHolders is R2's answer to a list of the holders that failed (§6.4):
+	// nil when the kind is gone, and its holders with it. Nil is never.
+	noHolders func(ctx context.Context, listErr error) error
 	// disowning reads live whether the Disown switch covers a PerName kind:
 	// the records may have been stripped, so a rebuild from them can't tell
 	// that it found every hold (§7.4). Nil is never.
@@ -1344,6 +1347,12 @@ func (ix *index) ids(lines []string) []ID {
 // and sets the marker. Each is logged once.
 func (ix *index) rebuild(ctx context.Context) error {
 	holders, err := ix.srv.List(ctx, ix.holder, "")
+	if err != nil && ix.noHolders != nil && ix.noHolders(ctx, err) == nil {
+		// The kind gone, its holders are, and their records (§6.4): nothing
+		// is written, as before, and its callers don't take that for a
+		// failure to retry for as long as the CRD is gone.
+		return errKindGone
+	}
 	if err != nil {
 		return fmt.Errorf("credential-use: listing the holders of %s to rebuild the index %s: %w", ix.holder, ix.ref(), err)
 	}
@@ -1492,7 +1501,7 @@ func (ix *index) lostTick(ctx context.Context, now time.Time) error {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	ix.rebuilding = false
-	if err == nil {
+	if err == nil || errors.Is(err, errKindGone) { // the CRD's return asks again
 		ix.lostFails = 0
 		return nil
 	}
@@ -1677,7 +1686,7 @@ func (h indexHandler) OnDelete(any) {
 func newIndexInformer(t *Tracker) (cache.SharedIndexInformer, error) {
 	s := t.s
 	lw := newContentListWatch(s.c.Dynamic, configMapGVR, t.idx.namespace, "", s.clock)
-	lw.field = "metadata.name=" + t.idx.name
+	lw.field, lw.recovered = "metadata.name="+t.idx.name, s.watchRecovered(t.indexInformer().what)
 	inf := cache.NewSharedIndexInformerWithOptions(lw, &unstructured.Unstructured{}, cache.SharedIndexInformerOptions{
 		ObjectDescription: "credential-use index " + t.idx.ref(),
 	})
@@ -1690,7 +1699,7 @@ func newIndexInformer(t *Tracker) (cache.SharedIndexInformer, error) {
 // indexInformer is t's informer on its index, for the RBAC check before it
 // starts: list and watch on that one ConfigMap.
 func (t *Tracker) indexInformer() informer {
-	return informer{inf: t.idx.inf, gvr: configMapGVR, ns: t.idx.namespace, name: t.idx.name, what: "the index informer of " + t.gk.String()}
+	return informer{t: t, inf: t.idx.inf, gvr: configMapGVR, ns: t.idx.namespace, name: t.idx.name, what: "the index informer of " + t.gk.String()}
 }
 
 // indexChanged is a new version of t's index: the index's checks, then the
@@ -1753,7 +1762,15 @@ func (t *Tracker) setupIndex(ctx context.Context) error {
 	// and rebuilding it (§10.6.6). A rebuild that fails here is left to the
 	// write loops, which retry it with backoff, and the next start finds the
 	// marker still absent.
-	if err := ix.rebuild(ctx); err != nil {
+	switch err := ix.rebuild(ctx); {
+	case errors.Is(err, errKindGone):
+		// The CRD went while the kind was being tracked, maybe before its
+		// informer listed it: its return rebuilds the index (crdReturned),
+		// and nothing before it can.
+		t.crdWentAway.Store(true)
+		t.warn("credential-use: the holder kind's CRD went while its index was set up; the index is rebuilt when the CRD returns",
+			"kind", t.gk.String(), "index", ix.ref())
+	case err != nil:
 		ix.markLost()
 		t.warn("credential-use: rebuilding the new index failed; the write loops retry it",
 			"kind", t.gk.String(), "index", ix.ref(), "error", err.Error())
@@ -1846,8 +1863,12 @@ func (t *Tracker) pointIndex(ctx context.Context) error {
 func (t *Tracker) isPerName(gk schema.GroupKind) bool { return t.idx.covers(gk) }
 
 // recorded reports whether some cached holder's record names id, or can't
-// be parsed, and so may: its line stays (§10.6.2).
+// be parsed, and so may: its line stays (§10.6.2). While the kind's CRD is
+// absent none does: what the holder cache still shows may be gone for good.
 func (t *Tracker) recorded(id ID) bool {
+	if t.crdAbsent() {
+		return false
+	}
 	idx := t.holders.GetIndexer()
 	for _, key := range []string{id.String(), unparseableKey} {
 		if objs, err := idx.ByIndex(refsIndex, key); err == nil && len(objs) > 0 {
@@ -1882,6 +1903,7 @@ func (t *Tracker) newTrackerIndex() error {
 	}
 	ix := newIndex(t.gk, t.prefix, s.o.IndexNamespace, s.indexMaxLines(), kinds, store, t.proto.srv)
 	ix.recorded = t.recorded
+	ix.noHolders = t.noHolders
 	ix.now, ix.margin = s.clock.Now, s.landingMargin()
 	ix.disowning = func(ctx context.Context) (bool, error) {
 		set, err := t.disownLive(ctx)
@@ -2008,8 +2030,8 @@ func (t *Tracker) startQuiet() {
 }
 
 // recheckIndex is the write loops' startup recheck from t's index (§10.2,
-// §10.6.5, M1 of the review of revision 16), run at their start and after a
-// Track while they run.
+// §10.6.5, M1 of the review of revision 16), run at their start, and, while
+// they run, after a Track and when t's CRD goes.
 func (s *Shared) recheckIndex(ctx context.Context, t *Tracker, done map[ID]bool) error {
 	return t.idx.recheckRest(ctx, done, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
 }
@@ -2028,10 +2050,18 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 		// Gone, or never rebuilt since its creation (§10.6.6). A rebuild
 		// that fails doesn't stop the recheck of the lines there are: its
 		// error is returned with the others, and the caller retries.
-		if err := ix.rebuild(ctx); err != nil {
+		gone := false
+		if err := ix.rebuild(ctx); errors.Is(err, errKindGone) {
+			gone = true
+		} else if err != nil {
 			errs = append(errs, err)
 		}
 		cur, err = ix.store.get(ctx)
+		if gone && Classify(err) == ClassNotFound {
+			// No index, and no holders to rebuild it from: no line to
+			// recheck, and none to write (§6.4, what it doesn't cover).
+			return errors.Join(errs...)
+		}
 	}
 	if err != nil {
 		errs = append(errs, fmt.Errorf("credential-use: reading the index %s for the startup recheck: %w", ix.ref(), err))

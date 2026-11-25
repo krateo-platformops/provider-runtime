@@ -5,7 +5,6 @@ import (
 	"slices"
 	"sync"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -51,8 +50,10 @@ type perNames struct {
 	// want are the IDs the index names, as last delivered.
 	want []ID
 	by   map[ID]*nameWatch
-	// forbidden are the names whose watch the server forbade, logged once.
+	// forbidden are the names whose watch the server forbade, logged once
+	// until the watch is back; failures, what else the watches fail with.
 	forbidden map[ID]bool
+	failures  watchFailures
 }
 
 // perNameKind is a PerName kind's resource.
@@ -116,11 +117,14 @@ func (n *perNames) follow(want []ID) {
 	}
 }
 
-// stopLocked stops w, the watch of id, and takes its counts off the
-// gauges. n.mu is held.
+// stopLocked stops w, the watch of id, takes its counts off the gauges, and
+// forgets what it failed with, so that another watch of id logs it again.
+// n.mu is held.
 func (n *perNames) stopLocked(id ID, w *nameWatch) {
 	w.stop()
 	delete(n.by, id)
+	delete(n.forbidden, id)
+	n.failures.recovered(id.GroupKind().String(), id)
 	n.t.dropCounts(w)
 }
 
@@ -165,6 +169,7 @@ func (n *perNames) newWatch(id ID) *nameWatch {
 		return nil
 	}
 	w := &nameWatch{p: p}
+	p.lw.recovered = func() { n.watching(id, w) }
 	w.h = &protectedHandler{s: s, p: p, t: t, w: w}
 	if _, err := p.inf.AddEventHandler(janitorHandler{s, p}); err != nil {
 		return nil
@@ -173,10 +178,8 @@ func (n *perNames) newWatch(id ID) *nameWatch {
 		return nil
 	}
 	p.add(t)
-	_ = p.inf.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
-		if apierrors.IsForbidden(err) {
-			n.forbiddenOnce(id, err)
-		}
+	_ = p.inf.SetWatchErrorHandlerWithContext(func(ctx context.Context, r *cache.Reflector, err error) {
+		n.watchFailed(ctx, r, id, w, err)
 	})
 	ctx, stop := context.WithCancel(n.parent)
 	w.stop = stop
@@ -184,14 +187,16 @@ func (n *perNames) newWatch(id ID) *nameWatch {
 	return w
 }
 
-// forbiddenOnce logs, once per name, a per-name watch the server forbade:
-// the provider's resourceNames RBAC doesn't list it (§13 shape 1). Holds on
-// it still work through live reads, if those are allowed; the reflector
-// keeps retrying.
-func (n *perNames) forbiddenOnce(id ID, err error) {
+// forbiddenOnce logs, once per name until the watch is back, a per-name
+// watch the server forbade: the provider's resourceNames RBAC doesn't list
+// it (§13 shape 1). Holds on it still work through live reads, if those are
+// allowed; the reflector keeps retrying.
+func (n *perNames) forbiddenOnce(id ID, w *nameWatch, err error) {
 	n.mu.Lock()
-	first := !n.forbidden[id]
-	n.forbidden[id] = true
+	first := n.by[id] == w && !n.forbidden[id]
+	if first {
+		n.forbidden[id] = true
+	}
 	n.mu.Unlock()
 	if first {
 		n.t.warn("credential-use: the watch of a protected object the index names is forbidden: grant list and watch on it by name (resourceNames, §13)",

@@ -72,10 +72,11 @@ func (d disownSet) key() string {
 
 // newCRDInformer builds the informer on the holder kind's own CRD, selected
 // by name (§7.4), caching its metadata with only its credential-use.
-// annotations.
-func newCRDInformer(md metadata.Interface, name string, clk clock.PassiveClock) (cache.SharedIndexInformer, error) {
+// annotations. recovered is its listWatch's.
+func newCRDInformer(md metadata.Interface, name string, clk clock.PassiveClock, recovered func()) (cache.SharedIndexInformer, error) {
 	lw := newListWatch(md, crdGVR, "", "", clk, nil)
 	lw.field = "metadata.name=" + name
+	lw.recovered = recovered
 	inf := cache.NewSharedIndexInformerWithOptions(lw, &metav1.PartialObjectMetadata{}, cache.SharedIndexInformerOptions{
 		ObjectDescription: "credential-use CRD " + name,
 	})
@@ -1025,14 +1026,30 @@ func (s *Shared) disownWritten(t *Tracker, rv string) {
 
 // crdHandler enqueues every holder of t's kind when the Disown switch
 // changes (§7.4): a holder's next pass then reads it, and stops holding the
-// kinds it covers, or, once it is removed, holds them again.
+// kinds it covers, or, once it is removed, holds them again. When the CRD
+// goes, it queues what the kind still holds (§10.2).
 type crdHandler struct{ t *Tracker }
 
-func (crdHandler) OnAdd(any, bool) {}
-func (crdHandler) OnDelete(any)    {}
+func (h crdHandler) OnAdd(any, bool) {
+	h.t.goneLogged.Store(false)
+	if h.t.crdWentAway.CompareAndSwap(true, false) {
+		h.t.crdReturned()
+	}
+}
+
+func (h crdHandler) OnDelete(any) {
+	h.t.crdWentAway.Store(true)
+	h.t.s.requeueHeld(h.t)
+}
+
 func (h crdHandler) OnUpdate(oldObj, newObj any) {
 	o, ok1 := metadataOf(oldObj)
 	n, ok2 := metadataOf(newObj)
+	if ok1 && ok2 && o.UID != n.UID {
+		// Gone and back between two looks, as across a relist.
+		h.t.goneLogged.Store(false)
+		h.t.crdReturned()
+	}
 	if !ok1 || !ok2 || o.Annotations[AnnotationDisown] == n.Annotations[AnnotationDisown] {
 		return
 	}

@@ -40,6 +40,11 @@ type listWatch struct {
 	clock    clock.PassiveClock
 	// listed, if set, receives each list's completion time.
 	listed func(time.Time)
+	// recovered, if set, is told that the informer watches: a stream's
+	// initial list has completed, or a watch after a List has opened. A List
+	// alone isn't that: with its watch refused, the reflector lists again at
+	// each retry.
+	recovered func()
 	// noWatchList: the client says it can't stream lists, as client-go's
 	// fakes do; the reflector then lists with a List.
 	noWatchList bool
@@ -121,6 +126,12 @@ func (l *listWatch) completed() {
 	}
 }
 
+func (l *listWatch) watches() {
+	if l.recovered != nil {
+		l.recovered()
+	}
+}
+
 func (l *listWatch) ListWithContext(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
 	if l.selector != "" {
 		options.LabelSelector = l.selector
@@ -150,6 +161,9 @@ func (l *listWatch) WatchWithContext(ctx context.Context, options metav1.ListOpt
 		return nil, err
 	}
 	initial := options.SendInitialEvents != nil && *options.SendInitialEvents
+	if !initial {
+		l.watches()
+	}
 	rw := &recordingWatch{inner: w, out: make(chan watch.Event), done: make(chan struct{}), initial: initial, lw: l}
 	go rw.forward()
 	return rw, nil
@@ -197,6 +211,7 @@ func (w *recordingWatch) forward() {
 			}
 			if w.initial && ev.Type == watch.Bookmark && isInitialEventsEnd(ev.Object) {
 				w.lw.completed()
+				w.lw.watches()
 			}
 			select {
 			case w.out <- ev:

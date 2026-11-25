@@ -106,10 +106,11 @@ func TestR2OfAHolderKindMappedClusterScoped(t *testing.T) {
 	}
 }
 
-// A list that fails is never "no users", whatever the mapping: with the CRD gone,
-// the API server's 404, of a kind that is cluster-scoped now for a process that
-// mapped it namespaced, the same, or a refusal. The batch is retried, and the
-// hold stays.
+// A list that fails is never "no users" while the CRD is there, whatever the
+// mapping: the API server's 404, as just before a CRD goes, or of a kind that is
+// cluster-scoped now for a process that mapped it namespaced, or a refusal. The
+// batch is retried, and the hold stays. (With the CRD gone, a 404 releases:
+// TestAHolderKindMappedClusterScopedAndItsCRD.)
 func TestABatchWhoseHolderListFails(t *testing.T) {
 	ctx := context.Background()
 	id := secretID("ns", "s")
@@ -121,7 +122,7 @@ func TestABatchWhoseHolderListFails(t *testing.T) {
 		is    func(error) bool
 		in    string // the namespace the list asks for
 	}{
-		"mapped cluster-scoped, the CRD gone":           {meta.RESTScopeRoot, unservedError(), notServed, ""},
+		"mapped cluster-scoped, a 404, the CRD there":   {meta.RESTScopeRoot, unservedError(), notServed, ""},
 		"mapped cluster-scoped, forbidden":              {meta.RESTScopeRoot, forbidden, apierrors.IsForbidden, ""},
 		"mapped namespaced, the kind is cluster-scoped": {meta.RESTScopeNamespace, unservedError(), notServed, "ns"},
 		"mapped namespaced, forbidden":                  {meta.RESTScopeNamespace, forbidden, apierrors.IsForbidden, "ns"},

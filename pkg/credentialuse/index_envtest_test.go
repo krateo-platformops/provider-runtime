@@ -1798,9 +1798,14 @@ func TestIndexAcquirerCreatedIndexIsRebuiltAtStart(t *testing.T) {
 type warnLog struct {
 	mu    sync.Mutex
 	warns []string
+	infos []string
 }
 
-func (l *warnLog) Info(string, ...any)         {}
+func (l *warnLog) Info(msg string, kv ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.infos = append(l.infos, fmt.Sprint(msg, kv))
+}
 func (l *warnLog) Debug(string, ...any)        {}
 func (l *warnLog) Error(error, string, ...any) {}
 func (l *warnLog) Warn(msg string, kv ...any) {
@@ -1815,10 +1820,20 @@ func (l *warnLog) WithName(string) logging.Logger   { return l }
 func (l *warnLog) matching(s string) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var out []string
-	for _, w := range l.warns {
-		if strings.Contains(w, s) {
-			out = append(out, w)
+	return linesWith(l.warns, s)
+}
+
+// informed returns the Info lines that contain s.
+func (l *warnLog) informed(s string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return linesWith(l.infos, s)
+}
+
+func linesWith(lines []string, s string) (out []string) {
+	for _, l := range lines {
+		if strings.Contains(l, s) {
+			out = append(out, l)
 		}
 	}
 	return out

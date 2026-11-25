@@ -157,11 +157,17 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		res.Failed = append(res.Failed, ids...)
 	}
 
-	// R0. The fast path, from the caches.
+	// R0. The fast path, from the caches: but nothing from the holder cache
+	// of a kind whose CRD is absent, which may show holders that are gone for
+	// as long as it is.
 	cachedUsers := map[ID]cachedUse{}
+	absent := p.kindAbsent != nil && p.kindAbsent()
 	var todo []ID
 	for _, id := range SortedIDs(pending) {
-		u := p.fastKeep(id, n)
+		var u cachedUse
+		if !absent {
+			u = p.fastKeep(id, n)
+		}
 		cachedUsers[id] = u
 		if !u.keep {
 			todo = append(todo, id)
@@ -272,7 +278,7 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		if len(decidable) == 0 {
 			break
 		}
-		holders, err := p.srv.List(ctx, p.holder, n)
+		holders, gone, err := p.listHolders(ctx, n)
 		if err != nil {
 			fail(fmt.Errorf("credential-use: listing %s in %s: %w", p.holder, n, err))
 			for _, r := range decidable {
@@ -332,6 +338,9 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 				p.ver.released(r.meta.UID, n)
 				p.seen.forget(r.meta.UID)
 				res.Released = append(res.Released, r.id)
+				if gone && p.releasedGone != nil {
+					p.releasedGone(r.id)
+				}
 				if out != nil && countPrefix(out.Finalizers, prefix) == 0 {
 					// R3 removed the kind's last finalizer, and its marker.
 					res.Bare = append(res.Bare, r.id)
@@ -348,6 +357,18 @@ func (p *protocol) release(ctx context.Context, n string, pending []ID) (Release
 		todo = next
 	}
 	return res, errors.Join(errs...)
+}
+
+// listHolders is R2's list of the holder kind in n, or an empty one when it
+// fails because the kind is gone, and its holders with it (noHolders, §6.4):
+// it reports which.
+func (p *protocol) listHolders(ctx context.Context, n string) (holders []metav1.PartialObjectMetadata, gone bool, err error) {
+	holders, err = p.srv.List(ctx, p.holder, n)
+	if err != nil && p.noHolders != nil {
+		err = p.noHolders(ctx, err)
+		return nil, err == nil, err
+	}
+	return holders, false, err
 }
 
 // cachedUse is R0's reading of one object's users in the caches.
