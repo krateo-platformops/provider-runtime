@@ -145,7 +145,9 @@ func (p pruneRig) gvr(v string) schema.GroupVersionResource {
 	return schema.GroupVersionResource{Group: pruneGroup, Version: v, Resource: strings.ToLower(p.kind) + "s"}
 }
 
-// crdSeq numbers the kinds of CRDs that stay after their test.
+// crdSeq numbers the kinds of the CRDs that tests in this package create, so
+// that a test can run again in one process while an earlier run's CRD is still
+// there: kept by a finalizer its objects have, or not deleted at all.
 var crdSeq atomic.Int64
 
 // newPruneRig creates a CRD of its own, whose kind is kind with a number, so
