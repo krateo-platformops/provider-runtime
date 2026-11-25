@@ -1004,7 +1004,7 @@ index's recheck, which run whatever was dropped:
 | outside the caches, with its label, in any namespace | §10.5's lists |
 | LabelScoped, its labels stripped, in any namespace | the list above |
 | PerName, its labels stripped or not | the index's recheck: a GET for each line. Such a kind isn't listed, which its RBAC would refuse (§13) |
-| PerName, with no line in the index: gone (§10.6.6's residual), or never written, as of a hold made when the kind was LabelScoped | **nothing**, until something names it again. A restart doesn't find it either: its marker label does, or `DisownPrefix` with its name (§10.6.6) |
+| PerName, with no line in the index: gone (§10.6.6's residual), or never written, as of a hold made when the kind was LabelScoped | **nothing**, until something names it again. A restart doesn't find it either. While its labels are there, an operator who may list the kind finds it by its marker label; or `DisownPrefix` with its name (§10.6.6) |
 | PerNamePoll (not built) | its index, the same way |
 | of a kind that a record names and `Protected` no longer lists | the record, while a cached holder has it |
 | of such a kind, that no record names any more | **nothing**, until something names it again |

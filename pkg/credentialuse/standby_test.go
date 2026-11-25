@@ -454,7 +454,11 @@ func TestTheBoundsEdges(t *testing.T) {
 // Every order of adding to three keys of two kinds, in either line, of taking a batch
 // and giving it back or not, and of the write loops' start and end, with a bound of
 // two names and two keys: the counts are right; the bound holds without the loops;
-// and nothing is lost but what a collapse dropped, which is remembered.
+// and nothing is lost but what a collapse dropped, which is remembered. (Two checks
+// aren't made once an order has a "get" or a "back", which they would misread: the
+// bound, which a worker's put back may pass while the loops run, and that a collapsed
+// key's list waits, which a worker may hold. The order of the loops' start and their
+// context, which a Track reads, has no test; it is one of two lines under one lock.)
 func TestTheBoundInEveryOrder(t *testing.T) {
 	keys := map[string]batchKey{"A": {widgetGK, "a"}, "B": {widgetGK, "b"}, "C": {gadgetGK, "c"}}
 	for _, spec := range []string{
