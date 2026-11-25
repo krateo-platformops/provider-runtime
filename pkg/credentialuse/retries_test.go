@@ -897,6 +897,172 @@ func TestAStopDrainsTheIndexsChecks(t *testing.T) {
 	}
 }
 
+// drainRig is a rig whose Widgets hold Secret ns/s, recorded, with an index of
+// the test's own, whose drain on a stop has bound.
+func drainRig(t *testing.T, bound time.Duration) (*fakeRig, *Tracker, *memStore, *warnings) {
+	t.Helper()
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "h", secretID("ns", "s")))
+	w := &warnings{}
+	o := r.options(widgetGK)
+	o.Logger = w
+	tr, err := r.s.Track(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	r.drain()
+	st := &memStore{exists: true}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	r.s.hooks.drainBound = &bound
+	return r, tr, st, w
+}
+
+// drainWarned reports whether w has the drain's warning, with what.
+func drainWarned(w *warnings, what string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.ContainsFunc(w.got, func(g string) bool { return strings.Contains(g, "left undone") && strings.Contains(g, what) })
+}
+
+// An acquirer call begun before the stop goes on after the write loops end,
+// up to callGrace, and may queue a check: the drain waits for it, and makes
+// that check, its bound from when the call ended; one that outlives the
+// drain's cap is said (§10.6.3, §7.2).
+func TestAStopWaitsForTheCallsInFlight(t *testing.T) {
+	s := secretID("ns", "s")
+	t.Run("a call that queues a check after the loops ended", func(t *testing.T) {
+		r, tr, st, w := drainRig(t, 500*time.Millisecond)
+		stop := r.runWrites(t)
+		end := r.s.calls.begin()
+		go func() {
+			time.Sleep(800 * time.Millisecond) // past the bound from the loops' end
+			tr.idx.queue([]ID{s}, false)       // its line check failed
+			end()
+		}()
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(st.lines, linesOf([]ID{s})) || drainWarned(w, "") {
+			t.Errorf("lines %q, warnings %q; want the line written before the loops returned, and nothing left", st.lines, w.got)
+		}
+	})
+	t.Run("a call that outlives the cap", func(t *testing.T) {
+		r, _, _, w := drainRig(t, 300*time.Millisecond)
+		grace := 300 * time.Millisecond
+		r.s.hooks.callGrace = &grace
+		stop := r.runWrites(t)
+		end := r.s.calls.begin()
+		defer end()
+		start := time.Now()
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+		if took := time.Since(start); took < grace || took > 2*time.Second {
+			t.Errorf("the stop took %s; want it to end at the cap of 600ms", took)
+		}
+		if !drainWarned(w, "callsInFlight 1 ") {
+			t.Errorf("warnings %q; want one naming the call in flight", w.got)
+		}
+	})
+	t.Run("a call begun after the stop", func(t *testing.T) {
+		r, tr, _, w := drainRig(t, 300*time.Millisecond)
+		grace := 2 * time.Second
+		r.s.hooks.callGrace = &grace
+		tr.idx.srv = &objServer{fail: map[ID]bool{s: true}} // the drain goes on
+		stop := r.runWrites(t)
+		tr.idx.queue([]ID{s}, false)
+		var mu sync.Mutex
+		var end func()
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			mu.Lock()
+			end = r.s.calls.begin() // its controller wasn't stopped
+			mu.Unlock()
+		}()
+		start := time.Now()
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+		took := time.Since(start)
+		mu.Lock()
+		if end != nil {
+			end()
+		}
+		mu.Unlock()
+		if took > time.Second || !drainWarned(w, "left 1 ") || !drainWarned(w, "callsInFlight 0 ") {
+			t.Errorf("the stop took %s, warnings %q; want it to end at its bound, with the check left and no call waited for", took, w.got)
+		}
+	})
+}
+
+// The loops end with the informers, which a manager stops first, before the
+// controllers: the drain waits for the loops' own stop, and makes what was
+// queued meanwhile (§7.2).
+func TestADrainAfterTheInformersEndedWaitsForTheStop(t *testing.T) {
+	s := secretID("ns", "s")
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "h", secretID("ns", "s")))
+	tr := r.track(t, widgetGK)
+	stopInformers := r.run(t)
+	r.drain()
+	st := &memStore{exists: true}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	bound := 300 * time.Millisecond
+	r.s.hooks.drainBound = &bound
+	stopWrites := r.runWrites(t)
+	if err := stopInformers(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * bound) // the loops have ended, and the controllers still run
+	tr.idx.queue([]ID{s}, false)
+	if err := stopWrites(); err != nil && !errors.Is(err, errInformersEnded) {
+		t.Fatal(err)
+	}
+	if !slices.Equal(st.lines, linesOf([]ID{s})) {
+		t.Errorf("lines %q; want the check queued before the stop made", st.lines)
+	}
+}
+
+// panicking is a server whose writes panic.
+type panicking struct{ server }
+
+func (panicking) Patch(context.Context, schema.GroupKind, string, string, types.PatchType, []byte) (*metav1.PartialObjectMetadata, error) {
+	panic("the server is gone")
+}
+
+// A call is counted from its detach to its stop, however it ends: a panic and
+// an early return included (§7.2).
+func TestACallIsCountedWhileInFlight(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"))
+	tr := r.track(t, widgetGK)
+	inFlight := func() int { return r.s.calls.before(time.Now().Add(time.Second)) }
+	cc := tr.proto.detach(context.Background())
+	if n := inFlight(); n != 1 {
+		t.Errorf("%d calls in flight during one, want 1", n)
+	}
+	cc.stop()
+	cc.stop()
+	if n := inFlight(); n != 0 {
+		t.Errorf("%d calls in flight after it, stopped twice, want 0", n)
+	}
+	srv := tr.proto.srv
+	tr.proto.srv = panicking{srv}
+	panicked := func() (p bool) {
+		defer func() { p = recover() != nil }()
+		_, _ = tr.proto.acquire(context.Background(), holderObject("ns", "h"), []Ref{SecretRef("ns", "s")})
+		return false
+	}()
+	tr.proto.srv = srv
+	if !panicked || inFlight() != 0 {
+		t.Errorf("a call that panicked (%v) leaves %d in flight, want 0", panicked, inFlight())
+	}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = tr.proto.acquire(ended, holderObject("ns", "h"), []Ref{SecretRef("ns", "s")})
+	if n := inFlight(); n != 0 {
+		t.Errorf("a call under an ended context leaves %d in flight, want 0", n)
+	}
+}
+
 // A kind that can't be listed doesn't stop the others, in a batch that asks
 // for a whole namespace outside the caches, nor in the startup recheck, which
 // lists nothing twice that it could list once.

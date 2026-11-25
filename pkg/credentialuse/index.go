@@ -1657,12 +1657,13 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 
 // drain makes, as the write loops stop, the late checks whose margin is over,
 // handing enqueue their batches, and every live check pending, whatever its
-// backoff, in rounds while some fail, the pause between them doubling, until
-// none is left or ctx ends (§10.6.3). A round's failures don't count towards
-// a check's backoff, which write loops started again keep. It returns how
-// many checks are left undone, how many late holds' margins aren't over, and
-// how many prunes are put off.
-func (ix *index) drain(ctx context.Context, enqueue func(id ID, n string)) (left, late, deferred int) {
+// backoff, in rounds while some fail or busy says more may come, the pause
+// between them doubling while they fail, until none is left and busy says
+// none will come, or ctx ends (§10.6.3). A round's failures don't count
+// towards a check's backoff, which write loops started again keep. It
+// returns how many checks are left undone, how many late holds' margins
+// aren't over, and how many prunes are put off.
+func (ix *index) drain(ctx context.Context, busy func() bool, enqueue func(id ID, n string)) (left, late, deferred int) {
 	counts := func() (int, int, int) {
 		ix.mu.Lock()
 		defer ix.mu.Unlock()
@@ -1686,7 +1687,7 @@ func (ix *index) drain(ctx context.Context, enqueue func(id ID, n string)) (left
 			}
 		}
 		ix.mu.Unlock()
-		if left, late, deferred = counts(); left == 0 || ctx.Err() != nil {
+		if left, late, deferred = counts(); left == 0 && !busy() || ctx.Err() != nil {
 			return left, late, deferred
 		}
 		select {
@@ -1694,7 +1695,11 @@ func (ix *index) drain(ctx context.Context, enqueue func(id ID, n string)) (left
 			return counts()
 		case <-time.After(pause):
 		}
-		pause = min(2*pause, drainPauseMax)
+		if left > 0 {
+			pause = min(2*pause, drainPauseMax)
+		} else {
+			pause = drainPause
+		}
 	}
 }
 

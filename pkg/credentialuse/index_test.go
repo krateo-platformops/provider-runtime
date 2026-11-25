@@ -794,7 +794,7 @@ func TestTheDrain(t *testing.T) {
 	drain := func(ix *index, d time.Duration) (left, lateLeft, deferred int, enqueued []ID) {
 		ctx, cancel := context.WithTimeout(context.Background(), d)
 		defer cancel()
-		left, lateLeft, deferred = ix.drain(ctx, func(id ID, _ string) { enqueued = append(enqueued, id) })
+		left, lateLeft, deferred = ix.drain(ctx, func() bool { return false }, func(id ID, _ string) { enqueued = append(enqueued, id) })
 		return left, lateLeft, deferred, enqueued
 	}
 	t.Run("a check that fails once", func(t *testing.T) {

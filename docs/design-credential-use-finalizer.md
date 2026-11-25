@@ -1958,10 +1958,19 @@ then know:
   and its re-add included (§10.6.2); a prune whose context has ended begins
   no other.
 - **Then the write loops drain** what the index holds in memory to write
-  (decided 2026-11-25; §10.6.3): every live check queued, within 10s. So
-  `RunWriteLoops` returns up to about 25s after its context ended, or after
-  `RunInformers` ended, which a manager stops first, among the runnables
-  that don't need leader election. That is within the manager's 30s, and
+  (decided 2026-11-25; §10.6.3): every live check queued, within 10s. The
+  acquirers may still queue some. A manager stops the runnables that don't
+  need leader election first, our informers among them, whose end ends the
+  loops, and only then the controllers with the write loops' own context.
+  An `Acquire` then goes on up to 15s. So the drain goes on while the write
+  loops' context lives, or an acquirer call begun before it ended is in
+  flight, and its 10s count from the last moment one of them was so; at
+  most 25s after its start, the 15s and the 10s. A call begun after that isn't
+  waited for: its controller wasn't stopped with the loops.
+- **So `RunWriteLoops` returns up to 25s after the controllers' cancel**:
+  the 15s of the last prune's write or of the acquirers, whichever is later,
+  and the drain's 10s. That fits in the manager's default 30s while the
+  first group stops within about 5s; ours stops in well under 1s. It is
   while the process still holds its Lease: controller-runtime v0.25.2
   cancels the leader election only once the runnables have stopped
   (`pkg/manager/internal.go`), so a manager that releases the Lease on a
@@ -3802,13 +3811,17 @@ pause between rounds doubling from 200ms, within 10s, the bound an A2 in
 flight is given after a stop (§7.2). Those are the re-adds a prune couldn't
 write, the checks an acquirer queued when its line check failed, the checks
 of lines someone else dropped, and the late checks of A2s whose margin is
-over, their batches queued too. A round's failures don't count towards a
-check's backoff. What the 10s leave is logged, with how many, and is the
-killed case; so are the late holds whose margin isn't over, which aren't
-checked early (condition 2 below), and the prunes put off are counted
-beside them. A check that an acquirer still ending queues after the drain
-has ended is the killed case too. A kill stays the accepted case
-(2026-11-24). With
+over, their batches queued too. The drain waits for the stop of the write
+loops' own context, and for the acquirer calls begun before it, which may
+queue more, and its 10s count from then (§7.2). A round's failures don't
+count towards a check's backoff. What the drain leaves is logged, with how
+many, and is the killed case: the checks left undone, the calls still in
+flight at its cap, and the late holds whose margin isn't over, which aren't
+checked early (condition 2 below); the prunes put off are counted beside
+them. When the write loops end and the process goes on, as when a consumer
+stops them alone while its informers run, the index's informer may queue
+the check of a drop after the drain: the next write loops take it. A kill stays the
+accepted case (2026-11-24). With
 Disown turned on meanwhile it is the third residual, below.
 
 **A hold that lands when nobody looks any more is the other residual** (the
