@@ -105,7 +105,7 @@ MUTANTS = [
     ("the rebuild ignores the records", IX,
      [("\t\t\t\tnamed[id] = true\n", "\t\t\t\t_ = named\n")]),
     ("a created index isn't rebuilt", IX,
-     [("\tif err := ix.rebuild(ctx); err != nil {\n\t\tix.markLost()\n", "\tif err := error(nil); err != nil {\n\t\tix.markLost()\n")]),
+     [("\tswitch err := ix.rebuild(ctx); {\n", "\tswitch err := error(nil); {\n")]),
     # §10.6.5, §10.2: the startup recheck from the index.
     ("no startup recheck", C + "uncached.go",
      [("\t\tif t.idx != nil {\n\t\t\tdone :=", "\t\tif false && t.idx != nil {\n\t\t\tdone :=")]),
