@@ -154,11 +154,11 @@ MUTANTS = [
      [("\t\tunmet += e.Unmet\n", "")]),
     # A change's one batch (§10.2).
     ("the old record's names aren't queued", IN,
-     [("\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil {\n\t\t\tk =", "\t_ = old\n\tfor _, m := range []*metav1.PartialObjectMetadata{cur} {\n\t\tif m != nil {\n\t\t\tk =")]),
+     [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\t_ = was\n\tids := slices.Concat(is.IDs)\n")]),
     ("the new record's names aren't queued", IN,
-     [("\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil {\n\t\t\tk =", "\t_ = cur\n\tfor _, m := range []*metav1.PartialObjectMetadata{old} {\n\t\tif m != nil {\n\t\t\tk =")]),
+     [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\t_ = is\n\tids := slices.Concat(was.IDs)\n")]),
     ("a batch for each record", IN,
-     [("\t\t\tids = append(ids, ReadRecord(m).IDs...)\n", "\t\t\tif ids = append(ids, ReadRecord(m).IDs...); m == old && len(ids) > 0 {\n\t\t\t\th.t.s.queue.Add(k, ids...)\n\t\t\t}\n")]),
+     [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\tif len(was.IDs) > 0 {\n\t\th.t.s.queue.Add(batchKey{h.t.gk, old.Namespace}, was.IDs...)\n\t}\n\tids := slices.Concat(was.IDs, is.IDs)\n")]),
     ("no names queue the namespace", IN,
      [("\tif len(ids) > 0 { // with none", "\tif true || len(ids) > 0 { // with none")]),
     # What is forgotten.

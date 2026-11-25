@@ -198,7 +198,8 @@ func holderIndexer(obj any) ([]string, error) {
 // holderHandler keeps tracker t's verified set (§6.3) and maps holder events
 // to release batches (§10.2): a create, an update whose record or owner
 // finalizer changed, and a delete, enqueue the (K, N) batch of every
-// protected object in the old and the new record.
+// protected object in the old and the new record. A holder that stops being a
+// user of everything (usesAll) enqueues the batch of its whole namespace.
 type holderHandler struct{ t *Tracker }
 
 func (h holderHandler) now() time.Time { return h.t.s.clock.Now() }
@@ -216,7 +217,7 @@ func (h holderHandler) OnAdd(obj any, _ bool) {
 	}
 	h.observe(m)
 	h.t.ver.holderEvent(m.UID, m, h.now())
-	h.enqueue(nil, m)
+	h.enqueue(nil, m, false)
 }
 
 func (h holderHandler) OnUpdate(oldObj, newObj any) {
@@ -227,10 +228,11 @@ func (h holderHandler) OnUpdate(oldObj, newObj any) {
 	}
 	h.observe(n)
 	at := h.now()
-	if o.UID != n.UID {
+	replaced := o.UID != n.UID
+	if replaced {
 		// Deleted and created again under its name, in a watch's gap: no
-		// deletion comes for the old UID, so it is forgotten here, as
-		// OnDelete forgets a holder that is gone.
+		// deletion comes for the old UID, so it is forgotten here, and its
+		// batch queued, as OnDelete does for one that a relist finds gone.
 		h.t.ver.holderEvent(o.UID, nil, at)
 		h.t.proto.written.forget(o.UID)
 		h.t.proto.backoff.forget(o.UID)
@@ -242,12 +244,13 @@ func (h holderHandler) OnUpdate(oldObj, newObj any) {
 		h.t.noteRefused(o.UID, false)
 		h.t.misplaced.forget(o.UID)
 		h.t.proto.conflicts.forget(o.UID)
+		h.t.unparseable.forget(o.UID)
 	}
 	h.t.ver.holderEvent(n.UID, n, at)
-	if o.UID != n.UID || o.Annotations[AnnotationRefs] != n.Annotations[AnnotationRefs] ||
+	if replaced || o.Annotations[AnnotationRefs] != n.Annotations[AnnotationRefs] ||
 		IsEstablished(o, h.t.o.OwnerFinalizers) != IsEstablished(n, h.t.o.OwnerFinalizers) ||
 		(o.DeletionTimestamp == nil) != (n.DeletionTimestamp == nil) {
-		h.enqueue(o, n)
+		h.enqueue(o, n, replaced)
 	}
 }
 
@@ -271,26 +274,52 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.noteRefused(m.UID, false)
 	h.t.misplaced.forget(m.UID)
 	h.t.proto.conflicts.forget(m.UID)
-	h.enqueue(m, nil)
+	h.t.unparseable.forget(m.UID)
+	_, gap := obj.(cache.DeletedFinalStateUnknown) // a relist found it gone
+	h.enqueue(m, nil, gap)
 	// A holder that is gone waits for no Missing ref (§10.3).
 	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)
 }
 
-// enqueue adds one batch, of every ID in old's and cur's records.
-func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata) {
+// enqueue adds one batch, of every ID in old's and cur's records; and, when old
+// was a user of everything held for its namespace and cur isn't, of all of it.
+// What such a holder kept is in no record of its own, and an object that is
+// being deleted has no event left to come: its batch would never run again. So
+// it is after a watch gap that old is gone in (gap): its record may have
+// changed, or have become unparseable, since the version that was delivered
+// last, and have kept objects that version doesn't name.
+func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata, gap bool) {
+	was, usedAll := h.recordOf(old)
+	is, usesAll := h.recordOf(cur)
 	// In one Add: a worker may take what one queues before the next, and a
 	// batch of its own would read the names in both records again.
-	var k batchKey
-	var ids []ID
-	for _, m := range []*metav1.PartialObjectMetadata{old, cur} {
-		if m != nil {
-			k = batchKey{h.t.gk, m.Namespace}
-			ids = append(ids, ReadRecord(m).IDs...)
-		}
+	ids := slices.Concat(was.IDs, is.IDs)
+	if gap || usedAll && !usesAll {
+		ids = append(ids, fillAll)
 	}
 	if len(ids) > 0 { // with none, an Add is of the whole namespace
-		h.t.s.queue.Add(k, ids...)
+		m := cur
+		if m == nil {
+			m = old
+		}
+		h.t.s.queue.Add(batchKey{h.t.gk, m.Namespace}, ids...)
 	}
+	// Once per holder, which its deletion or Forget forgets, and never what
+	// the record says (§4).
+	if usesAll && h.t.unparseable.first(consentKey{holder: cur.UID}) {
+		h.t.warn("credential-use: a holder's record can't be parsed, so it counts as a user of everything held for its namespace, until a pass of it rewrites the record (§4)",
+			"holder", nsName(cur.Namespace, cur.Name), "kind", h.t.gk.String())
+	}
+}
+
+// recordOf is m's record, and whether m counts as a user of every object held
+// for its namespace (§6.1), as one whose record can't be parsed does.
+func (h holderHandler) recordOf(m *metav1.PartialObjectMetadata) (r Record, usesAll bool) {
+	if m == nil {
+		return Record{}, false
+	}
+	r = ReadRecord(m)
+	return r, r.Unparseable && !notAUser(m, h.t.o.OwnerFinalizers)
 }
 
 // --- the protected informers: one per protected kind, shared (§10.1) ---

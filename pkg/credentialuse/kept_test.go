@@ -1853,22 +1853,30 @@ func TestARecordsChangeIsOneBatch(t *testing.T) {
 		h.Annotations = map[string]string{AnnotationRefs: "oops"}
 		return h
 	}
+	again := func(h *metav1.PartialObjectMetadata) *metav1.PartialObjectMetadata {
+		h.UID = "w-again"
+		return h
+	}
 	for name, tc := range map[string]struct {
 		old, cur *metav1.PartialObjectMetadata
 		want     []ID // nil is no batch
+		relist   bool // it is a relist that finds old gone
 	}{
-		"a drop from 4,000":               {record(ids(m)), record(ids(m - 1)), ids(m)},
-		"another name, and the others":    {record(ids(3, x)), record(ids(3, y)), ids(3, x, y)},
-		"all the names replaced":          {record([]ID{x}), record([]ID{y}), []ID{x, y}},
-		"added":                           {nil, record([]ID{x}), []ID{x}},
-		"added without a record":          {nil, record(nil), nil},
-		"gone":                            {record([]ID{x}), nil, []ID{x}},
-		"gone without a record":           {record(nil), nil, nil},
-		"the first names":                 {record(nil), record([]ID{x}), []ID{x}},
-		"the last name dropped":           {record([]ID{x}), record(nil), []ID{x}},
-		"becomes unparseable":             {record([]ID{x}), bad(), []ID{x}},
-		"an unparseable one gets a name":  {bad(), record([]ID{x}), []ID{x}},
-		"an unparseable one, and no name": {bad(), record(nil), nil},
+		"a drop from 4,000":               {old: record(ids(m)), cur: record(ids(m - 1)), want: ids(m)},
+		"another name, and the others":    {old: record(ids(3, x)), cur: record(ids(3, y)), want: ids(3, x, y)},
+		"all the names replaced":          {old: record([]ID{x}), cur: record([]ID{y}), want: []ID{x, y}},
+		"added":                           {cur: record([]ID{x}), want: []ID{x}},
+		"added without a record":          {cur: record(nil)},
+		"gone":                            {old: record([]ID{x}), want: []ID{x}},
+		"gone without a record":           {old: record(nil)},
+		"the first names":                 {old: record(nil), cur: record([]ID{x}), want: []ID{x}},
+		"the last name dropped":           {old: record([]ID{x}), cur: record(nil), want: []ID{x}},
+		"becomes unparseable":             {old: record([]ID{x}), cur: bad(), want: []ID{x}},
+		"an unparseable one gets a name":  {old: bad(), cur: record([]ID{x}), want: []ID{fillAll, x}},
+		"an unparseable one, and no name": {old: bad(), cur: record(nil), want: []ID{fillAll}},
+		"an unparseable one, gone":        {old: bad(), want: []ID{fillAll}},
+		"found gone by a relist":          {old: record([]ID{x}), want: []ID{fillAll, x}, relist: true},
+		"replaced in one event":           {old: record([]ID{x}), cur: again(record([]ID{y})), want: []ID{fillAll, x, y}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newFakeRig(t, namespaceObject("ns"))
@@ -1886,6 +1894,8 @@ func TestARecordsChangeIsOneBatch(t *testing.T) {
 			switch {
 			case tc.old == nil:
 				h.OnAdd(tc.cur, false)
+			case tc.relist:
+				h.OnDelete(cache.DeletedFinalStateUnknown{Key: "ns/h", Obj: tc.old})
 			case tc.cur == nil:
 				h.OnDelete(tc.old)
 			default:
