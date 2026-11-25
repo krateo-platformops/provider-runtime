@@ -731,6 +731,9 @@ func newStHistory(rec stRecording) *stHistory {
 // has none (EPOCH-REUSED).
 func (h *stHistory) wroteNothing(i int) bool {
 	c := h.calls[i]
+	if v, ok := h.version(c.obj, c.rv); !ok || v.uid != c.uid {
+		return false // the watch lacks its version: nothing is known of it (INCOMPLETE)
+	}
 	var before stVersion
 	for _, v := range h.objs[c.obj] {
 		if v.rv >= c.rv {
@@ -919,10 +922,14 @@ func (h *stHistory) auditCompleteness(r *stReport) {
 }
 
 // auditEpochs: every A2 that succeeded wrote, and wrote an epoch that its
-// finalizer on that object, of any incarnation, never had before.
+// finalizer on that object, of any incarnation, never had before. Of one whose
+// version the watch lacks, nothing is known, and auditCompleteness says so.
 func (h *stHistory) auditEpochs(r *stReport) {
 	for _, c := range h.calls {
 		if c.op != "a2" || !c.ok() {
+			continue
+		}
+		if v, ok := h.version(c.obj, c.rv); !ok || v.uid != c.uid {
 			continue
 		}
 		why := ""
