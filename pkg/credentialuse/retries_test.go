@@ -995,6 +995,57 @@ func TestAStopWaitsForTheCallsInFlight(t *testing.T) {
 	})
 }
 
+// blockingStore is a memStore whose first update blocks until its context
+// ends, as a write stuck in the API server's queue would.
+type blockingStore struct {
+	*memStore
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
+	first := false
+	s.once.Do(func() { first = true })
+	if first {
+		s.entered <- struct{}{}
+		<-ctx.Done()
+		return indexVersion{}, ctx.Err()
+	}
+	return s.memStore.update(ctx, cur, lines, mark)
+}
+
+// The drain's cap counts from the loops' end, and not from its own start: a
+// prune's write still running at the stop doesn't push the stop past the cap
+// (§7.2).
+func TestADrainsCapCountsFromTheLoopsEnd(t *testing.T) {
+	s := secretID("ns", "s")
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	st := &blockingStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{s})}, entered: make(chan struct{}, 1)}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	tr.idx.bound, tr.idx.checkBound = time.Second, 500*time.Millisecond
+	quiet, d, grace := time.Duration(0), 300*time.Millisecond, 300*time.Millisecond
+	r.s.hooks.pruneQuiet, r.s.hooks.drainBound, r.s.hooks.callGrace = &quiet, &d, &grace
+	stop := r.runWrites(t)
+	select {
+	case <-st.entered: // the batch's prune of the released Secret is in its write
+	case <-time.After(10 * time.Second):
+		t.Fatal("no prune began")
+	}
+	end := r.s.calls.begin() // a call that outlives the cap
+	defer end()
+	start := time.Now()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	// The prune's write runs on to its 500ms; the cap is at 600ms from the
+	// stop, where one from the drain's start would be at about 1.1s.
+	if took := time.Since(start); took < 400*time.Millisecond || took > 850*time.Millisecond {
+		t.Errorf("the stop took %s; want it to end at the cap, 600ms after the loops ended", took)
+	}
+}
+
 // The loops end with the informers, which a manager stops first, before the
 // controllers: the drain waits for the loops' own stop, and makes what was
 // queued meanwhile (§7.2).
