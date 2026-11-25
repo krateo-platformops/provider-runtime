@@ -34,9 +34,12 @@ const (
 	// 10s an A2 in flight is given after a stop (a2Grace), for what else a
 	// stop owes the index.
 	stopDrainBound = a2Grace
-	// drainPause is the wait between the drain's rounds, while some of its
-	// checks fail.
-	drainPause = 200 * time.Millisecond
+	// drainPause is the wait after the drain's first round, while some of
+	// its checks fail; it doubles at each round, to drainPauseMax, so that a
+	// failure that won't clear takes few turns from the acquirers still
+	// ending.
+	drainPause    = 200 * time.Millisecond
+	drainPauseMax = 2 * time.Second
 )
 
 // errInformersEnded is RunWriteLoops' error when RunInformers ends first.
@@ -94,8 +97,9 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		cancel()
 		s.mu.Unlock()
 		s.writeWG.Wait()
-		// Nothing of the loops runs any more, so nothing else queues a
-		// check; what is queued dies with the process unless it is made now.
+		// Nothing of the loops runs any more. What is queued dies with the
+		// process unless it is made now. An acquirer still ending may queue
+		// more after the drain (§10.6.3).
 		s.drainIndexes(ctx)
 		// What the release loop counted outside the caches is stale once it
 		// stops: only the process that runs the write loops reports it.
@@ -156,10 +160,11 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 // holds in memory, within stopDrainBound of the loops' end (§10.6.3, decided
 // 2026-11-25): the re-adds a prune couldn't write, the checks an acquirer's
 // line check queued when it failed, the checks of lines someone else dropped,
-// and the late checks of A2s of unknown outcome whose margin was over. Each
-// reads its object live and writes its line back if it carries the kind's
-// prefix, or can't be read, as the write loops would have. What the bound
-// leaves is logged, with how many.
+// and the late checks of A2s of unknown outcome whose margin is over, whose
+// batches it queues too. Each reads its object live and writes its line back
+// if it carries the kind's prefix, or can't be read, as the write loops would
+// have. What it leaves is logged, with how many: the checks left undone, and
+// the late holds whose margin isn't over, beside the prunes put off.
 func (s *Shared) drainIndexes(parent context.Context) {
 	d := stopDrainBound
 	if b := s.hooks.drainBound; b != nil {
@@ -175,9 +180,10 @@ func (s *Shared) drainIndexes(parent context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if left := t.idx.drain(ctx); left > 0 {
+			left, late, deferred := t.idx.drain(ctx, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
+			if left+late > 0 {
 				t.warn("credential-use: the write loops stopped with live checks of the index left undone: their lines may be missing until their holders' next passes (§10.6.3)",
-					"kind", t.gk.String(), "index", t.idx.ref(), "left", left, "bound", d.String())
+					"kind", t.gk.String(), "index", t.idx.ref(), "left", left, "lateHoldsNotDue", late, "prunesPutOff", deferred, "bound", d.String())
 			}
 		}()
 	}

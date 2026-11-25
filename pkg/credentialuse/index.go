@@ -1655,30 +1655,46 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	return err
 }
 
-// drain makes every live check pending, whatever its backoff, in rounds while
-// some fail, until none is left or ctx ends, and returns how many are left
-// (§10.6.3).
-func (ix *index) drain(ctx context.Context) int {
-	left := func() int {
+// drain makes, as the write loops stop, the late checks whose margin is over,
+// handing enqueue their batches, and every live check pending, whatever its
+// backoff, in rounds while some fail, the pause between them doubling, until
+// none is left or ctx ends (§10.6.3). A round's failures don't count towards
+// a check's backoff, which write loops started again keep. It returns how
+// many checks are left undone, how many late holds' margins aren't over, and
+// how many prunes are put off.
+func (ix *index) drain(ctx context.Context, enqueue func(id ID, n string)) (left, late, deferred int) {
+	counts := func() (int, int, int) {
 		ix.mu.Lock()
 		defer ix.mu.Unlock()
-		return len(ix.pending)
+		return len(ix.pending), len(ix.late), len(ix.deferred)
 	}
+	pause := drainPause
 	for {
+		ix.lateTick(ix.now(), enqueue)
 		ix.mu.Lock()
-		for _, r := range ix.pending {
+		before := make(map[ID]recheck, len(ix.pending))
+		for id, r := range ix.pending {
+			before[id] = recheck{due: r.due, fails: r.fails}
 			r.due = time.Time{}
 		}
 		ix.mu.Unlock()
-		_ = ix.recheckTick(ctx, time.Now())
-		if n := left(); n == 0 || ctx.Err() != nil {
-			return n
+		_ = ix.recheckTick(ctx, ix.now())
+		ix.mu.Lock()
+		for id, r := range ix.pending {
+			if b, ok := before[id]; ok {
+				r.due, r.fails = b.due, b.fails
+			}
+		}
+		ix.mu.Unlock()
+		if left, late, deferred = counts(); left == 0 || ctx.Err() != nil {
+			return left, late, deferred
 		}
 		select {
 		case <-ctx.Done():
-			return left()
-		case <-time.After(drainPause):
+			return counts()
+		case <-time.After(pause):
 		}
+		pause = min(2*pause, drainPauseMax)
 	}
 }
 

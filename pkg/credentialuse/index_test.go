@@ -770,6 +770,74 @@ func backlogged(d time.Duration, n int) *rate.Limiter {
 	return lim
 }
 
+// healingServer is an objServer whose failures end after its first read.
+type healingServer struct{ *objServer }
+
+func (s healingServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	m, err := s.objServer.Get(ctx, gk, ns, name)
+	clear(s.fail)
+	return m, err
+}
+
+// As the write loops stop, the drain makes the late checks whose margin is
+// over and every pending live check, whatever its backoff, again while they
+// fail, the pause doubling; a round's failures don't count towards a check's
+// backoff; and it says what it leaves (§10.6.3).
+func TestTheDrain(t *testing.T) {
+	held, late, early, putOff := SecretRef("ns", "held").ID(), SecretRef("ns", "late").ID(), SecretRef("ns", "early").ID(), SecretRef("ns", "put-off").ID()
+	inBackoff := func(ix *index, id ID, fails int, due time.Time) {
+		ix.queue([]ID{id}, false)
+		ix.mu.Lock()
+		ix.pending[id].fails, ix.pending[id].due = fails, due
+		ix.mu.Unlock()
+	}
+	drain := func(ix *index, d time.Duration) (left, lateLeft, deferred int, enqueued []ID) {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		left, lateLeft, deferred = ix.drain(ctx, func(id ID, _ string) { enqueued = append(enqueued, id) })
+		return left, lateLeft, deferred, enqueued
+	}
+	t.Run("a check that fails once", func(t *testing.T) {
+		srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}, fail: map[ID]bool{held: true}}
+		st := &memStore{exists: true, rebuilt: true}
+		ix := testIndex(st, healingServer{srv})
+		inBackoff(ix, held, 2, time.Now().Add(time.Hour))
+		if left, _, _, _ := drain(ix, 2*time.Second); left != 0 || !slices.Equal(st.lines, linesOf([]ID{held})) {
+			t.Errorf("%d left, lines %q; want the line written in a second round", left, st.lines)
+		}
+	})
+	t.Run("late holds and prunes put off", func(t *testing.T) {
+		srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{late: heldObj("late")}}
+		st := &memStore{exists: true, rebuilt: true}
+		ix := testIndex(st, srv)
+		ix.late[lateHold{late, "ns"}] = time.Now().Add(-time.Second)
+		ix.late[lateHold{early, "ns"}] = time.Now().Add(time.Hour)
+		ix.deferred[putOff] = time.Now().Add(time.Hour)
+		left, lateLeft, deferred, enqueued := drain(ix, 2*time.Second)
+		if left != 0 || lateLeft != 1 || deferred != 1 || !slices.Equal(enqueued, []ID{late}) || !slices.Equal(st.lines, linesOf([]ID{late})) {
+			t.Errorf("left %d, late holds left %d, prunes put off %d, batches %v, lines %q; want the late check made, with its batch, and the rest counted",
+				left, lateLeft, deferred, enqueued, st.lines)
+		}
+	})
+	t.Run("a check that fails for good", func(t *testing.T) {
+		srv := &objServer{fail: map[ID]bool{held: true}}
+		ix := testIndex(&memStore{exists: true, rebuilt: true}, srv)
+		due := time.Now().Add(time.Hour)
+		inBackoff(ix, held, 3, due)
+		left, _, _, _ := drain(ix, time.Second)
+		ix.mu.Lock()
+		r := *ix.pending[held]
+		ix.mu.Unlock()
+		if left != 1 || r.fails != 3 || !r.due.Equal(due) {
+			t.Errorf("%d left, the check's backoff %d failures and due %s; want it left, with its backoff as it was", left, r.fails, r.due)
+		}
+		// Rounds at 0, 200ms and 600ms, the next one past the bound.
+		if n := len(srv.gets); n < 2 || n > 4 {
+			t.Errorf("%d reads within 1s; want the rounds' pauses to double", n)
+		}
+	})
+}
+
 // A client's rate limiter refuses at once a call whose turn would come after
 // its context's deadline. Behind a backlog longer than a prune's check, the
 // check waits its turn, is cut, puts the line back, and says so, so that its

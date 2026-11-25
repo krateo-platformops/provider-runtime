@@ -1966,7 +1966,11 @@ then know:
   cancels the leader election only once the runnables have stopped
   (`pkg/manager/internal.go`), so a manager that releases the Lease on a
   stop does so after the drain. The next leader starts up to 10s later than
-  before, and no two leaders write the index at once.
+  before, and no two leaders write the index at once, as long as the process
+  exits when the manager's `Start` returns. A `GracefulShutdownTimeout`
+  under about 25s cuts the drain short, and a lost Lease skips it: the
+  manager then sets the timeout to 0 and waits for nothing, which is the
+  kill case.
 
 controller-runtime's manager waits for a stopping controller's workers, and
 for the write loops, within its `GracefulShutdownTimeout`, 30s by default
@@ -3678,8 +3682,9 @@ another writer's change.
      its release worker the 10s before it fails, where it failed at once, and
      within its 15s in all; and a read cut while it waits keeps its place in
      the limiter, a call's turn spent for nothing unless none asked after
-     it, about one a write: the reads after it are cut before they ask. A write that fails ends the
-     prune, and the lines after it stay. *Liveness:* what the reads found
+     it, about one a write: the reads after it are cut before they ask. A
+     write that fails ends the prune, and the lines after it stay.
+     *Liveness:* what the reads found
      bare before the cut stays removed, so a prune always gains, unless the
      reads before the check, or one read of it, outlast the 10s: the live
      read of the switch before the removal, the removal with its retries on
@@ -3792,14 +3797,18 @@ before the write loops retry it. The startup recheck doesn't find it: it
 reads only the lines there are. The holder's next pass does, since even a
 skip ensures the line. **A stop drains** what is queued (decided 2026-11-25):
 as the write loops end, after their last prune, they make every live check
-the index holds in memory, whatever its backoff, within 10s, the bound an A2
-in flight is given after a stop (§7.2). Those are the re-adds a prune
-couldn't write, the checks an acquirer queued when its line check failed, the
-checks of lines someone else dropped, and the late checks of A2s whose margin
-was over. What the 10s leave is logged, with how many, and is the killed
-case. A check that an acquirer still finishing queues after the drain has
-ended is too; a late check whose margin isn't over isn't made early, which
-is condition 2 below. A kill stays the accepted case (2026-11-24). With
+the index holds in memory, whatever its backoff, again while some fail, the
+pause between rounds doubling from 200ms, within 10s, the bound an A2 in
+flight is given after a stop (§7.2). Those are the re-adds a prune couldn't
+write, the checks an acquirer queued when its line check failed, the checks
+of lines someone else dropped, and the late checks of A2s whose margin is
+over, their batches queued too. A round's failures don't count towards a
+check's backoff. What the 10s leave is logged, with how many, and is the
+killed case; so are the late holds whose margin isn't over, which aren't
+checked early (condition 2 below), and the prunes put off are counted
+beside them. A check that an acquirer still ending queues after the drain
+has ended is the killed case too. A kill stays the accepted case
+(2026-11-24). With
 Disown turned on meanwhile it is the third residual, below.
 
 **A hold that lands when nobody looks any more is the other residual** (the
