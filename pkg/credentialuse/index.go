@@ -384,8 +384,11 @@ type index struct {
 	// kind's prefix is unknown.
 	onRestoredUnread func(id ID)
 	// onVouchMalformed reports the malformed entries of the vouched
-	// annotation; onVouchWrong, a vouched object that carries the prefix.
+	// annotation; onVouchForeign, its entries of a kind the index doesn't
+	// have, which vouch for nothing; onVouchWrong, a vouched object that
+	// carries the prefix.
 	onVouchMalformed func(entries []string)
+	onVouchForeign   func(entries []string)
 	onVouchWrong     func(id ID)
 
 	snap atomic.Pointer[indexSnapshot]
@@ -429,8 +432,8 @@ type index struct {
 	// deniedSeen are the objects whose refused read was reported.
 	deniedSeen map[ID]bool
 	// vouchWarned are the vouched annotation's values whose malformed
-	// entries were reported; vouchWrongSeen, the vouched objects found
-	// carrying the prefix.
+	// entries, or entries of another kind, were reported; vouchWrongSeen, the
+	// vouched objects found carrying the prefix.
 	vouchWarned    map[string]bool
 	vouchWrongSeen map[ID]bool
 }
@@ -1057,7 +1060,7 @@ func (v vouches) names(id ID) bool { return v.ids[id] }
 // <namespace>/*, is ignored, and reported once per value of the annotation.
 func (ix *index) parseVouched(v string) vouches {
 	out := vouches{ids: map[ID]bool{}, kinds: map[vouchedKind]bool{}}
-	var bad []string
+	var bad, foreign []string
 	for _, e := range strings.Split(v, ",") {
 		if e = strings.TrimSpace(e); e == "" {
 			continue
@@ -1066,6 +1069,7 @@ func (ix *index) parseVouched(v string) vouches {
 		switch {
 		case !ok || id.Kind == "*":
 			bad = append(bad, e)
+			continue
 		case id.Name == "*":
 			if len(validation.IsDNS1123Label(id.Namespace)) != 0 {
 				bad = append(bad, e)
@@ -1075,8 +1079,13 @@ func (ix *index) parseVouched(v string) vouches {
 		default:
 			out.ids[id] = true
 		}
+		// Of a kind with no lines, as secret for Secret, or Secret.v1 with
+		// a version for a group: it vouches for nothing the index names.
+		if !ix.kinds[id.GroupKind()] {
+			foreign = append(foreign, e)
+		}
 	}
-	if len(bad) > 0 {
+	if len(bad)+len(foreign) > 0 {
 		ix.mu.Lock()
 		first := !ix.vouchWarned[v]
 		if first {
@@ -1086,8 +1095,11 @@ func (ix *index) parseVouched(v string) vouches {
 			ix.vouchWarned[v] = true
 		}
 		ix.mu.Unlock()
-		if first && ix.onVouchMalformed != nil {
+		if first && len(bad) > 0 && ix.onVouchMalformed != nil {
 			ix.onVouchMalformed(bad)
+		}
+		if first && len(foreign) > 0 && ix.onVouchForeign != nil {
+			ix.onVouchForeign(foreign)
 		}
 	}
 	return out
@@ -1905,6 +1917,11 @@ func (t *Tracker) newTrackerIndex() error {
 	ix.onVouchMalformed = func(entries []string) {
 		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name>, or <namespace>/<Kind[.group]>/* for every object of a kind in a namespace (§10.6.6)",
 			"kind", t.gk.String(), "index", ix.ref(), "entries", strings.Join(entries, ", "))
+	}
+	ix.onVouchForeign = func(entries []string) {
+		_, kinds, _ := strings.Cut(valueOf("", ix.kinds), "/")
+		t.warn("credential-use: entries of the index's vouched annotation are of a kind the index has no lines of, and vouch for nothing: write the kind as the index's lines name it, Kind or Kind.group, with no version (§10.6.6)",
+			"kind", t.gk.String(), "index", ix.ref(), "entries", strings.Join(entries, ", "), "kinds", kinds)
 	}
 	ix.onVouchWrong = func(id ID) {
 		t.warn("credential-use: an object vouched for in the index carries a finalizer of the kind: the vouch is wrong, and is ignored for it (§10.6.6)",

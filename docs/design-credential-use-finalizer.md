@@ -3253,9 +3253,12 @@ another writer's change.
      are put back in the 5s that are left, a vouched object's too, which
      fails the prune: its bare objects are retried. A write that fails ends
      the prune, and the lines after it stay. *Liveness:* what the reads found
-     bare before the cut stays removed, so a prune always gains, unless a
-     single read outlasts the 10s. Then no write of it gains: its lines
-     linger, and none is lost, until the reads are faster.
+     bare before the cut stays removed, so a prune always gains, unless the
+     reads before the check, or one read of it, outlast the 10s: the live read
+     of the switch before the removal, the removal with its retries on a
+     conflict, and the read after it share them with the check. Then no write
+     of it gains: its lines linger, and none is lost, until the reads are
+     faster.
 - **Lines for Missing refs** (revision 16). The line is added before A2,
   so a ref whose A2 finds NotFound has a line but no hold. It is kept while
   some holder's record names the ref: PerNamePoll needs its grant for the
@@ -3375,6 +3378,14 @@ hold together:
      successor started;
    - **without leader election, the prune of another process** whose write
      loops have run for longer than that, and so have not just started.
+
+The late check can come later than the margin, behind the write loops' other
+work, as the deferred prunes after a restart (§10.6.2). That widens 2 from a
+sender that ends within the margin to one that ends before its late check. It
+doesn't widen 3: until the late check, the hold's entry keeps the line from
+this process's own prunes, its successor prunes nothing for its quiet time,
+and an A2 that lands within the margin has landed by then, so a release batch
+after it reads P held. What can still take the line is what 3 names.
 
 With one of them off, the line is there:
 
@@ -3639,7 +3650,9 @@ objects an operator has checked by hand to carry no finalizer of K. An entry
 `team-a/Secret/*` is every object of that kind in that namespace (the user's
 decision, 2026-11-24, for a namespace; of its kind, decided 2026-11-25); there
 is none for every namespace, nor for every kind of one, and a bare `team-a/*`
-is malformed. Malformed entries are ignored, with a warning once per value. While a vouched object
+is malformed. Malformed entries are ignored, with a warning once per value;
+so is an entry of a kind the index has no lines of, as `team-a/secret/*` or
+`team-a/Secret.v1/*`, which vouches for nothing. While a vouched object
 can't be read, Disown's count and its strip skip it, the startup recheck
 skips it after its read fails, the tamper check doesn't restore its
 dropped line, a prune may remove its line, and a rebuild doesn't add it. Every other unreadable

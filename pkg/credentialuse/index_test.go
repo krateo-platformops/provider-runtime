@@ -1777,6 +1777,21 @@ func TestParseVouched(t *testing.T) {
 			t.Errorf("%v vouches for %v", got, out)
 		}
 	}
+	// One of a kind the index has no lines of vouches for nothing, and is
+	// reported once per value: a kind in lower case, or with a version for a
+	// group, or another kind (§10.6.6).
+	reports = nil
+	var foreign [][]string
+	ix.onVouchForeign = func(e []string) { foreign = append(foreign, e) }
+	for range 2 {
+		ix.parseVouched("team-a/Secret/*, team-a/secret/*, team-a/Secret.v1/*, team-a/ConfigMap/*, team-b/secret/s, team-b/Secret/s, team-a/*")
+	}
+	if len(foreign) != 1 || !slices.Equal(foreign[0], []string{"team-a/secret/*", "team-a/Secret.v1/*", "team-a/ConfigMap/*", "team-b/secret/s"}) {
+		t.Errorf("entries of another kind reported %q, want the four once", foreign)
+	}
+	if len(reports) != 1 || !slices.Equal(reports[0], []string{"team-a/*"}) {
+		t.Errorf("malformed entries reported %q, want team-a/* once", reports)
+	}
 	if got, ok := parseUnheldRef(unheldRef(SecretRef("ns", "s").ID())); !ok || got != SecretRef("ns", "s").ID() {
 		t.Errorf("parseUnheldRef(unheldRef) = %v, %v", got, ok)
 	}

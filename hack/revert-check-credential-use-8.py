@@ -200,7 +200,7 @@ MUTANTS = [
     ("a rebuild adds a vouched line", IX,
      [("\t\t\tif vouched.has(id) {\n\t\t\t\tcontinue // vouched by an operator", "\t\t\tif false {\n\t\t\t\tcontinue // vouched by an operator")]),
     ("a malformed entry voids the vouch", IX,
-     [("\t\tcase !ok || id.Kind == \"*\":\n\t\t\tbad = append(bad, e)\n", "\t\tcase !ok || id.Kind == \"*\":\n\t\t\treturn vouches{ids: map[ID]bool{}, kinds: map[vouchedKind]bool{}}\n")]),
+     [("\t\tcase !ok || id.Kind == \"*\":\n\t\t\tbad = append(bad, e)\n\t\t\tcontinue\n", "\t\tcase !ok || id.Kind == \"*\":\n\t\t\treturn vouches{ids: map[ID]bool{}, kinds: map[vouchedKind]bool{}}\n")]),
     ("the index's writes drop the vouch", IX,
      [("\tu := cur.obj.DeepCopy()\n\tif err := unstructured.SetNestedField(u.Object, encodeIndex(lines), \"data\", indexDataKey); err != nil {", "\tu := cur.obj.DeepCopy()\n\tu.SetAnnotations(nil)\n\tif err := unstructured.SetNestedField(u.Object, encodeIndex(lines), \"data\", indexDataKey); err != nil {")]),
     ("a 403 in a live check is retried", IX,
