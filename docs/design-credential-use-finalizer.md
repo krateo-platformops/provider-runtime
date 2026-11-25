@@ -4012,6 +4012,18 @@ its Namespace's `allow-holders-from` names a holder's namespace any longer
   all lose consent together, so the finalizer for (K, N) goes once the last
   of them has dropped the ref.
 
+**How long that takes.** The change enqueues the target's holders where a cache
+or the Namespace informer delivers it, and otherwise each holder's next poll
+sees it. One that records more than 16 refs outside the caches
+(`SharedOptions.Namespaces`, §10.5) reads 16 of them a pass, those it names and
+those it doesn't alike, so a withdrawal of one it doesn't name may take it up to
+⌈m/16⌉ poll intervals for m of them, and longer where passes read fewer, and
+then §5's grace. A holder that names the ref reads it on every pass. Whoever edits the holder sets m: 4,000 forged
+refs that were there first make it about 250 poll intervals, over four hours at
+one minute; and at most about 4,000, under three days, if they are of a
+protected kind that no cache covers and whose reads hang. A holder whose passes
+fail is paced by its controller's error backoff instead.
+
 **The gate runs on every pass** (M1), for every held cross-namespace ref,
 not only before A2:
 
@@ -4059,6 +4071,219 @@ not only before A2:
 
   On a pass that runs A2 the consent read is live already, so that read
   serves.
+
+**Every recorded ref is gated, and first** (found in a review of the chain
+code, 2026-11-24). A record keeps refs that its pass doesn't name: behind
+a hop it can't follow (§9.1), and when the pass fails (§8). The gate of the
+refs that a pass names never reaches those, so a withdrawal didn't release
+them, for as long as the holder stayed so; and with the target's namespace
+being deleted, its teardown waited on a holder that no longer named the
+target, and the owner's recovery, withdrawing consent, did nothing. So every
+pass **begins** by gating each ref in another namespace that the record names,
+before its refs are named and whatever it then comes to, a `Refs` error and a
+holder in the index namespace included:
+
+- **a cached yes serves**, so it costs no call in the steady state. That holds
+  on a deleting pass too, for the refs the pass doesn't name: their withdrawal
+  is then seen once the informer delivers it, as on any pass that skips its
+  A2. Those it names are still read live before their A2. Anything but a
+  cached yes is read live, within the bound below, and the pass uses that
+  answer for a ref it then names, rather than read again: it is the live read
+  of the same pass that the A2 needs;
+- **what it drops goes in one A1** at once, which a pass that fails afterwards
+  has then written. It conflicts as any A1 does, and the pass that wrote it
+  skips no A2 (§6.3): the holder's version is new. A withdrawal is reported
+  once that A1 is written, with the dropped ref in `Acquired.Unheld` as
+  `ConsentWithdrawn`, once, whether or not the pass names it. A pass with
+  nothing to drop writes nothing;
+- **an A1 refused for its size is written again without the unheld list.** An
+  object's annotations are capped at 256 KiB together, and the ref's unheld
+  entry is about as long as its record entry. A holder whose other annotations
+  fill the rest would otherwise keep the hold, with a 422 on every pass.
+  Without the list the patch only shrinks them. The withdrawal is then not
+  listed, only reported. A pass that names such a ref still fails at its last
+  A1, whose list doesn't fit either, until there is room, but the hold is
+  released;
+- **an unreadable consent keeps the ref**, with `RetryAfter` on a failing pass
+  too, and one that is gone stays, as any Missing ref. Nothing is dropped once
+  the pass's context has ended;
+- **it asks nothing** about refs in the holder's own namespace, which need no
+  consent; about cluster-scoped objects, which have no Namespace to read; about
+  kinds that aren't protected; about kinds that the Disown switch covers, by
+  the informer, with no read of the CRD (§7.4); or for a record it can't parse,
+  which names nothing. Only the target's owner, or whoever edits the target's
+  Namespace, can make a holder lose a hold by it, on that target, after a live
+  read.
+
+**What it may cost.** Whoever can edit a holder can write its record, with
+about 4,000 refs of their choosing. So what the gate reads is bounded:
+
+- a ref whose **cache covers it, has synced, and lacks it** is kept, and not
+  read: it isn't held, or is gone. An unsynced cache lacks nothing. A ref that
+  the pass names is read live in any case, as before. **What that misses**, and
+  so a withdrawal of it isn't seen until a pass follows the whole chain, or
+  the cause ends:
+  - **LabelScoped, in a namespace that its caches cover:** an object with its
+    finalizer but without its held label, which someone else stripped. No cache
+    has it, and only an A2, which a ref that only the record keeps doesn't get,
+    restores the label. The owner can set it back,
+    `credential-use.krateo.io/held: "true"`: the informer then delivers the
+    object, and each holder's next pass reads it. Outside the covered
+    namespaces (§10.5) the ref is read live, labelled or not;
+  - **PerName:** a hold without an index line, and so without a watch. The
+    watch doesn't depend on the label (§10.6). No prune takes the line of an
+    object that a record names (§10.6.2), and the write loops put back one
+    that someone else drops, or the whole index, as long as they can read the
+    object (§10.6.6); the ref is gated again once its watch has synced;
+  - **a kind no longer in `Protected`** while records still name it: it isn't
+    asked about at all. Disown it first (§7.4), or protect it again;
+- the rest are read live, **at most 16 a pass**, so at most 16 GETs of objects
+  and 16 of Namespaces, each Namespace once (a name that can't exist, §6.2, is
+  one of the 16, and has no GET of its own), **and within 5s together**, or half
+  of what the pass's context has left, if that is sooner: a deadline of the
+  gate's own, which a client's rate limit isn't told: a read that has no turn
+  yet waits for it, and the deadline cuts the wait, where client-go's limiter
+  would refuse it at once. So a pass whose client is short of turns takes its
+  worker up to those 5s. A read that hangs, as of a kind whose conversion webhook
+  does, takes neither the pass nor the A1 of what the others found. **But it
+  takes up to those 5s of the passes of that holder that meet it**, of every one
+  with 16 refs to read or fewer, for as long as it hangs and the record names it.
+  Whoever can edit a holder can have it so, where reads of a protected kind
+  hang: with many made-up names, if no cache covers the kind there; or with one
+  existing object that a cache has without consent, which is read live too, and
+  costs the 5s as well. They can't make one hang;
+- those that have waited the longest go first, always, in memory: a ref starts
+  to wait when a pass first asks about it, and again when it is read. So a ref
+  is read **within ⌈m/16⌉ passes that read their 16**, where m is how many refs,
+  itself included, that first pass asks about, whatever is added to the record
+  later: fresh refs, or ones that leave it and return, go behind it. A restart,
+  or a new leader, forgets how long each has waited, so the wait starts over
+  there: with m of 17 to 32 it costs one more pass. A read counts once it is
+  answered, a failure included. One that the deadline cuts keeps its place, so
+  it is first in the next pass, with the whole deadline; if that isn't enough for
+  it, it goes behind the others. So every pass that reads anything moves at
+  least one ref behind the others, or drops it: a rotation of k refs whose reads
+  hang costs at most 2k passes, and never more than m in all. A withdrawn ref
+  whose A1 wasn't written is first again. A pass reads the refs it names itself
+  where the gate didn't, as it always did, under its own context: one of them
+  that hangs takes the pass, as on any pass;
+- **a client short of turns**, as under a rate limit with busy workers, cuts the
+  pass: one that answers k of its refs moves those k, but for withdrawn ones,
+  which stay first until their A1 lands, and the next goes on from there. A ref
+  takes two turns, or one if its Namespace was read in that pass, which the first
+  one's never was. A wait that is cut costs the client one turn, if somebody
+  waits behind it. **What remains:** while a turn takes more than half of the
+  gate's time, 2.5s of 5s, no ref is read, and a withdrawn one stays held. From
+  the context, a read that waits for a turn looks like one that hangs, so the
+  first in line goes behind the others when the deadline cuts it: under a load
+  that keeps time with the passes, with every other one ending before its first
+  answer, some refs may be so moved each time, and never read. And what a
+  client's own limiter or transport, other than client-go's, refuses at once, by
+  its place in the pass, counts as read;
+- **for what a pass asked about and doesn't know**, refs it couldn't read or
+  didn't get to, `RetryAfter` asks for the next, with one backoff a holder, the
+  gate's own: 1s, doubling up to the poll interval, back to 1s once a pass knows
+  all. So one ref that never can be read keeps the others' retry at the poll
+  interval. The refs that the pass names keep their own, per (holder, ref); one
+  that a holder stops naming while it fails stays in memory until the holder
+  goes;
+- **what it remembers** of a holder is of the refs that its record names now,
+  and goes with the holder;
+- another holder's pass costs what it did. The reads of one holder's record
+  use the same client as the others', though, and at its rate.
+
+**The release loop reads the names too, and those bounds aren't its.** A change
+of a record queues one batch, of every name in the old and the new one (§10.2),
+in every watch mode, and R0 settles only names that the caches have. So the
+process that runs the write loops makes a GET of each of the others, one after
+the other, where the caches cover them too, but none of a name that can't exist
+(§6.2). It grows with the record, 4,000 for a change that puts 4,000 made-up
+names there, and 8,000 for one that replaces them all. The changes that come
+while a batch waits cost one batch together, of every name of all of them. 4,000
+GETs in a row, at about 2ms each (against an
+envtest, 2026-11-24), hold one of the two workers for 8s, and for longer where
+the client's rate limit is lower; beside R0's own work, which grows with the
+square of the names.
+
+**That is once only where each GET finds its object, or that there is none, and
+nothing asks for it again.** What a batch fails at is read again, and only that
+(§6.2): each object after 1s, doubling up to 5 minutes, for as long as it fails,
+and whatever the record says by then. A batch fails at an object's GET, and
+whoever writes the record can name what always fails: a kind that can't be
+mapped, or an object outside a `resourceNames` grant. So m such names cost m
+tries every 5 minutes, beside those of the batches that changes queue. It fails
+too at the Namespace of an object that is being deleted, an epoch's restore, R3,
+or an object that kept changing under 5 releases, each for that object; at the
+holders' list, for all that it was to decide; at the index's prune, for those
+whose lines it was to prune; and at the list of what a whole namespace holds, for
+that list. One that waits for its grace, or whose epoch was restored, is looked
+at again alone. A restart forgets them, and reads the names that the records have
+then. A standby's queue, though, keeps every name of every change until it is
+elected.
+
+It was so before the gate, and how much a batch takes in one turn, and what a
+holder's data can keep in memory, is the release loop's to bound, apart from
+this.
+
+**The gate adds to it:** an A1 that drops refs is a change of the record. Its
+batch has the names of the one holder's record as it was, which the new one's
+are among, and whatever else waits for that (K, N). So dropping one ref of m
+costs up to m GETs, which any drop did, and the gate may drop them over many
+passes. All the refs that it asks about share a pass's 16 reads, those that the
+pass names and those it doesn't, withdrawn or not: of m, w of them withdrawn, the
+drops cost at most w such batches, as each drops one or more, and in passes that
+read their 16 at most ⌈m/16⌉, and one for what a pass drops among the refs it
+names itself. Each of the w is an object that exists, and that a cache has
+without consent, or that no cache covers. Outside the caches, 4,000 names of
+which one in each 16 that a pass reads is an existing Secret without consent cost
+up to 250 batches and 970,000 GETs, over at least 250 passes that don't follow
+the whole chain; and more batches, of one drop each, where passes read fewer.
+Where a cache has the objects, R0 settles those still in the record that aren't
+being deleted, and a batch reads those dropped since the last one, and the
+made-up names, which no cache has: 250 cached without consent and 3,750 made-up
+cost up to 16 batches of about 3,766.
+
+**What remains.** Where no cache covers the target (outside
+`SharedOptions.Namespaces`, §10.5), there is no cached yes, so an honest
+holder's recorded refs there cost up to those GETs on every pass. They are the
+reads that it makes anyway for the refs it names. A ref that is gone costs
+the gate none where a cache covers it, and one GET a pass, with its Namespace's, where
+none does, until a pass that follows the whole chain drops it from the record.
+And a forged record still tells its author whether a target exists where no
+cache covers it, or is held where one does: the ref of one that exists without
+consent is dropped, and of one that doesn't is kept. The unheld list answers
+that for any ref the holder may name already (`NotConsented`, or nothing), and
+the gate answers it for no more than 16 refs a pass.
+
+**A paused holder keeps its holds, whatever the target's owner does.** The gate
+is part of a pass, and a paused holder has none (§9.2): its recorded refs stay
+held, with their consent withdrawn. So are those of a holder that no controller
+reconciles. That is a limit (the user's decision, 2026-11-24). **The way out:**
+
+- **unpause the holder.** Its next pass drops the ref. Deleting it isn't enough
+  while it is paused: its pass returns before its deletion, so it stays until it
+  is unpaused, unless it has no owner finalizer;
+- **or remove the finalizer by hand**, `credential-use.<kind>.<group>/<holder
+  namespace>` (§3), from the target. Nothing puts it back while its consent is
+  withdrawn;
+- **or the Disown switch** (§7.4), for the whole holder kind; or, once the kind's
+  CRD is deleted, `DisownPrefix` with `Names`, which refuses while it exists.
+
+Nor is anything dropped while a holder is edited faster than a pass takes, since
+every A1 then conflicts, or while the API server refuses the A1 for a cause other
+than its size (a 422 from a schema or a webhook), or while every pass's context
+ends before its A1. The gate leaves that half of what the context has.
+
+**A ref that only the record keeps, recreated without the annotation, is
+dropped.** A two-step apply (the object, then its annotation) of a target that
+was deleted is, between the two, an object whose owner doesn't consent. If it
+is read then, the gate drops the ref, as it would one that the pass names. But
+no pass names this one, so it isn't held again when the annotation comes: only
+once the hop is back, by the pass that follows it to the ref. Give a recreated
+target its annotation in the same write, or the consent on its Namespace.
+
+`BeforeEstablish` and the prober don't change: a ref the gate dropped isn't
+Missing, and one it kept is neither probed for nor held by them, as before.
 
 **Why a drop needs that confirmation.** Releasing a hold is the direction
 that can expose a holder. A stale or unsynced cache is most likely exactly
@@ -4117,10 +4342,22 @@ credential-use.krateo.io/unheld: [{"ref":"team-b/Secret/db-creds","reason":"Cons
   `NotConsented` ones** (L4), because a released hold is the cause a later
   not-found needs explained.
   Within each reason, the most recent come first. Beyond 16, the last entry
-  is `{"ref":"…","reason":"More","count":<n>}`. With refs of at most about 350
+  is `{"ref":"…","reason":"More","count":<n>,"unmet":<m>}`. `unmet` is how many
+  of the `n` are released holds that the passes don't name (below), left out
+  when it is 0. A pass counts the refs it names each time, and can't count
+  those, so it carries that number over. With refs of at most about 350
   characters, it stays under 6 KB.
 - **An entry goes** when the ref is held again, or when the holder no longer
-  names it.
+  names it. A released hold's entry, `ConsentWithdrawn` or `ReadDenied`, stays
+  while the holder's passes can't follow its whole chain, or fail before their
+  last A1, though none names the ref: the holder may still read through to it,
+  and the entry explains what it then finds. It goes with the first pass that
+  follows the whole chain and doesn't name it. That pass's last A1 is what
+  removes it, so a pass whose refs lead nowhere further, which writes its one
+  A1 before its A2s, removes it even if an A2 then fails. `unmet` goes with
+  it. It may count too many for as long: a pass that names refs which its
+  gate's A1 left out of the list takes them out of the count in its last A1,
+  and one that fails before that doesn't.
 - **It is the runtime's.** Like the record, it shouldn't be edited. An edit
   is overwritten by the next A1.
 
@@ -4539,7 +4776,10 @@ Doc text for consumers:
 > still works as before, but isn't protected, and the holder gets a
 > `CredentialRefNotHeld` event. Removing a namespace from the annotation
 > later releases those holders' holds through the normal protocol, with a
-> `CredentialConsentWithdrawn` event.
+> `CredentialConsentWithdrawn` event. It needs a pass of each holder, so not
+> of a paused one. With restricted caches (`SharedOptions.Namespaces`), a
+> holder that records more than 16 refs outside them, m of them, may take up
+> to m/16 poll intervals, rounded up, for one it no longer names.
 
 ## 14. Tests, and what the reviewer should attack
 

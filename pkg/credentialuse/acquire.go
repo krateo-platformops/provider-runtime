@@ -135,10 +135,18 @@ type protocol struct {
 	// owes after each A2 of a cross-namespace ref (§10.2 L2). A protocol
 	// without cross-namespace refs needs none of them.
 	namespaceViews namespaceViews
-	backoff        *consentBackoff
-	reported       *reportedSet
-	unheldReads    *sharedReads
-	enqueueBatch   func(id ID, holderNamespace string)
+	// The gate of recorded refs (§11.3): protects reports whether a kind is
+	// protected, and cacheLacks whether an ID's cache covers it, has synced
+	// and lacks it. Nil ones are every kind, and never. gateContext gives its
+	// live reads their context; nil is the pass's.
+	protects     func(schema.GroupKind) bool
+	cacheLacks   func(ID) bool
+	gateTurns    *gateTurns
+	gateContext  func(context.Context) (context.Context, context.CancelFunc)
+	backoff      *consentBackoff
+	reported     *reportedSet
+	unheldReads  *sharedReads
+	enqueueBatch func(id ID, holderNamespace string)
 
 	// conflicts remembers which refs were reported as conflicting (§9.1); nil
 	// remembers nothing.
@@ -402,6 +410,16 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		maxDepth = DefaultMaxDepth
 	}
 
+	// The gate of what the record names, first (§11.3). What follows reads
+	// the record, and the unheld list, as it leaves them.
+	recorded, err := p.gateRecorded(ctx, obj, &a)
+	if errors.Is(err, ErrHolderConflict) {
+		return a, err
+	}
+	if err != nil {
+		return fail(err, "Announce")
+	}
+
 	byID := map[ID]Ref{} // every held ref of the chain so far
 	seen := map[ID]Ref{} // the first ref met of each object, which wins (§9.1)
 	// asked is what later refs of an object asked for that the first doesn't.
@@ -481,11 +499,14 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		}
 		return slices.DeleteFunc(want, unrecorded)
 	}
-	retry := func(id ID) {
-		d := p.backoff.fail(consentKey{obj.GetUID(), id})
-		if a.RetryAfter == 0 || d < a.RetryAfter {
-			a.RetryAfter = d
+	retry := func(id ID) { a.retryIn(p.backoff.fail(consentKey{obj.GetUID(), id})) }
+	// lastUnheld is the unheld list that the pass's last A1 writes.
+	lastUnheld := func() []UnheldEntry {
+		u := p.unheldEntries(found, notHeld, keepEntry, &passNow)
+		if unfollowed {
+			u = append(u, keptEntries(found, seen, recorded.folded)...)
 		}
+		return u
 	}
 	// drop records r as not held for want of consent, reporting a
 	// withdrawal when it was recorded, and follows its Next through the
@@ -495,6 +516,13 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		delete(byID, id)
 		reason := UnheldNotConsented
 		switch {
+		case recorded.withdrawn[id]: // reported already, and in a.Unheld
+			reason = UnheldConsentWithdrawn
+			for i := range a.Unheld {
+				if a.Unheld[i].Ref.ID() == id {
+					a.Unheld[i].Ref = r
+				}
+			}
 		case rec0.Names(id):
 			reason = UnheldConsentWithdrawn
 			a.Unheld = append(a.Unheld, Unheld{Ref: r, Reason: ReasonConsentWithdrawn})
@@ -591,7 +619,10 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 			// The gate, before A1: live in the adding direction, and from
 			// the cache on a pass that may skip A2 (§11.3, M1).
 			cross[id] = true
-			g := p.gate(ctx, obj, id, rec0.Names(id) && !deleting)
+			g, read := recorded.live[id]
+			if !read {
+				g = p.gate(ctx, obj, id, rec0.Names(id) && !deleting)
+			}
 			readOK[id] = g == gateHoldLive || g == gateNotHeld || g == gateMissing
 			switch g {
 			case gateHoldLive, gateHoldCached:
@@ -638,7 +669,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 		var unheldNow *[]UnheldEntry
 		if last := !chained && len(next) == 0; last {
 			metAll()
-			u := p.unheldEntries(found, notHeld, keepEntry, &passNow)
+			u := lastUnheld()
 			unheldNow = &u
 		} else if rec := ReadRecord(obj); !rec.Unparseable {
 			want = SortedIDs(append(want, slices.DeleteFunc(slices.Clone(rec.IDs), unrecorded)...))
@@ -814,7 +845,7 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 
 	// The last A1: exactly the chain, and the unheld list with it, in one
 	// patch (§11.3). It writes nothing when neither changed.
-	unheld := p.unheldEntries(found, notHeld, keepEntry, &passNow)
+	unheld := lastUnheld()
 	if _, err := p.announce(ctx, obj, exact(), &unheld, &a); err != nil {
 		if errors.Is(err, ErrHolderConflict) {
 			return a, err
@@ -1125,6 +1156,7 @@ func (p *protocol) forget(obj metav1.Object) bool {
 	obj.SetAnnotations(an)
 	p.ver.forgot(obj.GetUID())
 	p.backoff.forget(obj.GetUID())
+	p.gateTurns.forget(obj.GetUID())
 	p.reported.forget(obj.GetUID())
 	p.written.forget(obj.GetUID())
 	return true

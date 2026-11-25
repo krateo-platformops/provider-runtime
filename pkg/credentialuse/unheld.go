@@ -31,9 +31,16 @@ type UnheldEntry struct {
 	Since  time.Time `json:"since,omitzero"`
 	// Count is the number of entries left out, on the More entry only.
 	Count int `json:"count,omitempty"`
+	// Unmet is how many of Count are of released holds whose refs no pass
+	// meets (§11.3), on the More entry only: a pass counts the refs it does
+	// meet anew, and can't count these.
+	Unmet int `json:"unmet,omitempty"`
 
 	// listed: the entry was in the annotation the pass found. Not written.
 	listed bool
+	// unmet: the entry is one that Unmet counts, if it is left out. Not
+	// written.
+	unmet bool
 }
 
 // unheldRef is how the annotation names a ref: <namespace>/<Kind>/<name>,
@@ -65,13 +72,22 @@ func ReadUnheld(annotations map[string]string) []UnheldEntry {
 // encodeUnheld returns the annotation's value for entries, trimmed to
 // maxUnheld (§11.3): ConsentWithdrawn and ReadDenied entries are kept ahead
 // of NotConsented ones, the most recent first within each, and past the
-// bound the last entry is More, with the count left out. It returns nil
-// (remove the annotation) for no entries.
+// bound the last entry is More, with the count left out. A More entry among
+// entries is one that a list already trimmed: its count is added. It returns
+// nil (remove the annotation) for no entries.
 func encodeUnheld(entries []UnheldEntry) (*string, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	es := slices.Clone(entries)
+	already, unmet := 0, 0
+	es := slices.DeleteFunc(slices.Clone(entries), func(e UnheldEntry) bool {
+		if e.Reason != unheldMore {
+			return false
+		}
+		already += e.Count
+		unmet += e.Unmet
+		return true
+	})
 	rank := func(e UnheldEntry) int {
 		if e.Reason == UnheldNotConsented {
 			return 1
@@ -83,7 +99,7 @@ func encodeUnheld(entries []UnheldEntry) (*string, error) {
 	order := func(a, b UnheldEntry) int {
 		return cmp.Or(cmp.Compare(rank(a), rank(b)), b.Since.Compare(a.Since), cmp.Compare(a.Ref, b.Ref))
 	}
-	if len(es) > maxUnheld {
+	if len(es) > maxUnheld || already > 0 {
 		// Which entries a trim keeps: among NotConsented ones, those already
 		// listed before those that aren't. A ref trimmed into More isn't in
 		// the annotation, so it comes back each pass as if new, and must not
@@ -101,10 +117,16 @@ func encodeUnheld(entries []UnheldEntry) (*string, error) {
 		slices.SortStableFunc(es, func(a, b UnheldEntry) int {
 			return cmp.Or(cmp.Compare(rank(a), rank(b)), listedFirst(a, b), order(a, b))
 		})
-		more := len(es) - (maxUnheld - 1)
-		es = es[:maxUnheld-1]
+		shown := min(len(es), maxUnheld-1)
+		more := already + len(es) - shown
+		for _, e := range es[shown:] {
+			if e.unmet {
+				unmet++
+			}
+		}
+		es = es[:shown]
 		slices.SortStableFunc(es, order)
-		es = append(es, UnheldEntry{Ref: "…", Reason: unheldMore, Count: more})
+		es = append(es, UnheldEntry{Ref: "…", Reason: unheldMore, Count: more, Unmet: unmet})
 	} else {
 		slices.SortStableFunc(es, order)
 	}

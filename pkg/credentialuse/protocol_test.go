@@ -414,7 +414,9 @@ func TestAcquireOutcomes(t *testing.T) {
 		r := newRig(t)
 		h := &metav1.ObjectMeta{UID: "h1", Annotations: map[string]string{AnnotationRefs: "[]", AnnotationUnheld: "[]", "keep": "x"}}
 		r.p.ver.announced("h1", []ID{SecretRef("ns", "s").ID()}, nil, r.now)
-		if !r.p.forget(h) || len(h.Annotations) != 1 || r.p.forget(h) {
+		r.p.gateTurns = newGateTurns()
+		r.p.gateTurns.next("h1", []ID{SecretRef("ns", "s").ID()}, 1)
+		if !r.p.forget(h) || len(h.Annotations) != 1 || len(r.p.gateTurns.at) != 0 || r.p.forget(h) {
 			t.Errorf("forget left %v", h.Annotations)
 		}
 		if _, ok := r.p.ver.observed["h1"]; ok {

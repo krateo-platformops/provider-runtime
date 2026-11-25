@@ -245,6 +245,12 @@ func (h holderHandler) OnDelete(obj any) {
 	}
 	h.t.ver.holderEvent(m.UID, nil, h.now())
 	h.t.proto.written.forget(m.UID)
+	// A holder gone without a Forget, as one that was never established,
+	// leaves nothing behind either: its UID never comes back, and whoever can
+	// edit one names the refs these are kept for (§11.3).
+	h.t.proto.backoff.forget(m.UID)
+	h.t.proto.gateTurns.forget(m.UID)
+	h.t.proto.reported.forget(m.UID)
 	h.t.unrecorded.forget(m.UID)
 	h.t.degradedLogged.forget(m.UID)
 	h.t.misplaced.forget(m.UID)
@@ -254,16 +260,20 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.missing.set(types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, nil, h.now(), h.t.o.ProbeInterval)
 }
 
-// enqueue adds the batch of every ID in old's and cur's records.
+// enqueue adds one batch, of every ID in old's and cur's records.
 func (h holderHandler) enqueue(old, cur *metav1.PartialObjectMetadata) {
+	// In one Add: a worker may take what one queues before the next, and a
+	// batch of its own would read the names in both records again.
+	var k batchKey
+	var ids []ID
 	for _, m := range []*metav1.PartialObjectMetadata{old, cur} {
-		if m == nil {
-			continue
+		if m != nil {
+			k = batchKey{h.t.gk, m.Namespace}
+			ids = append(ids, ReadRecord(m).IDs...)
 		}
-		r := ReadRecord(m)
-		if len(r.IDs) > 0 {
-			h.t.s.queue.Add(batchKey{h.t.gk, m.Namespace}, r.IDs...)
-		}
+	}
+	if len(ids) > 0 { // with none, an Add is of the whole namespace
+		h.t.s.queue.Add(k, ids...)
 	}
 }
 
@@ -624,6 +634,25 @@ func (t *Tracker) protectedFor(id ID) *protectedInformer {
 		return t.names.get(id)
 	}
 	return t.s.protectedFor(id)
+}
+
+// cacheLacks reports whether the cache that covers id has synced, and doesn't
+// have it: it isn't held, or is gone, or has just been held, which the cache
+// will show, or its held label was stripped. A PerName kind's cache is the
+// watch of id's index line, whatever the object's labels: with the index
+// synced and no such watch, t holds no id, or its line is missing, until the
+// tamper check or a rebuild restores it (§10.6.6). A kind, or a namespace,
+// that no cache covers is never lacking.
+func (t *Tracker) cacheLacks(id ID) bool {
+	p := t.protectedFor(id)
+	if p == nil {
+		return t.isPerName(id.GroupKind()) && t.idx.inf.HasSynced()
+	}
+	if !p.inf.HasSynced() {
+		return false
+	}
+	_, ok := p.get(id.Namespace, id.Name)
+	return !ok
 }
 
 // trackerViews are tracker t's views over the shared caches.

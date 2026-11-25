@@ -792,6 +792,50 @@ func TestCredentialUseRetryAfter(t *testing.T) {
 	}
 }
 
+// §11.3, as it is today: a paused holder's pass doesn't acquire, so the gate
+// doesn't run, and its holds stay whatever the target's owner withdraws, until
+// it is unpaused. This pins that; whether it should is open.
+func TestCredentialUseAPausedHolderKeepsItsHolds(t *testing.T) {
+	ctx := context.Background()
+	team := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "team-b",
+		Annotations: map[string]string{credentialuse.AnnotationAllowHoldersFrom: "demo"}}}
+	w := newCUWorld(t, newWidget("w", nil), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-b"}}, team)
+	r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, func(resource.Managed) ([]credentialuse.Ref, error) {
+		return []credentialuse.Ref{credentialuse.SecretRef("team-b", "db")}, nil
+	})
+	startSource(t, r)
+	id := credentialuse.SecretRef("team-b", "db").ID()
+	recorded := func() bool { return credentialuse.ReadRecord(w.srv.widget("w")).Names(id) }
+	edit := func(obj client.Object, change func()) {
+		t.Helper()
+		if err := w.srv.raw.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+			t.Fatal(err)
+		}
+		change()
+		if err := w.srv.raw.Update(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustReconcile(t, r, "w")
+	if !recorded() {
+		t.Fatal("the consented ref isn't recorded")
+	}
+
+	widget := &Widget{ObjectMeta: metav1.ObjectMeta{Name: "w", Namespace: "demo"}}
+	edit(widget, func() { widget.Annotations[pmeta.AnnotationKeyReconciliationPaused] = "true" })
+	edit(team, func() { delete(team.Annotations, credentialuse.AnnotationAllowHoldersFrom) })
+	w.srv.ops.reset()
+	mustReconcile(t, r, "w")
+	if !recorded() || slices.ContainsFunc(w.srv.ops.list(), func(op string) bool { return strings.HasPrefix(op, "md-patch") }) {
+		t.Errorf("recorded %v, calls %v; a paused holder's pass acquires nothing today", recorded(), w.srv.ops.list())
+	}
+	edit(widget, func() { delete(widget.Annotations, pmeta.AnnotationKeyReconciliationPaused) })
+	mustReconcile(t, r, "w")
+	if recorded() {
+		t.Error("the withdrawn ref is still recorded once the holder is unpaused")
+	}
+}
+
 // M6 and L8: the predicate drops a holder update whose only change is the
 // record this process wrote, and passes any other change, and a record
 // change this process didn't write.
