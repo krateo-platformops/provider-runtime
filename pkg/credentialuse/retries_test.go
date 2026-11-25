@@ -791,11 +791,11 @@ type unwritable struct {
 	down bool
 }
 
-func (s *unwritable) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s *unwritable) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	if s.down {
 		return indexVersion{}, apierrors.NewInternalError(errors.New("etcd is unhappy"))
 	}
-	return s.memStore.update(ctx, cur, lines, rebuilt)
+	return s.memStore.update(ctx, cur, lines, mark)
 }
 
 // A prune that fails retries what it would have pruned, and nothing else.
