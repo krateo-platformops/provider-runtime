@@ -975,7 +975,8 @@ first, or its kind, but one with more honest names than it goes before it. When 
 loops end, as when their leadership does, what waited for a retry or a time waits in
 the queue, under the same bound, and its counts are forgotten. Not bounded by it: the
 graces' timers, one for each deletion of a held object and each finalizer it has, for
-the minute each lasts.
+the minute each lasts; and the release waits' timers (§6.4), below 2s, one for each
+object that waits. When either fires, what it adds is under the bound.
 
 At their start, and when a Track ends while they run, the loops make up for what
 collapsed (decided by the user, 2026-11-24), after the rescan, §10.5's lists and the
