@@ -577,9 +577,10 @@ type stFloor struct {
 func (h *stHistory) floors(passes int64) []stFloor {
 	per := func(thousand int64) int { return max(1, int(passes*thousand/1000)) }
 	fs := []stFloor{{countReleases, 3}, {countReleasesLive, 1}, {countReleasesUsers, 1}, {countRemovals, 2}, {countHeldByA2, per(5)}, {countEstablished, per(2)},
-		// Two canaries' holders live from the start to the end, whose first
-		// versions are judged in each process's feed.
-		{countHolderVersions, 4}}
+		// Each holder version older than 5s at its holder's end, once per
+		// process. 11 unloaded iterations at f250486 had 192 to 337 per 1,000
+		// passes; this is a sixth of the least. It needs a run of stressLeast.
+		{countHolderVersions, per(30)}}
 	if !h.outside {
 		fs = append(fs, stFloor{countSkips, per(8)}, stFloor{countKept, 1})
 	}
@@ -975,7 +976,7 @@ func (h *stHistory) auditFeeds(r *stReport) {
 					continue
 				}
 				if !held && len(feeds) > 0 {
-					r.counts[countHolderVersions]++
+					r.counts[countHolderVersions]++ // once per version and process: a holder has one feed
 				}
 				for _, f := range feeds {
 					es := h.eventsOn[stFeedObj{f, o}]

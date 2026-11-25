@@ -13,7 +13,7 @@ package credentialuse_test
 //
 // Each sub-test runs for 8s, and as long again to tear everything down; set
 // CREDENTIALUSE_STRESS to a duration for a longer one, which nobody runs
-// without asking.
+// without asking. A shorter one fails (stressLeast).
 //
 // CREDENTIALUSE_STRESS_SEED is the goroutines' seed: unset, 0, the same in
 // every run; a number; or vary, a random one each time, which the run logs so
@@ -147,15 +147,24 @@ func stressSeed(t *testing.T) uint64 {
 	}
 }
 
+// stressLeast is the least duration of a run: the canaries and the floors are
+// sized for it, and no shorter run has been measured. Below about 6s the end
+// deletes the canaries' holders before 5s of their versions are judged for lag,
+// and a right run fails; a start slower than about 3s does that at 8s.
+const stressLeast = 8 * time.Second
+
 func stressDuration(t *testing.T) time.Duration {
 	if v := os.Getenv("CREDENTIALUSE_STRESS"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			t.Fatalf("CREDENTIALUSE_STRESS=%q: %v", v, err)
 		}
+		if d < stressLeast {
+			t.Fatalf("CREDENTIALUSE_STRESS=%q: a run lasts at least %s, for which the canaries and the floors are sized", v, stressLeast)
+		}
 		return d
 	}
-	return 8 * time.Second
+	return stressLeast
 }
 
 // The stress test, with two processes and with three, and with two whose
