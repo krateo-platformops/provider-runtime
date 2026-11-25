@@ -350,6 +350,9 @@ type index struct {
 	// holder cache: a line for an object without the kind's finalizer is
 	// kept while one does (§10.6.2). Nil is never.
 	recorded func(id ID) bool
+	// noHolders is R2's answer to a list of the holders that failed (§6.4):
+	// nil when the kind is gone, and its holders with it. Nil is never.
+	noHolders func(ctx context.Context, listErr error) error
 	// disowning reads live whether the Disown switch covers a PerName kind:
 	// the records may have been stripped, so a rebuild from them can't tell
 	// that it found every hold (§7.4). Nil is never.
@@ -1344,6 +1347,12 @@ func (ix *index) ids(lines []string) []ID {
 // and sets the marker. Each is logged once.
 func (ix *index) rebuild(ctx context.Context) error {
 	holders, err := ix.srv.List(ctx, ix.holder, "")
+	if err != nil && ix.noHolders != nil {
+		// The kind gone, its holders are, and their records: the union is
+		// empty, as it would be read (§6.4). Otherwise the rebuild fails for as
+		// long as the CRD is gone.
+		err = ix.noHolders(ctx, err)
+	}
 	if err != nil {
 		return fmt.Errorf("credential-use: listing the holders of %s to rebuild the index %s: %w", ix.holder, ix.ref(), err)
 	}
@@ -1886,6 +1895,7 @@ func (t *Tracker) newTrackerIndex() error {
 	}
 	ix := newIndex(t.gk, t.prefix, s.o.IndexNamespace, s.indexMaxLines(), kinds, store, t.proto.srv)
 	ix.recorded = t.recorded
+	ix.noHolders = t.noHolders
 	ix.now, ix.margin = s.clock.Now, s.landingMargin()
 	ix.disowning = func(ctx context.Context) (bool, error) {
 		set, err := t.disownLive(ctx)

@@ -273,6 +273,7 @@ func perNameFakeRig(t *testing.T, objs []runtime.Object, before func(r *fakeRig)
 		"data": map[string]any{indexDataKey: encodeIndex(linesOf(ids))}}}
 	cm.SetNamespace("idx")
 	cm.SetName(IndexName(widgetGK))
+	cm.SetUID("index-uid") // a rebuild's marker is of the uid (§10.6.6)
 	cm.SetAnnotations(map[string]string{AnnotationRebuilt: "true"})
 	if _, err := r.dyn.Resource(configMapGVR).Namespace("idx").Create(ctx, cm, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)

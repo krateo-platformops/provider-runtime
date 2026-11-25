@@ -1359,7 +1359,10 @@ name its tracker was given, with no resourceVersion:
   its tests.
 - **The CRD, one being deleted included, or any error**, a 403 or a 404 of any
   other form among them: every hold stays, and the batch is retried as after
-  any failed list. A 403's error says what to grant.
+  any failed list. A 403's error says what to grant. A CRD that is there says
+  to restart the process if it lasts: the kind is served no more as `Track`
+  mapped it, as after the CRD was created again with another scope, or without
+  the declared version, which a new process maps anew.
 
 *The list's 404 is never the evidence.* An API server answers it for a K that
 exists while its CRD informer lags, or the version isn't served, or the scope
@@ -1430,7 +1433,8 @@ the evidence: the GET is.
   another, for a round that found the CRD gone, and nothing otherwise. It is per
   batch, so at least per (K, N), and objects of one key that are at different
   backoffs are retried in batches of their own, each with its reads: with 30
-  versions and holders in 50 namespaces, one CRD's deletion is about 1,550 GETs,
+  versions and holders in 50 namespaces, one CRD's deletion is about 1,600 GETs
+(each batch's GET of the CRD, of the group, and of its 30 versions),
   and more for keys whose objects had failed at different times. A client with a rate limit may not finish a
   large group within the 10s; the batch is then retried. And a discovery that
   hangs holds one of the two release workers for 10s for each key of K, so that
@@ -1488,9 +1492,11 @@ remedy:
 - **no process tracks K any more**, or the process started after the CRD went:
   `Track` needs the CRD (§7.3);
 - **R1 fails**, for a protected kind that is gone too, or whose grant is;
-- **K's index is lost with the CRD** (§10.6.6). It can't be rebuilt without a
-  list of holders, so a hold that no informer showed is in no record and no
-  line. Give `DisownPrefix` the protected kinds then, not the index.
+- **K's index is lost with the CRD** (§10.6.6). Its rebuild, while the kind is
+  gone, takes the union of the records for what it is, empty, by the same GET
+  and veto, keeps every line there is, and marks the index; it isn't retried for
+  ever. But a hold that no informer showed is then in no record and no line.
+  Give `DisownPrefix` the protected kinds then, not the index.
 
 The only things that can still remove the finalizer while H's record names
 P are:
@@ -3100,10 +3106,11 @@ and those asked for while it runs are one. That one cuts the run's wait short,
 never its work: a run that waits to retry a part that fails, as a kind it can't
 list, starts again at once with every part, and nothing counted as done, since
 what a part read before the deletion may have changed; a run that doesn't wait
-runs once more when it ends. No part in flight is cancelled: an index prune
-between its write and its check of what it removed (§10.6.2) finishes both.
-Without that, a part that fails for good would keep the run on its backoff, and
-a hold that only the recheck finds would wait for a restart. A CRD that is back before the batch keeps R0 as it was: the holder informer lists
+runs once more when it ends. No part in flight is cancelled, by choice: none
+needs it, since an index prune finishes its write and its check of what it
+removed under its own bound, whatever the recheck's context (§10.6.2). Without
+the cut, a part that fails for good would keep the run on its backoff, and a
+hold that only the recheck finds would wait for a restart. A CRD that is back before the batch keeps R0 as it was: the holder informer lists
 again, within its backoff, and delivers what it missed.
 
 **And the acquirer enqueues the batch itself** after any A2 issued from a

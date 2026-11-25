@@ -390,6 +390,9 @@ func TestNoHolders(t *testing.T) {
 			if err != nil && c.err != nil && !strings.Contains(err.Error(), c.err.Error()) {
 				t.Errorf("noHolders = %v: it lost the GET's error", err)
 			}
+			if got := err != nil && strings.Contains(err.Error(), "restart the process"); got != (name == "it exists") {
+				t.Errorf("noHolders = %v: a restart is the advice while the CRD is there, and only then", err)
+			}
 			if got := err != nil && strings.Contains(err.Error(), "grant get on the CRD "+crd); got != (name == "403") {
 				t.Errorf("noHolders = %v: a grant is the advice for a 403, and only for it", err)
 			}

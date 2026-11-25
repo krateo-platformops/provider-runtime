@@ -3,23 +3,17 @@ package credentialuse
 import (
 	"context"
 	"errors"
-	"slices"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	clienttesting "k8s.io/client-go/testing"
 )
 
 // The recheck that a CRD's deletion asks for while one runs (recheckSoon): it
-// cuts the run's wait short, and never its work. The clock stands still in
-// each test, so that no retry's backoff ends: what the tests see, only an ask
-// did.
+// cuts the run's wait short. The clock stands still in each test, so that no
+// retry's backoff ends: what the tests see, only an ask did.
 
 // within waits for ch to close, for at most 20 seconds.
 func within(t *testing.T, what string, ch <-chan struct{}) {
@@ -79,17 +73,8 @@ func TestTheCRDsDeletionRereadsTheIndex(t *testing.T) {
 	}, s, x)
 	tr := r.s.trackers[widgetGK]
 	failX.Store(true) // the index's part fails for as long as the test runs
-	gets := func() int {
-		n := 0
-		for _, a := range r.md.Actions() {
-			if g, ok := a.(clienttesting.GetAction); ok && a.GetResource() == secretsGVR && g.GetName() == "s" {
-				n++
-			}
-		}
-		return n
-	}
 	r.runWrites(t)
-	eventually(t, "the start's recheck to read the Secret", func() bool { return gets() >= 1 })
+	eventually(t, "the start's recheck to read the Secret", func() bool { return r.getsOf("s") >= 1 })
 	r.idle(t, batchKey{widgetGK, "ns"})
 	eventually(t, "the holder's watch", func() bool { return out.watching(1) })
 	out.fail(errTest404)
@@ -98,13 +83,24 @@ func TestTheCRDsDeletionRereadsTheIndex(t *testing.T) {
 	failed := sink.warned("a release batch failed")
 	crdHandler{tr}.OnDelete(crdMeta(widgetGK)) // the CRD is still there
 	eventually(t, "the first try to read it, and its batch to fail", func() bool {
-		return gets() >= 1 && sink.warned("a release batch failed") > failed
+		return r.getsOf("s") >= 1 && sink.warned("a release batch failed") > failed
 	})
 	if !r.heldBy(t, widgetGK, "ns", "s") {
 		t.Fatal("released with the CRD there")
 	}
 	r.removeCRD(t, widgetGK)
 	eventually(t, "the hold to be released", func() bool { return !r.heldBy(t, widgetGK, "ns", "s") })
+}
+
+// getsOf counts the GETs of Secret ns/name made.
+func (r *fakeRig) getsOf(name string) int {
+	n := 0
+	for _, a := range r.md.Actions() {
+		if g, ok := a.(clienttesting.GetAction); ok && a.GetResource() == secretsGVR && g.GetName() == name {
+			n++
+		}
+	}
+	return n
 }
 
 // One recheck runs at a time; asks made while one of its parts runs are one,
@@ -168,118 +164,103 @@ func TestARecheckAskedForMeanwhile(t *testing.T) {
 	}
 }
 
-// ctxCallServer and ctxIndexStore fail a call whose context has ended, as a real
-// client does, and the fake ones don't.
-type ctxCallServer struct{ server }
-
-func (s ctxCallServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return s.server.Get(ctx, gk, ns, name)
-}
-
-func (s ctxCallServer) Patch(ctx context.Context, gk schema.GroupKind, ns, name string, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return s.server.Patch(ctx, gk, ns, name, pt, data)
-}
-
-func (s ctxCallServer) List(ctx context.Context, gk schema.GroupKind, ns string) ([]metav1.PartialObjectMetadata, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return s.server.List(ctx, gk, ns)
-}
-
-// ctxIndexStore holds the write that removes line until release closes, once
-// gate is set, after the write landed.
-type ctxIndexStore struct {
-	indexStore
-	line    string
-	gate    *atomic.Bool
-	once    *sync.Once
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (s ctxIndexStore) get(ctx context.Context) (indexVersion, error) {
-	if err := ctx.Err(); err != nil {
-		return indexVersion{}, err
-	}
-	return s.indexStore.get(ctx)
-}
-
-func (s ctxIndexStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
-	if err := ctx.Err(); err != nil {
-		return indexVersion{}, err
-	}
-	v, err := s.indexStore.update(ctx, cur, lines, mark)
-	if err == nil && s.gate.Load() && slices.Contains(cur.lines, s.line) && !slices.Contains(lines, s.line) {
-		s.once.Do(func() {
-			close(s.entered)
-			<-s.release
+// The CRD's deletion seen by a tracker that is no longer its kind's, as one
+// that a Track rolled back while the CRD went, queues nothing and rechecks
+// nothing: as endTracking, it acts only for the kind's tracker.
+func TestARolledBackTrackersCRDDeletion(t *testing.T) {
+	rollBack := func(t *testing.T, r *fakeRig, tr *Tracker) {
+		r.s.mu.Lock()
+		delete(r.s.trackers, widgetGK)
+		r.s.mu.Unlock()
+		t.Cleanup(func() {
+			r.s.mu.Lock()
+			r.s.trackers[widgetGK] = tr
+			r.s.mu.Unlock()
 		})
 	}
-	return v, err
-}
-
-func (s ctxIndexStore) create(ctx context.Context, lines []string) (indexVersion, error) {
-	if err := ctx.Err(); err != nil {
-		return indexVersion{}, err
-	}
-	return s.indexStore.create(ctx, lines)
-}
-
-// An ask while the recheck's index prune is between its write and its check of
-// what it removed cuts nothing: the check is made, and the line of an object
-// that an A2 held meanwhile comes back at once, without a report of tampering
-// (§10.6.2).
-func TestAnAskCutsNoPrune(t *testing.T) {
-	s, x := secretID("ns", "s"), secretID("ns", "x")
-	var gate atomic.Bool
-	entered, release := make(chan struct{}), make(chan struct{})
-	r, sink, _ := perNameFakeRig(t, []runtime.Object{
-		heldObject(secretGVK, "ns", "x", "u-x", widgetGK, "ns"), holderObject("ns", "h", x),
-		heldObject(secretGVK, "ns", "s", "u-s", widgetGK)}, func(r *fakeRig) {
-		r.s.hooks.wrapServer = func(srv server) server { return ctxCallServer{srv} }
-		r.s.hooks.wrapIndex = func(st indexStore) indexStore {
-			return ctxIndexStore{indexStore: st, line: s.String(), gate: &gate, once: &sync.Once{}, entered: entered, release: release}
+	t.Run("what the caches show", func(t *testing.T) {
+		r, tr, _, _ := ghostRig(t, SharedOptions{}, "ns", false)
+		eventually(t, "the Secret's cache", func() bool { _, ok := (trackerViews{tr}).Protected(secretID("ns", "s")); return ok })
+		r.drain()
+		rollBack(t, r, tr)
+		crdHandler{tr}.OnDelete(crdMeta(widgetGK))
+		if got := r.queued(widgetGK, "ns"); len(got) != 0 {
+			t.Errorf("queued %v for a tracker that isn't the kind's", got)
 		}
-	}, x)
-	tr := r.s.trackers[widgetGK]
-	r.runWrites(t)
-	eventually(t, "the start's recheck to read x", func() bool {
-		for _, a := range r.md.Actions() {
-			if g, ok := a.(clienttesting.GetAction); ok && a.GetResource() == secretsGVR && g.GetName() == "x" {
-				return true
-			}
-		}
-		return false
 	})
-	r.idle(t, batchKey{widgetGK, "ns"})
-	// The line of s, which carries nothing, and which no record names: the
-	// recheck prunes it.
-	cm, err := r.dyn.Resource(configMapGVR).Namespace("idx").Get(context.Background(), IndexName(widgetGK), metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
+	t.Run("what they can't", func(t *testing.T) {
+		r, tr, _, _ := ghostRig(t, SharedOptions{Namespaces: []string{"ns"}}, "out", false)
+		r.runWrites(t)
+		eventually(t, "the start's recheck", r.clusterHeldListed)
+		r.idle(t, batchKey{widgetGK, "out"})
+		rollBack(t, r, tr)
+		r.md.ClearActions()
+		// recheckSoon's own check, under mu: the rollback may come after
+		// requeueHeld's.
+		r.s.recheckSoon(tr)
+		time.Sleep(200 * time.Millisecond)
+		r.s.mu.Lock()
+		rechecking := tr.rechecking
+		r.s.mu.Unlock()
+		if n := r.heldLists(); n != 0 || rechecking {
+			t.Errorf("a recheck for a tracker that isn't the kind's: %d lists, rechecking %v", n, rechecking)
+		}
+	})
+}
+
+// A rebuild of the index while the kind is gone, as for a lost index or a
+// stale marker, finds the union of the records empty, keeps every line, and
+// marks the index: it doesn't fail for as long as the CRD is gone. While the CRD
+// is there, the list's 404 fails it.
+func TestARebuildWhileTheKindIsGone(t *testing.T) {
+	ctx := context.Background()
+	s, x := secretID("ns", "s"), secretID("ns", "x")
+	r, _, out := perNameFakeRig(t, []runtime.Object{heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns")}, nil, s, x)
+	tr := r.s.trackers[widgetGK]
+	out.fail(errTest404)
+	if err := tr.idx.rebuild(ctx); err == nil {
+		t.Error("a rebuild with the CRD there, and the holders' list a 404, succeeded")
 	}
-	cm.Object["data"] = map[string]any{indexDataKey: encodeIndex(linesOf([]ID{s, x}))}
-	if _, err := r.dyn.Resource(configMapGVR).Namespace("idx").Update(context.Background(), cm, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
+	r.removeCRD(t, widgetGK)
+	if err := tr.idx.rebuild(ctx); err != nil {
+		t.Fatalf("a rebuild with the kind gone: %v", err)
 	}
-	gate.Store(true)
-	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
-	within(t, "the prune's write", entered)
-	// An A2 of a new holder lands after the prune read s, and the CRD's
-	// deletion asks again. The holder keeps the hold, and the line, after.
-	must(r.md.Tracker().Create(widgetsGVR, holderObject("ns", "h2", s), "ns"))
-	must(r.md.Tracker().Update(secretsGVR, heldObject(secretGVK, "ns", "s", "u-s", widgetGK, "ns"), "ns"))
-	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
-	close(release)
-	eventually(t, "the line of s to come back", func() bool { return slices.Contains(r.indexedIDs(t), s) })
-	if n := sink.warned("a line dropped from the index named an object"); n != 0 {
-		t.Errorf("tampering reported %d times: %q", n, sink.warns)
+	cur, err := tr.idx.store.get(ctx)
+	if err != nil || tr.idx.needsRebuild(cur) {
+		t.Errorf("the index after the rebuild: %+v, %v; want it marked", cur, err)
+	}
+	if got := r.indexedIDs(t); len(got) != 2 {
+		t.Errorf("the index names %v; want both lines kept", got)
+	}
+}
+
+// A ghost's line, which the CRD's deletion's recheck finds bare, waits for the
+// write loops' quiet start to end before it is pruned, as any line does
+// (§10.6.2); the hold itself doesn't wait.
+func TestAGhostsLineWaitsForTheQuietStart(t *testing.T) {
+	s, missing := secretID("ns", "s"), secretID("ns", "missing")
+	r, _, out := perNameFakeRig(t, []runtime.Object{
+		heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "ghost", s, missing)}, nil, s, missing)
+	r.s.SetPruneQuiet(time.Minute)
+	r.runWrites(t)
+	eventually(t, "the start's recheck to read the Secret, and its batch", func() bool {
+		return r.getsOf("s") >= 2 && r.s.queue.Len() == 0 && !r.working(batchKey{widgetGK, "ns"})
+	})
+	eventually(t, "the holder's watch", func() bool { return out.watching(1) })
+	out.fail(errTest404)
+	must(r.md.Tracker().Delete(widgetsGVR, "ns", "ghost"))
+	r.removeCRD(t, widgetGK)
+	eventually(t, "the hold to be released", func() bool { return !r.heldBy(t, widgetGK, "ns", "s") })
+	time.Sleep(200 * time.Millisecond)
+	if got := r.indexedIDs(t); len(got) != 2 {
+		t.Fatalf("the index names %v within the quiet start; want both lines kept", got)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for len(r.indexedIDs(t)) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the ghost's lines stay after the quiet start: %v", r.indexedIDs(t))
+		}
+		r.clk.Step(indexTick)
+		time.Sleep(10 * time.Millisecond)
 	}
 }

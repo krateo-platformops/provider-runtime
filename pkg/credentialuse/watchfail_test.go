@@ -534,11 +534,14 @@ func TestWhatAFailureLogs(t *testing.T) {
 		t.Errorf("warned %d times, want 5: %q", n, sink.warns)
 	}
 
-	// The API server's 410 has the reason Expired. Gone, which routineWatchEnd
-	// takes too, as client-go does, came only from servers of 1.17 and before
-	// (client-go v0.37.2 tools/cache/reflector.go:1154-1160), which Krateo
-	// doesn't support: no case of it.
-	for _, err := range []error{apierrors.NewResourceExpired("test"), io.EOF, io.ErrUnexpectedEOF} {
+	// The API server's 410 has the reason Expired. Gone came from servers of
+	// 1.17 and before, and may still from an aggregated API server built on
+	// their libraries, which serves a protected kind: client-go takes it for
+	// an expiry for them (v0.37.2 tools/cache/reflector.go:1154-1160), and
+	// routineWatchEnd is client-go's cases exactly. Built by hand, as
+	// NewGone is deprecated.
+	gone := &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonGone}}
+	for _, err := range []error{apierrors.NewResourceExpired("test"), gone, io.EOF, io.ErrUnexpectedEOF} {
 		if !routineWatchEnd(err) {
 			t.Errorf("%v isn't routine", err)
 		}

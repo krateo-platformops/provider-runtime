@@ -46,7 +46,9 @@ MUTANTS = [
     ("a mapper's no match isn't worth the GET", CG,
      [("\tif meta.IsNoMatchError(err) {\n", "\tif false && meta.IsNoMatchError(err) {\n")]),
     ("the list's 404 is the evidence", CG,
-     [("\tcase err == nil:\n\t\treturn listErr\n\tcase !crd", "\tcase err == nil:\n\tcase !crd")]),
+     [("\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so", "\t\t_ = fmt.Errorf(\"%w (the CRD %s is there, so")]),
+    ("a CRD that is there gives no advice", CG,
+     [("\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so", "\t\treturn listErr\n\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so")]),
     ("a GET that fails is the evidence", CG,
      [("\tcase !crdNotFound(err, t.crdName):\n", "\tcase false && !crdNotFound(err, t.crdName):\n")]),
     ("a GET that fails says nothing of its own", CG,
@@ -165,9 +167,17 @@ MUTANTS = [
       ("\t\tcase t.recheckAsk <- struct{}{}:\n", "\t\tcase t.recheckAsk <- struct{}{}:\n\t\t\tif c, ok := recheckCancels.Load(t); ok {\n\t\t\t\tc.(context.CancelFunc)()\n\t\t\t}\n"),
       ("\t\t\ts.recheckUncachedAsked(ctx, []*Tracker{t}, ask)\n", "\t\t\trunCtx, cancel := context.WithCancel(ctx)\n\t\t\trecheckCancels.Store(t, cancel)\n\t\t\ts.recheckUncachedAsked(runCtx, []*Tracker{t}, ask)\n\t\t\tcancel()\n")]),
     ("a recheck starts while the write loops end", CG,
-     [("\tif ctx == nil || ctx.Err() != nil {\n", "\tif ctx == nil {\n")]),
+     [("\tif ctx == nil || ctx.Err() != nil || s.trackers[t.gk] != t {\n", "\tif ctx == nil || s.trackers[t.gk] != t {\n")]),
+    ("a rolled-back tracker rechecks", CG,
+     [("\tif ctx == nil || ctx.Err() != nil || s.trackers[t.gk] != t {\n", "\tif ctx == nil || ctx.Err() != nil {\n")]),
+    ("a rolled-back tracker queues what it held", CG,
+     [("\tif !live {\n\t\treturn\n\t}\n", "\tif false && !live {\n\t\treturn\n\t}\n")]),
     ("the write loops don't wait for a recheck", CG,
      [("\ts.writeWG.Add(1)\n", ""), ("\t\tdefer s.writeWG.Done()\n", "")]),
+    ("a rebuild fails while the kind is gone", IX,
+     [("\tif err != nil && ix.noHolders != nil {\n", "\tif false && err != nil && ix.noHolders != nil {\n")]),
+    ("a rebuild takes any failed list for no holders", IX,
+     [("\t\terr = ix.noHolders(ctx, err)\n", "\t\t_, err = ix.noHolders(ctx, err), error(nil)\n")]),
     ("a ghost's record keeps its line", IX,
      [("\tif t.crdAbsent() {\n", "\tif false && t.crdAbsent() {\n")]),
     # The informers' failures.
@@ -185,6 +195,8 @@ MUTANTS = [
      [("\tcase ctx.Err() != nil:\n", "\tcase false && ctx.Err() != nil:\n")]),
     ("a watch's end is logged", WF,
      [("\tcase routineWatchEnd(err):\n", "\tcase false && routineWatchEnd(err):\n")]),
+    ("a 410 Gone isn't routine", WF,
+     [("apierrors.IsResourceExpired(err) || apierrors.IsGone(err) ||", "apierrors.IsResourceExpired(err) ||")]),
     ("an EOF in a broken connection is routine", WF,
      [("import (\n\t\"context\"\n", "import (\n\t\"context\"\n\t\"errors\"\n"), ("err == io.EOF ||", "errors.Is(err, io.EOF) ||")]),
     ("the start's 403 is logged too", WF,
@@ -255,7 +267,7 @@ STOPPED = {C: "TestAStoppedPerNameWatchForgetsItsFailure"}
 STREAM = {C: "TestAStreamsInitialListIsARecovery"}
 VETO = {C: "TestTheDiscoverysVeto"}
 LOGGED = {C: "TestAReleaseForWantOfTheKindIsLoggedOnce"}
-RECHECK = {C: "TestTheCRDsDeletionCutsARecheckWaitShort|TestTheCRDsDeletionRereadsTheIndex|TestARecheckAskedForMeanwhile|TestAnAskCutsNoPrune"}
+RECHECK = {C: "TestTheCRDsDeletionCutsARecheckWaitShort|TestTheCRDsDeletionRereadsTheIndex|TestARecheckAskedForMeanwhile"}
 WAIT = {C: "TestTheWriteLoopsWaitForTheRecheck|TestTheRecheckAfterACRDsDeletionEndsWithTheWriteLoops"}
 NEXT = {C: "TestAFailedTracksFailuresAreLoggedByTheNext"}
 INDEX = {C: "TestTheIndexInformersFailureIsLoggedOnce"}
@@ -268,6 +280,7 @@ KILLERS = {
     "a list's 404 isn't worth the GET": NONE,
     "a mapper's no match isn't worth the GET": NONE,
     "the list's 404 is the evidence": NONE,
+    "a CRD that is there gives no advice": NONE,
     "a GET that fails is the evidence": NONE,
     "a GET that fails says nothing of its own": NONE,
     "any read that fails advises a grant": NONE,
@@ -324,8 +337,12 @@ KILLERS = {
     "an ask keeps what the last try did": RECHECK,
     "an ask cancels the recheck's work": RECHECK,
     "a recheck starts while the write loops end": WAIT,
+    "a rolled-back tracker rechecks": {C: "TestARolledBackTrackersCRDDeletion"},
+    "a rolled-back tracker queues what it held": {C: "TestARolledBackTrackersCRDDeletion"},
     "the write loops don't wait for a recheck": WAIT,
-    "a ghost's record keeps its line": {C: "TestAGhostsRecordKeepsNoLine"},
+    "a rebuild fails while the kind is gone": {C: "TestARebuildWhileTheKindIsGone"},
+    "a rebuild takes any failed list for no holders": {C: "TestARebuildWhileTheKindIsGone"},
+    "a ghost's record keeps its line": {C:"TestAGhostsRecordKeepsNoLine"},
     "a failure is logged at every retry": WHAT,
     "a failure is never logged": WHAT,
     "a recovery forgets nothing": WHAT,
@@ -334,6 +351,7 @@ KILLERS = {
     "what fails as the process stops is logged": WHAT,
     "a watch's end is logged": WHAT,
     "an EOF in a broken connection is routine": WHAT,
+    "a 410 Gone isn't routine": WHAT,
     "the start's 403 is logged too": WHAT,
     "a tracker's failure goes to klog": ONCE,
     "a per-name 403 is one for the kind": NAMES,

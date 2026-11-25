@@ -53,7 +53,10 @@ func (t *Tracker) noHolders(ctx context.Context, listErr error) error {
 	_, err = t.s.c.Metadata.Resource(crdGVR).Get(ctx, t.crdName, metav1.GetOptions{})
 	switch {
 	case err == nil:
-		return listErr
+		// As just after the CRD is created; for good, the kind is served no
+		// more as Track mapped it, which a new process maps anew.
+		return fmt.Errorf("%w (the CRD %s is there, so its holds stay; if this lasts, it no longer serves %s as this process maps it, as after it was created again with another scope, or without that version: restart the process)",
+			listErr, t.crdName, t.gvr)
 	case !crdNotFound(err, t.crdName):
 		return unread(listErr, "whether its CRD is gone, and its holders with it", "get on the CRD "+t.crdName, err)
 	}
@@ -178,6 +181,14 @@ func (t *Tracker) crdAbsent() bool {
 // run; their start does otherwise. It also prunes the lines that only ghosts'
 // records kept (§10.6.2).
 func (s *Shared) requeueHeld(t *Tracker) {
+	// As endTracking: only for the kind's tracker, and not one that a Track
+	// rolled back as the CRD went.
+	s.mu.Lock()
+	live := s.trackers[t.gk] == t
+	s.mu.Unlock()
+	if !live {
+		return
+	}
 	for _, p := range append(s.protectedInformers(), t.names.all()...) {
 		for _, obj := range p.inf.GetStore().List() {
 			m, ok := metadataOf(obj)
@@ -196,19 +207,20 @@ func (s *Shared) requeueHeld(t *Tracker) {
 }
 
 // recheckSoon runs t's recheck of what the caches can't show beside the write
-// loops, if they run. One runs at a time. A recheck asked for meanwhile cuts
-// the run's wait short, never its work: no part in flight is interrupted, as an
-// index prune between its write and its check of what it removed would be
-// (§10.6.2). If the run waits to retry a part that fails, as for good, it
-// starts again at once with every part, and nothing of the last try counted as
-// done; if it doesn't, it runs once more when it ends. Many asks are one.
+// loops, if they run, and t is its kind's tracker. One runs at a time. A
+// recheck asked for meanwhile cuts the run's wait short: if the run waits to
+// retry a part that fails, as for good, it starts again at once with every
+// part, and nothing of the last try counted as done; if it doesn't, it runs
+// once more when it ends. Many asks are one. A part in flight runs to its end:
+// a choice, since none needs it, an index prune least, which finishes its write
+// and its check under its own bound whatever ctx does (removeChunk).
 func (s *Shared) recheckSoon(t *Tracker) {
 	// As endTracking does: an Add only under mu, while the write loops run,
 	// so that their end waits for it.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ctx := s.writeCtx
-	if ctx == nil || ctx.Err() != nil {
+	if ctx == nil || ctx.Err() != nil || s.trackers[t.gk] != t {
 		return
 	}
 	if t.recheckAsk == nil {
