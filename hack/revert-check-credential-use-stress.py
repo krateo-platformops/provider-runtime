@@ -62,8 +62,10 @@ R2 = "\t\tholders, err := p.srv.List(ctx, p.holder, n)\n"
 KEPT_LISTS = [(RE, "\t\"fmt\"\n\t\"time\"\n", "\t\"fmt\"\n\t\"sync\"\n\t\"time\"\n"),
               (RE, "// cachedUse is R0's reading of one object's users in the caches.\n",
                "var keptLists sync.Map\n\n// cachedUse is R0's reading of one object's users in the caches.\n")]
-LIVE_READ = "\tns, err := p.srv.Get(ctx, namespaceGroupKind, \"\", id.Namespace)\n"
-LIVE_YES = "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.Annotations[AnnotationAllowHoldersFrom], obj.GetNamespace()) {\n\t\treturn gateHoldLive"
+# The start of every live read of a consent: the gate's, and a kept ref's (#138).
+LIVE_READ = "\tns, read := namespaces[id.Namespace]\n"
+LIVE_YES = "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.consent, obj.GetNamespace()) {\n\t\treturn gateHoldLive"
+CACHED_YES = "\tif cachedOK && p.cachedYes(obj, id) {\n\t\treturn gateHoldCached\n\t}\n"
 GRACE_END = "\treturn firstSeen.Add(ahead + grace)\n"
 SKIP = "\t\t\t\tif cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {"
 WROTE = "\t\tp.ver.wrote(%s, namespace, issued)\n\t\tp.wroteDeleting(id, namespace, out)\n\t\treturn ClassNone, out.UID, nil\n\t}\n\tvar last error\n"
@@ -159,7 +161,9 @@ MUTANTS = [
     ("the consent gate says no, whatever it read", [(CO, LIVE_YES, LIVE_YES.replace("if consents", "if false && consents"))], [UNACCOUNTED, DROP], ("cross",)),
     ("the consent gate says yes, whatever it read", [(CO, LIVE_YES, LIVE_YES.replace("if consents", "if true || consents"))], [NO_CONSENT], ("cross",)),
     ("a cached no isn't confirmed",
-     [(CO, "\t\t\t\treturn gateHoldCached\n\t\t\t}\n", "\t\t\t\treturn gateHoldCached\n\t\t\t} else if known {\n\t\t\t\treturn gateNotHeld\n\t\t\t}\n")], [UNACCOUNTED, DROP], ("cross",)),
+     [(CO, CACHED_YES, CACHED_YES + "\tif _, ok := p.views.Protected(id); cachedOK && ok && p.namespaceViews != nil {\n"
+                                    "\t\tif _, known := p.namespaceViews.NamespaceConsent(id.Namespace); known {\n\t\t\treturn gateNotHeld\n\t\t}\n\t}\n")],
+     [UNACCOUNTED, DROP], ("cross",)),
     # What a pass says, and what never happens.
     ("every third acquire fails",
      [(AQ, "\t\"sync\"\n\t\"time\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n\t\"time\"\n"),
@@ -174,7 +178,7 @@ MUTANTS = [
      [(IN, "func (h holderHandler) OnUpdate(oldObj, newObj any) {\n", "var holderVersions atomic.Int64\n\nfunc (h holderHandler) OnUpdate(oldObj, newObj any) {\n\tif holderVersions.Add(1) > 300 {\n\t\treturn\n\t}\n"),
       (IN, "\t\"sync\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n")], ["LAG"]),
     ("a ref that a record drops queues no release",
-     [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil {\n", "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m == nil || m == old && cur != nil {\n")],
+     [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil {\n", "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil && (m != old || cur == nil) {\n")],
      ["TOO-LITTLE", "CANARY-NOT-RELEASED"]),
 ]
 
