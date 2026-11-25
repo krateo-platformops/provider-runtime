@@ -380,8 +380,19 @@ func TestTheWriteLoopsWaitForTheRecheck(t *testing.T) {
 	r.md.ClearActions()
 	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
 	time.Sleep(100 * time.Millisecond)
-	if n := r.heldLists(); n != 0 || tr.rechecking {
-		t.Errorf("%d rechecks began while the write loops were ending", n)
+	// Any list: a recheck begun now makes its first part's call, whose ended
+	// context the fake doesn't honour, and stops before the held objects'.
+	lists := 0
+	for _, a := range r.md.Actions() {
+		if a.GetVerb() == "list" && a.GetResource().Resource == "secrets" && a.GetNamespace() == "" {
+			lists++
+		}
+	}
+	r.s.mu.Lock()
+	rechecking := tr.rechecking
+	r.s.mu.Unlock()
+	if lists != 0 || rechecking {
+		t.Errorf("a recheck began while the write loops were ending: %d lists, rechecking %v", lists, rechecking)
 	}
 	r.s.mu.Lock()
 	r.s.writeCtx = nil

@@ -380,29 +380,26 @@ func TestAPerNameWatchsFailureIsLoggedOnce(t *testing.T) {
 }
 
 // A watch that stopped, its line gone, neither keeps the kind's failure
-// pending nor records one. The test calls the handlers itself: the watches'
-// lists never end, so that no list of theirs records a recovery between its
-// calls, as under load one did.
+// pending nor records one. The test calls the handlers itself, on watches with
+// no informer: a running one records a recovery whenever its watch is up
+// (listWatch.watches), the first one too, which a list's gate doesn't hold back,
+// since the reflector streams its first list through a watch.
 func TestAStoppedPerNameWatchForgetsItsFailure(t *testing.T) {
 	r, sink := newFakeRig(t), &sinkLines{}
 	a, b := secretID("ns", "a"), secretID("ns", "b")
-	tr := r.trackLogged(t, sink)
-	never := make(chan struct{})
-	gate := func(resource string) {
-		if resource == "secrets" {
-			<-never
-		}
-	}
-	r.listGate.Store(&gate)
-	t.Cleanup(func() { close(never) })
-	n := newPerNames(tr)
+	n := newPerNames(r.trackLogged(t, sink))
 	n.infos[secretGroupKind] = perNameKind{gvr: secretsGVR, namespaced: true}
 	parent, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	n.start(parent)
-	n.follow([]ID{a, b})
+	bare := func(id ID) *nameWatch {
+		return &nameWatch{p: &protectedInformer{gk: id.GroupKind(), ns: id.Namespace, name: id.Name}, stop: func() {}}
+	}
+	wa, wb := bare(a), bare(b)
+	n.mu.Lock()
+	n.want, n.by[a], n.by[b] = []ID{a, b}, wa, wb
+	n.mu.Unlock()
 	ctx := context.Background()
-	wa, wb := n.by[a], n.by[b]
 	n.watchFailed(ctx, nil, a, wa, errTest404)
 	n.watchFailed(ctx, nil, b, wb, errTest404)
 	n.follow([]ID{b})
