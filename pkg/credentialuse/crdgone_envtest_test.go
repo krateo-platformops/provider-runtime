@@ -209,6 +209,7 @@ func newGizmoRig(t *testing.T, cfg *rest.Config, g gizmoOptions) *gizmoRig {
 		clients.Mapper = g.mapper
 	}
 	r.s = cu.NewShared(clients, g.so)
+	r.s.SetPruneQuiet(0) // a PerName index's lines go at once (§10.6.2)
 	o := widgetOptions(r.c.enqueue)
 	o.Holder, o.DeletionGrace, o.ProbeInterval, o.Logger = gizmoGVK, testGrace, time.Second, r.logs
 	if g.change != nil {

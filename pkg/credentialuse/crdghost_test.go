@@ -266,6 +266,9 @@ func perNameFakeRig(t *testing.T, objs []runtime.Object, before func(r *fakeRig)
 	t.Helper()
 	ctx := context.Background()
 	r := newFakeRigWith(t, SharedOptions{IndexNamespace: "idx"}, append([]runtime.Object{namespaceObject("ns"), namespaceObject("idx")}, objs...)...)
+	// The write loops prune at once: their quiet start (§10.6.2), for the holds
+	// another process may still land, is the late tests' (late_test.go).
+	r.s.SetPruneQuiet(0)
 	cm := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
 		"data": map[string]any{indexDataKey: encodeIndex(linesOf(ids))}}}
 	cm.SetNamespace("idx")
