@@ -929,8 +929,9 @@ releases wait. So:
   the limiter's wait: R1 30s for names that are new, 130s if two that failed three times
   or more are among them; the Namespaces 10s and twice the longest of their objects'
   times; the list a minute a page, and before it a minute for each protected kind when
-  the batch is a namespace's outside the caches; in PerName mode, a minute for each line
-  a prune took, and in the write loops' recheck a minute for the index. An answer that
+  the batch is a namespace's outside the caches; in PerName mode, the prune: each write of
+  up to 50 lines, with its reads, in 15s and its check in 10s (§10.6.2), so 30s for a
+  turn's 64; and in the write loops' recheck a minute for the index and for each line. An answer that
   begins and doesn't end, its first byte read, has 5 minutes more; and client-go makes a
   call that is answered 429 up to 10 times, each with its time and 5 minutes more, so a
   server that keeps answering so can keep one call for about an hour, where nothing
@@ -939,9 +940,8 @@ releases wait. So:
   B over 10s about 4 to 5 B of a worker for the release of one known object, and B for
   a made-up name, as each read of every name cost before. Not limited here, and not more than before: the
   mapper, which takes no context, and whose discovery client-go gives up after 32s (a
-  turn's window lets one or two of them begin); the epoch's repair in R1, R3's patches,
-  at most 64 and a conflict's, and the index's writes, each of which the API server
-  answers or cuts; and a conflict's rounds, up to 4 more, of objects that were read.
+  turn's window lets one or two of them begin); the epoch's repair in R1, and R3's
+  patches, at most 64 and a conflict's, each of which the API server answers or cuts; and a conflict's rounds, up to 4 more, of objects that were read.
 - **Once the write loops' context ends**, nothing more is read, and what wasn't
   reached goes back for the next ones.
 - **Each holder's record is parsed once a turn**, by R0 and R2 together, one that
@@ -962,7 +962,9 @@ releases wait. So:
 does decide, it decides on R1's and R2's reads, all of its own and in their order,
 and on R3's tests, unchanged. R2's list is live; the text of a record alone says
 what it names, so R0's parse of a text serves R2's. An object leaves the queue only
-decided, failed, which has its retry, or asked for at a time. By mode:
+decided, failed, which has its retry, asked for at a time, waiting (§6.4), which
+queues it again when its wait ends, or parked behind a Track of its kind, which puts
+it back. By mode:
 LabelScoped, every event and the rescan queue what they did. PerName, the same of
 the per-name watches and the index's recheck; a line is pruned only for an object
 that its turn read, live, without a finalizer of the kind, so one of the rest keeps
@@ -1727,7 +1729,9 @@ only come after the write it reports.
   lists are up to 0.4s of one of the two workers, below. A failed batch logs one line
   a turn. An object being deleted, in a namespace that the
   cache doesn't show being deleted or in none, is read once more, and its release begins
-  after a wait below 2s, 1s on average (§6.2 R1). Its batch is its own, with its own
+  after a wait below 2s, 1s on average (§6.2 R1). It is queued again then as known to be
+  held, behind what is known of its key before it: behind more than a turn of that, it
+  waits a turn more. Its batch is its own, with its own
   list, unless other waits of the key end while it is busy: they share the next. Behind
   a busy key it waits for that too. If it is then kept, that is reported as much later
   (§12). The list usually waits below 100ms in the API server, not at most (§6.4), with a

@@ -1043,8 +1043,8 @@ func (ix *index) readStore(ctx context.Context) (indexVersion, error) {
 }
 
 // read is a live GET of id, which must be answered in the time of a list's page: the
-// release loop makes it after a prune, and the write loops' recheck makes one for each
-// line, before the parts after it.
+// write loops' recheck makes one for each line, before the parts after it. A prune's,
+// and a deferred one's, are in the prune's own, shorter bound too (§10.6.2).
 func (ix *index) read(ctx context.Context, id ID) (*metav1.PartialObjectMetadata, error) {
 	return answered(ctx, livePageTime, func(ctx context.Context) (*metav1.PartialObjectMetadata, error) {
 		return ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
