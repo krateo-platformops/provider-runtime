@@ -331,7 +331,10 @@ func TestAnIndexSetUpWhileTheKindIsGone(t *testing.T) {
 	if _, err := r.dyn.Resource(configMapGVR).Namespace("idx").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	tr.crdWentAway.Store(false) // as for an informer that never saw it go
+	// As for an informer that never saw it go: reset once it has, so that its
+	// OnDelete doesn't set it again after.
+	eventually(t, "the CRD informer to see it go", tr.crdAbsent)
+	tr.crdWentAway.Store(false)
 	if err := tr.setupIndex(ctx); err != nil {
 		t.Fatalf("setupIndex: %v", err)
 	}
