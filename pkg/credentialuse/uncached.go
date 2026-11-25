@@ -200,6 +200,14 @@ func (s *Shared) liveHeldIn(ctx context.Context, t *Tracker, n string) ([]ID, er
 // until it succeeds or ctx ends: a recheck that is skipped can strand a hold
 // for good.
 func (s *Shared) recheckUncached(ctx context.Context, ts []*Tracker) {
+	s.recheckUncachedAsked(ctx, ts, nil)
+}
+
+// recheckUncachedAsked is recheckUncached, whose wait to retry what failed an
+// ask cuts short (recheckSoon): it starts again at once, with every part, each
+// with nothing done, and the backoff from its start. A part in flight runs to
+// its end. A nil ask is never made.
+func (s *Shared) recheckUncachedAsked(ctx context.Context, ts []*Tracker, ask <-chan struct{}) {
 	left := s.recheckParts(ts)
 	for attempt := 0; ; attempt++ {
 		d := min(releaseBackoffBase<<min(attempt, 8), releaseBackoffMax)
@@ -224,6 +232,10 @@ func (s *Shared) recheckUncached(ctx context.Context, ts []*Tracker) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-ask:
+			// What changed may be what a part that succeeded read: none of
+			// the last try's counts.
+			left, attempt = s.recheckParts(ts), -1
 		case <-s.clock.After(d):
 		}
 	}

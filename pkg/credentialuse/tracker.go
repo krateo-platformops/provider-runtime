@@ -54,8 +54,10 @@ type Tracker struct {
 	gone     bool // a failed Track dropped t
 
 	// Under Shared.mu: rechecking, a recheck that t's CRD's deletion started
-	// runs (recheckSoon); recheckAgain, another was asked for meanwhile.
-	rechecking, recheckAgain bool
+	// runs (recheckSoon); recheckAsk, its slot for one asked for meanwhile,
+	// which a send under mu fills and the run empties.
+	rechecking bool
+	recheckAsk chan struct{}
 
 	// goneLogged: a release for want of the kind has been logged since the
 	// CRD was last seen.

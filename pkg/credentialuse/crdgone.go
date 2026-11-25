@@ -196,8 +196,12 @@ func (s *Shared) requeueHeld(t *Tracker) {
 }
 
 // recheckSoon runs t's recheck of what the caches can't show beside the write
-// loops, if they run. One runs at a time: a recheck asked for meanwhile, as
-// while one retries a list that fails, runs once more after it.
+// loops, if they run. One runs at a time. A recheck asked for meanwhile cuts
+// the run's wait short, never its work: no part in flight is interrupted, as an
+// index prune between its write and its check of what it removed would be
+// (§10.6.2). If the run waits to retry a part that fails, as for good, it
+// starts again at once with every part, and nothing of the last try counted as
+// done; if it doesn't, it runs once more when it ends. Many asks are one.
 func (s *Shared) recheckSoon(t *Tracker) {
 	// As endTracking does: an Add only under mu, while the write loops run,
 	// so that their end waits for it.
@@ -207,19 +211,33 @@ func (s *Shared) recheckSoon(t *Tracker) {
 	if ctx == nil || ctx.Err() != nil {
 		return
 	}
+	if t.recheckAsk == nil {
+		t.recheckAsk = make(chan struct{}, 1)
+	}
 	if t.rechecking {
-		t.recheckAgain = true
+		select {
+		case t.recheckAsk <- struct{}{}:
+		default: // one is asked for already
+		}
 		return
 	}
 	t.rechecking = true
+	ask := t.recheckAsk
 	s.writeWG.Add(1)
 	go func() {
 		defer s.writeWG.Done()
 		for {
-			s.recheckUncached(ctx, []*Tracker{t})
+			s.recheckUncachedAsked(ctx, []*Tracker{t}, ask)
+			// Under mu, as the send is: an ask is either taken here, or
+			// made after rechecking is false, and starts a run itself.
 			s.mu.Lock()
-			again := t.recheckAgain && ctx.Err() == nil
-			t.rechecking, t.recheckAgain = again, false
+			again := false
+			select {
+			case <-ask:
+				again = ctx.Err() == nil
+			default:
+			}
+			t.rechecking = again
 			s.mu.Unlock()
 			if !again {
 				return
