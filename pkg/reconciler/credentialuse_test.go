@@ -1004,6 +1004,102 @@ func TestCredentialUseStandaloneForgetOnTheOrphanPath(t *testing.T) {
 	})
 }
 
+// §9, §12 (decided 2026-11-25): while an established holder's refs are
+// refused, its Synced stays True/ReconcileSuccess and says so in its message,
+// with no status write of its own and its transition time kept; the first pass
+// that isn't refused, a degraded one included, takes the message off.
+func TestCredentialUseSyncedSaysARefusal(t *testing.T) {
+	ctx := context.Background()
+	chained := credentialuse.Ref{GroupKind: schema.GroupKind{Kind: "ConfigMap"}, Namespace: "demo", Name: "config",
+		Next: func(*unstructured.Unstructured) ([]credentialuse.Ref, error) { return nil, nil }}
+	direct := credentialuse.SecretRef("demo", "creds")
+	var refs []credentialuse.Ref
+	var refsErr error
+	wd := initialized(newWidget("w", nil))
+	wd.Finalizers = []string{FinalizerName}
+	w := newCUWorld(t, wd, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "demo"}})
+	p := &widgetProvider{ops: w.srv.ops}
+	r := w.reconciler(nil, p, func(resource.Managed) ([]credentialuse.Ref, error) { return refs, refsErr })
+	startSource(t, r)
+	pass := func(what string) prv1.Condition {
+		t.Helper()
+		w.srv.ops.reset()
+		mustReconcile(t, r, "w")
+		if n := w.srv.ops.count("status"); n != 1 {
+			t.Errorf("%s: %d status writes (%v), want the pass's one", what, n, w.srv.ops.list())
+		}
+		s := w.srv.widget("w").GetCondition(prv1.TypeSynced)
+		if s.Status != metav1.ConditionTrue || s.Reason != prv1.ReasonReconcileSuccess {
+			t.Errorf("%s: Synced = %+v, want True/ReconcileSuccess", what, s)
+		}
+		return s
+	}
+
+	refs = []credentialuse.Ref{direct}
+	if s := pass("direct refs"); s.Message != "" {
+		t.Errorf("direct refs: Synced message %q, want none", s.Message)
+	}
+	refs = []credentialuse.Ref{direct, chained}
+	s := pass("refused")
+	if !strings.HasPrefix(s.Message, refusedPrefix+"credential-use: chains") || !strings.HasSuffix(s.Message, " (§9)") ||
+		!strings.Contains(s.Message, `"/ConfigMap/demo/config"`) || strings.Contains(s.Message, "\n") {
+		t.Errorf("refused: Synced message %q, want the refusal, on one line", s.Message)
+	}
+	// Its transition time is the stored one: the message is the same.
+	stored := w.srv.widget("w")
+	old := metav1.NewTime(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	for i := range stored.Status.Conditions {
+		if stored.Status.Conditions[i].Type == prv1.TypeSynced {
+			stored.Status.Conditions[i].LastTransitionTime = old
+		}
+	}
+	if err := w.srv.raw.Status().Update(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	if again := pass("refused again"); again.Message != s.Message || !again.LastTransitionTime.Equal(&old) {
+		t.Errorf("refused again: Synced %+v, want the same message and its stored time", again)
+	}
+	// A pass that fails in Observe keeps its own Synced.
+	p.observeErr = errors.New("unauthorized")
+	if _, err := r.Reconcile(ctx, reqFor("w")); err == nil {
+		t.Fatal("Reconcile succeeded, want the Observe error")
+	}
+	if s := w.srv.widget("w").GetCondition(prv1.TypeSynced); s.Reason != prv1.ReasonReconcileError || strings.Contains(s.Message, refusedPrefix) {
+		t.Errorf("a failed Observe: Synced = %+v, want its error alone", s)
+	}
+	p.observeErr = nil
+	refsErr = errors.New("boom")
+	if s := pass("another failure"); s.Message != "" {
+		t.Errorf("another failure: Synced message %q, want none", s.Message)
+	}
+	refsErr = nil
+	pass("refused, once more")
+	refs = []credentialuse.Ref{direct}
+	if s := pass("direct again"); s.Message != "" {
+		t.Errorf("direct again: Synced message %q, want none", s.Message)
+	}
+}
+
+// refusalOf is the refusal of an established holder's pass, its first line:
+// errors.Join puts a failed gate's error on the next.
+func TestRefusalOf(t *testing.T) {
+	refused := fmt.Errorf("%w: ref \"/ConfigMap/demo/config\" has a Next", credentialuse.ErrChainsNotSupported)
+	for name, tc := range map[string]struct {
+		a    credentialuse.Acquired
+		want string
+	}{
+		"refused":                 {credentialuse.Acquired{Degraded: true, Err: refused}, refused.Error()},
+		"refused, the gate fails": {credentialuse.Acquired{Degraded: true, Err: errors.Join(refused, errors.New("the A1 is down"))}, refused.Error()},
+		"new":                     {credentialuse.Acquired{MustNotConnect: true, Err: refused}, ""},
+		"another failure":         {credentialuse.Acquired{Degraded: true, Err: errors.New("boom")}, ""},
+		"no failure":              {credentialuse.Acquired{}, ""},
+	} {
+		if got := refusalOf(tc.a); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
 // §9, "Not in this release": a ref with a Next is refused, with no write for
 // any ref. A new holder doesn't connect, and says why; an established one
 // proceeds, Degraded, with its record as it was; one being deleted runs its
@@ -1048,6 +1144,9 @@ func TestCredentialUseRefusesAChain(t *testing.T) {
 			got := w.srv.widget("w")
 			if s := got.GetCondition(prv1.TypeSynced); s.Reason != prv1.ReasonReconcileError || !strings.Contains(s.Message, "/ConfigMap/demo/config") || !strings.Contains(s.Message, "without a Next") {
 				t.Errorf("Synced = %+v, want ReconcileError naming the ref and what to do", s)
+			}
+			if s := got.GetCondition(prv1.TypeSynced); strings.Contains(s.Message, refusedPrefix) {
+				t.Errorf("Synced = %+v: a new holder's condition is its error, as before", s)
 			}
 			if c := got.GetCondition(prv1.TypeReady); c.Reason != prv1.ReasonNotObserved {
 				t.Errorf("Ready = %+v, want NotObserved", c)

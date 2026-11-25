@@ -33,6 +33,7 @@ type credentialUseMetrics struct {
 	waitingObjects   metric.Int64Gauge
 	indexFillRatio   metric.Float64Gauge
 	disownUnreadable metric.Int64Gauge
+	refusedHolders   metric.Int64Gauge
 	degraded         metric.Int64Counter
 	refsNotHeld      metric.Int64Counter
 	refsConflicting  metric.Int64Counter
@@ -64,6 +65,10 @@ func newCredentialUseMetrics(meter metric.Meter) (credentialUseMetrics, error) {
 	}
 	if m.disownUnreadable, err = meter.Int64Gauge("credentialuse.disown_unreadable",
 		metric.WithDescription("Objects in the index or a record that Disown's last pass couldn't read, keeping its count unknown (PerName).")); err != nil {
+		return m, err
+	}
+	if m.refusedHolders, err = meter.Int64Gauge("credentialuse.refused_holders",
+		metric.WithDescription("Holders whose last pass in this process was refused, for refs with a Next (chains aren't supported in this release).")); err != nil {
 		return m, err
 	}
 	counters := []struct {
@@ -159,6 +164,11 @@ func (m *Metrics) ReleaseRejected(holderKindLabel string) {
 // DisownUnreadable implements credentialuse.MetricsRecorder.
 func (m *Metrics) DisownUnreadable(holderKindLabel string, n int) {
 	m.cu.disownUnreadable.Record(context.Background(), int64(n), holderKind(holderKindLabel))
+}
+
+// RefusedHolders implements credentialuse.MetricsRecorder.
+func (m *Metrics) RefusedHolders(holderKindLabel string, n int) {
+	m.cu.refusedHolders.Record(context.Background(), int64(n), holderKind(holderKindLabel))
 }
 
 // IndexReadDenied implements credentialuse.MetricsRecorder.

@@ -254,6 +254,7 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.unrecorded.forget(m.UID)
 	h.t.degradedLogged.forget(m.UID)
 	h.t.refused.forget(m.UID)
+	h.t.noteRefused(m.UID, false)
 	h.t.misplaced.forget(m.UID)
 	h.t.proto.conflicts.forget(m.UID)
 	h.enqueue(m, nil)

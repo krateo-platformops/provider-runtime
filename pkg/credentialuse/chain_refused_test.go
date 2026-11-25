@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -800,6 +801,125 @@ func quotedStart(s string) string {
 		}
 	}
 	return s
+}
+
+// refusedGauge keeps credentialuse_refused_holders' last value.
+type refusedGauge struct {
+	NopMetrics
+	mu  sync.Mutex
+	got []int
+}
+
+func (g *refusedGauge) RefusedHolders(_ string, n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.got = append(g.got, n)
+}
+
+func (g *refusedGauge) last() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.got) == 0 {
+		return -1
+	}
+	return g.got[len(g.got)-1]
+}
+
+// TestTheRefusedHoldersGauge: credentialuse_refused_holders counts the holders
+// whose last pass was refused, new or established, once each (§12; decided
+// 2026-11-25). A pass that isn't refused, a failed one included, Forget and the
+// holder's deletion take one off.
+func TestTheRefusedHoldersGauge(t *testing.T) {
+	ctx := context.Background()
+	h1, h2, h3 := holderObject("ns", "h1"), holderObject("ns", "h2"), holderObject("ns", "h3")
+	h3.Finalizers = nil // a new holder
+	r := newFakeRig(t, h1, h2, h3, namespaceObject("ns"))
+	g := &refusedGauge{}
+	failing := map[string]bool{}
+	o := r.options(widgetGK)
+	o.Metrics = g
+	o.Refs = func(obj metav1.Object) ([]Ref, error) {
+		if failing[obj.GetName()] {
+			return nil, errors.New("boom")
+		}
+		return r.refsOf(obj)
+	}
+	tr, err := r.s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chained := SecretRef("ns", "outer")
+	chained.Next = func(*unstructured.Unstructured) ([]Ref, error) { return nil, nil }
+	get := func(name string) *metav1.PartialObjectMetadata {
+		t.Helper()
+		obj, err := r.md.Tracker().Get(widgetsGVR, "ns", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return obj.(*metav1.PartialObjectMetadata).DeepCopy()
+	}
+	pass := func(name string, refused bool, want int) {
+		t.Helper()
+		if refused {
+			r.setRefs(name, SecretRef("ns", "direct"), chained)
+		} else {
+			r.setRefs(name)
+		}
+		if _, err := tr.Acquire(ctx, get(name)); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.last(); got != want {
+			t.Errorf("after %s's pass (refused %v): gauge %d, want %d", name, refused, got, want)
+		}
+	}
+	pass("h1", true, 1)
+	pass("h1", true, 1)
+	pass("h2", true, 2)
+	pass("h3", true, 3)
+	pass("h1", false, 2)
+	failing["h2"] = true
+	pass("h2", false, 1)
+	failing["h2"] = false
+	pass("h2", true, 2)
+	tr.Forget(get("h2"))
+	if got := g.last(); got != 1 {
+		t.Errorf("after Forget: gauge %d, want 1", got)
+	}
+	holderHandler{tr}.OnDelete(get("h3"))
+	if got := g.last(); got != 0 {
+		t.Errorf("after the deletion: gauge %d, want 0", got)
+	}
+}
+
+// TestARefusedPassOverAnUnparseableRecord: a refused pass writes nothing, so a
+// record that can't be parsed stays so, and keeps what it held, as for a paused
+// holder (§4, §11.3): only a pass that reaches its last A1 writes a valid one.
+func TestARefusedPassOverAnUnparseableRecord(t *testing.T) {
+	ctx := context.Background()
+	r, _ := refusingRig(t)
+	must(r.m.Create(secretKey("ns", "s"), metav1.ObjectMeta{Finalizers: []string{fNS}, Annotations: map[string]string{fNS: "epoch-x"}}))
+	must(r.m.Create(widgetKey("ns", "h"), metav1.ObjectMeta{Finalizers: ownerFinalizers, Annotations: map[string]string{AnnotationRefs: "oops"}}))
+	chained := SecretRef("ns", "s")
+	chained.Next = func(*unstructured.Unstructured) ([]Ref, error) { return nil, nil }
+	for range 2 {
+		r.srv.calls = nil
+		a, err := r.p.acquire(ctx, r.get(t, widgetKey("ns", "h")), []Ref{chained})
+		if err != nil || !a.Degraded || !errors.Is(a.Err, ErrChainsNotSupported) {
+			t.Fatalf("acquire = %+v, %v; want it refused", a, err)
+		}
+		if len(r.srv.calls) != 0 {
+			t.Errorf("calls %v, want none: the record names nothing to ask about", r.srv.calls)
+		}
+		if got := r.get(t, widgetKey("ns", "h")).Annotations[AnnotationRefs]; got != "oops" {
+			t.Errorf("record %q, want it as it was", got)
+		}
+	}
+	if _, err := r.p.release(ctx, "ns", []ID{SecretRef("ns", "s").ID()}); err != nil {
+		t.Fatal(err)
+	}
+	if !hasFinalizer(r.get(t, secretKey("ns", "s")), fNS) {
+		t.Error("a release took what the unparseable record counts as used")
+	}
 }
 
 // TestFollowChainsReachesTheTracker: the switch the chain tests set is the

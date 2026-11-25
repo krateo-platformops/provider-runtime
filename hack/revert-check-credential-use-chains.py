@@ -38,7 +38,10 @@ RC = R + "credentialuse.go"
 RT = "pkg/reconciler/reconcilertest/"
 RTC = RT + "credentialuse.go"
 IN = C + "informers.go"
-FILES = [AQ, CH, TR, SH, IN, RC, RTC]
+RR = R + "reconciler.go"
+TM = "pkg/telemetry/"
+TMC = TM + "credentialuse.go"
+FILES = [AQ, CH, TR, SH, IN, RC, RR, RTC, TMC]
 
 
 def sub(s, old, new):
@@ -159,6 +162,30 @@ MUTANTS = [
     # The chain code stays under test, through the reconciler too.
     ("no resolved chain on Connect's context", RC,
      [("\texternalCtx = credentialuse.WithResolved(externalCtx, a)\n", "")]),
+    # What lasts on the object, and the gauge (§9, §12; decided 2026-11-25).
+    ("Synced doesn't say a refusal", RR, [("\t\trefusedSynced(managed, start, cup.refused)\n", "")]),
+    ("the pass doesn't keep the refusal", RC, [("\tcup.refused = refusalOf(a)\n", "")]),
+    ("the refusal's Synced takes a new time each pass", RC,
+     [("managed.SetConditions(start.keep(c.WithMessage(refusedPrefix + refused + \" (§9)\")))", "managed.SetConditions(c.WithMessage(refusedPrefix + refused + \" (§9)\"))")]),
+    ("any Synced says the refusal", RC,
+     [("\tif c.Status != metav1.ConditionTrue || c.Reason != prv1.ReasonReconcileSuccess {\n\t\treturn\n\t}\n\tmanaged.SetConditions(start.keep(",
+       "\tmanaged.SetConditions(start.keep(")]),
+    ("any degraded pass says it is refused", RC,
+     [("\tif !a.Degraded || !errors.Is(a.Err, credentialuse.ErrChainsNotSupported) {", "\tif !a.Degraded {")]),
+    ("a new holder's pass says it is refused", RC,
+     [("\tif !a.Degraded || !errors.Is(a.Err, credentialuse.ErrChainsNotSupported) {", "\tif !errors.Is(a.Err, credentialuse.ErrChainsNotSupported) {")]),
+    ("a failed gate's error joins the message", RC,
+     [("\tline, _, _ := strings.Cut(a.Err.Error(), \"\\n\")\n\treturn line\n", "\t_ = strings.Cut\n\treturn a.Err.Error()\n")]),
+    ("the gauge isn't set", TR,
+     [("\t\tdelete(r.by, uid)\n\t}\n\tsinkMetrics{t}.RefusedHolders(kindLabel(t.gk), len(r.by))\n", "\t\tdelete(r.by, uid)\n\t}\n")]),
+    ("only an established holder counts", TR,
+     [("\tt.noteRefused(obj.GetUID(), errors.Is(a.Err, ErrChainsNotSupported))\n", "\tt.noteRefused(obj.GetUID(), a.Degraded && errors.Is(a.Err, ErrChainsNotSupported))\n")]),
+    ("a pass that isn't refused leaves the count", TR,
+     [("\tt.noteRefused(obj.GetUID(), errors.Is(a.Err, ErrChainsNotSupported))\n", "\tif errors.Is(a.Err, ErrChainsNotSupported) {\n\t\tt.noteRefused(obj.GetUID(), true)\n\t}\n")]),
+    ("Forget leaves the count", TR, [("\tt.noteRefused(obj.GetUID(), false)\n", "")]),
+    ("a holder's deletion leaves the count", IN, [("\th.t.noteRefused(m.UID, false)\n", "")]),
+    ("the gauge isn't exported", TMC,
+     [("\tm.cu.refusedHolders.Record(context.Background(), int64(n), holderKind(holderKindLabel))\n", "")]),
     # reconcilertest.
     ("AssertCredentialRefsCover follows chains", RTC,
      [("\t\tif r.Next != nil && !followChains {", "\t\tif false {")]),
@@ -183,6 +210,8 @@ COVER = {RT: "TestAssertCredentialRefsCoverRefusesAChain"}
 GATED = {C: "TestARefusedPassGatesWhatTheRecordNames"}
 BOTH = {C: "TestARefusedPassGatesWhatTheRecordNames|TestKeptRefsInAnotherNamespaceAreGated"}
 ONCE = {C: "TestARefusedChainIsReportedOnce"}
+SYNCED = {R: "TestCredentialUseSyncedSaysARefusal"}
+GAUGE = {C: "TestTheRefusedHoldersGauge"}
 
 KILLERS = {
     "a chain is refused before the gate": BOTH,
@@ -235,6 +264,19 @@ KILLERS = {
     "Track turns chains on for a kind with Content": SCANNED,
     "the tests' switch doesn't reach the tracker": {C: "TestFollowChainsReachesTheTracker|TestCredentialUseResolvedOnConnectsContext|TestNothingInProductionFollowsChains"},
     "no resolved chain on Connect's context": {C: "TestCredentialUseResolvedOnConnectsContext"},
+    "Synced doesn't say a refusal": SYNCED,
+    "the pass doesn't keep the refusal": SYNCED,
+    "the refusal's Synced takes a new time each pass": SYNCED,
+    "any Synced says the refusal": SYNCED,
+    "any degraded pass says it is refused": {R: "TestCredentialUseSyncedSaysARefusal|TestRefusalOf"},
+    "a new holder's pass says it is refused": {R: "TestRefusalOf"},
+    "a failed gate's error joins the message": {R: "TestRefusalOf"},
+    "the gauge isn't set": GAUGE,
+    "only an established holder counts": GAUGE,
+    "a pass that isn't refused leaves the count": GAUGE,
+    "Forget leaves the count": GAUGE,
+    "a holder's deletion leaves the count": GAUGE,
+    "the gauge isn't exported": {TM: "TestCredentialUseMetrics"},
     "AssertCredentialRefsCover follows chains": COVER,
     "AssertCredentialRefsCover follows chains by default": {C: "TestNothingInProductionFollowsChains", RT: "TestAssertCredentialRefsCoverRefusesAChain"},
     "AssertCredentialRefsCover checks the first ref alone": COVER,

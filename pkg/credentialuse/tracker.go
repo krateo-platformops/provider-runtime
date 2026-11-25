@@ -67,6 +67,9 @@ type Tracker struct {
 	// neither that nor another failure hides the other, the failed gate of a
 	// refused pass included.
 	refused *reportedSet
+	// refusedNow are the holders whose last pass was refused for a chain, new
+	// or established, for credentialuse_refused_holders (§9, §12).
+	refusedNow refusedHolders
 	// misplaced are the holders in the index namespace whose refusal was
 	// logged, once each (§10.6.1).
 	misplaced *reportedSet
@@ -109,6 +112,7 @@ func (t *Tracker) rebind(o Options) {
 	t.sink = sinksOf(o)
 	t.sinkMu.Unlock()
 	t.reportHeld()
+	t.reportRefused()
 }
 
 // enqueue adds holder nn to the kind's queue.
@@ -173,6 +177,9 @@ func (m sinkMetrics) AdmissionDenied(k string) {
 }
 func (m sinkMetrics) ReleaseRejected(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.ReleaseRejected(k) })
+}
+func (m sinkMetrics) RefusedHolders(k string, n int) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.RefusedHolders(k, n) })
 }
 func (m sinkMetrics) DisownUnreadable(k string, n int) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.DisownUnreadable(k, n) })
@@ -501,6 +508,7 @@ func (t *Tracker) heldDeleting(id ID, namespace string) {
 // failed too is reported as any failure, since a Secret may stay held against
 // its owner meanwhile.
 func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
+	t.noteRefused(obj.GetUID(), errors.Is(a.Err, ErrChainsNotSupported))
 	key := consentKey{holder: obj.GetUID()}
 	if !a.Degraded {
 		t.degradedLogged.clear(key)
@@ -528,6 +536,42 @@ func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
 	t.warn("credential-use: the acquire failed for an established holder, which proceeds", kv...)
 }
 
+// refusedHolders are a tracker's refused holders, by UID.
+type refusedHolders struct {
+	mu sync.Mutex
+	by map[types.UID]bool
+}
+
+// noteRefused records whether holder uid's last pass was refused for a chain,
+// and sets credentialuse_refused_holders when that changes its count. It is
+// called with no other lock of the tracker's held, and holds its own across
+// the sink, so that the gauge's values come in the order of the changes.
+func (t *Tracker) noteRefused(uid types.UID, refused bool) {
+	r := &t.refusedNow
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.by[uid] == refused {
+		return
+	}
+	if r.by == nil {
+		r.by = map[types.UID]bool{}
+	}
+	if refused {
+		r.by[uid] = true
+	} else {
+		delete(r.by, uid)
+	}
+	sinkMetrics{t}.RefusedHolders(kindLabel(t.gk), len(r.by))
+}
+
+// reportRefused sets the gauge again, as after a rebind.
+func (t *Tracker) reportRefused() {
+	r := &t.refusedNow
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sinkMetrics{t}.RefusedHolders(kindLabel(t.gk), len(r.by))
+}
+
 // BeforeEstablish runs just before the caller adds its owner finalizer
 // (§7.2 item 3): it live-reads every ref that was Missing, and holds any
 // that now exists. On an error, the caller doesn't add the finalizer this
@@ -542,6 +586,7 @@ func (t *Tracker) BeforeEstablish(ctx context.Context, obj metav1.Object, a Acqu
 func (t *Tracker) Forget(obj metav1.Object) bool {
 	t.degradedLogged.forget(obj.GetUID())
 	t.refused.forget(obj.GetUID())
+	t.noteRefused(obj.GetUID(), false)
 	t.missing.set(types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, nil, t.s.clock.Now(), t.o.ProbeInterval)
 	return t.proto.forget(obj)
 }

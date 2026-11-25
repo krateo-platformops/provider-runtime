@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -773,6 +774,41 @@ type credentialUsePass struct {
 	// governor's requeue.
 	retryAfter time.Duration
 	deferred   bool
+	// refused is the refusal of an established holder's chain, which Synced's
+	// message carries while it lasts (refusedSynced), or "".
+	refused string
+}
+
+// refusedPrefix starts Synced's message while an established holder's refs are
+// refused (§9, §12; decided 2026-11-25).
+const refusedPrefix = "credential-use: refs refused, not held: "
+
+// refusedSynced puts a refused chain on Synced, just before each status write:
+// an established holder's pass proceeds, Synced=True/ReconcileSuccess, and the
+// refusal lasts until the provider or the object changes, while its event
+// doesn't (§9, §12; decided 2026-11-25). Only that Synced takes it; any other,
+// a policy report included, is left as it is. It keeps the condition's stored
+// transition time when nothing changed, so it costs no write of its own.
+func refusedSynced(managed resource.Managed, start passConditions, refused string) {
+	if refused == "" {
+		return
+	}
+	c := managed.GetCondition(prv1.TypeSynced)
+	if c.Status != metav1.ConditionTrue || c.Reason != prv1.ReasonReconcileSuccess {
+		return
+	}
+	managed.SetConditions(start.keep(c.WithMessage(refusedPrefix + refused + " (§9)")))
+}
+
+// refusalOf is the refusal of an established holder's pass, on one line, or "":
+// the first line of its error, which errors.Join puts first, before a failed
+// gate's (credentialuse.ErrChainsNotSupported).
+func refusalOf(a credentialuse.Acquired) string {
+	if !a.Degraded || !errors.Is(a.Err, credentialuse.ErrChainsNotSupported) {
+		return ""
+	}
+	line, _, _ := strings.Cut(a.Err.Error(), "\n")
+	return line
 }
 
 // requeue applies retryAfter to the pass's result: a pass that ends without
@@ -856,6 +892,7 @@ func (r *Reconciler) acquireCredentials(ctx, externalCtx context.Context, log lo
 	}
 	cup.acquired = a
 	cup.retryAfter = a.RetryAfter
+	cup.refused = refusalOf(a)
 	externalCtx = credentialuse.WithResolved(externalCtx, a)
 	externalCtx = withCredentialUseHolder(externalCtx, r.cu.tracker, managed)
 	return managed, externalCtx, reconcile.Result{}, false, nil

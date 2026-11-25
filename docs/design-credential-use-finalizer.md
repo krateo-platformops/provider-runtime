@@ -233,8 +233,11 @@ new key (`refs.v2`), and a reader that knows both reads both.
 
 **A record that can't be parsed counts as a user** of every protected
 object its namespace's check considers. It fails safe, and is logged with
-the holder's name. The holder's next acquire overwrites it with a valid
-record.
+the holder's name. The holder's next acquire that reaches its last A1
+overwrites it with a valid record. One that ends before it doesn't: a `Refs`
+error, a holder in the index namespace, a refused chain (§9). The record then
+stays unparseable, and keeps what it counts as used, as a paused holder's
+record does (§11.3).
 
 **Annotation, not status.** Every kind has annotations, unstructured
 objects included. Annotations survive backup, restore and GitOps re-applies
@@ -2518,7 +2521,7 @@ chain code stays, and stays tested, but nothing in production reaches it:
 |---|---|
 | New (no owner finalizer), with no record that names a ref in another namespace | `MustNotConnect`. No call by the core, no Connect, no finalizer. Synced=False/ReconcileError with the error, which names the ref; Ready=NotObserved; backoff |
 | New, with a record that names a ref in another namespace | The same, after the gate, which may write the drop of a withdrawn ref. It isn't established, but it counts as a user (§6.1), so without the gate it would keep that ref held against its owner |
-| Established | `Degraded`. Nothing written but the gate's drop, if any: the rest of its record, its `unheld` list and its holds stay as they are. A release reads that same record, so it takes only what §5 always lets it take. `CredentialUseDegraded` and a log line once (below), and the counter every pass, under the reason `ChainsNotSupported`. It connects as today, and `Resolved` finds nothing |
+| Established | `Degraded`. Nothing written but the gate's drop, if any: the rest of its record, its `unheld` list and its holds stay as they are; a record that can't be parsed stays so (§4). A release reads that same record, so it takes only what §5 always lets it take. Synced stays True/ReconcileSuccess, and its message says `credential-use: refs refused, not held: <the error, cut> (§9)` for as long as it is refused (decided 2026-11-25; §12). `CredentialUseDegraded` and a log line once (below), the counter every pass, under the reason `ChainsNotSupported`, and the gauge `credentialuse_refused_holders`. It connects as today, and `Resolved` finds nothing |
 | Established and being deleted | The same, then its external Delete runs, and `Forget` removes the record in the write that removes its finalizer, which releases what it held |
 | Being deleted, without an owner finalizer | provider-runtime doesn't acquire on it (§8 step 5), so nothing is refused |
 | It names no `Next` again | The next pass writes the exact record, holds what it names, and releases the rest |
@@ -2538,8 +2541,18 @@ under the event throttle, and counts `Announce` as well, since a withdrawn ref
 stays held meanwhile. This state lasts until the provider or
 the object changes, so the event throttle alone would let one through per
 holder every 10 minutes for as long: 17 a second for 10,000 holders. A restart
-records each once more. The counter counts every pass. A new holder's message
-is its condition's, as for any failure.
+records each once more. **The event doesn't last**: the API server drops it
+after its `--event-ttl`, about an hour, and client-go's broadcaster queues
+1,000 events and drops the rest, so after a restart with many refused holders
+most of theirs are never sent. **What lasts** is Synced's message on the holder,
+which a refused pass sets with the status write every pass makes anyway, so it
+costs no write of its own and keeps its transition time; the gauge
+`credentialuse_refused_holders`, which counts the holders whose last pass in
+this process was refused, new and established, and drops one at a pass that
+isn't refused, at `Forget` and at the holder's deletion; and the counter, every
+pass. A new holder's message is its condition's, as for any failure. The log
+line carries the ref whole, for an established holder only, and unbounded:
+however long the name, and with its line breaks unless the logger escapes them.
 
 **Disown (§7.4) is no remedy for a refused new holder**: it doesn't connect
 while its refs have a `Next`, whatever the switch covers. An established one
@@ -4391,7 +4404,10 @@ reconciles. That is a limit (the user's decision, 2026-11-24). **The way out:**
 Nor is anything dropped while a holder is edited faster than a pass takes, since
 every A1 then conflicts, or while the API server refuses the A1 for a cause other
 than its size (a 422 from a schema or a webhook), or while every pass's context
-ends before its A1. The gate leaves that half of what the context has.
+ends before its A1. The gate leaves that half of what the context has. Nor is
+anything dropped from a record that can't be parsed while every pass ends
+before its last A1 (§4): it names nothing to ask about, and only that A1 writes
+a valid one. That is no wider than a paused holder.
 
 **A ref that only the record keeps, recreated without the annotation, is
 dropped.** A two-step apply (the object, then its annotation) of a target that
@@ -4745,6 +4761,19 @@ For example:
 successful pass, and never to a failure that isn't in Connect or Observe.
 It is message text, not a new condition (U4).
 
+**The one exception: a refused chain** (decided 2026-11-25). While an
+established holder's refs are refused (§9), its Synced stays
+True/ReconcileSuccess, and its message is exactly
+`credential-use: refs refused, not held: <the refusal's error> (§9)`, on one
+line: the error quotes and cuts the ref. It is set with the status write that
+every pass makes, so it costs none of its own, and keeps the condition's
+transition time while it doesn't change. The first pass that isn't refused,
+a failed one included, takes it off. A refusal lasts until the provider or
+the object changes, and its event doesn't (§9), so the object itself says it.
+A new holder's Synced is False/ReconcileError with the error, as for any
+failure. Outside runtimes, in neutral terms: report a refused chain durably on
+the object, not only as an event.
+
 **Outside runtimes**, in neutral terms: when a pass fails because the
 object's credentials or the objects that lead to them can't be read, and
 the object's `unheld` annotation is non-empty, add to the failure you
@@ -4761,6 +4790,8 @@ separate, and is written on the CRD (§7.4).
 **The metrics**, all labelled `holder_kind`:
 `credentialuse_held_objects` and `credentialuse_waiting_objects` (gauges),
 `credentialuse_index_fill_ratio` (gauge, PerName and PerNamePoll),
+`credentialuse_refused_holders` (gauge, the holders whose last pass in this
+process was refused for a chain, §9; decided 2026-11-25),
 `credentialuse_degraded_total{reason}` (every fail-open of §8, which earlier
 revisions counted without naming; a refused chain has a reason of its own,
 `ChainsNotSupported`, §9), `credentialuse_refs_not_held_total`,
@@ -4883,8 +4914,11 @@ Doc text for consumers:
 > other object Connect reads, as a ref of its own. If any ref has a `Next`,
 > the whole list is refused with `credentialuse.ErrChainsNotSupported`: a new
 > object doesn't connect and reports `Synced=False`; an existing one keeps
-> working, with one `CredentialUseDegraded` event, and keeps what it already
-> holds, but **nothing new is held, its direct refs included**. On an upgrade
+> working, with `Synced=True` whose message says
+> `credential-use: refs refused, not held: …` for as long as it lasts, one
+> `CredentialUseDegraded` event, which expires, and the gauge
+> `credentialuse_refused_holders`; it keeps what it already holds, but
+> **nothing new is held, its direct refs included**. On an upgrade
 > to credential-use, an existing object has no record yet, so it holds
 > nothing. Disown doesn't let a refused new object connect. A Secret whose
 > name is only inside another object can't be named, so leave it out: it
@@ -5636,6 +5670,7 @@ The first revision is `a2ee5d1`. This revision answers its review.
 | U2 Implicit wiring; setup failure refuses to start | §7.3, §7.5 (the builder line: NQ3, below) |
 | U3 Build `Resolved` now; alone it doesn't close the window | §9.2 |
 | U4 Events, a log line and a gauge; no new condition | §12 |
+| A refused chain says so on the object: Synced=True's message, and the gauge `credentialuse_refused_holders`, the one exception to "never on a successful pass" (decided 2026-11-25) | §9, §12 |
 | U5 Hold only when unrecoverable; the residual and its remedy | §5 |
 | U6 Shared finalizer per (K, N), write-to-acquire, no drain mark, JSON-patch tests, the proof, the in-memory verified set, §15's grounds | §3, §6, §15.1, §15.7 |
 | U7 ClusterRole and ClusterRoleBinding, `resourceNames`, a namespaced Role is unsafe, core-provider's point 5 | §13 |
@@ -5978,6 +6013,9 @@ them, on 1.36.2 and 1.37.0 (§6.2).
 **Decided on 2026-11-24:** the first tag supports direct refs only. A ref
 that uses a chain gets a clear error, and chains come in the next release
 (§9). U1 and C2 (§17) therefore ship there, not in the first tag.
+
+**Decided on 2026-11-25:** an established holder whose chain is refused says so
+on Synced=True's message, and a gauge counts such holders (§9, §12).
 
 Nothing is open.
 

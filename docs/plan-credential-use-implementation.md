@@ -1273,7 +1273,10 @@ unchanged.
   wraps it names the ref's kind, namespace and name, quoted and cut as an
   index line's error is (`quotedLine`): a tenant may write the name, and the
   event of a refusal, recorded once, must fit an event's note of 1,024 bytes.
-  The log line has the ref whole.
+  The log line has the ref whole, for an established holder only (a new
+  holder's pass logs nothing of its own: its condition and its error carry the
+  cut), and unbounded: as long as the name, with its line breaks unless the
+  logger escapes them.
 - **Refused in the protocol's `acquire`, before it looks at the list**, and so
   before A1 and A2: `refuseChains` over the whole list `RefsFunc` returned,
   **just after the gate of what the record names** (§11.3), which begins
@@ -1294,7 +1297,15 @@ unchanged.
   it, `ChainsNotSupported`, every pass; the event and the log line are
   recorded once per holder, since it doesn't pass by itself. A refused pass
   whose gate also failed is reported as any failure, and counts `Announce`
-  too: a Secret may be held against its owner meanwhile.
+  too: a Secret may be held against its owner meanwhile. The event expires
+  (the API server's `--event-ttl`) and may be dropped (client-go's queue of
+  1,000), so what lasts is on the object, by the user's decision of
+  2026-11-25: an established refused holder's Synced stays
+  True/ReconcileSuccess with the message `credential-use: refs refused, not
+  held: <the error> (§9)`, set by the adapter just before every status write
+  (`refusedSynced`, after `policySynced`), with the transition time kept; and
+  the gauge `credentialuse_refused_holders{holder_kind}`, of the holders whose
+  last pass in the process was refused.
 - `AssertCredentialRefsCover` fails on a ref with a `Next`, or a provider's
   test would pass and its holders then not connect. It can't be used for a
   fixture whose Connect reads a Secret through another object (§9).
