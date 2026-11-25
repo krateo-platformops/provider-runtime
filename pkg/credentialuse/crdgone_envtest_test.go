@@ -17,6 +17,7 @@ import (
 	"time"
 
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -821,6 +822,53 @@ func TestAKindThatGoesAndReturns(t *testing.T) {
 	}
 	r.removeKind(t, ns, "g2")
 	gizmoReleased(t, 2*time.Minute, ns, "s2")
+}
+
+// A holder kind whose CRD goes and returns namespaced, while a process that
+// mapped it cluster-scoped runs throughout, its write loops too (§6.2, §6.4):
+// what a holder of the new CRD uses stays, and what none uses goes. Not checked:
+// an API server that still serves the deleted CRD.
+func TestAHolderKindThatReturnsNamespacedUnderARunningProcess(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	a, cached := env.Namespace(t, "scope-run"), env.Namespace(t, "scope-run")
+	crd := newScopeCRD(t, a)
+	crd.create(apiextensionsv1.ClusterScoped)
+	// The Secrets of a are outside its caches: every batch reads the holders
+	// live.
+	s, old := crd.track(cu.SharedOptions{Namespaces: []string{cached}})
+	running(t, s)
+	ref := cu.SecretRef(a, "a-used")
+	crd.remove()
+	crd.gone(old, ref, a)
+	crd.create(apiextensionsv1.NamespaceScoped)
+	crd.holder(a, "h", ref)
+	holdSecret(t, crd.kind().GroupKind(), a, "a-used")
+	holdSecret(t, crd.kind().GroupKind(), a, "b-unused")
+	cutest.Eventually(t, time.Minute, func() error {
+		if f := finalizersOf(t, a, "b-unused"); len(f) != 0 {
+			return fmt.Errorf("the unused Secret's finalizers are %v: %w", f, cutest.ErrNotYet)
+		}
+		return nil
+	})
+	for range 30 {
+		if f := finalizersOf(t, a, "a-used"); len(f) != 1 {
+			t.Fatalf("the used Secret's finalizers are %v, want its hold", f)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := crd.at(a).Patch(ctx, "h", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := crd.at(a).Delete(ctx, "h", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cutest.Eventually(t, time.Minute, func() error {
+		if f := finalizersOf(t, a, "a-used"); len(f) != 0 {
+			return fmt.Errorf("the used Secret's finalizers are %v: %w", f, cutest.ErrNotYet)
+		}
+		return nil
+	})
 }
 
 func secretEpoch(ns, name, f string) string {

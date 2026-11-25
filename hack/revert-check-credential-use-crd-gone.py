@@ -20,11 +20,11 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
-CG, WF, RL, TR, DI, IX, SH, PN, LW = [C + f for f in (
-    "crdgone.go", "watchfail.go", "release.go", "tracker.go", "disown.go", "index.go", "shared.go", "pername.go", "listwatch.go")]
+CG, WF, RL, TR, DI, IX, SH, PN, LW, UN = [C + f for f in (
+    "crdgone.go", "watchfail.go", "release.go", "tracker.go", "disown.go", "index.go", "shared.go", "pername.go", "listwatch.go", "uncached.go")]
 R = "pkg/reconciler/"
 RC = R + "credentialuse.go"
-FILES = [CG, WF, RL, TR, DI, IX, SH, PN, LW, RC]
+FILES = [CG, WF, RL, TR, DI, IX, SH, PN, LW, UN, RC]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
 MUTANTS = [
@@ -33,6 +33,8 @@ MUTANTS = [
      [("\tif err != nil && p.noHolders != nil {\n", "\tif false && err != nil && p.noHolders != nil {\n")]),
     ("R2 takes any failed list for an empty one", RL,
      [("\t\terr = p.noHolders(ctx, err)\n", "\t\t_, err = p.noHolders(ctx, err), error(nil)\n")]),
+    ("what noHolders keeps isn't Failed", RL,
+     [("\t\t\tfor _, r := range decidable {\n\t\t\t\tres.Failed = append(res.Failed, r.id)\n\t\t\t}\n\t\t\tbreak\n", "\t\t\tbreak\n")]),
     ("R2 asks though its list succeeded", RL,
      [("\tif err != nil && p.noHolders != nil {\n", "\tif p.noHolders != nil {\n")]),
     ("the tracker's protocol asks nobody", TR,
@@ -145,9 +147,23 @@ MUTANTS = [
     ("each deletion starts a recheck", CG,
      [("\tif t.rechecking {\n", "\tif false && t.rechecking {\n")]),
     ("a recheck asked for meanwhile is lost", CG,
-     [("\t\tt.recheckAgain = true\n", "")]),
+     [("\t\tselect {\n\t\tcase t.recheckAsk <- struct{}{}:\n\t\tdefault: // one is asked for already\n\t\t}\n", "")]),
     ("a recheck is a tracker's last", CG,
-     [("\t\t\tt.rechecking, t.recheckAgain = again, false\n", "\t\t\tt.recheckAgain = false\n")]),
+     [("\t\t\tt.rechecking = again\n", "\t\t\tt.rechecking = again || true\n")]),
+    ("the end of a recheck doesn't look for an ask", CG,
+     [("\t\t\tcase <-ask:\n\t\t\t\tagain = ctx.Err() == nil\n", "\t\t\tcase <-make(chan struct{}):\n\t\t\t\tagain = ctx.Err() == nil\n")]),
+    ("an ask doesn't cut a recheck's wait", UN,
+     [("\t\tcase <-ask:\n", "\t\tcase <-make(chan struct{}):\n")]),
+    ("an ask retries only what failed", UN,
+     [("\t\t\tleft, attempt = s.recheckParts(ts), -1\n", "\t\t\tattempt = -1\n")]),
+    ("an ask keeps what the last try did", UN,
+     [("\tleft := s.recheckParts(ts)\n\tfor attempt", "\tall := s.recheckParts(ts)\n\tleft := all\n\tfor attempt"),
+      ("\t\t\tleft, attempt = s.recheckParts(ts), -1\n", "\t\t\tleft, attempt = all, -1\n")]),
+    ("an ask cancels the recheck's work", CG,
+     [("\t\"strings\"\n\t\"time\"\n", "\t\"strings\"\n\t\"sync\"\n\t\"time\"\n"),
+      ("func (s *Shared) recheckSoon(t *Tracker) {\n", "var recheckCancels sync.Map\n\nfunc (s *Shared) recheckSoon(t *Tracker) {\n"),
+      ("\t\tcase t.recheckAsk <- struct{}{}:\n", "\t\tcase t.recheckAsk <- struct{}{}:\n\t\t\tif c, ok := recheckCancels.Load(t); ok {\n\t\t\t\tc.(context.CancelFunc)()\n\t\t\t}\n"),
+      ("\t\t\ts.recheckUncachedAsked(ctx, []*Tracker{t}, ask)\n", "\t\t\trunCtx, cancel := context.WithCancel(ctx)\n\t\t\trecheckCancels.Store(t, cancel)\n\t\t\ts.recheckUncachedAsked(runCtx, []*Tracker{t}, ask)\n\t\t\tcancel()\n")]),
     ("a recheck starts while the write loops end", CG,
      [("\tif ctx == nil || ctx.Err() != nil {\n", "\tif ctx == nil {\n")]),
     ("the write loops don't wait for a recheck", CG,
@@ -239,7 +255,7 @@ STOPPED = {C: "TestAStoppedPerNameWatchForgetsItsFailure"}
 STREAM = {C: "TestAStreamsInitialListIsARecovery"}
 VETO = {C: "TestTheDiscoverysVeto"}
 LOGGED = {C: "TestAReleaseForWantOfTheKindIsLoggedOnce"}
-RECHECK = {C: "TestOneRecheckPerTracker"}
+RECHECK = {C: "TestTheCRDsDeletionCutsARecheckWaitShort|TestTheCRDsDeletionRereadsTheIndex|TestARecheckAskedForMeanwhile|TestAnAskCutsNoPrune"}
 WAIT = {C: "TestTheWriteLoopsWaitForTheRecheck|TestTheRecheckAfterACRDsDeletionEndsWithTheWriteLoops"}
 NEXT = {C: "TestAFailedTracksFailuresAreLoggedByTheNext"}
 INDEX = {C: "TestTheIndexInformersFailureIsLoggedOnce"}
@@ -301,6 +317,12 @@ KILLERS = {
     "each deletion starts a recheck": RECHECK,
     "a recheck asked for meanwhile is lost": RECHECK,
     "a recheck is a tracker's last": RECHECK,
+    "what noHolders keeps isn't Failed": {C: "TestWhatNoHoldersKeepsIsFailed"},
+    "the end of a recheck doesn't look for an ask": RECHECK,
+    "an ask doesn't cut a recheck's wait": RECHECK,
+    "an ask retries only what failed": RECHECK,
+    "an ask keeps what the last try did": RECHECK,
+    "an ask cancels the recheck's work": RECHECK,
     "a recheck starts while the write loops end": WAIT,
     "the write loops don't wait for a recheck": WAIT,
     "a ghost's record keeps its line": {C: "TestAGhostsRecordKeepsNoLine"},

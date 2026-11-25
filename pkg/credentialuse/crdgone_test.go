@@ -45,6 +45,92 @@ func TestAKindThatIsGoneAtItsDeclaredVersion(t *testing.T) {
 	r.onlyDeclared(t, "list")
 }
 
+// A holder kind that a process maps cluster-scoped, and that is namespaced
+// now, is listed whole, and filtered (§6.2): its list succeeds, so its CRD isn't
+// read, whether a user keeps the hold or none does. With the CRD gone, the
+// cluster-wide list is the API server's 404, and one GET of the CRD releases.
+func TestAHolderKindMappedClusterScopedAndItsCRD(t *testing.T) {
+	ctx := context.Background()
+	id := secretID("ns", "s")
+	for name, c := range map[string]struct {
+		user, gone bool
+		held       bool
+		gets       int
+	}{
+		"a user there": {user: true, held: true},
+		"no user":      {},
+		"the CRD gone": {gone: true, gets: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			objs := []runtime.Object{heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns")}
+			if c.user {
+				objs = append(objs, holderObject("ns", "h", id))
+			}
+			r, tr, _ := scopeRig(t, meta.RESTScopeRoot, objs...)
+			if c.gone {
+				r.breakable("widgets").fail(errTest404)
+				r.removeCRD(t, widgetGK)
+			}
+			r.md.ClearActions()
+			res, err := tr.proto.release(ctx, "ns", []ID{id})
+			if err != nil || r.heldBy(t, widgetGK, "ns", "s") != c.held {
+				t.Errorf("release = %+v, %v; want held %v", res, err, c.held)
+			}
+			if got := r.crdGets(); len(got) != c.gets {
+				t.Errorf("the CRD's GETs: %q, want %d", got, c.gets)
+			}
+		})
+	}
+}
+
+// What noHolders keeps, the batch couldn't decide: every object of the round
+// that reached R2 is Failed, retried with its backoff (§6.2). What it finds
+// gone is decided, and none is.
+func TestWhatNoHoldersKeepsIsFailed(t *testing.T) {
+	a, b := secretID("ns", "a"), secretID("ns", "b")
+	for name, c := range map[string]struct {
+		gone   bool // the CRD is
+		before func(r *fakeRig)
+		failed bool
+	}{
+		"the CRD is there":   {failed: true},
+		"its GET is refused": {gone: true, failed: true, before: func(r *fakeRig) { r.failCRDGet(func() error { return errTest403 }) }},
+		"discovery can't be read": {gone: true, failed: true, before: func(r *fakeRig) {
+			r.disc.answer = func(string, *http.Request) (*http.Response, error, bool) {
+				return httpAnswer(503, "text/plain", "the aggregated API server is down\n"), nil, true
+			}
+		}},
+		"another resource serves the kind": {gone: true, failed: true, before: func(r *fakeRig) { r.disc.serve("v1", "widgetries", "Widget") }},
+		"the kind is gone":                 {gone: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "a", "u-a", widgetGK, "ns"), heldObject(secretGVK, "ns", "b", "u-b", widgetGK, "ns"))
+			tr := r.track(t, widgetGK)
+			r.breakable("widgets").fail(errTest404)
+			if c.gone {
+				r.removeCRD(t, widgetGK)
+			}
+			if c.before != nil {
+				c.before(r)
+			}
+			res, err := tr.proto.release(context.Background(), "ns", []ID{a, b})
+			if (err != nil) != c.failed {
+				t.Errorf("release = %v; want an error %v", err, c.failed)
+			}
+			want := []ID(nil)
+			if c.failed {
+				want = []ID{a, b}
+			}
+			if got := SortedIDs(res.Failed); !slices.Equal(got, want) {
+				t.Errorf("Failed = %v, want %v", got, want)
+			}
+			if held := r.heldBy(t, widgetGK, "ns", "a") && r.heldBy(t, widgetGK, "ns", "b"); held != c.failed || len(res.Released) != 2 && !c.failed {
+				t.Errorf("held %v, released %v; want held %v", held, res.Released, c.failed)
+			}
+		})
+	}
+}
+
 // R2 without a list of holders asks noHolders, once, after every R1 and the
 // list; its answer is an empty list, or the batch's error, with every hold
 // kept. Without it, as in the model, the list's failure is the error.

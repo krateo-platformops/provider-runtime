@@ -254,7 +254,9 @@ func (q *batchQueue) Fail(k batchKey, ids ...ID) (soonest time.Duration) {
 // how often they had failed, is forgotten. R0's keep, from the caches alone,
 // decides too (§6.2): the user it saw is in the way of any release, and its own
 // event runs the batch again when it goes, but for a user whose record can't be
-// parsed, and one of a kind whose CRD is gone (§6.2).
+// parsed (§6.2). A cached user of a kind whose CRD is gone has no event when it
+// goes: the CRD's own deletion runs the batches of what the kind holds, whose
+// R0 then doesn't take the cache's word (§6.4).
 func (q *batchQueue) Settle(k batchKey, ids ...ID) {
 	var stop []clock.Timer
 	q.mu.Lock()

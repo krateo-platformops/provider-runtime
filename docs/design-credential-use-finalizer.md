@@ -1377,7 +1377,12 @@ that landed before tG is of a holder that is gone by tC, and no user; one that
 lands between tG and tR breaks R3, and the next round asks again; one after tR
 adds the finalizer back. **A CRD created again** between the GET and R3 is
 these same cases: its new holders are those a list just before them misses too.
-A skip rests on the same two (below). It never matters which process did what,
+So is one created again with another scope (§6.2). A process that mapped the old
+one cluster-scoped lists the new one whole, and filters: its list succeeds, and
+the CRD isn't asked (`TestAHolderKindMappedClusterScopedAndItsCRD`). One that
+mapped it namespaced lists in a namespace, which the API server answers with a
+404 while the new CRD is there: the GET finds it, and the hold stays
+(`TestABatchWhoseHolderListFails`). A skip rests on the same two (below). It never matters which process did what,
 so two processes are no different (§6.8). The model searches the part that is
 new (§14): a releaser whose list is a 404 whether or not the CRD is there,
 against the CRD's return and a new holder of it, from a state in which the CRD
@@ -1423,19 +1428,28 @@ the evidence: the GET is.
   each round (`discoveryTimeout`).
 - *The cost* is one GET and one for each of the group's versions, one after
   another, for a round that found the CRD gone, and nothing otherwise. It is per
-  batch, so per (K, N): with 30 versions and holders in 50 namespaces, one CRD's
-  deletion is about 1,550 GETs. A client with a rate limit may not finish a
+  batch, so at least per (K, N), and objects of one key that are at different
+  backoffs are retried in batches of their own, each with its reads: with 30
+  versions and holders in 50 namespaces, one CRD's deletion is about 1,550 GETs,
+  and more for keys whose objects had failed at different times. A client with a rate limit may not finish a
   large group within the 10s; the batch is then retried. And a discovery that
   hangs holds one of the two release workers for 10s for each key of K, so that
   every kind's releases wait. The answer isn't shared between batches: that
   would be state in a path that decides a release, to save reads on a rare
   event.
 - *Just after the CRD goes*, discovery may still show it, or a version it no
-  longer serves may be a 404: the batch is retried, 1s and then 2s later for a
-  key that hadn't failed before. One that had, its CRD being there, is at its
-  backoff, of up to 5 minutes. The error says that discovery still shows the
+  longer serves may be a 404: every object of the round that reached R2 is
+  retried, 1s and then 2s later for one that hadn't failed before. One that had,
+  its CRD being there, is at its own backoff, of up to 5 minutes; the CRD's
+  deletion runs what the caches show, and asks for the recheck of what they
+  don't, at once (§10.2). The error says that discovery still shows the
   resource, and asks for no restart, which would leave the hold for good: a new
   process can't track the kind (§7.3).
+- *The log line* of a failed batch has its first three errors, and how many
+  more there are: with several objects whose R1 failed first, the error that
+  says what to grant for the CRD, or for discovery, may be among those cut, and
+  only the count says there is more. The errors aren't reordered: what the log
+  shows first is what failed first, the R1 reads.
 - *The client* is `Clients.Discovery`, a REST client and not a discovery client,
   so that a caching one can't answer for the API server. provider-runtime sets
   it. Without it no kind is ever taken for gone: the holds stay, and the error
@@ -3081,8 +3095,15 @@ holder it missed: only a change to P itself would. The recheck of what the
 caches can't show runs too, on the process whose write loops run: the objects
 outside them, where `SharedOptions.Namespaces` restricts them (§10.5), and in
 PerName mode those the index names (§10.6.5), whose watch may be refused. Of
-the rechecks that a CRD's deletion starts, one runs at a time for a tracker. A
-CRD that is back before the batch keeps R0 as it was: the holder informer lists
+the rechecks that a CRD's deletion starts, one runs at a time for a tracker,
+and those asked for while it runs are one. That one cuts the run's wait short,
+never its work: a run that waits to retry a part that fails, as a kind it can't
+list, starts again at once with every part, and nothing counted as done, since
+what a part read before the deletion may have changed; a run that doesn't wait
+runs once more when it ends. No part in flight is cancelled: an index prune
+between its write and its check of what it removed (§10.6.2) finishes both.
+Without that, a part that fails for good would keep the run on its backoff, and
+a hold that only the recheck finds would wait for a restart. A CRD that is back before the batch keeps R0 as it was: the holder informer lists
 again, within its backoff, and delivers what it missed.
 
 **And the acquirer enqueues the batch itself** after any A2 issued from a
