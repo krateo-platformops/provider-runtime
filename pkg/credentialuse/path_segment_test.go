@@ -134,8 +134,10 @@ func TestANameNoObjectCanHave(t *testing.T) {
 			t.Errorf("a list in %q made the calls %q", ns, a)
 		}
 	}
-	// Nor is anything of a cluster-scoped kind in a namespace.
-	for _, srv := range []clientServer{s, ofThings} {
+	// Nor is anything of a cluster-scoped kind in a namespace, but the holder
+	// kind's, which is asked for
+	// (TestAListOfAHolderKindMappedClusterScopedIsFiltered).
+	for _, srv := range []clientServer{s, ofSecrets} {
 		if l, err := srv.List(ctx, thing.GroupKind(), "a"); err != nil || len(l) != 0 {
 			t.Errorf("a list of a cluster-scoped kind in a namespace: %v, %v; want none", l, err)
 		}

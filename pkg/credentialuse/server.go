@@ -68,19 +68,17 @@ func (s clientServer) object(gk schema.GroupKind, namespace, name string) (metad
 	if !mayExist(namespaced, namespace, name) {
 		return nil, apierrors.NewNotFound(gvr.GroupResource(), name)
 	}
-	return s.client(gk, namespace)
+	return s.client(gvr, namespaced, namespace), nil
 }
 
-func (s clientServer) client(gk schema.GroupKind, namespace string) (metadata.ResourceInterface, error) {
-	gvr, namespaced, err := s.resource(gk)
-	if err != nil {
-		return nil, err
-	}
+// client returns the client for gvr, namespaced or not, as resource answered:
+// in namespace, or in every one.
+func (s clientServer) client(gvr schema.GroupVersionResource, namespaced bool, namespace string) metadata.ResourceInterface {
 	r := s.md.Resource(gvr)
 	if namespaced {
-		return r.Namespace(namespace), nil
+		return r.Namespace(namespace)
 	}
-	return r, nil
+	return r
 }
 
 func (s clientServer) Get(ctx context.Context, gk schema.GroupKind, namespace, name string) (*metav1.PartialObjectMetadata, error) {
@@ -128,15 +126,26 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 // selector and no resourceVersion: each page is a consistent read, and the
 // continue token keeps the pages at the first page's revision.
 // A namespace that can't exist has none, and any namespace none of a
-// cluster-scoped kind.
+// cluster-scoped kind: no call is made. But the holder kind's are always asked
+// for: the mapping is kept while the process lives, so a kind it has as
+// cluster-scoped may be namespaced by now, with holders in namespace, and R2
+// releases what has none (§6.2). Its list is then of every one, of which those
+// in namespace are kept. That is exact: a kind that is namespaced has them all
+// on that path, each with its namespace, and one that is cluster-scoped has
+// none with any, its holders' holds being of another finalizer (FinalizerName).
 func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace string) ([]metav1.PartialObjectMetadata, error) {
-	if _, namespaced, err := s.resource(gk); err == nil && namespace != "" && (!namespaced || !pathSegment(namespace)) {
-		return nil, nil
-	}
-	c, err := s.client(gk, namespace)
+	gvr, namespaced, err := s.resource(gk)
 	if err != nil {
 		return nil, err
 	}
+	filter := false
+	if namespace != "" {
+		filter = !namespaced && gk == s.holder.GroupKind()
+		if !filter && (!namespaced || !pathSegment(namespace)) {
+			return nil, nil
+		}
+	}
+	c := s.client(gvr, namespaced, namespace)
 	var out []metav1.PartialObjectMetadata
 	opts := metav1.ListOptions{Limit: listPageSize}
 	for {
@@ -144,7 +153,11 @@ func (s clientServer) List(ctx context.Context, gk schema.GroupKind, namespace s
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, l.Items...)
+		for i := range l.Items {
+			if !filter || l.Items[i].Namespace == namespace {
+				out = append(out, l.Items[i])
+			}
+		}
 		if l.Continue == "" {
 			return out, nil
 		}
