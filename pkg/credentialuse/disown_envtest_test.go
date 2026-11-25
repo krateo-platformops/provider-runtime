@@ -388,6 +388,11 @@ func TestDisownWithThreeProcesses(t *testing.T) {
 // after the Disown loop has stripped the record. The loop's next pass counts
 // the finalizer the A2 put back, so the settling resets, and strips it. The
 // Secret is outside the process's caches, as in the test above.
+//
+// The A2 is held back from the switch until that strip: the loop looks once a
+// second, so its TimeoutBound, which bounds an A2 whose pass has no deadline
+// (§7.2), is well past that, and the passes as long as Track's check wants. An
+// A2 whose bound ends while it is held back says so on landed.
 func TestALateA2AfterTheDisownStrip(t *testing.T) {
 	cutest.Require(t, env)
 	set := disowning(t)
@@ -400,7 +405,11 @@ func TestALateA2AfterTheDisownStrip(t *testing.T) {
 	theA2 := func(c cu.Call) bool {
 		return c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.StrategicMergePatchType
 	}
-	r := newWriteRig(t, env.Config, cu.SharedOptions{Namespaces: []string{cached}}, disownOptions, func(s *cu.Shared) {
+	slow := func(o *cu.Options) {
+		disownOptions(o)
+		o.TimeoutBound, o.DisownInterval = 5*time.Second, 5*time.Second
+	}
+	r := newWriteRig(t, env.Config, cu.SharedOptions{Namespaces: []string{cached}}, slow, func(s *cu.Shared) {
 		s.HookCalls(func(ctx context.Context, c cu.Call) error {
 			if !armed.Load() || !theA2(c) || !fired.CompareAndSwap(false, true) {
 				return nil
@@ -410,6 +419,12 @@ func TestALateA2AfterTheDisownStrip(t *testing.T) {
 			case <-release:
 				return nil
 			case <-ctx.Done():
+				// The A2's bound ended before the strip: fail with that,
+				// rather than wait for a landing that won't come.
+				select {
+				case landed <- fmt.Errorf("its context ended while it was held back: %w", ctx.Err()):
+				default:
+				}
 				return ctx.Err()
 			}
 		}, func(c cu.Call, err error) {
