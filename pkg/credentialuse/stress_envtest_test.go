@@ -974,6 +974,13 @@ func (w *stressWorld) audit(what string, teardowns int64) {
 			t.Errorf("AUDIT %s: and %d more", class, n-maxFindings)
 		}
 	}
+	// What is counted and fails nothing, to be read by hand: a log line, not
+	// an error, whose verdict the count script leaves alone.
+	for i, f := range r.notes {
+		if i < maxFindings {
+			t.Logf("NOTE %s: %s\n%s", f.class, f.text, h.timeline(f))
+		}
+	}
 	// A stress that did next to nothing proves nothing (the review of #114),
 	// and nor do audits that had next to nothing to look at.
 	if w.ops.Load() < 100 || passes < 100 || teardowns < 1 {

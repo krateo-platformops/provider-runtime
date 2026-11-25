@@ -6013,6 +6013,12 @@ failure that the API server had caused (H3 below). Now:
   consent; and a skip, a consent its caches may have had.
 - **One worker a key** (§10.2), **and the labels** that go with the finalizers
   (§3).
+- **Each A2 writes an epoch its finalizer never had on that object**
+  (`EPOCH-REUSED`), so that R3's test tells the holds apart. One that wrote
+  nothing, answered with a version another write made, is no bound of anything,
+  since its revision is older than it; and its hold counts from its answer on, so
+  that a release that takes it from under its user is judged as one over an A2
+  that landed.
 - **A record write drops no ref the holder still names,** except one in
   another namespace whose consent that pass read, live, as refused. And a pass
   that went through every ref leaves exactly the refs of the version it read,
@@ -6044,7 +6050,8 @@ failure that the API server had caused (H3 below). Now:
   and fails the run by itself.
 - **On a failure it prints** what it found, and the timeline around it, by
   revision: versions, calls, with what each list had, passes, releases and
-  DELETEs.
+  DELETEs. Each lost A2 that it counts and doesn't fail on (H1, below) is logged
+  the same way, as a `NOTE`, to be read by hand.
 
 Each audit is tested on made-up histories, without an API server, and against
 mutants of the protocol by `hack/revert-check-credential-use-stress.py`, which

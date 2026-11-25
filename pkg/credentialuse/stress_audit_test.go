@@ -153,7 +153,20 @@ func (b *auditRun) a1(p *stPass, rec ...stObj) {
 	})
 }
 
+// a2 is p's A2 on o. An epoch is written once on an object, as NewEpoch's
+// are: one that o had had is made another, with a suffix. a2Again writes it as
+// it is.
 func (b *auditRun) a2(p *stPass, o stObj, epoch string) {
+	for _, v := range b.vs {
+		if v.stObj == o && v.epochs[auditFin] == epoch {
+			epoch = fmt.Sprintf("%s.%d", epoch, len(b.calls))
+			break
+		}
+	}
+	b.a2Again(p, o, epoch)
+}
+
+func (b *auditRun) a2Again(p *stPass, o stObj, epoch string) {
 	b.call(stCall{proc: 1, g: "5", pass: p.id, op: "a2", obj: o, fin: auditFin, wrote: epoch}, func(c *stCall) {
 		c.from(b.put(o, b.last[o].uid, func(v *stVersion) { b.hold(v, epoch) }))
 	})
@@ -345,10 +358,10 @@ func TestAuditReleases(t *testing.T) {
 			b.batch()
 			p := b.pass()
 			b.a1(p, auditS)
-			b.a2(p, auditS, "e0")
+			b.a2Again(p, auditS, "e0")
 			b.end(p, auditS)
 			b.r3()
-		}, []string{findReleasedOverUser, findReleasedUnread}},
+		}, []string{findReleasedOverUser, findReleasedUnread, findEpochReused}},
 		{"the list came before R1, and missed a user", func(b *auditRun) {
 			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
 			b.r1()
@@ -563,6 +576,10 @@ func TestAuditRemovals(t *testing.T) {
 		b.calls[len(b.calls)-1].rv = read.rv
 		r := b.want(t)
 		wantCount(t, r, countLostA2, 1)
+		// It is noted, with its timeline, for a reading by hand.
+		if len(r.notes) != 1 || r.notes[0].class != findLostA2 || !strings.Contains(b.history().timeline(r.notes[0]), auditS.String()) {
+			t.Errorf("notes: %v, want one of %s, with a timeline of %s", r.notes, findLostA2, auditS)
+		}
 	})
 	t.Run("a held object that nothing explains", func(t *testing.T) {
 		b := newAuditRun(stressPlain).acquired()

@@ -1104,7 +1104,7 @@ func TestAuditGapNoopA2(t *testing.T) {
 		b.put(auditH, "uh", func(v *stVersion) { v.spec = "s" })
 		p := b.pass()
 		b.a1(p, auditS)
-		b.a2(p, auditS, "e1")
+		b.a2Again(p, auditS, "e1")
 		b.end(p, auditS)
 		b.want(t, "EPOCH-REUSED")
 	})

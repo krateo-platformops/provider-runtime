@@ -200,7 +200,7 @@ H1_CLASSES = counts.H1
 
 def errors(out):
     """The error lines of a go test -v output, less the stress's summaries."""
-    return [m for m in re.findall(r"^\s+\S+\.go:\d+: (.*)$", out, re.M) if not re.match(r"\d+ processes, \S+, seed \d+: ", m)]
+    return [m for m in re.findall(r"^\s+\S+\.go:\d+: (.*)$", out, re.M) if not re.match(r"\d+ processes, \S+, seed \d+: ", m) and not counts.NOTE.match(m)]
 
 
 def h1_alone(out):

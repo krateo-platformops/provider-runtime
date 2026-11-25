@@ -41,6 +41,7 @@ SUMMARY = re.compile(r"\d+ processes, \S+, seed \d+: ")
 NAMES = re.compile(r"^(\d+) (operations|namespace teardowns|passes)$")
 ERROR = re.compile(r"\s+\S+\.go:\d+: (.*)$")
 EXCUSED = re.compile("AUDIT (" + "|".join(H1) + "):")
+NOTE = re.compile(r"NOTE [A-Z0-9-]+: ")  # t.Logf's, of what is counted: no error
 MORE = re.compile(r"AUDIT [A-Z0-9-]+: and \d+ more$")
 RUNS = re.compile(r"=== (?:RUN|CONT|NAME)\s+(\S+)$")
 ENDS = re.compile(r"\s+--- (PASS|FAIL): TestStress/(\S+) \(([0-9.]+)s\)")
@@ -130,7 +131,7 @@ def read(path):
                 if v.isdigit():
                     total[name] += int(v)
                     seen[name] += int(v) > 0
-        elif m:
+        elif m and not NOTE.match(m[1]):
             (errors[current] if current else outside).append(m[1])
         end = ENDS.match(line)
         if end:

@@ -255,6 +255,9 @@ type stCall struct {
 	testedUID       string // r3: the uid and the epoch it tests
 	tested          string
 	wrote           string // a2: the epoch it writes
+	// noop: an A2 that wrote nothing, as far as the history can tell (wroteNothing):
+	// its answer is a version another write made. The history sets it.
+	noop bool
 }
 
 // A stItem is one holder of a list's answer.
@@ -281,11 +284,14 @@ func (c stCall) removal() bool { return c.op == "r3" && c.ok() && c.deleting && 
 // revision is the revision c was made at, if its answer has it: a write's, or
 // a consistent list's. A GET's is of the version it answered, an R3's that
 // removes the object of the version its tests ran on, and a list's page after
-// the first of its first page's.
+// the first of its first page's. An A2 that wrote nothing has none: it
+// happened after the revision it answered, and nothing says how long after.
 func (c stCall) revision() (uint64, bool) {
 	switch c.op {
-	case "a1", "a2":
+	case "a1":
 		return c.rv, true
+	case "a2":
+		return c.rv, !c.noop
 	case "list":
 		return c.rv, !c.continued
 	case "r3":
@@ -473,6 +479,10 @@ const (
 	findRecreate  = "H1-RECREATE"
 	findUnbounded = "H1-RECREATE-UNBOUNDED"
 	findLostA2    = "H1-LOST-A2"
+	// findEpochReused: an A2 wrote an epoch that its finalizer on that object
+	// had had already, or wrote nothing: R3's epoch test can't tell the two
+	// holds apart (§6.2). Epochs are random, so it is never the API server's.
+	findEpochReused = "EPOCH-REUSED"
 	// findTwice: two goroutines of one process worked on one key of the
 	// release queue at once (§10.2).
 	findTwice = "RELEASED-TWICE"
@@ -536,6 +546,9 @@ type stFinding struct {
 type stReport struct {
 	findings []stFinding
 	counts   map[string]int
+	// notes are what is counted and fails nothing, and is to be read by hand:
+	// the API server's H1, where no read failed for it.
+	notes []stFinding
 }
 
 // The counts. A run that checked next to nothing proves nothing.
@@ -696,6 +709,9 @@ func newStHistory(rec stRecording) *stHistory {
 			h.byPass[c.pass] = append(h.byPass[c.pass], i)
 		}
 	}
+	for i, c := range h.calls {
+		h.calls[i].noop = c.op == "a2" && c.ok() && h.wroteNothing(i)
+	}
 	for _, p := range rec.passes {
 		h.passes[p.id] = p
 	}
@@ -703,6 +719,35 @@ func newStHistory(rec stRecording) *stHistory {
 		h.writes[w.obj] = append(h.writes[w.obj], w)
 	}
 	return h
+}
+
+// wroteNothing reports whether the A2 at index i of the calls changed nothing,
+// so that its answer is a version another write made: the version before that
+// one had its finalizer, its epoch and the labels already; or another A2 was
+// answered with the same version, and began before this one ended, so that it
+// may have been the one that made it. Of two that overlap, neither is known to
+// have written, so both are taken to have written nothing: none of their
+// revisions bounds anything. Production writes a fresh epoch each time, and
+// has none (EPOCH-REUSED).
+func (h *stHistory) wroteNothing(i int) bool {
+	c := h.calls[i]
+	var before stVersion
+	for _, v := range h.objs[c.obj] {
+		if v.rv >= c.rv {
+			break
+		}
+		before = v
+	}
+	if !before.gone && before.uid == c.uid && slices.Contains(before.fins, c.fin) && before.epochs[c.fin] == c.wrote && before.badLabels == "" {
+		return true
+	}
+	for _, j := range h.byObj[c.obj] {
+		d := h.calls[j]
+		if j != i && d.op == "a2" && d.ok() && d.rv == c.rv && d.start.Before(c.end) {
+			return true
+		}
+	}
+	return false
 }
 
 // holderKind: objects of kind are holders in this run.
@@ -805,6 +850,7 @@ func (h *stHistory) callsOf(p *stPass, f func(c stCall) bool) []stCall {
 func (h *stHistory) audit() *stReport {
 	r := &stReport{counts: map[string]int{}}
 	h.auditCompleteness(r)
+	h.auditEpochs(r)
 	h.auditGets(r)
 	h.auditFeeds(r)
 	h.auditKept(r)
@@ -868,6 +914,29 @@ func (h *stHistory) auditCompleteness(r *stReport) {
 			if !ok {
 				lacks(w.obj, w.end, "the watch has no version of "+w.String())
 			}
+		}
+	}
+}
+
+// auditEpochs: every A2 that succeeded wrote, and wrote an epoch that its
+// finalizer on that object, of any incarnation, never had before.
+func (h *stHistory) auditEpochs(r *stReport) {
+	for _, c := range h.calls {
+		if c.op != "a2" || !c.ok() {
+			continue
+		}
+		why := ""
+		if c.noop {
+			why = "it wrote nothing: the object had that epoch already"
+		}
+		for _, v := range h.objs[c.obj] {
+			if why == "" && v.rv < c.rv && !v.gone && slices.Contains(v.fins, c.fin) && v.epochs[c.fin] == c.wrote {
+				why = "an earlier version had it: " + v.String()
+			}
+		}
+		if why != "" {
+			r.find(stFinding{class: findEpochReused, text: fmt.Sprintf("%s: %s", c, why), obj: c.obj,
+				from: c.start.Add(-2 * time.Second), to: c.end.Add(time.Second), zero: c.end, calls: []stCall{c}})
 		}
 	}
 }
@@ -1282,6 +1351,12 @@ func (h *stHistory) judge(r *stReport, i int, on stVersion, landed uint64) {
 				find(findReleasedUnread, nil, "an A2 had landed since it read the object: %s", a)
 				break
 			}
+			// One that wrote nothing confirmed a hold at its answer: between
+			// the read and the release, by the clocks of one process.
+			if a.noop && a.start.After(b.r1.end) && a.end.Before(c.start) {
+				find(findReleasedUnread, nil, "an A2 had confirmed a hold since it read the object, and wrote nothing that R3 could tell apart: %s", a)
+				break
+			}
 		}
 	}
 
@@ -1301,7 +1376,13 @@ func (h *stHistory) judge(r *stReport, i int, on stVersion, landed uint64) {
 			if first, ok := h.run(v, c.obj); ok {
 				for _, a := range a2s {
 					p := h.passes[a.pass]
-					if a.rv < first.rv || a.rv > on.rv || p == nil || p.holder != o || p.uid != v.uid {
+					if p == nil || p.holder != o || p.uid != v.uid {
+						continue
+					}
+					// An A2 that wrote nothing has no revision of its own: its
+					// hold is confirmed at its answer, by a pass that worked from
+					// a version of the run.
+					if a.noop && (!a.end.Before(c.start) || h.lastRead(p) < first.rv) || !a.noop && (a.rv < first.rv || a.rv > on.rv) {
 						continue
 					}
 					user, del = true, del || p.deleting
@@ -1537,6 +1618,8 @@ func (h *stHistory) auditRemovals(r *stReport) {
 				// The last version isn't one that a release's tests ran on: an
 				// A2 landed after the tests, and went with the object. H1.
 				r.counts[countLostA2]++
+				r.notes = append(r.notes, stFinding{class: findLostA2, text: fmt.Sprintf("%s: the last version, %s, is none that a release's tests ran on: %v", d, last, rs),
+					obj: o, from: d.at.Add(-5 * time.Second), to: d.at.Add(2 * time.Second), zero: d.at, calls: rs})
 			}
 			r.counts[countRemovals]++
 		}
@@ -1917,12 +2000,20 @@ func (h *stHistory) lastRead(p *stPass) uint64 {
 }
 
 // announced: the record named o before p's A2 on it: in the version p read,
-// or in one an A1 of p's wrote (§6.2).
+// or in one an A1 of p's wrote (§6.2). Before it, by the revisions; or, of one
+// that wrote nothing and has none, by the clock of the pass, whose calls come
+// one after another.
 func (h *stHistory) announced(p *stPass, o stObj, a2 stCall) bool {
 	if v, ok := h.version(p.holder, p.rv); ok && slices.Contains(v.rec, o) {
 		return true
 	}
-	return slices.ContainsFunc(h.callsOn(p.holder, func(c stCall) bool { return c.pass == p.id && c.op == "a1" && c.ok() && c.rv < a2.rv }), func(c stCall) bool {
+	before := func(c stCall) bool {
+		if a2.noop {
+			return !c.end.After(a2.start)
+		}
+		return c.rv < a2.rv
+	}
+	return slices.ContainsFunc(h.callsOn(p.holder, func(c stCall) bool { return c.pass == p.id && c.op == "a1" && c.ok() && before(c) }), func(c stCall) bool {
 		v, ok := h.version(p.holder, c.rv)
 		return ok && slices.Contains(v.rec, o)
 	})
@@ -2283,8 +2374,8 @@ func (h *stHistory) lostToRelease(d stVersion, a2 stCall) ([]stCall, bool) {
 	}
 	last, ok := h.last(d.stObj, d.uid)
 	rs := h.callsOn(d.stObj, func(c stCall) bool { return c.removal() && c.uid == d.uid })
-	if !ok || !d.deleting || a2.rv != last.rv || len(rs) == 0 {
-		return nil, false
+	if !ok || !d.deleting || a2.noop || a2.rv != last.rv || len(rs) == 0 {
+		return nil, false // one that wrote nothing made no version
 	}
 	return rs, !slices.ContainsFunc(rs, func(c stCall) bool { return c.rv >= a2.rv })
 }
@@ -2301,11 +2392,19 @@ func (h *stHistory) exempt(f stRead, d stVersion, fin string) (bool, string) {
 	// The window is from the A2 that began the hold it went with, to the read.
 	// The API server answers a release only once it has done with it, so one
 	// answered before that A2 began touched nothing since. One whose outcome
-	// isn't known may still have been at work, however early it began.
+	// isn't known may still have been at work, however early it began. Of the
+	// A2s answered with that version, the first to begin: one that wrote
+	// nothing began after the one that did.
 	began := h.createBegan(d.stObj, d.uid)
 	if v, held := h.heldSince(d); held {
+		first := time.Time{}
 		for _, a := range h.callsOn(d.stObj, func(a stCall) bool { return a.op == "a2" && a.ok() && a.rv == v.rv }) {
-			began = a.start
+			if first.IsZero() || a.start.Before(first) {
+				first = a.start
+			}
+		}
+		if !first.IsZero() {
+			began = first
 		}
 	}
 	rs := h.callsOn(d.stObj, func(c stCall) bool {
