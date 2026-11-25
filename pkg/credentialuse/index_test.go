@@ -181,6 +181,22 @@ func TestIndexLineCodec(t *testing.T) {
 	}
 }
 
+// IndexIDs reads what an index ConfigMap's data names, as the tracker does:
+// the lines that parse, sorted, without repeats; nothing from data without
+// the index's key.
+func TestIndexIDs(t *testing.T) {
+	data := map[string]string{indexDataKey: "  b/K/n/x\n\n/Secret/team-a/git-token\nb/K/n/x\ngarbage\nx/Cluster//c\n", "other": "a/K/n/y\n"}
+	want := []ID{SecretRef("team-a", "git-token").ID(), {Group: "b", Kind: "K", Namespace: "n", Name: "x"}, {Group: "x", Kind: "Cluster", Name: "c"}}
+	if got := IndexIDs(data); !slices.Equal(got, want) {
+		t.Errorf("IndexIDs = %v, want %v", got, want)
+	}
+	for _, d := range []map[string]string{nil, {}, {"other": "a/K/n/y\n"}, {indexDataKey: ""}} {
+		if got := IndexIDs(d); len(got) != 0 {
+			t.Errorf("IndexIDs(%v) = %v, want none", d, got)
+		}
+	}
+}
+
 // A line that wouldn't read back as its ID, or is of a name too long (§10.6),
 // is refused before A2, so that its holder isn't connected, or is Degraded;
 // and no add writes it.

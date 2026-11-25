@@ -69,6 +69,8 @@ func TestMain(m *testing.M) {
 			testCRD("Widget", "widgets", "v1", "v1alpha1"),
 			testCRD("Sprocket", "sprockets", "v1"),
 			testCRD("Gadget", "gadgets", "v1"),
+			// Shield is a protected kind of the held tests.
+			testCRD("Shield", "shields", "v1"),
 		},
 		ErrorIfCRDPathMissing: true,
 	}

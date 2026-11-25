@@ -57,11 +57,64 @@
 // the Kind is empty rather than report a wrong answer. It would also start a
 // metadata informer per Kind, which is the memory this package exists to save.
 //
+// # Held objects (credential-use)
+//
+// A Kind whose controller holds credentials through pkg/credentialuse must not
+// sit at zero replicas while it holds any: at 0 nothing releases them
+// (docs/design-credential-use-finalizer.md §11.6). ReconcileWithOptions and
+// ExistsWithOptions take two options for it; Reconcile and Exists are
+// unchanged. When the instance list finds nothing:
+//
+//   - WithHeld(protected...) lists each protected kind metadata-only, in every
+//     namespace, selected by the Kind's marker label (credentialuse.MarkerLabel)
+//     with Limit 1. It stops at the first object whose finalizers include the
+//     Kind's prefix (credentialuse.FinalizerPrefix), and pages on past an object
+//     that carries the label without the prefix, as a hash collision leaves.
+//   - WithHeldIndex(index) reads the Kind's index ConfigMap, for its PerName
+//     and PerNamePoll kinds, and GETs the objects its lines name until one
+//     still carries the prefix (§10.6.5). An index without its rebuilt marker
+//     is read like any other (decided 2026-11-25). An object that is gone holds
+//     nothing.
+//   - Either one, alone, also reads the Kind's CRD: a Disown switch that is set
+//     and hasn't settled counts as an instance, by credentialuse.DisownSettled's
+//     three checks (decided 2026-11-23), so that setting the switch on a Kind
+//     at zero wakes its controller to perform Disown. A disown-settled left by
+//     another value of the switch, or "true", hasn't settled it. A switch that
+//     is set but names nothing, as ",", never settles, so it keeps the
+//     controller up until it is removed (decided 2026-11-25).
+//
+// The two are independent and add up: a hold found by either counts (decided
+// 2026-11-25). A holder kind whose protected kinds are all LabelScoped passes
+// WithHeld with them; one whose kinds are all PerName passes WithHeldIndex;
+// one that mixes the modes passes WithHeld with its LabelScoped kinds and
+// WithHeldIndex for the others. WithHeld with no kind is an error (decided
+// 2026-11-25).
+//
+// Every failed read is an error, never "nothing held", so the controller stays
+// up: a failed LIST, a missing or unreadable CRD, a missing or unreadable
+// index, a failed GET of an object a line names, and a line whose kind the
+// RESTMapper can't map (decided 2026-11-25).
+//
+// Both options need a RESTMapper, for the CRD's name and for the kinds of the
+// index's lines. ReconcileWithOptions takes c.RESTMapper(). ExistsWithOptions
+// takes a client.Reader, which carries none, so it needs WithRESTMapper(m)
+// alongside either option, and fails without it (decided 2026-11-25).
+//
+// With them, a call on an empty Kind reads more: a GET of the CRD, then a
+// LIST page for each protected kind and for each collision on it, or a GET of
+// the index and one for each of its lines up to the first hold.
+//
 // # RBAC
 //
 // The owner needs list on the watched resource across all namespaces, and get
 // and patch on deployments/scale in the Deployment's namespace. It needs no
 // access to the Deployment object itself.
+//
+// With WithHeld or WithHeldIndex it also needs get on the holder kind's
+// CustomResourceDefinition (it may be scoped by resourceNames to that one
+// CRD). With WithHeld, list on each protected kind across all namespaces.
+// With WithHeldIndex, get on the index ConfigMap, and get on each object its
+// lines name, which a resourceNames rule can grant.
 package scaletozero
 
 import (
@@ -88,7 +141,9 @@ const pageSize int64 = 1
 type Reason string
 
 const (
-	// ReasonActive: at least one instance exists, so the controller runs.
+	// ReasonActive: at least one instance exists, so the controller runs. With
+	// WithHeld or WithHeldIndex, a held object or a Disown switch that hasn't
+	// settled counts as one.
 	ReasonActive Reason = "Active"
 	// ReasonIdleHoldDown: no instance exists, but the Kind hasn't been empty
 	// for the whole hold-down yet, so the controller keeps running.
@@ -125,7 +180,9 @@ type Result struct {
 	// exist is not time-based: the owner must call again when they are created
 	// or deleted (a watch, or its own resync).
 	RequeueAfter time.Duration
-	// Exists reports whether an instance was found.
+	// Exists reports whether an instance was found or, with WithHeld or
+	// WithHeldIndex, a held object or a Disown switch that hasn't settled,
+	// which count as instances.
 	Exists bool
 	// Patched reports whether Reconcile changed the Deployment's scale.
 	Patched bool
@@ -146,7 +203,24 @@ type Result struct {
 //
 // sel is required: pass labels.Everything() to match every instance. A nil sel
 // is an error.
+//
+// Exists is ExistsWithOptions with no options.
 func Exists(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, sel labels.Selector) (bool, error) {
+	return ExistsWithOptions(ctx, r, gvk, sel)
+}
+
+// ExistsWithOptions is Exists, with options. With WithHeld or WithHeldIndex,
+// when no instance exists, it also reports true while an object of a
+// protected kind still carries a credential-use finalizer of gvk's kind, or
+// while that kind's Disown switch is set and hasn't settled (see "Held
+// objects" in the package documentation). Those read the holder kind's CRD,
+// whose name needs the RESTMapper that WithRESTMapper gives: a client.Reader
+// carries none, so without it they are an error.
+//
+// Every failed read is an error, never false. The options are checked before
+// anything is listed, so a wrong one fails every call, not only those on an
+// empty Kind.
+func ExistsWithOptions(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, sel labels.Selector, opts ...Option) (bool, error) {
 	if r == nil {
 		return false, errors.New("scaletozero: Exists needs a reader")
 	}
@@ -156,7 +230,29 @@ func Exists(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, s
 	if gvk.Version == "" || gvk.Kind == "" {
 		return false, errors.Errorf("scaletozero: listing needs a version and a kind, got %q", gvk)
 	}
+	o, err := newOptions(opts)
+	if err != nil {
+		return false, err
+	}
+	found, err := first(ctx, r, gvk, sel, anyObject)
+	if err != nil || found {
+		return found, err
+	}
+	if !o.held() {
+		return false, nil
+	}
+	return o.heldExists(ctx, r, gvk)
+}
 
+// anyObject matches every object.
+func anyObject(*metav1.PartialObjectMetadata) bool { return true }
+
+// first reports whether gvk has an object that matches sel and match, in any
+// namespace. It lists metadata-only, one item per page, and stops at the
+// first object that match accepts. It follows the continue token past every
+// page without one, an empty page included, until the token runs out. A
+// failure on any page is an error.
+func first(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, sel labels.Selector, match func(*metav1.PartialObjectMetadata) bool) (bool, error) {
 	cont := ""
 	for {
 		list := &metav1.PartialObjectMetadataList{}
@@ -168,8 +264,10 @@ func Exists(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, s
 		if err := r.List(ctx, list, opts...); err != nil {
 			return false, fmt.Errorf("scaletozero: listing %s: %w", gvk, err)
 		}
-		if len(list.Items) > 0 {
-			return true, nil
+		for i := range list.Items {
+			if match(&list.Items[i]) {
+				return true, nil
+			}
 		}
 		if list.Continue == "" {
 			return false, nil
@@ -264,7 +362,20 @@ func nextLastSeen(exists bool, lastSeen, now time.Time) time.Time {
 // Deployment's spec, and only spec.replicas is patched, with a merge patch on
 // autoscaling/v1 Scale. c must read live: give it a client built with
 // client.New, not mgr.GetClient().
+//
+// Reconcile is ReconcileWithOptions with no options.
 func Reconcile(ctx context.Context, c client.Client, deploy types.NamespacedName, gvk schema.GroupVersionKind, sel labels.Selector, lastSeen time.Time, holdDown time.Duration, active int32) (Result, error) {
+	return ReconcileWithOptions(ctx, c, deploy, gvk, sel, lastSeen, holdDown, active)
+}
+
+// ReconcileWithOptions is Reconcile, with options. It decides on
+// ExistsWithOptions(ctx, c, gvk, sel, opts...), so that with WithHeld or
+// WithHeldIndex a held object, or a Disown switch that hasn't settled, keeps
+// the controller running as an instance does, and wakes it from 0. It takes
+// the RESTMapper those need from c.RESTMapper(); a WithRESTMapper among opts
+// takes its place. Every error behaves as Reconcile's: nothing changes, and
+// Result.Replicas is never 0.
+func ReconcileWithOptions(ctx context.Context, c client.Client, deploy types.NamespacedName, gvk schema.GroupVersionKind, sel labels.Selector, lastSeen time.Time, holdDown time.Duration, active int32, opts ...Option) (Result, error) {
 	// fail keeps everything as it was, and reports replicas that never read
 	// as 0: the current ones when they were read and are non-zero, else active.
 	read := false
@@ -299,7 +410,7 @@ func Reconcile(ctx context.Context, c client.Client, deploy types.NamespacedName
 	if active < 1 {
 		return fail(errors.Errorf("scaletozero: active must be at least 1, got %d", active))
 	}
-	exists, err := Exists(ctx, c, gvk, sel)
+	exists, err := ExistsWithOptions(ctx, c, gvk, sel, append([]Option{WithRESTMapper(c.RESTMapper())}, opts...)...)
 	if err != nil {
 		return fail(err)
 	}
