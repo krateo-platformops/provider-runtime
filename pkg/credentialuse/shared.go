@@ -205,6 +205,12 @@ type Shared struct {
 	namespaces cache.SharedIndexInformer
 	nsLW       *listWatch
 
+	// releaseWait draws the wait before the release of an object being deleted
+	// (§6.4); nil, in tests, is none. Set before anything runs. waits are those
+	// begun.
+	releaseWait func() time.Duration
+	waits       releaseWaits
+
 	// trackWaiting counts Tracks waiting for another Track of their kind,
 	// for tests.
 	trackWaiting atomic.Int32
@@ -294,6 +300,7 @@ func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 		// unheldReads shares the live read of an unheld hop among every
 		// holder kind of the process (§9.4).
 		unheldReads: newSharedReads(clk),
+		releaseWait: randomReleaseWait,
 		trackers:    map[schema.GroupKind]*Tracker{},
 		tracking:    map[schema.GroupKind]*inflight{},
 		runDone:     make(chan struct{}),

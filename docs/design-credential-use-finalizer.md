@@ -268,10 +268,11 @@ the target's consent (§11.3). One that isn't held isn't covered here, and
 the original deadlock doesn't apply to it: the holder's namespace teardown
 never deletes a Secret in another namespace.
 
-**The re-reads are the last step before the release patch.** When the
+**The re-reads are the last reads before the release patch.** When the
 grace has run out, the releaser GETs the Namespace live and reads its
 `deletionTimestamp`, not its phase. It then lists the holders live, to find
-users that are deleting. Only then does it patch (§6.2, R2 and R3). Reading
+users that are deleting. Only then does it patch (§6.2, R2 and R3); how long
+that can be, and what can start in it, is in §6.4. Reading
 them earlier, when P is first read, would let a namespace deletion or a
 holder deletion that starts during the grace go unseen.
 
@@ -840,8 +841,10 @@ model decides one batch (`RequeueAt` is all it reads of a schedule), and has
 none for what failed, what asked, or the backoff: those are the release loop's,
 tested on the queue by enumeration and on the loop. A time a batch asks for, a
 grace's end or a repaired epoch's recheck, is for the object that asked, each at
-its own time, not for the rest of the batch, and waits for no backoff. The log line of a failed batch has the first few
-errors, and how many more there are.
+its own time, not for the rest of the batch, and waits for no backoff. An object
+whose release must wait (R1, §6.4) is neither decided nor failed: it is queued
+again when its wait ends, and its backoff stays as it was. The log line of a
+failed batch has the first few errors, and how many more there are.
 
 **The releaser** works on one holder kind K and one namespace N at a time,
 for the set of protected objects pending there (R7). For each pending P:
@@ -872,6 +875,13 @@ for the set of protected objects pending there (R7). For each pending P:
   - If P is being deleted in a namespace that was live when last seen, has
     users by R0, and is still inside the grace, requeue the batch at the
     end of the grace (§5).
+  - Otherwise, if P is being deleted, and its namespace was live when last seen,
+    **wait a random time below 2s** first (§6.4, H1): P leaves the batch, which
+    goes on with the others, and is queued again when its wait ends; R1 then reads
+    it again. The wait is the object's own, of that incarnation, begins once, and
+    is forgotten when a batch decides P: a retry doesn't wait again, and a P that
+    was kept does, at its next release. It holds no worker, moves neither a grace's end nor a retry, and is
+    dropped when the write loops stop. Nothing that isn't being deleted waits.
 - **R2. The last reads, after every R1 in the batch.** First read the
   clock: whether each P's grace is over is decided on that reading, taken
   before any of R2's reads (revision 17, §6.4). For each P being
@@ -1037,16 +1047,19 @@ tG, whose R2 list reads at tL > tG, and whose R3 patch lands at tR > tL.
 - If tD_H < tL, the list sees H deleting, so P is kept.
 - If tD_H > tL, H's deletion pass runs A2 without a skip. If that write
   lands before tR, R3 fails and the retry's list sees H deleting.
-- If it lands after tR, the release won. This needs tD_H inside the
-  releaser's few milliseconds between the list and the patch, and after the
-  grace. A2 then reports Deleting, H proceeds Degraded, and H fails until P
-  is recreated. Its namespace is live, so this is recoverable, and it is
-  part of §5.2's residual.
+- If it lands after tR, the release won. This needs tD_H between what the
+  list saw and the patch (a few milliseconds for a batch of one, about M
+  round trips for the last of M), and after the grace. A2 then reports
+  Deleting, H proceeds Degraded, and H fails until P is recreated. Its
+  namespace is live, so this is recoverable, and it is part of §5.2's
+  residual.
 
-The namespace's deletion is handled the same way. Its `deletionTimestamp`
-is read live after the grace, as the last step before R3. A namespace
-deletion that starts after that read deletes the holders, and their
-deletion passes write, which breaks an R3 that hasn't landed yet.
+The namespace's deletion is handled the same way, with an earlier read. R2
+GETs each Namespace live, after the grace, and **then** makes the list. So
+the list, with all its pages, and the batch's other Namespaces may come
+between a Namespace's read and R3. A namespace deletion that starts after
+that read deletes the holders, and their deletion passes write, which breaks
+an R3 that hasn't landed yet.
 
 **The grace is measured before R2's reads** (M4 of the review of the
 protocol's code, revision 17). R2 reads the clock first, and decides
@@ -1057,8 +1070,9 @@ deletion that began inside the grace, after the GET, was then released over
 as if it had begun after the grace. A test reproduces it, and the model
 checks every release against it.
 
-**That leaves an unrecoverable window, about M round trips wide for M R3
-patches in a row** (L3). Say
+**That leaves an unrecoverable window: the rest of R2's reads, usually below
+100ms and not bounded by that, and about M round trips for M R3 patches in a
+row** (L3). Say
 the namespace's deletion begins between R2's Namespace GET and R3's patch,
 after the grace, while no user is deleting. R3 then lands first, because
 the namespace controller takes far longer than that to discover and delete
@@ -1068,6 +1082,189 @@ namespace, then the grace running out with no user deleting, then the
 namespace deleted inside that window. Nothing in this design closes
 it. It is stated here, and tested in the model, rather than claimed
 away.
+
+*Why the list takes that long, by the source.* The API server answers a consistent
+list from its watch cache, once the cache has reached the revision that etcd is at.
+If something in etcd was written since the cache's last event, of whatever kind, and
+the holder kind isn't being written, the cache learns that it is there from a progress
+notification. The API server asks etcd for one at most once in 100ms, while a read
+waits (apiserver v0.37.2 and v0.36.2, `storage/cacher/progress/watch_progress.go:34`
+and `:77-108`). So a list made within 100ms of such a request waits for the next one,
+and a list after a quieter time asks at once. The requests are each holder kind's own,
+on each API server, as far as the API server's side shows: each resource has an etcd
+client of its own. **100ms isn't a bound:** a cache that can't catch up makes the list
+wait 3s (`blockTimeout`, `storage/cacher/watch_cache.go`), and the API server then
+reads etcd itself (v0.37.2 `storage/cacher/delegator.go`; behind an alpha gate that is
+off by default, it answers a 429). The longest list seen was 108ms, in the freshness
+runs below.
+
+Measured on envtest 1.37.0 (4 CPUs, one API server), for batches of one, from the start
+of the Namespace's read to the start of R3. In every row a creator tries each Secret
+again each 1ms, which loads the API server:
+
+| | R3s | p50 | p99 | longest |
+|---|---|---|---|---|
+| one release alone | 250 first R3s | 3.0ms | 4.6ms | 14.7ms |
+| 20 at once, each of a kind of its own | 1,000 first | 3.6ms | 13.1ms | 17.7ms |
+| | 9 later | 96.6ms | | 100.3ms |
+| 40 at once of one kind, written each 10ms | 1,000 first | 4.2ms | 26.4ms | 49.4ms |
+| | 8 later | 4.7ms | | 28.4ms |
+| 40 at once of one kind, a wait below 10s, not 2s | 1,000 first | 4.8ms | 96.4ms | 104.8ms |
+| | 4 later | 85.0ms | | 98.2ms |
+
+The later ones are the R3s of an object after its first. Of the 21, 12 overlapped the
+first: in 7 of those pairs one R3 got a NotFound, and in 5 both passed. One that fails
+opens no window. "At once" is graces that end together. A kind
+that is written often makes a list wait less, not seldom: at most 255 of the 1,008
+lists of the written-each-10ms row waited, and at most 1,391 of 2,000 in the freshness
+run at 10ms, none over 25ms. (The counter has other reads of that cache, too.)
+
+With the 2s wait and a kind that nothing else writes, only R1 to R3 was measured,
+which is one read more: p50 69ms and 67ms (959 R3s that didn't overlap, and 86 that
+did), longest 115ms, at a poll of 1ms; p50 81ms, longest 105ms, at 200ms. For larger M
+it is about M round trips, and then the batch's own reads are R1's, too: in batches of
+the 200 in one namespace, R1 to R3 was p50 443ms, longest 739ms, with the wait, and
+p50 0.94s, longest 1.55s, without it (the p50s of the R3s that didn't overlap; of the
+others 477ms and 1.36s).
+
+*What the list saw is not that old (by the source).* It answers with the cache's
+latest state when its wait ends, so the windows that begin at what the list saw
+are no wider for it. An A2 while the list waits breaks R3 (the second case above),
+which costs a retry. `TestAListIsNotBehindAnAnsweredWrite`, on request, checks two
+sides of it. A list isn't behind a write of its kind that was answered *before it
+began*: 0 of 8,000, of which the 2,000 with a write each 10ms are the strong case; the
+others begin, mostly, long after a write. And a list shows most of what was answered
+*while it went on*: of 1,983 pairs of a list and a write answered during it, 2 lists of
+8,000 ended without one that was answered by then, both at 10ms, the write answered
+below 0.1ms before the end. It is one API server and one etcd; for several, this rests
+on each list asking etcd for its revision first.
+
+**What the cases above assume, and the API server doesn't do (H1, H3).** They
+take the removal of an object for one step. It is two: the API server tests a
+request against the object, and then removes what carries that name, with no
+test (apiserver v0.37.2 `pkg/registry/generic/registry/store.go`: `:847` and
+`:869-870`, then `:658-680`, for a patch that empties the finalizers;
+`:1210-1279` for a user's DELETE). In between:
+
+- **a lost A2** (H1): an R3 that empties the finalizers of an object being deleted
+  passes its tests, an A2 lands with a fresh epoch and succeeds, and the object
+  goes. The holder thinks for one pass that it holds P.
+- **the recreate** (H1): the R3s of two processes, from one incarnation, both pass
+  their tests; the first removes it, the object is created again, and the second
+  removes the *new* one, whatever its finalizers, though nobody deleted it.
+- **a lost first hold** (H3): a user's DELETE finds no finalizer, a first A2 lands
+  and succeeds, and the object goes, never marked as being deleted. It is the same
+  as a DELETE an instant earlier.
+
+`TestPremiseARemovalIsTwoSteps` pins it (P23), on 1.37.0 and 1.36.2: it fails if
+Kubernetes comes to remove in one step, and then this passage is out of date. The
+models' API server does it in one, so they prove nothing about these.
+
+*How wide:* measured on envtest 1.37.0 (n2-standard-4, 2,000 races each), 1.4 to
+1.9ms for an R3 and 0.8 to 1.2ms for a DELETE when idle, up to 2.3ms with 4 CPU
+burners, each ±0.2 to 0.5. Every control, whose object has another finalizer, so
+that nothing is removed, lost 0 of 500 races. A real cluster's isn't known; every
+rate scales with it.
+
+*How often:* a lost A2 needs an A2 in that window of a release of an object being
+deleted. In a stress test that writes all the time it was 25 of 10,625 such
+releases (0.24%), and no violation; at one A2 a minute it would be 1 in 40,000, an
+estimate. The recreate needs two processes to release at once, and something that
+creates the object again at once. The stress test's plain form met it, before the
+wait, in 5 of 207 iterations (2.4%, 95% 0.8 to 5.6; 4 CPUs; each read by hand); an
+iteration is a run of many releases. An earlier form met it in none of 10,600 releases
+(per release: the two aren't comparable). That is to be measured again, with the
+wait. Both need P deleted in a live namespace, where it can be created again, so they
+are recoverable; but a pass whose Connect reads a cache may establish a holder on a
+Secret that is gone.
+
+*What is done about it:* **the recreate is made rarer, by a random wait, and the rest
+is accepted** (decided 2026-11-24; and, after the measurements below, to keep the
+wait as built, below 2s). How, and what it does, is ours. Two processes learn
+of a holder that went, or of a grace's end, at one moment, and each then released at
+once: their R3s overlapped in 16 to 24% of the stress test's releases. Now each waits a
+random time of its own, below 2s, before the R1 of an object being deleted (§6.2 R1).
+The second process mostly finds P gone, or the new one without the finalizer, and makes
+no R3.
+
+*What it does, measured:* the releases in which two processes' R3s of one object
+overlapped: their spans at the clients, from before each call to after its answer, in
+one test binary. Each is a Secret being deleted with a live user, so the graces of one
+round end about together, and something tries to create it again, at the poll given.
+Envtest 1.37.0, 4 CPUs, one API server; an R3 took 3 to 7ms on average.
+`TestReleaseWaitSpreadsTwoProcesses`, on request; the rows are of several versions of
+it.
+
+| Shape of a round | Poll | Without the wait | With it, below 2s |
+|---|---|---|---|
+| 40 Secrets, each in a namespace of its own, deleted at once | 1ms | 256 of 600 (42.7%) | 43 of 1,000 (4.3%) |
+| the same | 20ms | 232 of 600 (38.7%) | 31 of 600 (5.2%) |
+| the same | 200ms | | 44 of 1,000 (4.4%) |
+| the same, each deleted as it is made | 1ms | 996 of 1,000 | 38 of 1,000 (3.8%) |
+| 200 Secrets in one namespace, in two runs | 20ms | 109 and 101 of 3,000 (3.5%) | 14 and 11 of 3,000 (0.42%) |
+| 40 Secrets at once, the holder kind written each 10ms | 1ms | | 5 of 1,000 (0.50%) |
+| 20 Secrets at once, each of a holder kind of its own | 1ms | | 4 of 1,000 (0.40%) |
+| one Secret | 1ms | | 0 of 250 (95%: below 1.5%) |
+
+A wait below 10s, for the first row's shape: 3 of 1,000 (0.30%, 95% 0.06 to 0.87).
+Where both were run, the wait makes them 7 to 26 times rarer, by the shape. The stress
+test hasn't been run with it.
+
+- **One release alone** overlaps with probability about 2w/L, for an R3 of w and waits
+  below L: 0.29 to 0.63% for the R3s with the wait here. 0.4% was measured for kinds of
+  their own, where 2w/L was 0.39%.
+- **Many releases of one quiet kind at once overlap more,** 3.8 to 5.2%, while an R3 was
+  4 to 6ms on average. R2's lists that wait for the same progress notification (above)
+  are answered together, and the R3s behind them begin together, whatever an R3 takes.
+  Two processes whose lists are made in the same 100ms meet so, which is about 100ms/L,
+  an estimate. In the overlaps at a poll of 1ms the two waits ended p50 40ms apart, and
+  the two R3s began p50 0.2ms apart. Waits that end further apart can meet as well, when
+  workers are busy: in 5 of 43 pairs they ended 100 to 221ms apart (10 of 44 at a poll of
+  200ms, to 307ms).
+- It isn't so for processes whose lists go to different API servers, which have caches
+  of their own. That is from the source, not measured.
+- **What it costs:** such an object goes 1s later on average for the wait alone, and
+  later where a key or the workers are busy (§6.6).
+
+*The recreate, estimated,* not measured: an overlap, times the chance that a try to
+create lands **between the two removals**. Before the first it gets AlreadyExists, and
+after the second the new object stands. The time between the two isn't measured. The
+second R3 must have passed its tests before the first removal, so it is at most about
+the second's own test-to-removal window, 1.5ms on average when idle, which makes these
+roughly ceilings. At a try each second, with 40 at once of a quiet kind: 1 in 670 to 1,700 releases without the
+wait, by the shape, and 1 in 13,000 to 17,500 with it; for a kind's only release, at
+0.4%, 1 in 170,000. A try each 100ms makes them 10 times likelier. **The data says that
+they are too high, by about 9 times if a try takes 5ms** (the poll and an answer; not
+measured): at a poll of 1ms 46 recreated Secrets went in 1,333 overlaps of the
+40-Secret shape (12 in the 256, 3 in the 43, 31 in the 996, 0 in the 38), or 3.5%,
+which is 0.17ms between the removals, not 1.5ms. It is of the order of the 0.2ms by
+which the R3s began apart in the 43 overlaps where that was measured, 3 of which lost a
+recreated Secret. Not each overlap can: of the 87 overlaps with the wait of the
+40-Secret shape of a quiet kind, at polls of 1ms and 200ms, both R3s passed in 76; in the
+other shapes with the wait below 2s in 5 of 23. At polls of 20ms and 200ms 1 went in 307, of the 40-Secret shape, and none
+in the 200-Secret one; the shuffled runs aren't counted.
+
+- The wait is each object's own, by its uid. One for a whole batch would let two
+  processes whose batches overlap meet on all of its objects, and one for a name would
+  let the next object of the name go without.
+- It is once for each decision, so an object may wait twice or more: one that a batch
+  keeps waits again before it is released. A holder cache that is behind can be why:
+  R0 keeps P for a user that is gone, or R1 waits where the cache doesn't show the user
+  that R2's list does.
+- **What has no wait.** An object that isn't being deleted at R1, and is by the time
+  R3 lands, is removed by it. One in a namespace that the cache shows being deleted,
+  and that has gone and been made again live since: R1 goes by the cache, and R2, which
+  reads it live, may release at once. And Disown's strips, which are R3's patches: two
+  processes' strips of an object being deleted can remove the next one as two R3s
+  can. It is rarer, since each process has its own interval, and switched on by
+  hand.
+- It is no proof: it leaves the window as it is, and does nothing for a lost A2 or
+  a lost first hold. A mark on the object before its removal would close the lost
+  A2 and the recreate; it was rejected for now, at one more write per release
+  (§15). The condition it was to be taken under, a notable share of lost A2s, isn't
+  met.
+- With leader election only a timed-out R3 and its own retry can overlap, and at a
+  change of leader an R3 that the old one left in flight and the new one's.
 
 **Error or crash after the announce** (HIGH-1). Suppose A1 succeeds and A2
 fails, times out, or the process dies. Then no `written` entry is issued
@@ -1125,7 +1322,8 @@ P are:
   (§10.2), within the cache's lag.
 
 **What the proof assumes.** R1's GET, R2's Namespace GET and R2's list are
-consistent reads, and A2 is a write. No decision rests on a cache. Caches
+consistent reads, and A2 is a write. **The API server tests and removes in one
+step**, which it doesn't (H1 and H3, above). No decision rests on a cache. Caches
 serve only the fast paths (R0, and the `written` skip), and both are safe
 when stale. A stale R0 that sees a user already gone only delays the
 release to the next event. The skip rests on a delivery time, which can
@@ -1224,7 +1422,17 @@ only come after the write it reports.
 - **A release:** for a batch of M pending objects in (K, N), M GETs, one
   Namespace GET per deleting namespace, one paginated metadata-only list of
   K in N, and up to M patches. A namespace teardown with 50 Secrets lists
-  the holders once, not 50 times.
+  the holders once, not 50 times. An object being deleted, in a namespace that the
+  cache doesn't show being deleted or in none, is read once more, and its release begins
+  after a wait below 2s, 1s on average (§6.2 R1). Its batch is its own, with its own
+  list, unless other waits of the key end while it is busy: they share the next. Behind
+  a busy key it waits for that too. If it is then kept, that is reported as much later
+  (§12). The list usually waits below 100ms in the API server, not at most (§6.4), with a
+  release worker: the two workers then make about 20 batches a second (an estimate), and
+  with more keys than that at one moment the releases come later than their waits.
+  R1 began up to 0.24s after its wait's end with 40 at once of a quiet kind at a poll of
+  1ms, and 0.38s at 200ms; with 200 in one namespace p50 0.59s, p90 1.2s, and 2.0s at
+  the longest (3,827 R3s). So 4s in all after the grace is possible.
 
 ### 6.7 The invariant, restated so it is true
 
@@ -1235,6 +1443,10 @@ That live read is the check just before `AddFinalizer` (§8, R6). A ref that
 appears after it is held on a later pass, through the prober or backoff
 (§10.3). Until then it is unprotected: it was created after the decision, in
 a live namespace, so it is recoverable.
+
+**"Written" isn't "held", for an instant** (H1, H3, §6.4): an A2 that succeeds on
+an object whose removal has begun is lost with it, and nothing tells the pass. The
+object's removal enqueues its holders, whose next passes find it Missing.
 
 ### 6.8 N processes of one kind, without leader election (CP1)
 
@@ -1256,7 +1468,10 @@ reconciling any holder. Part by part:
   lists the holders at its own. Every one of those versions must keep the record,
   or one process's release loop doesn't see another's users.
 - **Release** (R0 to R3). R3's JSON-patch tests serialize any number of
-  releasers. A losing releaser re-reads from R1.
+  releasers. A losing releaser re-reads from R1. **Except at an object's
+  removal**, which isn't one step: there two releasers of one incarnation can both
+  succeed, and the second remove the next one. Each waits a random time first, so
+  that they seldom meet (§6.4, H1).
 - **The index** (§10.6). Every write is guarded and merges on conflict. The
   superset proof (§10.6.3) is between any acquirer and any pruner, in any
   processes. The CRD pointer is written once, after a GET that finds it
@@ -3945,7 +4160,9 @@ on krateo-057:
 **Unit tests for the races (§6)** run on an in-memory API model: a
 linearizable store with resourceVersions, `ValidateNoNewFinalizers`,
 strategic-merge and JSON-patch semantics, a namespace phase, and a lagging
-cache per actor. They enumerate every schedule of:
+cache per actor. It removes an object in one step, which the API server doesn't
+(H1 and H3, §6.4), and has no wait before a release, which only moves it. They
+enumerate every schedule of:
 
 - the acquirer's steps: A1, A2, and Connect. Each step can succeed, fail
   with an error, crash, or lose its response;
@@ -4077,6 +4294,37 @@ second annotation.
 so the record would need hashed identities and one label per ref. Users and
 tools also edit labels far more often than annotations. The one label kept
 (`held`) only scopes caches.
+
+**15.9 A released mark, on objects being deleted** (H1, §6.4): the release patch
+would leave the finalizer and set a mark that makes every A2 fail, and a second
+patch would remove the finalizer. It closes the lost A2 and the recreate, at one
+more write per such release and 130 to 150 lines in the release protocol, with a
+backstop for a process that stops between the two. Not taken (decided
+2026-11-24): the random wait makes the recreate rarer for 60 lines, and lost A2s
+aren't a notable share of the releases, which was the condition to take it: 0.24%
+under stress, with no violation. It is worth another look if a real cluster's
+window is well past 5ms, or if kinds without leader election commonly have held
+Secrets deleted and created again at once.
+
+**15.10 A longer wait, and other ways to spread two processes' releases** (H1, §6.4).
+
+- *A wait below 10s:* 3 of 1,000 releases overlapped (95% 0.06 to 0.87%), against 43 and
+  44 of 1,000 at 2s, with 40 at once of a quiet kind, in two versions of the test: too
+  few to say how many times fewer. With more at once it should near five times (10s
+  over 2s), since the lists then wait for the same progress notifications all the time;
+  that isn't measured. The wait alone would take 5s on average and up to 10s, not 1s and
+  up to 2s. Not taken: the wait stays below 2s, as built (decided 2026-11-24, after
+  the measurements).
+- *A random delay between R2's list and R3* spreads what the list aligned. It widens
+  every window that begins at R2's reads, the unrecoverable one among them, to make a
+  recoverable case rarer, and holds a worker. Not built or measured.
+- *An order of each process's own for a batch's R3s* was built, measured and taken out:
+  with 200 Secrets in one namespace 18 and 12 of 3,000 releases overlapped with it, in
+  two runs, and 14 and 11 with the wait alone.
+- *A list that doesn't wait:* no one request makes one, on an etcd whose watches can
+  report progress. A list without a resourceVersion is then served from the watch cache,
+  with a limit or without (v0.37.2 `storage/cacher/delegator/interface.go`), and one with
+  a resourceVersion isn't a consistent read.
 
 ## 16. Consumer adoption
 

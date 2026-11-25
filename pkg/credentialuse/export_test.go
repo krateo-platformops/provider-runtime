@@ -34,6 +34,27 @@ func (s *Shared) BeforeListRecorded(f func(t *Tracker)) { s.hooks.beforeListReco
 // SetSyncTimeout bounds each informer's first sync.
 func (s *Shared) SetSyncTimeout(d time.Duration) { s.syncTimeout.Store(int64(d)) }
 
+// SetReleaseWait sets what draws the wait before the release of an object being
+// deleted (§6.4); nil is no wait. Set it before Track.
+func (s *Shared) SetReleaseWait(f func() time.Duration) { s.releaseWait = f }
+
+// WaitEnd is when the wait of id, in the batch of gk's holders in ns, ends or
+// ended, while it is kept: until a batch decides id.
+func (s *Shared) WaitEnd(gk schema.GroupKind, ns string, id ID) (time.Time, bool) {
+	s.waits.mu.Lock()
+	defer s.waits.mu.Unlock()
+	e, ok := s.waits.ends[batchKey{gk, ns}][id]
+	return e.end, ok
+}
+
+// QueueLoad is how many batches wait for a release worker, and how many are
+// worked on.
+func (s *Shared) QueueLoad() (ready, working int) {
+	s.queue.mu.Lock()
+	defer s.queue.mu.Unlock()
+	return len(s.queue.ready), len(s.queue.working)
+}
+
 // QueuedBatch reports whether the batch of holder kind gk in namespace ns is
 // waiting, and the protected objects it covers.
 func (s *Shared) QueuedBatch(gk schema.GroupKind, ns string) (bool, []ID) {

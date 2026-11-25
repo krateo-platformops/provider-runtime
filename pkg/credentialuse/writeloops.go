@@ -90,6 +90,7 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		for _, t := range s.trackerList() {
 			t.clearUncached()
 		}
+		s.waits.clear()
 		s.mu.Lock()
 		s.writeCtx = nil
 		s.mu.Unlock()
@@ -175,10 +176,11 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 }
 
 // releaseBatch runs one batch (§6.2 R0 to R3), and requeues its objects as its
-// result says: those that asked, each at its time, as at a grace's end; those it
-// couldn't decide, and only those, with backoff, or at once, for the next write
-// loops, when ctx ended under it. A namespace's list that fails is retried so
-// too, and doesn't hold up what there is.
+// result says: those that asked, each at its time, as at a grace's end; those
+// whose release must wait (§6.4), each when its wait ends; those it couldn't
+// decide, and only those, with backoff, or at once, for the next write loops,
+// when ctx ended under it. A namespace's list that fails is retried so too, and
+// doesn't hold up what there is.
 //
 // A batch that fillAll marks, from an Add with no objects, also covers every
 // object of its namespace that holds K's finalizer for N, which heldIn lists,
@@ -193,6 +195,7 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	t := s.trackerOrPark(k, ids)
 	if t == nil {
 		s.queue.Settle(k, ids...) // dropped, or parked: nothing to remember
+		s.waits.settle(k, ids...)
 		return
 	}
 	fill := len(ids) == 0 || slices.Contains(ids, fillAll)
@@ -228,6 +231,15 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 	if err != nil {
 		fail(err, res.Failed...)
 	}
+	s.wait(k, res.Waiting)
+	waiting := map[ID]bool{}
+	for _, o := range res.Waiting {
+		waiting[o.ID] = true
+	}
+	undecided := func(id ID) bool { return failed[id] || waiting[id] }
+	// The next release of what the batch decided waits again, though its prune,
+	// below, fails.
+	s.waits.settle(k, slices.DeleteFunc(slices.Clone(ids), undecided)...)
 	s.reportKept(t, k, res.Kept)
 	if t.idx != nil {
 		// The prune after R3, in one write per batch (§10.6.2, L1). One that
@@ -237,7 +249,7 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 			fail(err, bare...)
 		}
 	}
-	decided := slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return failed[id] })
+	decided := slices.DeleteFunc(slices.Clone(ids), undecided)
 	t.keptUncached(decided, res.Kept)
 	if fill && !failed[fillAll] {
 		s.queue.Settle(k, fillAll)
