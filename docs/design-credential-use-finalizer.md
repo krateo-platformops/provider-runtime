@@ -1360,9 +1360,10 @@ name its tracker was given, with no resourceVersion:
 - **The CRD, one being deleted included, or any error**, a 403 or a 404 of any
   other form among them: every hold stays, and the batch is retried as after
   any failed list. A 403's error says what to grant. A CRD that is there says
-  to restart the process if it lasts: the kind is served no more as `Track`
-  mapped it, as after the CRD was created again with another scope, or without
-  the declared version, which a new process maps anew.
+  what to do if it lasts, when the kind is served no more as `Track` mapped it:
+  after the CRD was created again with another scope, restart the process,
+  which maps it anew; if the declared version is no longer served, restart it
+  with one that is, since `Track` refuses a version that isn't (§6.2, §7.3).
 
 *The list's 404 is never the evidence.* An API server answers it for a K that
 exists while its CRD informer lags, or the version isn't served, or the scope
@@ -1492,11 +1493,14 @@ remedy:
 - **no process tracks K any more**, or the process started after the CRD went:
   `Track` needs the CRD (§7.3);
 - **R1 fails**, for a protected kind that is gone too, or whose grant is;
-- **K's index is lost with the CRD** (§10.6.6). Its rebuild, while the kind is
-  gone, takes the union of the records for what it is, empty, by the same GET
-  and veto, keeps every line there is, and marks the index; it isn't retried for
-  ever. But a hold that no informer showed is then in no record and no line.
-  Give `DisownPrefix` the protected kinds then, not the index.
+- **K's index is lost with the CRD** (§10.6.6). While the kind is gone its
+  rebuild finds that, by the same GET and veto, and writes nothing: it creates
+  no index that an uninstall deleted, marks none, and isn't retried as a
+  failure. When the CRD returns, the index is rebuilt from the records, those
+  of instances its cleanup left behind among them (the first limit above), and
+  not at each holder's next pass. But a hold that no informer showed, and no
+  record names, is in no line. Give `DisownPrefix` the protected kinds then,
+  not the index.
 
 The only things that can still remove the finalizer while H's record names
 P are:

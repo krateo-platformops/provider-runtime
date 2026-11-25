@@ -54,8 +54,9 @@ func (t *Tracker) noHolders(ctx context.Context, listErr error) error {
 	switch {
 	case err == nil:
 		// As just after the CRD is created; for good, the kind is served no
-		// more as Track mapped it, which a new process maps anew.
-		return fmt.Errorf("%w (the CRD %s is there, so its holds stay; if this lasts, it no longer serves %s as this process maps it, as after it was created again with another scope, or without that version: restart the process)",
+		// more as Track mapped it. A new process maps a new scope anew, but
+		// Track refuses a declared version that isn't served (§6.2, §7.3).
+		return fmt.Errorf("%w (the CRD %s is there, so its holds stay; if this lasts, it no longer serves %s as this process maps it: after it was created again with another scope, restart the process; if it no longer serves that version, restart it with a declared version that is served)",
 			listErr, t.crdName, t.gvr)
 	case !crdNotFound(err, t.crdName):
 		return unread(listErr, "whether its CRD is gone, and its holders with it", "get on the CRD "+t.crdName, err)
@@ -159,6 +160,24 @@ func (t *Tracker) releasedGone(id ID) {
 			"kind", t.gk.String(), "crd", t.crdName, "first", id.String())
 	}
 }
+
+// crdReturned is told that t's CRD is back after its deletion. Instances its
+// cleanup left behind, as when its finalizer was stripped by hand (§6.4,
+// limits), are readable again, with their records; a rebuild of the index
+// while the kind was gone had none of them to read, and wrote nothing. So the
+// index is rebuilt from the records now, as for one that is lost (§10.6.6),
+// and not at each holder's next pass.
+func (t *Tracker) crdReturned() {
+	if t.idx != nil {
+		t.idx.markLost()
+	}
+}
+
+// errKindGone is a rebuild's answer while the holder kind is gone (noHolders):
+// with the holders gone, so are their records, and there is nothing to rebuild
+// from. It writes nothing, and creates no index that is gone: the CRD's
+// return rebuilds it (crdReturned).
+var errKindGone = errors.New("credential-use: the holder kind is gone, and its records with it: nothing to rebuild the index from")
 
 // crdAbsent reports whether t's CRD is absent from its informer, which has
 // synced: the kind's lists and watches fail then, so the holder cache shows

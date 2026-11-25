@@ -1347,11 +1347,11 @@ func (ix *index) ids(lines []string) []ID {
 // and sets the marker. Each is logged once.
 func (ix *index) rebuild(ctx context.Context) error {
 	holders, err := ix.srv.List(ctx, ix.holder, "")
-	if err != nil && ix.noHolders != nil {
-		// The kind gone, its holders are, and their records: the union is
-		// empty, as it would be read (§6.4). Otherwise the rebuild fails for as
-		// long as the CRD is gone.
-		err = ix.noHolders(ctx, err)
+	if err != nil && ix.noHolders != nil && ix.noHolders(ctx, err) == nil {
+		// The kind gone, its holders are, and their records (§6.4): nothing
+		// is written, as before, and its callers don't take that for a
+		// failure to retry for as long as the CRD is gone.
+		return errKindGone
 	}
 	if err != nil {
 		return fmt.Errorf("credential-use: listing the holders of %s to rebuild the index %s: %w", ix.holder, ix.ref(), err)
@@ -1501,7 +1501,7 @@ func (ix *index) lostTick(ctx context.Context, now time.Time) error {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	ix.rebuilding = false
-	if err == nil {
+	if err == nil || errors.Is(err, errKindGone) { // the CRD's return asks again
 		ix.lostFails = 0
 		return nil
 	}
@@ -2042,10 +2042,18 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 		// Gone, or never rebuilt since its creation (§10.6.6). A rebuild
 		// that fails doesn't stop the recheck of the lines there are: its
 		// error is returned with the others, and the caller retries.
-		if err := ix.rebuild(ctx); err != nil {
+		gone := false
+		if err := ix.rebuild(ctx); errors.Is(err, errKindGone) {
+			gone = true
+		} else if err != nil {
 			errs = append(errs, err)
 		}
 		cur, err = ix.store.get(ctx)
+		if gone && Classify(err) == ClassNotFound {
+			// No index, and no holders to rebuild it from: no line to
+			// recheck, and none to write (§6.4, what it doesn't cover).
+			return errors.Join(errs...)
+		}
 	}
 	if err != nil {
 		errs = append(errs, fmt.Errorf("credential-use: reading the index %s for the startup recheck: %w", ix.ref(), err))

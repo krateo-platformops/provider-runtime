@@ -1024,11 +1024,26 @@ func (s *Shared) disownWritten(t *Tracker, rv string) {
 // goes, it queues what the kind still holds (§10.2).
 type crdHandler struct{ t *Tracker }
 
-func (h crdHandler) OnAdd(any, bool) { h.t.goneLogged.Store(false) }
-func (h crdHandler) OnDelete(any)    { h.t.s.requeueHeld(h.t) }
+func (h crdHandler) OnAdd(any, bool) {
+	h.t.goneLogged.Store(false)
+	if h.t.crdWentAway.CompareAndSwap(true, false) {
+		h.t.crdReturned()
+	}
+}
+
+func (h crdHandler) OnDelete(any) {
+	h.t.crdWentAway.Store(true)
+	h.t.s.requeueHeld(h.t)
+}
+
 func (h crdHandler) OnUpdate(oldObj, newObj any) {
 	o, ok1 := metadataOf(oldObj)
 	n, ok2 := metadataOf(newObj)
+	if ok1 && ok2 && o.UID != n.UID {
+		// Gone and back between two looks, as across a relist.
+		h.t.goneLogged.Store(false)
+		h.t.crdReturned()
+	}
 	if !ok1 || !ok2 || o.Annotations[AnnotationDisown] == n.Annotations[AnnotationDisown] {
 		return
 	}

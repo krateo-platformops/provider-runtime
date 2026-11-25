@@ -62,6 +62,9 @@ type Tracker struct {
 	// goneLogged: a release for want of the kind has been logged since the
 	// CRD was last seen.
 	goneLogged atomic.Bool
+	// crdWentAway: the CRD informer delivered the CRD's deletion, and not its
+	// return since (crdHandler).
+	crdWentAway atomic.Bool
 
 	// missing are the refs a holder's pass last found Missing, for the
 	// prober (§10.3).

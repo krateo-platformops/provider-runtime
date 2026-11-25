@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clienttesting "k8s.io/client-go/testing"
 )
@@ -209,28 +210,115 @@ func TestARolledBackTrackersCRDDeletion(t *testing.T) {
 }
 
 // A rebuild of the index while the kind is gone, as for a lost index or a
-// stale marker, finds the union of the records empty, keeps every line, and
-// marks the index: it doesn't fail for as long as the CRD is gone. While the CRD
-// is there, the list's 404 fails it.
+// stale marker, finds no records to rebuild from, by noHolders, and writes
+// nothing: it keeps every line, marks nothing, and creates no index that is
+// gone; and neither the recheck nor the loop of a lost index takes that for a
+// failure to retry. While the CRD is there, the list's 404 fails it.
 func TestARebuildWhileTheKindIsGone(t *testing.T) {
 	ctx := context.Background()
 	s, x := secretID("ns", "s"), secretID("ns", "x")
 	r, _, out := perNameFakeRig(t, []runtime.Object{heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns")}, nil, s, x)
 	tr := r.s.trackers[widgetGK]
 	out.fail(errTest404)
-	if err := tr.idx.rebuild(ctx); err == nil {
-		t.Error("a rebuild with the CRD there, and the holders' list a 404, succeeded")
+	if err := tr.idx.rebuild(ctx); err == nil || errors.Is(err, errKindGone) {
+		t.Errorf("a rebuild with the CRD there, and the holders' list a 404: %v", err)
 	}
 	r.removeCRD(t, widgetGK)
-	if err := tr.idx.rebuild(ctx); err != nil {
+	before, err := tr.idx.store.get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.idx.rebuild(ctx); !errors.Is(err, errKindGone) {
 		t.Fatalf("a rebuild with the kind gone: %v", err)
 	}
-	cur, err := tr.idx.store.get(ctx)
-	if err != nil || tr.idx.needsRebuild(cur) {
-		t.Errorf("the index after the rebuild: %+v, %v; want it marked", cur, err)
+	if cur, err := tr.idx.store.get(ctx); err != nil || cur.rv != before.rv {
+		t.Errorf("the index after the rebuild: %+v, %v; want it as it was, at %s", cur, err, before.rv)
 	}
-	if got := r.indexedIDs(t); len(got) != 2 {
-		t.Errorf("the index names %v; want both lines kept", got)
+	// The index deleted meanwhile, as by an uninstall: nothing creates it.
+	must(r.dyn.Resource(configMapGVR).Namespace("idx").Delete(ctx, IndexName(widgetGK), metav1.DeleteOptions{}))
+	if err := tr.idx.recheckRest(ctx, map[ID]bool{}, func(ID, string) {}); err != nil {
+		t.Errorf("the recheck with the kind and its index gone: %v", err)
+	}
+	tr.idx.markLost()
+	if err := tr.idx.lostTick(ctx, r.clk.Now()); err != nil {
+		t.Errorf("the lost index's rebuild with the kind gone: %v", err)
+	}
+	if _, err := tr.idx.store.get(ctx); Classify(err) != ClassNotFound {
+		t.Errorf("the index is back: %v", err)
+	}
+}
+
+// A holder kind's instances that its CRD's cleanup left behind, as when its
+// finalizer was stripped by hand, are readable again once the CRD returns, with
+// their records: the index, lost while the kind was gone, is rebuilt from them
+// then, without a holder's pass.
+func TestTheCRDsReturnRebuildsTheIndex(t *testing.T) {
+	ctx := context.Background()
+	s := secretID("ns", "s")
+	var refuse atomic.Bool
+	r, _, out := perNameFakeRig(t, []runtime.Object{
+		heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "left", s)}, func(r *fakeRig) {
+		// While the kind is gone, its holds aren't released, as for a
+		// refused R3: the instance left behind keeps its Secret.
+		r.md.PrependReactor("patch", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			if refuse.Load() {
+				return true, nil, errTest403
+			}
+			return false, nil, nil
+		})
+	}, s)
+	refuse.Store(true)
+	r.runWrites(t)
+	r.idle(t, batchKey{widgetGK, "ns"})
+	indexed := func() bool {
+		_, err := r.dyn.Resource(configMapGVR).Namespace("idx").Get(ctx, IndexName(widgetGK), metav1.GetOptions{})
+		return err == nil && len(r.indexedIDs(t)) == 1
+	}
+	out.fail(errTest404)
+	r.removeCRD(t, widgetGK)
+	eventually(t, "the CRD informer to see it go", (r.s.trackers[widgetGK]).crdAbsent)
+	must(r.dyn.Resource(configMapGVR).Namespace("idx").Delete(ctx, IndexName(widgetGK), metav1.DeleteOptions{}))
+	for range 20 {
+		r.clk.Step(indexTick)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := r.dyn.Resource(configMapGVR).Namespace("idx").Get(ctx, IndexName(widgetGK), metav1.GetOptions{}); err == nil {
+		t.Fatal("the index came back while the kind was gone")
+	}
+	r.restoreCRD(t, widgetGK)
+	out.heal()
+	deadline := time.Now().Add(20 * time.Second)
+	for !indexed() {
+		if time.Now().After(deadline) {
+			t.Fatal("the index isn't rebuilt from the left-behind record once the CRD is back")
+		}
+		r.clk.Step(indexTick)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !r.heldBy(t, widgetGK, "ns", "s") {
+		t.Error("the Secret's hold went")
+	}
+}
+
+// A CRD seen with another uid is one that went and came back between two of
+// the informer's looks: its return rebuilds the index too.
+func TestACRDWithAnotherUIDIsAReturn(t *testing.T) {
+	r, _, _ := perNameFakeRig(t, nil, nil)
+	tr := r.s.trackers[widgetGK]
+	old, back := crdMeta(widgetGK), crdMeta(widgetGK)
+	old.UID, back.UID = "u-old", "u-new"
+	lost := func() bool {
+		tr.idx.mu.Lock()
+		defer tr.idx.mu.Unlock()
+		return tr.idx.lost
+	}
+	crdHandler{tr}.OnUpdate(old, old)
+	if lost() {
+		t.Fatal("an update of the same CRD marked the index lost")
+	}
+	crdHandler{tr}.OnUpdate(old, back)
+	if !lost() {
+		t.Error("a CRD with another uid didn't mark the index lost")
 	}
 }
 
