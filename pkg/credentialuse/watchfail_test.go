@@ -380,13 +380,27 @@ func TestAPerNameWatchsFailureIsLoggedOnce(t *testing.T) {
 }
 
 // A watch that stopped, its line gone, neither keeps the kind's failure
-// pending nor records one.
+// pending nor records one. The test calls the handlers itself: the watches'
+// lists never end, so that no list of theirs records a recovery between its
+// calls, as under load one did.
 func TestAStoppedPerNameWatchForgetsItsFailure(t *testing.T) {
-	r := newFakeRig(t)
-	o, sink := r.breakable("secrets"), &sinkLines{}
+	r, sink := newFakeRig(t), &sinkLines{}
 	a, b := secretID("ns", "a"), secretID("ns", "b")
-	n := perNameWatches(t, r, sink, a, b)
-	eventually(t, "both watches", func() bool { return o.watching(2) })
+	tr := r.trackLogged(t, sink)
+	never := make(chan struct{})
+	gate := func(resource string) {
+		if resource == "secrets" {
+			<-never
+		}
+	}
+	r.listGate.Store(&gate)
+	t.Cleanup(func() { close(never) })
+	n := newPerNames(tr)
+	n.infos[secretGroupKind] = perNameKind{gvr: secretsGVR, namespaced: true}
+	parent, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	n.start(parent)
+	n.follow([]ID{a, b})
 	ctx := context.Background()
 	wa, wb := n.by[a], n.by[b]
 	n.watchFailed(ctx, nil, a, wa, errTest404)
@@ -523,9 +537,11 @@ func TestWhatAFailureLogs(t *testing.T) {
 		t.Errorf("warned %d times, want 5: %q", n, sink.warns)
 	}
 
-	// The API server's 410 has the reason Expired; an older one's, Gone.
-	gone := &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonGone}}
-	for _, err := range []error{apierrors.NewResourceExpired("test"), gone, io.EOF, io.ErrUnexpectedEOF} {
+	// The API server's 410 has the reason Expired. Gone, which routineWatchEnd
+	// takes too, as client-go does, came only from servers of 1.17 and before
+	// (client-go v0.37.2 tools/cache/reflector.go:1154-1160), which Krateo
+	// doesn't support: no case of it.
+	for _, err := range []error{apierrors.NewResourceExpired("test"), io.EOF, io.ErrUnexpectedEOF} {
 		if !routineWatchEnd(err) {
 			t.Errorf("%v isn't routine", err)
 		}
