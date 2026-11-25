@@ -48,7 +48,7 @@ MUTANTS = [
     ("the list's 404 is the evidence", CG,
      [("\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so", "\t\t_ = fmt.Errorf(\"%w (the CRD %s is there, so")]),
     ("a CRD that is there gives no advice", CG,
-     [("\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so", "\t\treturn listErr\n\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so")]),
+     [("\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so", "\t\tif listErr != nil {\n\t\t\treturn listErr\n\t\t}\n\t\treturn fmt.Errorf(\"%w (the CRD %s is there, so")]),
     ("a GET that fails is the evidence", CG,
      [("\tcase !crdNotFound(err, t.crdName):\n", "\tcase false && !crdNotFound(err, t.crdName):\n")]),
     ("a GET that fails says nothing of its own", CG,
