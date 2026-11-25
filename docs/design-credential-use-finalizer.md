@@ -235,13 +235,13 @@ new key (`refs.v2`), and a reader that knows both reads both.
 object its namespace's check considers. It fails safe, and each process whose
 informer delivers it, while it counts so, logs a warning, once per holder, with
 its namespace, name and kind, and nothing of the record. The holder's next
-acquire that reaches its last A1 overwrites it with a valid record. One that
-ends before it doesn't: a `Refs` error, a holder in the index namespace, a
-refused chain (§9). The record then stays unparseable, and keeps what it counts
-as used, as a paused holder's record does (§11.3). Until then it counts, for
-every object held for its
-namespace, as a holder that names it does (§5); when it stops counting as a user
-of them all, they are all checked again (§10.2).
+acquire that reaches its last A1 overwrites it with a valid record. Until then
+it counts, for every object held for its namespace, as a holder that names it
+does (§5); when it stops counting as a user of them all, they are all checked
+again (§10.2). An acquire that ends before its last A1 doesn't overwrite it: a
+`Refs` error, a holder in the index namespace, a refused chain (§9). The record
+then stays unparseable, and keeps what it counts as used, as a paused holder's
+record does (§11.3).
 
 **Annotation, not status.** Every kind has annotations, unstructured
 objects included. Annotations survive backup, restore and GitOps re-applies
@@ -2908,7 +2908,7 @@ Its index maps each recorded ref to holders. The index serves:
   namespace's teardown waited on a holder that was gone. So does a holder that
   a relist finds gone, or replaced by another of its name, after a watch gap:
   its record may have become unparseable, or have named others, in the gap.
-  - **A pass's own repair** writes all the refs it names in one A1, where they
+  - **A pass's own repair** writes all the refs it records in one A1, where they
     are all direct, as every pass's are in this release (§9): so the batch finds
     them recorded. A refused chain's pass writes no record, so one that can't be
     parsed stays, and counts, until its refs name no `Next`. **A chain that is
