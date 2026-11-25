@@ -8,8 +8,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// The wait before the release of an object being deleted (§6.4, H1; the user's
-// decision, 2026-11-24). The API server removes such an object in two steps: it
+// The wait before the release of an object being deleted (§6.4, H1; decided
+// 2026-11-24). The API server removes such an object in two steps: it
 // tests R3's patch, and then removes what carries that name. Between them,
 // another process's R3 of the same incarnation also passes its tests, and
 // removes whatever carries the name by then, such as a Secret recreated at once.
@@ -22,7 +22,10 @@ import (
 const releaseWaitMax = 2 * time.Second
 
 // randomReleaseWait is the wait, in production.
-func randomReleaseWait() time.Duration { return rand.N(releaseWaitMax) }
+func randomReleaseWait() time.Duration {
+	//nolint:gosec // it spreads two processes of one provider in time; nothing here is secret, and the global source is seeded at random per process
+	return rand.N(releaseWaitMax) // #nosec G404 -- it spreads two processes of one provider in time; nothing here is secret, and the global source is seeded at random per process
+}
 
 // releaseWaits are the waits of the batches' objects: when each ends. An entry
 // goes when a batch decides its object, so that the next release of it waits

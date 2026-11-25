@@ -722,6 +722,6 @@ func TestTheProductionWait(t *testing.T) {
 		t.Errorf("10000 waits from %s to %s: want them spread over %s", lo, hi, releaseWaitMax)
 	}
 	if s := fmt.Sprint(releaseWaitMax); s != "2s" {
-		t.Errorf("the wait is below %s, want 2s (the user's decision)", s)
+		t.Errorf("the wait is below %s, want 2s, as decided", s)
 	}
 }

@@ -1179,8 +1179,8 @@ are recoverable; but a pass whose Connect reads a cache may establish a holder o
 Secret that is gone.
 
 *What is done about it:* **the recreate is made rarer, by a random wait, and the rest
-is accepted** (the user's decision, 2026-11-24; and, after the measurements below, to
-keep the wait as built, below 2s). How, and what it does, is ours. Two processes learn
+is accepted** (decided 2026-11-24; and, after the measurements below, to keep the
+wait as built, below 2s). How, and what it does, is ours. Two processes learn
 of a holder that went, or of a grace's end, at one moment, and each then released at
 once: their R3s overlapped in 16 to 24% of the stress test's releases. Now each waits a
 random time of its own, below 2s, before the R1 of an object being deleted (§6.2 R1).
@@ -4299,7 +4299,7 @@ tools also edit labels far more often than annotations. The one label kept
 would leave the finalizer and set a mark that makes every A2 fail, and a second
 patch would remove the finalizer. It closes the lost A2 and the recreate, at one
 more write per such release and 130 to 150 lines in the release protocol, with a
-backstop for a process that stops between the two. Not taken (the user's decision,
+backstop for a process that stops between the two. Not taken (decided
 2026-11-24): the random wait makes the recreate rarer for 60 lines, and lost A2s
 aren't a notable share of the releases, which was the condition to take it: 0.24%
 under stress, with no violation. It is worth another look if a real cluster's
@@ -4313,8 +4313,8 @@ Secrets deleted and created again at once.
   few to say how many times fewer. With more at once it should near five times (10s
   over 2s), since the lists then wait for the same progress notifications all the time;
   that isn't measured. The wait alone would take 5s on average and up to 10s, not 1s and
-  up to 2s. Not taken: the wait stays below 2s, as built (the user's decision,
-  2026-11-24, after the measurements).
+  up to 2s. Not taken: the wait stays below 2s, as built (decided 2026-11-24, after
+  the measurements).
 - *A random delay between R2's list and R3* spreads what the list aligned. It widens
   every window that begins at R2's reads, the unrecoverable one among them, to make a
   recoverable case rarer, and holds a worker. Not built or measured.
