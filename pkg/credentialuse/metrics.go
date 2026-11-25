@@ -53,6 +53,9 @@ type MetricsRecorder interface {
 	// the index names that a check couldn't read for a 403, once each; their
 	// lines are kept (§10.6.5).
 	IndexReadDenied(holderKind string)
+	// DisownRestarts counts credentialuse_disown_restarts_total: Disown's runs
+	// of zero passes that started over because the CRD changed (§7.4).
+	DisownRestarts(holderKind string)
 }
 
 // NopMetrics records nothing.
@@ -75,3 +78,4 @@ func (NopMetrics) ReleaseRejected(string)         {}
 func (NopMetrics) CRDWriteStarved(string)         {}
 func (NopMetrics) DisownUnreadable(string, int)   {}
 func (NopMetrics) IndexReadDenied(string)         {}
+func (NopMetrics) DisownRestarts(string)          {}

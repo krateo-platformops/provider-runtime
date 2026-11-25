@@ -178,6 +178,9 @@ func (m sinkMetrics) IndexReadDenied(k string) {
 func (m sinkMetrics) RefsConflicting(k, asked string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.RefsConflicting(k, asked) })
 }
+func (m sinkMetrics) DisownRestarts(k string) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.DisownRestarts(k) })
+}
 func (m sinkMetrics) CRDWriteStarved(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.CRDWriteStarved(k) })
 }
@@ -215,7 +218,9 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		seen:            s.seen,
 		reports:         coreReports{metrics: sinkMetrics{t}, events: s.events, warn: t.warn},
 		newEpoch:        NewEpoch,
+		a2Bound:         o.TimeoutBound,
 		heldDeleting:    t.heldDeleting,
+		mustWait:        func(n string, o Waiting) bool { return s.mustWait(batchKey{gk, n}, o) },
 		maxDepth:        o.MaxDepth,
 		contentKinds:    map[schema.GroupKind]bool{},
 		contentCache:    trackerViews{t},
@@ -235,7 +240,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 			s.queue.Add(batchKey{gk, ns}, id)
 		},
 		disowned:   func(pk schema.GroupKind) bool { return t.disownSwitch().covers(pk) },
-		disownLive: t.disownLive,
+		disownLive: t.disownForHold,
 	}
 	for _, pk := range o.Protected {
 		if pk.Content {

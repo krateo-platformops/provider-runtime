@@ -34,6 +34,35 @@ func (s *Shared) BeforeListRecorded(f func(t *Tracker)) { s.hooks.beforeListReco
 // SetSyncTimeout bounds each informer's first sync.
 func (s *Shared) SetSyncTimeout(d time.Duration) { s.syncTimeout.Store(int64(d)) }
 
+// SetReleaseWait sets what draws the wait before the release of an object being
+// deleted (§6.4); nil is no wait. Set it before Track.
+func (s *Shared) SetReleaseWait(f func() time.Duration) { s.releaseWait = f }
+
+// WaitEnd is when the wait of id, in the batch of gk's holders in ns, ends or
+// ended, while it is kept: until a batch decides id.
+func (s *Shared) WaitEnd(gk schema.GroupKind, ns string, id ID) (time.Time, bool) {
+	s.waits.mu.Lock()
+	defer s.waits.mu.Unlock()
+	e, ok := s.waits.ends[batchKey{gk, ns}][id]
+	return e.end, ok
+}
+
+// QueueLoad is how many batches wait for a release worker, and how many are
+// worked on.
+func (s *Shared) QueueLoad() (ready, working int) {
+	s.queue.mu.Lock()
+	defer s.queue.mu.Unlock()
+	return len(s.queue.ready), len(s.queue.working)
+}
+
+// SetLandingMargin replaces LandingMargin, so that Disown's passes can be
+// short. Set it before Track.
+func (s *Shared) SetLandingMargin(d time.Duration) { s.hooks.landingMargin = &d }
+
+// SetPruneQuiet replaces how long the prunes are kept back once the write
+// loops have started. Set it before they do.
+func (s *Shared) SetPruneQuiet(d time.Duration) { s.hooks.pruneQuiet = &d }
+
 // QueuedBatch reports whether the batch of holder kind gk in namespace ns is
 // waiting, and the protected objects it covers.
 func (s *Shared) QueuedBatch(gk schema.GroupKind, ns string) (bool, []ID) {
@@ -97,7 +126,8 @@ func (t *Tracker) HolderLists() (lists, streams int64) {
 // call. Set it before Track.
 //
 // The index's calls are hooked too (§10.6), as Ops "index-get",
-// "index-update" and "index-create" on the ConfigMap.
+// "index-update" and "index-create" on the ConfigMap; a write's Call carries
+// the lines it leaves.
 func (s *Shared) HookCalls(before func(ctx context.Context, c Call) error, after func(c Call, err error)) {
 	s.hooks.wrapServer = func(srv server) server { return hookServer{server: srv, before: before, after: after} }
 	s.hooks.wrapIndex = func(st indexStore) indexStore { return hookIndexStore{st: st, before: before, after: after} }
@@ -145,8 +175,8 @@ type hookIndexStore struct {
 	after  func(c Call, err error)
 }
 
-func (h hookIndexStore) call(ctx context.Context, op string, f func() error) error {
-	c := Call{Op: op, GK: configMapGroupKind}
+func (h hookIndexStore) call(ctx context.Context, op string, lines []string, f func() error) error {
+	c := Call{Op: op, GK: configMapGroupKind, Lines: lines}
 	if hs, ok := h.st.(configMapStore); ok {
 		c.Namespace, c.Name = hs.namespace, hs.name
 	}
@@ -163,16 +193,16 @@ func (h hookIndexStore) call(ctx context.Context, op string, f func() error) err
 }
 
 func (h hookIndexStore) get(ctx context.Context) (v indexVersion, err error) {
-	err = h.call(ctx, "index-get", func() error { v, err = h.st.get(ctx); return err })
+	err = h.call(ctx, "index-get", nil, func() error { v, err = h.st.get(ctx); return err })
 	return v, err
 }
 
-func (h hookIndexStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (v indexVersion, err error) {
-	err = h.call(ctx, "index-update", func() error { v, err = h.st.update(ctx, cur, lines, rebuilt); return err })
+func (h hookIndexStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (v indexVersion, err error) {
+	err = h.call(ctx, "index-update", lines, func() error { v, err = h.st.update(ctx, cur, lines, mark); return err })
 	return v, err
 }
 
-func (h hookIndexStore) create(ctx context.Context, lines []string, rebuilt bool) (v indexVersion, err error) {
-	err = h.call(ctx, "index-create", func() error { v, err = h.st.create(ctx, lines, rebuilt); return err })
+func (h hookIndexStore) create(ctx context.Context, lines []string) (v indexVersion, err error) {
+	err = h.call(ctx, "index-create", lines, func() error { v, err = h.st.create(ctx, lines); return err })
 	return v, err
 }

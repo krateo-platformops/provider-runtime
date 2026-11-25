@@ -335,19 +335,24 @@ func TestARefWithoutItsNamespaceIsMissing(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
 	idx := indexNamespace(t)
-	crd := cutest.CRD("ClusterWidget", "clusterwidgets")
+	// A kind of its own, so that the test can run again in one process: its CRD
+	// doesn't go while the last holder has its owner finalizer.
+	kind := fmt.Sprintf("ClusterWidgetN%d", crdSeq.Add(1))
+	crd := cutest.CRD(kind, strings.ToLower(kind)+"s")
 	crd.Spec.Scope = apiextensionsv1.ClusterScoped
-	gvr := schema.GroupVersionResource{Group: cutest.Group, Version: "v1", Resource: "clusterwidgets"}
+	gvr := schema.GroupVersionResource{Group: cutest.Group, Version: "v1", Resource: crd.Spec.Names.Plural}
 	if err := env.Client.Create(ctx, crd); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = env.Client.Delete(context.Background(), crd) })
 	holders := env.Dynamic.Resource(gvr)
 	cutest.Eventually(t, 30*time.Second, func() error { _, err := holders.List(ctx, metav1.ListOptions{}); return err })
-	gvk := gvr.GroupVersion().WithKind("ClusterWidget")
+	gvk := gvr.GroupVersion().WithKind(kind)
 	c := newController(t)
 	clients := clientsFor(t, env.Config)
 	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
+	s.SetLandingMargin(0) // disownOptions' passes are short
 	o := widgetOptions(c.enqueue)
 	o.Holder, o.ProbeInterval = gvk, time.Second
 	disownOptions(&o)
@@ -437,7 +442,7 @@ func TestARefWithoutItsNamespaceIsMissing(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if a := u.GetAnnotations(); a[cu.AnnotationHeldCount] != "0" || a[cu.AnnotationDisownSettled] != "true" {
+		if a := u.GetAnnotations(); !cu.DisownSettled(a) {
 			return fmt.Errorf("held-count %q, settled %q: %w", a[cu.AnnotationHeldCount], a[cu.AnnotationDisownSettled], cutest.ErrNotYet)
 		}
 		return nil

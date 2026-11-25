@@ -38,7 +38,7 @@ MUTANTS = [
     ("the write loops don't rescan", "writeloops.go",
      [("\ts.rescan()\n\tvar wg sync.WaitGroup", "\tvar wg sync.WaitGroup")]),
     ("a batch of an untracked kind is worked with another tracker", "writeloops.go",
-     [("\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\ts.queue.Settle(k, ids...) // dropped, or parked: nothing to remember\n\t\treturn\n\t}",
+     [("\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\ts.queue.Settle(k, ids...) // dropped, or parked: nothing to remember\n\t\ts.waits.settle(k, ids...)\n\t\treturn\n\t}",
        "\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\tif all := s.trackerList(); len(all) > 0 {\n\t\t\tt = all[0]\n\t\t} else {\n\t\t\treturn\n\t\t}\n\t}")]),
     ("an empty batch isn't filled", "writeloops.go",
      [("\tif fill {\n\t\tids = slices.DeleteFunc(", "\tif fill && false {\n\t\tids = slices.DeleteFunc(")]),

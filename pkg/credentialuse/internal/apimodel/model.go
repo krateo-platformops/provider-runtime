@@ -19,7 +19,11 @@
 //     a 422 with a FieldValueForbidden cause), and its deletionTimestamp
 //     can't change;
 //   - a write that changes nothing doesn't bump the resourceVersion;
-//   - an object with a deletionTimestamp and no finalizers is removed;
+//   - an object with a deletionTimestamp and no finalizers is removed, in the
+//     same step as the write that emptied them. **The API server does it in
+//     two** (H1, §6.4 of the design, P23): what lands between them, a write
+//     that succeeds and is lost or a removal of the next incarnation, isn't
+//     modelled, nor is a DELETE's own gap (H3);
 //   - a Namespace's deletion leaves it Terminating, and NamespaceLifecycle
 //     refuses creates in it with a 403.
 //

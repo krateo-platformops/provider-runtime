@@ -468,6 +468,59 @@ func TestCredentialUseSourceTimer(t *testing.T) {
 	})
 }
 
+// §7.5 (the user's decision, 2026-11-23): a pass in a process whose write
+// loops haven't started, as on a standby whose controller doesn't need leader
+// election, does nothing, not even the Get, and fails the manager once that
+// has lasted sourceStartTimeout; once they have started, passes run.
+func TestCredentialUseNeedsTheWriteLoops(t *testing.T) {
+	old := sourceStartTimeout
+	sourceStartTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { sourceStartTimeout = old })
+	w := newCUWorld(t, newWidget("w", nil))
+	m := newCUManager(w)
+	r := w.reconciler(m, &widgetProvider{ops: w.srv.ops}, secretRef("creds"))
+	startSource(t, r)
+	failed := func() bool {
+		select {
+		case <-r.cu.wiring.failed:
+			return true
+		default:
+			return false
+		}
+	}
+	pass := func() {
+		t.Helper()
+		if _, err := r.Reconcile(context.Background(), reqFor("w")); err == nil || !strings.Contains(err.Error(), "leader election") {
+			t.Fatalf("Reconcile = %v, want the refusal", err)
+		}
+		if ops := w.srv.ops.list(); len(ops) != 0 {
+			t.Errorf("the pass acted: %v", ops)
+		}
+	}
+	pass()
+	if failed() {
+		t.Error("the first pass without the write loops failed the manager: a leader's may come just before them")
+	}
+	time.Sleep(sourceStartTimeout)
+	pass()
+	if !failed() {
+		t.Error("the write loops still not started after the timeout, and the manager wasn't failed")
+	}
+
+	wr := newSharedWiring(nil)
+	if err := wr.notWriting("Widget.k", time.Now()); err == nil {
+		t.Error("no error before the write loops have started")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := (writeLoopsRunnable{wr}).run(ctx, func(ctx context.Context) error { <-ctx.Done(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := wr.notWriting("Widget.k", time.Now()); err != nil {
+		t.Errorf("once they have started: %v", err)
+	}
+}
+
 // §8 step 5: the record write (A1) runs on a pass before Connect, and a
 // conflict on it requeues through the rate limiter, as every conflict on the
 // object does, before Connect.

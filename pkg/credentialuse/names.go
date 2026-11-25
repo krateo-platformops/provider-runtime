@@ -40,7 +40,10 @@ const (
 	AnnotationDisown = Domain + "/disown"
 	// AnnotationHeldCount is Disown's live count (§7.4).
 	AnnotationHeldCount = Domain + "/held-count"
-	// AnnotationDisownSettled is set once Disown has finished (§7.4).
+	// AnnotationDisownSettled is set, once Disown has finished, to the
+	// switch's value, as AnnotationDisown has it. Disown has settled if and
+	// only if AnnotationDisown is set and not empty, this equals it, and
+	// AnnotationHeldCount is "0": a plain comparison of the strings (§7.4).
 	AnnotationDisownSettled = Domain + "/disown-settled"
 	// AnnotationConfig holds the settings every process of a kind shares
 	// (§7.3).
@@ -54,18 +57,35 @@ const (
 const (
 	// AnnotationRebuilt marks an index rebuilt from the records since it was
 	// created (§10.6.6): only a rebuild that completed sets it, in the same
-	// guarded write as its last merge. Track and the startup recheck rebuild
-	// an index without it, so that a process that died between creating the
-	// index and rebuilding it leaves no hold without its line.
+	// guarded write as its last merge. Its value is <uid>/<kinds>: the
+	// ConfigMap's own metadata.uid, so that a copy restored from a backup,
+	// which may lack the lines of holds made since, isn't marked; and the
+	// protected kinds it was rebuilt for, as the Disown switch lists them, so
+	// that a kind whose holds had no lines before it was moved to PerName
+	// isn't either. Track and the startup recheck rebuild an index without it,
+	// so that a process that died between creating the index and rebuilding it
+	// leaves no hold without its line.
 	AnnotationRebuilt = Domain + "/rebuilt"
 	// AnnotationVouched lists the objects an operator has checked by hand
 	// to carry no finalizer of the kind, comma-separated, each written as
 	// the unheld annotation names a ref: <namespace>/<Kind[.group]>/<name>
 	// (§7.4, §10.6.6). While such an object can't be read, Disown and the
 	// startup recheck skip it after a read that fails, and its line may go;
-	// a vouched object that can be read is treated as any other. The
-	// process never writes it.
+	// a vouched object that can be read is treated as any other. An entry
+	// <namespace>/<Kind[.group]>/*, as team-a/Secret/*, is every object of
+	// that kind in that namespace, once none of them carries the holder kind's
+	// marker label; a bare <namespace>/* is malformed. The process never
+	// writes it.
 	AnnotationVouched = Domain + "/vouched"
+	// AnnotationVouchedIndex is an operator's word, after the index was lost
+	// while Disown was on, that no object of some kinds carries a finalizer of
+	// the holder kind but those the index names (§7.4). Its value is
+	// <uid>/<kinds>: the index ConfigMap's metadata.uid, so that it holds for
+	// that ConfigMap only, and a later loss, or a restored copy, needs a new
+	// one; and those kinds, as the Disown switch lists them, so that a switch
+	// that covers another kind needs a new one too. The process never writes
+	// it.
+	AnnotationVouchedIndex = Domain + "/vouched-index"
 )
 
 // ClusterScopedName is the name part of a cluster-scoped holder kind's

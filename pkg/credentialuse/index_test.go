@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,8 +41,19 @@ type memStore struct {
 	beforeCreate func(s *memStore)
 	failGet      error
 	updates      int
+	// rebuilt: the marker is of Secrets, unless marked has its kinds.
 	rebuilt      bool
+	marked       kindSet
 	vouched      string
+	uid, vouches string // the ConfigMap's uid, and AnnotationVouchedIndex
+}
+
+func (s *memStore) version() indexVersion {
+	v := indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), marked: s.marked, vouched: s.vouched, uid: s.uid, vouchedIndex: s.vouches}
+	if s.rebuilt && v.marked == nil {
+		v.marked = kindSet{secretGroupKind: true}
+	}
+	return v
 }
 
 func (s *memStore) get(context.Context) (indexVersion, error) {
@@ -51,10 +63,10 @@ func (s *memStore) get(context.Context) (indexVersion, error) {
 	if !s.exists {
 		return indexVersion{}, apierrors.NewNotFound(configMapsGR, "cu-index")
 	}
-	return indexVersion{lines: slices.Clone(s.lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched}, nil
+	return s.version(), nil
 }
 
-func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	if f := s.beforeUpdate; f != nil {
 		f(s)
 	}
@@ -65,20 +77,22 @@ func (s *memStore) update(_ context.Context, cur indexVersion, lines []string, r
 		return indexVersion{}, apierrors.NewConflict(configMapsGR, "cu-index", errors.New("modified"))
 	}
 	s.lines, s.rv = slices.Clone(lines), s.rv+1
-	s.rebuilt = s.rebuilt || rebuilt
+	if mark != nil {
+		s.marked, s.rebuilt = mark, len(mark) > 0
+	}
 	s.updates++
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: s.rebuilt, vouched: s.vouched}, nil
+	return s.version(), nil
 }
 
-func (s *memStore) create(_ context.Context, lines []string, rebuilt bool) (indexVersion, error) {
+func (s *memStore) create(_ context.Context, lines []string) (indexVersion, error) {
 	if f := s.beforeCreate; f != nil {
 		f(s)
 	}
 	if s.exists {
 		return indexVersion{}, apierrors.NewAlreadyExists(configMapsGR, "cu-index")
 	}
-	s.exists, s.lines, s.rv, s.rebuilt = true, slices.Clone(lines), s.rv+1, rebuilt
-	return indexVersion{lines: slices.Clone(lines), rv: strconv.Itoa(s.rv), rebuilt: rebuilt}, nil
+	s.exists, s.lines, s.rv, s.rebuilt, s.marked = true, slices.Clone(lines), s.rv+1, false, nil
+	return s.version(), nil
 }
 
 // objServer serves Get from a map of objects, and fails the names in fail.
@@ -344,30 +358,539 @@ func TestIndexPruneChecksAfter(t *testing.T) {
 	}
 }
 
-// A drop is someone else's unless this process removed the line; a drop
-// whose R3 the per-name cache shows needs no check (§10.6.6, L5).
+// A drop is this process's own only in the version a successful removal of
+// it returned, and only for the lines that removal removed (§10.6.6);
+// whichever comes first, the event or the write's return.
 func TestIndexObservesDrops(t *testing.T) {
-	mine, theirs, released := SecretRef("ns", "mine").ID(), SecretRef("ns", "theirs").ID(), SecretRef("ns", "released").ID()
+	mine, theirs := SecretRef("ns", "mine").ID(), SecretRef("ns", "theirs").ID()
+	kept := SecretRef("ns", "kept").ID().String()
+	old := indexVersion{lines: linesOf([]ID{mine, theirs, SecretRef("ns", "kept").ID()}), rv: "7"}
+	only := func(t *testing.T, ix *index, want ...ID) {
+		t.Helper()
+		if got := SortedIDs(keysOf(ix.pending)); !slices.Equal(got, SortedIDs(want)) {
+			t.Errorf("pending = %v, want %v", got, want)
+		}
+	}
+	for _, eventFirst := range []bool{true, false} {
+		ix := testIndex(&memStore{}, nil)
+		// One delivery shows this process's removal of mine, and, coalesced
+		// with it, someone else's of theirs.
+		event := func() { ix.observed(&old, indexVersion{lines: []string{kept}, rv: "9"}) }
+		if eventFirst {
+			event()
+		}
+		ix.removed("9", []string{mine.String()})
+		if !eventFirst {
+			event()
+		}
+		only(t, ix, theirs)
+		if r := ix.pending[theirs]; r == nil || !r.tampered {
+			t.Fatalf("a drop by someone else isn't queued as tampering: %v", ix.pending)
+		}
+	}
+	// Coalesced past this process's version into someone else's: checked.
 	ix := testIndex(&memStore{}, nil)
-	ix.released = func(id ID) bool { return id == released }
-	old := indexVersion{lines: linesOf([]ID{mine, theirs, released, SecretRef("ns", "kept").ID()})}
-	ix.notePruned([]string{mine.String()}, 1)
-	ix.observed(&old, indexVersion{lines: linesOf([]ID{SecretRef("ns", "kept").ID()})})
-	if got := keysOf(ix.pending); len(got) != 1 || got[0] != theirs {
-		t.Errorf("pending = %v, want only %v", got, theirs)
-	}
-	if r := ix.pending[theirs]; r == nil || !r.tampered {
-		t.Fatalf("a drop by someone else isn't queued as tampering: %v", ix.pending)
-	}
-	if len(ix.pruned) != 0 {
-		t.Errorf("this process's drop is still expected: %v", ix.pruned)
-	}
+	ix.removed("9", []string{mine.String()})
+	ix.observed(&old, indexVersion{lines: []string{kept}, rv: "10"})
+	only(t, ix, mine, theirs)
 	// A line this process removed, back since, is someone else's to drop.
-	ix.notePruned([]string{mine.String()}, 1)
-	ix.observed(nil, indexVersion{lines: linesOf([]ID{mine})})
-	ix.observed(&indexVersion{lines: linesOf([]ID{mine})}, indexVersion{})
-	if ix.pending[mine] == nil {
-		t.Error("a line removed, put back, then dropped by someone else isn't checked")
+	ix = testIndex(&memStore{}, nil)
+	ix.removed("9", []string{mine.String()})
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "8"}, indexVersion{rv: "9"})
+	ix.observed(&indexVersion{rv: "9"}, indexVersion{lines: linesOf([]ID{mine}), rv: "10"})
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "10"}, indexVersion{rv: "11"})
+	only(t, ix, mine)
+	// A drop queued for another reason too isn't taken back.
+	ix = testIndex(&memStore{}, nil)
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "8"}, indexVersion{rv: "9"})
+	ix.queue([]ID{mine}, false)
+	ix.removed("9", []string{mine.String()})
+	only(t, ix, mine)
+	// What this process remembers is bounded; a removal it forgot is checked.
+	ix = testIndex(&memStore{}, nil)
+	ix.removed("9", []string{mine.String()})
+	for i := range maxOwnRemovals {
+		ix.removed(strconv.Itoa(100+i), nil)
+	}
+	if len(ix.own) != maxOwnRemovals {
+		t.Errorf("%d removals remembered, want %d", len(ix.own), maxOwnRemovals)
+	}
+	ix.observed(&indexVersion{lines: linesOf([]ID{mine}), rv: "8"}, indexVersion{rv: "9"})
+	only(t, ix, mine)
+}
+
+// lossyStore is a memStore whose next update lands, and then fails as with
+// its response lost; afterLoss runs in between, and afterGet after each get.
+type lossyStore struct {
+	*memStore
+	lose      bool
+	afterLoss func()
+	afterGet  func()
+}
+
+func (s *lossyStore) get(ctx context.Context) (indexVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return indexVersion{}, err
+	}
+	v, err := s.memStore.get(ctx)
+	if s.afterGet != nil {
+		s.afterGet()
+	}
+	return v, err
+}
+
+func (s *lossyStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return indexVersion{}, err
+	}
+	v, err := s.memStore.update(ctx, cur, lines, mark)
+	if err == nil && s.lose {
+		s.lose = false
+		if s.afterLoss != nil {
+			s.afterLoss()
+		}
+		return indexVersion{}, apierrors.NewTimeoutError("the response was lost", 1)
+	}
+	return v, err
+}
+
+// Every line an attempt of a prune tried to remove is checked after it,
+// whatever came of the attempt, and whether its drop is delivered before or
+// after the attempt returns (§10.6.2, §10.6.6): a conflict with someone
+// else's removal of the line, and a removal whose response was lost. The
+// object is held, or can't be read; either way its line is back, without a
+// later check's help.
+func TestPruneChecksWhatItTried(t *testing.T) {
+	id := SecretRef("ns", "x").ID()
+	for _, unreadable := range []bool{false, true} {
+		for _, fault := range []string{"conflict", "lost response"} {
+			for _, event := range []string{"before", "after", "never"} {
+				t.Run(fmt.Sprintf("unreadable=%v/%s/event %s the return", unreadable, fault, event), func(t *testing.T) {
+					srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{id: heldObj("x")}, forbid: map[ID]bool{id: unreadable}}
+					st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{id}), rv: 1}}
+					ix := testIndex(st, srv)
+					deliver := func() { ix.observed(&indexVersion{lines: linesOf([]ID{id}), rv: "1"}, indexVersion{rv: "2"}) }
+					before := func() {
+						if event == "before" {
+							deliver()
+						}
+					}
+					if fault == "conflict" {
+						st.beforeUpdate = func(s *memStore) {
+							s.beforeUpdate, s.lines, s.rv = nil, nil, s.rv+1
+							before()
+						}
+					} else {
+						st.lose, st.afterLoss = true, before
+					}
+					err := ix.prune(context.Background(), []ID{id})
+					if (err != nil) != (fault == "lost response") {
+						t.Errorf("prune = %v", err)
+					}
+					if !slices.Equal(st.lines, linesOf([]ID{id})) {
+						t.Fatalf("after the prune: %q, want its line back", st.lines)
+					}
+					if event == "after" {
+						deliver()
+					}
+					if err := ix.recheckTick(context.Background(), time.Now()); err != nil {
+						t.Fatal(err)
+					}
+					if !slices.Equal(st.lines, linesOf([]ID{id})) || len(ix.pending) != 0 {
+						t.Errorf("after the live checks: %q, pending %v", st.lines, ix.pending)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A drop delivered while its object's check runs survives the check, which
+// read the line before it (§10.6.6).
+func TestADropDuringItsCheckSurvives(t *testing.T) {
+	id := SecretRef("ns", "x").ID()
+	for _, unreadable := range []bool{false, true} {
+		srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{id: heldObj("x")}, forbid: map[ID]bool{id: unreadable}}
+		st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{id}), rv: 1}}
+		ix := testIndex(st, srv)
+		ix.queue([]ID{id}, false)
+		st.afterGet = func() { // the check's add has read the line
+			st.afterGet = nil
+			st.lines, st.rv = nil, st.rv+1
+			ix.observed(&indexVersion{lines: linesOf([]ID{id}), rv: "1"}, indexVersion{rv: "2"})
+		}
+		now := time.Now()
+		if err := ix.recheckTick(context.Background(), now); err != nil {
+			t.Fatal(err)
+		}
+		if ix.pending[id] == nil {
+			t.Fatal("the check took the drop delivered during it")
+		}
+		if err := ix.recheckTick(context.Background(), now); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(st.lines, linesOf([]ID{id})) || len(ix.pending) != 0 {
+			t.Errorf("unreadable=%v: after the next check: %q, pending %v", unreadable, st.lines, ix.pending)
+		}
+	}
+}
+
+// A vouch withdrawn while a prune of its line is under way doesn't count: the
+// check after it reads the vouch live, whatever this process last saw.
+func TestAVouchWithdrawnDuringAPrune(t *testing.T) {
+	id := SecretRef("ns", "x").ID()
+	st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{id}), rv: 1, vouched: "ns/Secret/x"}
+	srv := &getHook{objServer: &objServer{forbid: map[ID]bool{id: true}}}
+	ix := testIndex(st, srv)
+	srv.on = func() { st.vouched = "" } // after the prune's write has returned
+	if err := ix.prune(context.Background(), []ID{id}); err != nil || !slices.Equal(st.lines, linesOf([]ID{id})) {
+		t.Errorf("the vouch withdrawn: %v, lines %q; want its line back", err, st.lines)
+	}
+	srv.on = func() { st.vouched = "ns/Secret/x" }
+	if err := ix.prune(context.Background(), []ID{id}); err != nil || len(st.lines) != 0 {
+		t.Errorf("vouched for meanwhile: %v, lines %q; want it pruned", err, st.lines)
+	}
+}
+
+// The write loops and Disown both make the checks that are due. One that
+// finds an object held, and can't add its line, stays pending, though the
+// other's, whose read was before the hold landed, has taken it meanwhile
+// (§10.6.6).
+func TestAFailedCheckSurvivesAnother(t *testing.T) {
+	ctx, now := context.Background(), time.Now()
+	id := SecretRef("ns", "x").ID()
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{}}
+	st := &memStore{exists: true, rebuilt: true}
+	ix := testIndex(st, srv)
+	ix.queue([]ID{id}, true)
+	st.beforeUpdate = func(s *memStore) {
+		// Another tick, whose read found x bare, ends first; and this one's
+		// add fails.
+		s.beforeUpdate = nil
+		held := srv.objs
+		srv.objs = nil
+		if err := ix.recheckTick(ctx, now); err != nil || len(ix.pending) != 0 {
+			t.Fatalf("the other check: %v, pending %v", err, ix.pending)
+		}
+		srv.objs, s.exists = held, false
+	}
+	srv.objs[id] = heldObj("x")
+	if err := ix.recheckTick(ctx, now); err == nil {
+		t.Fatal("the add didn't fail")
+	}
+	r := ix.pending[id]
+	if r == nil || !r.due.After(now) || !r.tampered {
+		t.Fatalf("pending %+v; want x, as a tampered one, due later", r)
+	}
+	st.exists = true
+	if err := ix.recheckTick(ctx, now.Add(time.Hour)); err != nil || !slices.Equal(st.lines, linesOf([]ID{id})) || len(ix.pending) != 0 {
+		t.Errorf("the retry: %v, lines %q, pending %v", err, st.lines, ix.pending)
+	}
+}
+
+// A rebuild under way leaves the index unsure until it has ended, as one that
+// is due does (§7.4).
+func TestARebuildUnderWayIsUnsure(t *testing.T) {
+	secrets := map[schema.GroupKind]bool{secretGroupKind: true}
+	for name, fail := range map[string]bool{"that completes": false, "that fails": true} {
+		st := &memStore{}
+		ix := testIndex(st, &objServer{})
+		during := 0
+		st.beforeCreate = func(s *memStore) {
+			if during++; !ix.unsure(secrets) {
+				t.Errorf("a rebuild %s: sure while it is under way", name)
+			}
+		}
+		if fail {
+			st.beforeUpdate = func(s *memStore) { s.exists = false }
+		}
+		ix.markLost()
+		if err := ix.lostTick(context.Background(), time.Now()); (err != nil) != fail || during == 0 {
+			t.Errorf("a rebuild %s: %v, %d creates", name, err, during)
+		}
+		if ix.unsure(secrets) != fail {
+			t.Errorf("after a rebuild %s: unsure %v", name, ix.unsure(secrets))
+		}
+	}
+}
+
+// getHook is an objServer that runs on before each Get.
+type getHook struct {
+	*objServer
+	on func()
+}
+
+func (s *getHook) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	s.on()
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
+// stopServer is an objServer that fails once its context is done, as the API
+// client does.
+type stopServer struct{ *objServer }
+
+func (s stopServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
+// pause waits d, or until ctx ends.
+func pause(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// slowServer is an objServer whose reads take d, and slowStore a memStore.
+type slowServer struct {
+	*objServer
+	d time.Duration
+}
+
+func (s slowServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if err := pause(ctx, s.d); err != nil {
+		return nil, err
+	}
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
+type slowStore struct {
+	*memStore
+	d time.Duration
+}
+
+func (s slowStore) get(ctx context.Context) (indexVersion, error) {
+	if err := pause(ctx, s.d); err != nil {
+		return indexVersion{}, err
+	}
+	return s.memStore.get(ctx)
+}
+
+func (s slowStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
+	if err := pause(ctx, s.d); err != nil {
+		return indexVersion{}, err
+	}
+	return s.memStore.update(ctx, cur, lines, mark)
+}
+
+// A prune of more lines than one check can read within its bound, as after a
+// namespace's teardown, removes them all but the held ones, in as many writes
+// as it takes, with none left to the queue (§10.6.2). 400 reads of 5ms don't
+// fit in the bound here, and 50 do.
+func TestAPruneOfManyLines(t *testing.T) {
+	const n, d = 400, 5 * time.Millisecond
+	srv := slowServer{&objServer{objs: map[ID]*metav1.PartialObjectMetadata{}}, d}
+	var ids, held []ID
+	for i := range n {
+		id := SecretRef("ns", fmt.Sprintf("s%03d", i)).ID()
+		ids = append(ids, id)
+		if i%40 == 0 {
+			held = append(held, id)
+			srv.objs[id] = heldObj(id.Name)
+		}
+	}
+	for name, empty := range map[string]bool{"a prune": false, "Disown's emptying": true} {
+		st := &memStore{exists: true, rebuilt: true, lines: linesOf(ids), rv: 1}
+		ix := testIndex(slowStore{st, d}, srv)
+		ix.maxLines = n
+		ix.bound, ix.checkBound = 2250*time.Millisecond, 1500*time.Millisecond
+		remove := ix.prune
+		if empty {
+			remove = ix.empty
+		}
+		if err := remove(context.Background(), ids); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if want := linesOf(held); !slices.Equal(st.lines, want) || len(ix.pending) != 0 {
+			t.Errorf("%s: %d lines left, %d pending; want the %d held ones, and none", name, len(st.lines), len(ix.pending), len(want))
+		}
+	}
+}
+
+// A prune whose check is cut short by its bound puts the lines back it didn't
+// come to, in the index itself and not in the queue, which dies with the
+// process; and says so, so that its batch is retried (§10.6.2).
+func TestAPruneCutShort(t *testing.T) {
+	bare, stuck, held := SecretRef("ns", "bare").ID(), SecretRef("ns", "c-stuck").ID(), SecretRef("ns", "d-held").ID()
+	objs := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("d-held")}}
+	st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare, stuck, held}), rv: 1}}
+	ix := testIndex(st, stuckServer{stopServer{objs}, stuck})
+	ix.bound, ix.checkBound = time.Minute, 50*time.Millisecond
+	if err := ix.prune(context.Background(), []ID{bare, stuck, held}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("prune = %v, want that its check was cut short", err)
+	}
+	if want := linesOf([]ID{stuck, held}); !slices.Equal(st.lines, want) || len(ix.pending) != 0 {
+		t.Errorf("lines %q, pending %v; want %q, and none", st.lines, ix.pending, want)
+	}
+	// One whose context ends begins no other write.
+	var many []ID
+	for i := range 2 * pruneChunk {
+		many = append(many, SecretRef("ns", fmt.Sprintf("s%03d", i)).ID())
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	st.lines, st.beforeUpdate = linesOf(many), func(*memStore) { stop() }
+	ix.maxLines, ix.checkBound = len(many), time.Minute
+	if err := ix.prune(ctx, many); !errors.Is(err, context.Canceled) || len(st.lines) != pruneChunk {
+		t.Errorf("a prune stopped in its first write = %v, with %d lines left, want %d", err, len(st.lines), pruneChunk)
+	}
+}
+
+// A check cut short by its bound read nothing of what it didn't come to, so a
+// vouch of a kind in a namespace isn't of it: its line goes back, as every
+// other's (§10.6.2). What it read, and can't, the vouch covers.
+func TestAPruneCutShortInAVouchedKind(t *testing.T) {
+	denied, stuck := SecretRef("ns", "a-denied").ID(), SecretRef("ns", "b-stuck").ID()
+	objs := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{}, forbid: map[ID]bool{denied: true}}
+	st := &memStore{exists: true, rebuilt: true, vouched: "ns/Secret/*", lines: linesOf([]ID{denied, stuck}), rv: 1}
+	ix := testIndex(st, stuckServer{stopServer{objs}, stuck})
+	ix.bound, ix.checkBound = time.Minute, 50*time.Millisecond
+	if err := ix.prune(context.Background(), []ID{denied, stuck}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("prune = %v, want that its check was cut short", err)
+	}
+	if want := linesOf([]ID{stuck}); !slices.Equal(st.lines, want) || len(ix.pending) != 0 {
+		t.Errorf("lines %q, pending %v; want %q, and none", st.lines, ix.pending, want)
+	}
+}
+
+// stuckServer's read of one object doesn't answer.
+type stuckServer struct {
+	stopServer
+	id ID
+}
+
+func (s stuckServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if name == s.id.Name {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.stopServer.Get(ctx, gk, ns, name)
+}
+
+// A graceful stop ends ctx in the middle of a prune: the write isn't
+// aborted, and the check after it and the re-add run to their end, within
+// pruneBound (§10.6.2). A prune that hasn't begun doesn't.
+func TestAPruneOutlivesAStop(t *testing.T) {
+	held, denied := SecretRef("ns", "held").ID(), SecretRef("ns", "denied").ID()
+	srv := stopServer{&objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}, forbid: map[ID]bool{denied: true}}}
+	st := &lossyStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{denied, held}), rv: 1}}
+	ix := testIndex(st, srv)
+	ctx, stop := context.WithCancel(context.Background())
+	st.beforeUpdate = func(*memStore) { stop() }
+	if err := ix.prune(ctx, []ID{denied, held}); err != nil {
+		t.Errorf("prune = %v", err)
+	}
+	if want := linesOf([]ID{denied, held}); !slices.Equal(st.lines, want) {
+		t.Errorf("after a stop in the middle of the prune: %q, want %q", st.lines, want)
+	}
+	updates := st.updates
+	if err := ix.prune(ctx, []ID{held}); !errors.Is(err, context.Canceled) || st.updates != updates {
+		t.Errorf("a prune begun after the stop = %v, with %d updates", err, st.updates-updates)
+	}
+}
+
+// While Disown covers the kind and hasn't settled, a prune's lines stay,
+// whatever the CRD's cache shows: a live read before the removal that finds
+// it on, or fails, removes nothing; one after it, for a switch set meanwhile,
+// puts them back, and so does one that fails. Disown's own emptying removes
+// them (§7.4).
+func TestAPruneWhileDisownHasntSettled(t *testing.T) {
+	ctx := context.Background()
+	bare := SecretRef("ns", "bare").ID()
+	all := parseDisown("all")
+	for name, tc := range map[string]struct {
+		cached, before, after disownSet
+		// fail is the live read that fails, 1 or 2; reads is how many there
+		// are.
+		fail, reads int
+		empty       bool
+		kept        bool
+		updates     int
+	}{
+		"off":                          {reads: 2, updates: 1},
+		"on, and cached":               {cached: all, before: all, after: all, kept: true},
+		"on, and not cached":           {before: all, after: all, reads: 1, kept: true},
+		"set during it":                {after: all, reads: 2, kept: true, updates: 2},
+		"on for another kind":          {before: parseDisown("ConfigMap"), after: parseDisown("ConfigMap"), reads: 2, updates: 1},
+		"unreadable before it":         {fail: 1, reads: 1, kept: true},
+		"unreadable after it":          {fail: 2, reads: 2, kept: true, updates: 2},
+		"on, and the emptying":         {cached: all, before: all, after: all, empty: true, updates: 1},
+		"off, with a cache that isn't": {cached: all, kept: true},
+	} {
+		reads := 0
+		st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare}), rv: 1}
+		ix := testIndex(st, &objServer{objs: map[ID]*metav1.PartialObjectMetadata{bare: {ObjectMeta: metav1.ObjectMeta{Name: "bare"}}}})
+		ix.keptCached = tc.cached.covers
+		ix.keptLive = func(context.Context) (disownSet, error) {
+			if reads++; reads == tc.fail {
+				return disownSet{}, errors.New("the CRD can't be read")
+			}
+			if reads == 1 {
+				return tc.before, nil
+			}
+			return tc.after, nil
+		}
+		remove := ix.prune
+		if tc.empty {
+			remove = ix.empty
+		}
+		if err := remove(ctx, []ID{bare}); (err != nil) != (tc.fail > 0) || reads != tc.reads {
+			t.Errorf("%s: %v, with %d live reads of the switch, want %d", name, err, reads, tc.reads)
+		}
+		if got := len(st.lines) == 1; got != tc.kept || st.updates != tc.updates {
+			t.Errorf("%s: the line kept: %v, in %d updates; want %v, in %d", name, got, st.updates, tc.kept, tc.updates)
+		}
+	}
+}
+
+// A bare object's dropped line goes back while Disown covers the kind and
+// hasn't settled, unreported; a switch that can't be read retries the check
+// (§7.4).
+func TestABareDropWhileDisownHasntSettled(t *testing.T) {
+	bare := SecretRef("ns", "bare").ID()
+	st := &memStore{exists: true, rebuilt: true}
+	ix := testIndex(st, &objServer{objs: map[ID]*metav1.PartialObjectMetadata{bare: {ObjectMeta: metav1.ObjectMeta{Name: "bare"}}}})
+	ix.onTampered = func(ID) { t.Error("a bare object's line was reported as tampering") }
+	var set disownSet
+	fail := errors.New("the CRD can't be read")
+	ix.keptLive = func(context.Context) (disownSet, error) { return set, fail }
+	now := time.Now()
+	ix.queue([]ID{bare}, true)
+	if err := ix.recheckTick(context.Background(), now); err == nil || ix.pending[bare] == nil || len(st.lines) != 0 {
+		t.Errorf("with the switch unreadable: %v, pending %v, lines %q", err, ix.pending, st.lines)
+	}
+	set, fail = parseDisown("all"), nil
+	if err := ix.recheckTick(context.Background(), now.Add(time.Hour)); err != nil || len(ix.pending) != 0 || !slices.Equal(st.lines, linesOf([]ID{bare})) {
+		t.Errorf("under the switch: %v, pending %v, lines %q; want the line back", err, ix.pending, st.lines)
+	}
+	set, st.lines = disownSet{}, nil
+	ix.queue([]ID{bare}, true)
+	if err := ix.recheckTick(context.Background(), now); err != nil || len(ix.pending) != 0 || len(st.lines) != 0 {
+		t.Errorf("without it: %v, pending %v, lines %q; want it dropped", err, ix.pending, st.lines)
+	}
+}
+
+// Once settled, Disown removes only the lines a live read proves free: not
+// one whose strip failed, which can't be read and isn't vouched for, or that
+// carries the prefix (§7.4).
+func TestFreeLines(t *testing.T) {
+	id := func(n string) ID { return SecretRef("ns", n).ID() }
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{
+		id("bare"): {ObjectMeta: metav1.ObjectMeta{Name: "bare"}}, id("unstripped"): {ObjectMeta: metav1.ObjectMeta{Name: "unstripped"}}, id("held"): heldObj("held"), id("vouched-held"): heldObj("vouched-held"),
+	}, forbid: map[ID]bool{id("denied"): true, id("vouched"): true}, fail: map[ID]bool{id("failing"): true}}
+	prefix, _ := FinalizerPrefix(widgetGK)
+	tr := &Tracker{gk: widgetGK, prefix: prefix}
+	var lined []ID
+	for _, n := range []string{"bare", "denied", "failing", "gone", "held", "unstripped", "vouched", "vouched-held"} {
+		lined = append(lined, id(n))
+	}
+	got := tr.freeLines(context.Background(), srv, lined, map[ID]bool{id("unstripped"): true}, vouches{ids: map[ID]bool{id("vouched"): true, id("vouched-held"): true}})
+	if want := []ID{id("bare"), id("gone"), id("vouched")}; !slices.Equal(got, want) {
+		t.Errorf("free = %v, want %v", got, want)
 	}
 }
 
@@ -535,17 +1058,43 @@ func TestProbePerNameGetsOnly(t *testing.T) {
 // fakeLines is a lineKeeper that records what the acquirer asks of it, and
 // fails postCheck while failPost is set.
 type fakeLines struct {
-	ensured, checked []ID
-	failPost         bool
+	ensured, checked, unknown []ID
+	failPost, failEnsure      bool
+	// flying are the A2s it was told of and not of their end, and steps what
+	// it was asked, in order.
+	flying map[ID]int
+	steps  []string
+}
+
+func (f *fakeLines) holding(id ID) func() {
+	if f.flying == nil {
+		f.flying = map[ID]int{}
+	}
+	f.flying[id]++
+	f.steps = append(f.steps, "holding")
+	return func() {
+		f.flying[id]--
+		f.steps = append(f.steps, "done")
+	}
+}
+
+func (f *fakeLines) unknownA2(_ context.Context, id ID, _ string) {
+	f.unknown = append(f.unknown, id)
+	f.steps = append(f.steps, "unknown")
 }
 
 func (f *fakeLines) covers(gk schema.GroupKind) bool { return gk == secretGroupKind }
 func (f *fakeLines) ensure(_ context.Context, id ID) error {
 	f.ensured = append(f.ensured, id)
+	f.steps = append(f.steps, "ensure")
+	if f.failEnsure {
+		return errors.New("the index is full")
+	}
 	return nil
 }
 func (f *fakeLines) postCheck(_ context.Context, id ID) error {
 	f.checked = append(f.checked, id)
+	f.steps = append(f.steps, "check")
 	if f.failPost {
 		return errors.New("the index can't be read")
 	}
@@ -807,8 +1356,217 @@ func TestTheRebuiltMarker(t *testing.T) {
 	if err := testIndex(st2, srv).rebuild(context.Background()); err != nil || !st2.rebuilt {
 		t.Errorf("a rebuild that adds no line: %v, marker %v", err, st2.rebuilt)
 	}
-	if !testIndex(st, srv).needsRebuild(indexVersion{}) || testIndex(st, srv).needsRebuild(indexVersion{rebuilt: true}) {
+	if !testIndex(st, srv).needsRebuild(indexVersion{}) || testIndex(st, srv).needsRebuild(indexVersion{marked: kindSet{secretGroupKind: true}}) {
 		t.Error("needsRebuild doesn't follow the marker")
+	}
+}
+
+// The marker is of the index's kinds: one moved to PerName since is in no
+// marker, so a rebuild is due, and Disown of it isn't complete; one moved away
+// leaves it, under the switch too, so that moved back it isn't complete before
+// a rebuild of it (§10.6.6).
+func TestTheMarkersKinds(t *testing.T) {
+	ctx := context.Background()
+	m := apimodel.New(time.Now)
+	seed(m, "ns", "s", []string{"h"}, true)
+	srv := nsServer{modelServer{m: m}, "ns"}
+	secrets, both := kindSet{secretGroupKind: true}, kindSet{secretGroupKind: true, configMapGroupKind: true}
+	st := &memStore{exists: true, rebuilt: true}
+	rebuild := func(kinds kindSet, on bool) *index {
+		t.Helper()
+		ix := testIndex(st, srv)
+		ix.kinds = kinds
+		ix.disowning = func(context.Context) (bool, error) { return on, nil }
+		if err := ix.rebuild(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return ix
+	}
+	for _, step := range []struct {
+		what       string
+		kinds      kindSet // the process's
+		on         bool    // the switch
+		due        bool    // whether the rebuild was
+		want       kindSet // the marker after it
+		incomplete kindSet
+	}{
+		{"as it was", secrets, false, false, secrets, both},
+		{"another moved to PerName, under the switch", both, true, true, secrets, both},
+		{"another moved to PerName", both, false, true, both, nil},
+		{"and moved away, under the switch", secrets, true, true, secrets, both},
+		{"and back, under the switch", both, true, true, secrets, both},
+		{"and back", both, false, true, both, nil},
+		{"and away", secrets, false, true, secrets, both},
+	} {
+		ix := testIndex(st, srv)
+		ix.kinds = step.kinds
+		if got := ix.needsRebuild(st.version()); got != step.due {
+			t.Errorf("%s: a rebuild is due: %v, want %v", step.what, got, step.due)
+		}
+		rebuild(step.kinds, step.on)
+		v := st.version()
+		v.uid = "u"
+		if !maps.Equal(v.marked, step.want) || !v.complete(secrets) || v.complete(both) != (step.incomplete == nil) {
+			t.Errorf("%s: marked %v, want %v; complete for Secrets %v, for both %v", step.what, v.marked, step.want, v.complete(secrets), v.complete(both))
+		}
+	}
+	// A vouch makes up for what the marker lacks, kind by kind.
+	v := st.version()
+	v.uid, v.vouchedIndex = "u", "u/ConfigMap"
+	if !v.complete(both) {
+		t.Error("the marker of Secrets, and a vouch for ConfigMaps, aren't complete for both")
+	}
+}
+
+// While Disown is on, a rebuild can't tell that the records still name every
+// hold, so it merges the lines and leaves the marker off, unless the kind
+// was never tracked before; the rebuild after the switch sets it. A switch
+// that can't be read fails the rebuild (§7.4, §10.6.6).
+func TestARebuildUnderDisownLeavesNoMarker(t *testing.T) {
+	ctx := context.Background()
+	m := apimodel.New(time.Now)
+	seed(m, "ns", "s", []string{"h"}, true)
+	srv := nsServer{modelServer{m: m}, "ns"}
+	line := SecretRef("ns", "s").ID().String()
+	st := &memStore{}
+	ix := testIndex(st, srv)
+	on, fail := true, error(nil)
+	ix.disowning = func(context.Context) (bool, error) { return on, fail }
+	fail = errors.New("the CRD can't be read")
+	if err := ix.rebuild(ctx); !errors.Is(err, fail) || st.exists {
+		t.Errorf("a rebuild that can't read the switch = %v, index created %v", err, st.exists)
+	}
+	fail = nil
+	if err := ix.rebuild(ctx); err != nil || st.rebuilt || !slices.Contains(st.lines, line) {
+		t.Errorf("a rebuild under the switch: %v, marker %v, lines %q; want the line and no marker", err, st.rebuilt, st.lines)
+	}
+	ix.lost = false
+	ix.saw(indexVersion{})
+	if ix.switchChanged(); !ix.lost {
+		t.Error("a switch that changes over an index without the marker asks for no rebuild")
+	}
+	on = false
+	if err := ix.rebuild(ctx); err != nil || !st.rebuilt {
+		t.Errorf("a rebuild after the switch: %v, marker %v", err, st.rebuilt)
+	}
+	ix.lost = false
+	ix.saw(indexVersion{marked: kindSet{secretGroupKind: true}})
+	if ix.switchChanged(); ix.lost {
+		t.Error("a switch that changes over a rebuilt index asks for a rebuild")
+	}
+
+	// A kind never tracked before had no hold; once rebuilt, a loss is one.
+	on = true
+	st = &memStore{}
+	ix = testIndex(st, srv)
+	ix.disowning = func(context.Context) (bool, error) { return on, nil }
+	ix.setFresh(true)
+	if err := ix.rebuild(ctx); err != nil || !st.rebuilt || ix.isFresh() {
+		t.Errorf("the first rebuild of a kind never tracked: %v, marker %v, still fresh %v", err, st.rebuilt, ix.isFresh())
+	}
+	st.exists, st.rebuilt, st.lines = false, false, nil
+	if err := ix.rebuild(ctx); err != nil || st.rebuilt {
+		t.Errorf("a rebuild after it was lost: %v, marker %v; want none", err, st.rebuilt)
+	}
+}
+
+// An index names every hold of some kinds once a rebuild completed, or an
+// operator vouched for that very ConfigMap, and for each of those kinds (§7.4).
+func TestIndexVersionComplete(t *testing.T) {
+	target := schema.GroupKind{Group: "core.krateo.io", Kind: "KubernetesTarget"}
+	secrets := map[schema.GroupKind]bool{secretGroupKind: true}
+	both := map[schema.GroupKind]bool{secretGroupKind: true, target: true}
+	for _, c := range []struct {
+		v     indexVersion
+		kinds map[schema.GroupKind]bool
+		want  bool
+	}{
+		{indexVersion{uid: "a"}, secrets, false},
+		{indexVersion{}, secrets, false}, // no uid vouches for no uid
+		{indexVersion{vouchedIndex: "/Secret"}, secrets, false},
+		{indexVersion{uid: "a", marked: both}, both, true},
+		{indexVersion{uid: "a", marked: secrets}, both, false}, // moved to PerName since
+		{indexVersion{uid: "a", marked: secrets}, secrets, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, secrets, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, both, false}, // the switch was widened
+		{indexVersion{uid: "a", vouchedIndex: "a/KubernetesTarget.core.krateo.io,Secret"}, both, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/KubernetesTarget.core.krateo.io,Secret"}, secrets, true},
+		{indexVersion{uid: "a", vouchedIndex: "a/all"}, secrets, false}, // it names no kind
+		{indexVersion{uid: "a", vouchedIndex: "a"}, secrets, false},
+		{indexVersion{uid: "a", vouchedIndex: "a/Secret"}, nil, false},
+		{indexVersion{uid: "b", vouchedIndex: "a/Secret"}, secrets, false}, // restored, or lost again
+		{indexVersion{uid: "a", vouched: "a/Secret"}, secrets, false},
+	} {
+		if got := c.v.complete(c.kinds); got != c.want {
+			t.Errorf("%+v is complete for %v: %v, want %v", c.v, c.kinds, got, c.want)
+		}
+	}
+	if v := valueOf("a", both); v != "a/KubernetesTarget.core.krateo.io,Secret" || !maps.Equal(kindsOf(v, "a"), both) {
+		t.Errorf("the value for both is %q, of %v", v, kindsOf(v, "a"))
+	}
+	if got := kindsOf("a/", "a"); got == nil || len(got) != 0 {
+		t.Errorf("a value of no kind is %v, want one that lists none", got)
+	}
+}
+
+// A pending live check of a kind, or a rebuild that is due, means a line of
+// it may be missing (§7.4).
+func TestIndexUnsure(t *testing.T) {
+	secrets, others := map[schema.GroupKind]bool{secretGroupKind: true}, map[schema.GroupKind]bool{configMapGroupKind: true}
+	ix := testIndex(&memStore{}, nil)
+	if ix.unsure(secrets) {
+		t.Error("unsure with nothing pending")
+	}
+	ix.queue([]ID{SecretRef("ns", "s").ID()}, false)
+	if !ix.unsure(secrets) || ix.unsure(others) {
+		t.Errorf("with a Secret's check pending: unsure of Secrets %v, of ConfigMaps %v", ix.unsure(secrets), ix.unsure(others))
+	}
+	ix = testIndex(&memStore{}, nil)
+	ix.markLost()
+	if !ix.unsure(secrets) {
+		t.Error("sure with a rebuild due")
+	}
+}
+
+// duringGet is a memStore whose get runs during as it returns.
+type duringGet struct {
+	*memStore
+	during func()
+}
+
+func (s duringGet) get(ctx context.Context) (indexVersion, error) {
+	v, err := s.memStore.get(ctx)
+	s.during()
+	return v, err
+}
+
+// A read of the index for a count is sure only with nothing owed before it
+// and after it: a re-add that lands during it isn't in what it read, and one
+// that becomes due during it may not be (§7.4).
+func TestReadSure(t *testing.T) {
+	secrets := map[schema.GroupKind]bool{secretGroupKind: true}
+	id := SecretRef("ns", "s").ID()
+	for name, tc := range map[string]struct {
+		before, during func(ix *index)
+		sure           bool
+	}{
+		"nothing owed":           {sure: true},
+		"owed throughout":        {before: func(ix *index) { ix.queue([]ID{id}, false) }},
+		"owed before, not after": {before: func(ix *index) { ix.queue([]ID{id}, false) }, during: func(ix *index) { delete(ix.pending, id) }},
+		"owed after, not before": {during: func(ix *index) { ix.queue([]ID{id}, false) }},
+	} {
+		st := &duringGet{memStore: &memStore{exists: true, rebuilt: true}, during: func() {}}
+		ix := testIndex(st, nil)
+		if tc.during != nil {
+			st.during = func() { tc.during(ix) }
+		}
+		if tc.before != nil {
+			tc.before(ix)
+		}
+		cur, sure, err := ix.readSure(context.Background(), secrets)
+		if err != nil || len(cur.marked) == 0 || sure != tc.sure {
+			t.Errorf("%s: %+v, sure %v, %v; want sure %v", name, cur, sure, err, tc.sure)
+		}
 	}
 }
 
@@ -987,17 +1745,52 @@ func TestParseVouched(t *testing.T) {
 			{Group: "x.io", Kind: "Cluster", Name: "c"}:                                            true,
 			{Group: "core.krateo.io", Kind: "KubernetesTarget", Namespace: "team-b", Name: "prod"}: true,
 		}
-		if len(got) != len(want) {
+		if len(got.ids) != len(want) || len(got.kinds) != 0 {
 			t.Fatalf("parsed %v, want %v", got, want)
 		}
 		for id := range want {
-			if !got[id] {
+			if !got.has(id) || !got.names(id) {
 				t.Errorf("%v missing from %v", id, got)
 			}
 		}
 	}
 	if len(reports) != 1 || !slices.Equal(reports[0], []string{"nonsense", "a/b/c/d"}) {
 		t.Errorf("reports %q, want the two malformed entries once", reports)
+	}
+	// A kind in a namespace, whole; neither a namespace of every kind, nor
+	// every namespace, nor what has none (decided 2026-11-25).
+	reports = nil
+	target := schema.GroupKind{Group: "core.krateo.io", Kind: "KubernetesTarget"}
+	got := ix.parseVouched("team-a/Secret/*, team-b/KubernetesTarget.core.krateo.io/*, team-a/*, */*,/*,*,*/Secret/*,/Secret/*,team_c/Secret/*,team-a/*/*")
+	if want := map[vouchedKind]bool{{"team-a", secretGroupKind}: true, {"team-b", target}: true}; len(got.ids) != 0 || !maps.Equal(got.kinds, want) {
+		t.Errorf("parsed %v, want %v", got, want)
+	}
+	if len(reports) != 1 || !slices.Equal(reports[0], []string{"team-a/*", "*/*", "/*", "*", "*/Secret/*", "/Secret/*", "team_c/Secret/*", "team-a/*/*"}) {
+		t.Errorf("reports %q, want the malformed entries", reports)
+	}
+	in, inTarget := SecretRef("team-a", "s").ID(), ID{Group: target.Group, Kind: target.Kind, Namespace: "team-b", Name: "prod"}
+	if !got.has(in) || got.names(in) || !got.has(inTarget) || got.names(inTarget) {
+		t.Errorf("%v: has and names don't follow the kind in its namespace", got)
+	}
+	for _, out := range []ID{SecretRef("team-b", "s").ID(), {Kind: "ConfigMap", Namespace: "team-a", Name: "c"}, {Group: target.Group, Kind: target.Kind, Namespace: "team-a", Name: "prod"}, {Kind: "Cluster", Name: "c"}} {
+		if got.has(out) {
+			t.Errorf("%v vouches for %v", got, out)
+		}
+	}
+	// One of a kind the index has no lines of vouches for nothing, and is
+	// reported once per value: a kind in lower case, or with a version for a
+	// group, or another kind (§10.6.6).
+	reports = nil
+	var foreign [][]string
+	ix.onVouchForeign = func(e []string) { foreign = append(foreign, e) }
+	for range 2 {
+		ix.parseVouched("team-a/Secret/*, team-a/secret/*, team-a/Secret.v1/*, team-a/ConfigMap/*, team-b/secret/s, team-b/Secret/s, team-a/*")
+	}
+	if len(foreign) != 1 || !slices.Equal(foreign[0], []string{"team-a/secret/*", "team-a/Secret.v1/*", "team-a/ConfigMap/*", "team-b/secret/s"}) {
+		t.Errorf("entries of another kind reported %q, want the four once", foreign)
+	}
+	if len(reports) != 1 || !slices.Equal(reports[0], []string{"team-a/*"}) {
+		t.Errorf("malformed entries reported %q, want team-a/* once", reports)
 	}
 	if got, ok := parseUnheldRef(unheldRef(SecretRef("ns", "s").ID())); !ok || got != SecretRef("ns", "s").ID() {
 		t.Errorf("parseUnheldRef(unheldRef) = %v, %v", got, ok)
@@ -1073,12 +1866,47 @@ func TestAVouchedLine(t *testing.T) {
 	}
 }
 
+// A vouch of a kind in a namespace is a vouch for each of its objects of that
+// kind that can't be read, and for none that can: one that carries the prefix
+// is treated as any other, and isn't a wrong vouch (§10.6.6).
+func TestAVouchedNamespace(t *testing.T) {
+	ctx := context.Background()
+	in, out, carrying := SecretRef("team-a", "in").ID(), SecretRef("team-b", "out").ID(), SecretRef("team-a", "carrying").ID()
+	prefix, _ := FinalizerPrefix(widgetGK)
+	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{carrying: {ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "carrying", Finalizers: []string{prefix + "team-a"}}}},
+		forbid: map[ID]bool{in: true, out: true}}
+	st := &memStore{exists: true, rebuilt: true, vouched: "team-a/Secret/*", lines: linesOf([]ID{in, carrying})}
+	ix := testIndex(st, srv)
+	ix.onVouchWrong = func(id ID) { t.Errorf("a wrong vouch of %v", id) }
+	var denials []ID
+	ix.onDenied = func(id ID, _ error) { denials = append(denials, id) }
+	var enqueued []ID
+	if err := ix.recheck(ctx, func(id ID, _ string) { enqueued = append(enqueued, id) }); err != nil || !slices.Equal(enqueued, []ID{carrying}) || len(denials) != 0 {
+		t.Errorf("the recheck: %v, enqueued %v, denials %v; want %v enqueued, and nothing denied", err, enqueued, denials, carrying)
+	}
+	st.lines = nil
+	ix.queue([]ID{in, out, carrying}, true)
+	if err := ix.recheckTick(ctx, time.Now()); err != nil || !slices.Equal(st.lines, linesOf([]ID{out, carrying})) {
+		t.Errorf("after the live checks: %v, %q", err, st.lines)
+	}
+	st.lines = linesOf([]ID{in, out, carrying})
+	if err := ix.prune(ctx, []ID{in, out, carrying}); err != nil || !slices.Equal(st.lines, linesOf([]ID{out, carrying})) {
+		t.Errorf("after the prune: %v, %q", err, st.lines)
+	}
+	rec, _ := EncodeRecord([]ID{in, out, carrying})
+	h := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "h", Annotations: map[string]string{AnnotationRefs: rec}}}
+	st2 := &memStore{exists: true, vouched: "team-a/Secret/*"}
+	if err := testIndex(st2, holdersServer{srv, []metav1.PartialObjectMetadata{h}}).rebuild(ctx); err != nil || !slices.Equal(st2.lines, linesOf([]ID{out, carrying})) {
+		t.Errorf("after the rebuild: %v, %q", err, st2.lines)
+	}
+}
+
 // The index's own writes keep the annotations an operator set, the vouched
 // list among them (§10.6.6).
 func TestIndexWritesPreserveTheVouch(t *testing.T) {
 	cm := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "ConfigMap",
-		"metadata": map[string]any{"name": "cu-index-x", "namespace": "idx", "annotations": map[string]any{AnnotationVouched: "ns/Secret/s"}},
+		"metadata": map[string]any{"name": "cu-index-x", "namespace": "idx", "uid": "u1", "annotations": map[string]any{AnnotationVouched: "ns/Secret/s"}},
 		"data":     map[string]any{indexDataKey: ""},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cm)
@@ -1087,7 +1915,7 @@ func TestIndexWritesPreserveTheVouch(t *testing.T) {
 	if err := ix.add(context.Background(), []ID{SecretRef("ns", "a").ID()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ix.merge(context.Background(), nil, true); err != nil {
+	if err := ix.merge(context.Background(), nil, func(cur indexVersion) kindSet { return ix.mark(cur, true) }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ix.remove(context.Background(), []string{SecretRef("ns", "a").ID().String()}); err != nil {
@@ -1097,7 +1925,43 @@ func TestIndexWritesPreserveTheVouch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.vouched != "ns/Secret/s" || !v.rebuilt {
-		t.Errorf("after the writes: vouched %q, rebuilt %v", v.vouched, v.rebuilt)
+	if v.vouched != "ns/Secret/s" || !maps.Equal(v.marked, ix.kinds) || v.obj.GetAnnotations()[AnnotationRebuilt] != "u1/Secret" {
+		t.Errorf("after the writes: vouched %q, marked %v", v.vouched, v.marked)
+	}
+	// A copy restored from a backup has another uid, and the marker and the
+	// lines of the one it copies.
+	restored := v.obj.DeepCopy()
+	restored.SetUID("u2")
+	if v := versionOf(restored); v.marked != nil || v.uid != "u2" {
+		t.Errorf("a restored copy: %+v; want no marker", v)
+	}
+	for uid, marker := range map[string]string{"u1": "true", "": "/Secret", "u2": "u1/Secret", "u3": "u3"} {
+		u := v.obj.DeepCopy()
+		u.SetUID(types.UID(uid))
+		u.SetAnnotations(map[string]string{AnnotationRebuilt: marker})
+		if got := versionOf(u).marked; got != nil {
+			t.Errorf("uid %q with the marker %q is marked for %v", uid, marker, got)
+		}
+	}
+}
+
+// A rebuild that creates the index marks it, in a second write, since the
+// marker is the uid the first one gave it; one that stops in between leaves
+// it unmarked, and so to be rebuilt (§10.6.6).
+func TestARebuildThatCreatesTheIndexMarksIt(t *testing.T) {
+	m := apimodel.New(time.Now)
+	seed(m, "ns", "s", []string{"h"}, true)
+	srv := nsServer{modelServer{m: m}, "ns"}
+	st := &memStore{}
+	ix := testIndex(st, srv)
+	if err := ix.rebuild(context.Background()); err != nil || !st.rebuilt || st.updates != 1 {
+		t.Errorf("a rebuild of a missing index: %v, marker %v, %d updates after the create; want the marker, in one", err, st.rebuilt, st.updates)
+	}
+	if ix.lost {
+		t.Error("a rebuild that creates the index asks for another")
+	}
+	st = &memStore{beforeUpdate: func(s *memStore) { s.exists = false }}
+	if err := testIndex(st, srv).rebuild(context.Background()); err == nil || st.rebuilt {
+		t.Errorf("a rebuild whose index is always deleted before the mark: %v, marker %v", err, st.rebuilt)
 	}
 }

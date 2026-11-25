@@ -135,7 +135,7 @@ MUTANTS = [
     ("an error that names no object loses them all", WL,
      [("\t\tif len(of) == 0 {\n\t\t\tof = ids\n", "\t\tif false && len(of) == 0 {\n\t\t\tof = ids\n")]),
     ("what an error doesn't name is settled before its retry", WL,
-     [("func(id ID) bool { return failed[id] })\n", "func(id ID) bool { return slices.Contains(res.Failed, id) })\n")]),
+     [("return failed[id] || waiting[id] }\n", "return slices.Contains(res.Failed, id) || waiting[id] }\n")]),
     ("what failed without an error is settled", WL,
      [("\tif err == nil && len(res.Failed) > 0 {\n", "\tif false && err == nil && len(res.Failed) > 0 {\n")]),
     ("an error that names some retries them all", WL,

@@ -300,10 +300,12 @@ say which half each item lands in.
   except the PerName items. It publishes `credential-use.krateo.io/config` on
   the holder CRD once (A4), with bounded retries (L4 of #52's review), and a
   disagreeing process refuses to start. It validates
-  `(DisownPasses − 1) × DisownInterval ≥ 2 × TimeoutBound` (A6), and
+  `(DisownPasses − 1) × DisownInterval ≥ max(2 × TimeoutBound, TimeoutBound
+  + LandingMargin)` (A6), and
   derives an unset `DisownInterval` so that it holds. PR 3 validated
   `DisownPasses × DisownInterval`; PR 6 changed the bound to `(DisownPasses
-  − 1)`, and PR 7 added the derivation. `NewShared`
+  − 1)`, PR 7 added the derivation, and the index fix the landing margin
+  (the user's decision, 2026-11-23). `NewShared`
   creates the (K, N) batch queue before any informer starts, so it buffers
   and deduplicates from the first event, grace timers included (M1 of #52's
   review);
@@ -401,7 +403,9 @@ unreleased and nothing imports it, so neither is visible to anyone.
 - `server.go`, `listwatch.go`, `informers.go`, and `shared.go`, `tracker.go`,
   `setup.go` for `NewShared`, `Track` and the published settings; `events.go`
   and `metrics.go` (the `MetricsRecorder` interface, with nop defaults and
-  throttled events; the OpenTelemetry implementation is PR 7's); the
+  throttled events; the OpenTelemetry implementation is PR 7's; an
+  implementation outside this module embeds `NopMetrics`, since the
+  interface grows); the
   driver. The (K, N) batch queue (`queue.go`) is created by `NewShared` and
   runs its timers on an injectable clock, so that PR 3b's ordering tests
   drive it; its handlers enqueue into it, and nothing drains it until PR 3b.
@@ -738,7 +742,12 @@ tests.
 - **The setup check is on the span of the zero passes**, `(DisownPasses −
   1) × DisownInterval ≥ 2 × TimeoutBound`: the first pass runs as soon as
   the switch is seen, so `DisownPasses` passes span one interval fewer (the
-  review of PR 6). The defaults give 240s against 180s.
+  review of PR 6). The defaults give 240s against 180s. Since 2026-11-23
+  (the user's decision) the bound is `max(2 × TimeoutBound, TimeoutBound +
+  LandingMargin)`, `LandingMargin` 60s, and an unset interval is derived
+  from it, also for few passes and a small `TimeoutBound`. A tracker's
+  passes are an interval apart from its own clock reading, taken after its
+  switch's.
 - **A change of what the switch covers starts the run over**, and makes a
   pass due at once; and a count write whose GET finds a switch other than
   the one the pass counted under writes nothing. So widening `Secret` to
@@ -750,11 +759,23 @@ tests.
   `credentialuse_crd_write_starved_total`.
 - **Removing the switch clears `held-count` and `disown-settled`** from the
   CRD, at most once per `DisownInterval`: a flag left behind would say an
-  uninstall is safe while the kind is protected again.
+  uninstall is safe while the kind is protected again. No process may run to
+  clear it, so a reader doesn't rest on that (the user's decision,
+  2026-11-23): `disown-settled` holds the switch's value as written, and a
+  reader checks that the switch is set and not empty, that the flag is the
+  same string, and that `held-count` is `"0"` (`DisownSettled`). A pass's
+  live read before its first A2 removes a flag of another value first, and
+  doesn't hold if it can't.
 - **The run of zeros is per process, and resets on any non-zero or `unknown`
   count it reads on the CRD**, its own earlier one included; unit-tested on a
   fake CRD client (`TestDisownSettling`), and against envtest with a hold put
-  back outside the caches, where only Disown's count can find it.
+  back outside the caches, where only Disown's count can find it. Since
+  2026-11-23 (the user's decision) any other write of the CRD starts it over
+  too: a run is of passes over an unchanged CRD, by the resourceVersion read
+  as each pass starts and as it writes. Runs that keep starting over for two
+  spans are reported, with the event `CredentialUseDisownRestarted`, which
+  names the CRD's last writers, and counted in
+  `credentialuse_disown_restarts_total`.
 - **`DisownPrefix` finds the CRD by `spec.group` and `spec.names.kind`**,
   since its name needs a plural no mapper knows once it is gone; a list that
   fails refuses too. `Names`, read with a GET each, replaces the lists.
@@ -883,7 +904,15 @@ of tests.
   is what is published on the CRD. `DisownPasses` of 1 with the interval
   unset is refused with the "below twice TimeoutBound" error, never a
   division by zero; an interval set explicitly is still refused when too
-  short.
+  short. Since 2026-11-23 the bound in it is `max(2 × TimeoutBound,
+  TimeoutBound + LandingMargin)` (PR 6's notes).
+- **A process whose write loops haven't started refuses its passes** (the
+  user's decision, 2026-11-23; §7.5): one whose controller sets
+  `NeedLeaderElection` to false would hold on a standby, where nothing makes
+  good what a hold owes after it.
+- **An A2 in flight outlives a stop, within bounds** (decided 2026-11-23;
+  §7.2): 10s after its caller's context is cancelled, or the
+  caller's deadline if sooner, and the whole call 15s.
 - **A holder being deleted that carries none of its owner finalizers skips
   Acquire** (the user's decision, 2026-11-22): it has been finalized, isn't
   a user (§6.1), and a record it wrote would be ignored; the rest of its
@@ -940,7 +969,10 @@ of tests.
 - **The metrics** are named `credentialuse.<name>`, which the Prometheus
   exporter turns into the design's names (`_total` added to counters), and
   are taken from `WithMetrics` when the recorder implements
-  `credentialuse.MetricsRecorder`, as `telemetry.Metrics` does.
+  `credentialuse.MetricsRecorder`, as `telemetry.Metrics` does. The
+  interface grows with the metrics, so any other implementation embeds
+  `credentialuse.NopMetrics`: one that doesn't stops satisfying it when a
+  method is added, and its credential-use metrics then silently stop.
 - **`KindOptions` lives in the core**; the adapter adds the holder, the
   owner finalizers, `Refs`, the sinks, `PollInterval` (the poll interval)
   and `TimeoutBound` (the timeout plus 30s).
@@ -967,8 +999,8 @@ of tests.
 - the pointer on the CRD, written once (A4), with start refused on
   disagreement;
 - Disown in PerName mode (§7.4): the live count from the index with a GET
-  per line, Disown emptying the index, and `DisownPrefixOptions.Index`
-  (from PR 6);
+  per line, Disown emptying the index once it has settled, and
+  `DisownPrefixOptions.Index` (from PR 6);
 - the `IndexNamespace` checks (it exists, and holds no holders) at `Track`
   and at acquire time; creating the index when absent;
 - the startup recheck from the index, and the write loops' rescan of it at
@@ -1037,9 +1069,13 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   recheck and the post-check re-adds. Records are read from the synced
   holder cache, which a stale cache only keeps a line longer, and an
   unparseable record keeps every line. Each prune live-GETs every object
-  it removed and adds back any that carries the kind's prefix, or can't be
-  read. A re-add that fails is queued for the write loops, which retry it
-  with backoff until it lands.
+  whose line any attempt of it tried to remove, and adds back any that
+  carries the kind's prefix, or can't be read. A re-add that fails is queued
+  for the write loops, which retry it with backoff until it lands. Since
+  2026-11-23 a prune's write, once begun, runs to its end within 15s (up to
+  50 lines in one, since 2026-11-24), whatever its
+  context does; and an A2 whose outcome is unknown gets its line checked at
+  once, and again after `LandingMargin`, with its release batch (F).
 - **What fails is retried by the write loops** (the review of the PR 8
   build): a re-add after a prune, an acquirer's post-check that can't read
   the index or can't add the line, as on a full index, and a rebuild that
@@ -1051,7 +1087,9 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
 - **A durable marker, `credential-use.krateo.io/rebuilt`, on the index**
   (the user's decision, 2026-11-22). Only a completed rebuild sets it, in
   the same guarded write as its last merge, which writes even when it adds
-  no line. Every other create, an acquirer's or `Track`'s, leaves it
+  no line; its value is the ConfigMap's uid and the PerName kinds, so that a
+  restored copy isn't marked, nor a kind moved to PerName since (2026-11-24).
+  Every create, an acquirer's or `Track`'s, leaves it
   absent. `Track` and the startup recheck rebuild, by merging, an index
   without it, so a process that dies between creating the index and
   rebuilding it, or an index an acquirer recreated while no write loops
@@ -1072,8 +1110,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   and the sink throttles it while the set is the same. Disown also logs, and
   sets the gauge `credentialuse_disown_unreadable`. The remedy, for PR 11's
   runbook: grant `get`, or confirm by hand that the object carries no
-  finalizer of the kind and add it to the index's vouched annotation, then
-  optionally remove its line. A 403 in the startup recheck,
+  finalizer of the kind and add it to the index's vouched annotation; the
+  settled pass removes its line. A 403 in the startup recheck,
   or in the write loops' live checks, is logged and counted once per object
   (`credentialuse_index_read_denied_total`) and isn't returned as an error,
   since no retry helps before RBAC changes. That holds only for the
@@ -1096,14 +1134,18 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   - a prune may remove its line;
   - a rebuild doesn't add it.
 
-  Once readable and carrying the prefix, it is treated normally, and the
+  An entry `ns/Kind[.group]/*` is every object of that kind in a namespace
+  (for a namespace, the user's decision, 2026-11-24; of its kind, decided
+  2026-11-25), once none of them carries the kind's marker label; a bare
+  `ns/*` is malformed. Once readable and carrying the prefix, it is treated normally, and the
   wrong vouch is logged. Every other unreadable line keeps the superset's
   rule. The process never writes the annotation, and its writes keep it,
   as they keep the rebuilt marker. Disown's event names the vouch as the
   remedy.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
-  after R3, in one write per batch. A prune that fails retries the batch.
+  after R3, up to 50 in one write. A prune that fails retries the objects
+  it would have pruned.
 - **The acquirer keeps the line on every pass.** It adds the line before
   each A2, `BeforeEstablish`'s included, unless the index informer's view
   shows it. It checks the line live after each successful A2. A pass that
@@ -1112,26 +1154,43 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   that fails, the full index included, fails the hold: closed for a new
   holder, Degraded for an established one. A failed check also drops the
   A2's written entry, so the next pass writes A2 and checks again.
-- **Disown empties the index under the prune's rule** (§7.4, A15). It
-  counts the union of the index's lines and the records of the kinds the
-  switch covers, with a GET each. It strips them, then prunes those lines
-  and live-GETs each object. Without that GET, an A2 from a pass begun
-  before the switch that lands after the strip would lose its line, and the
-  count from the index and the records would never see it again. A missing
-  or unreadable index, or a GET that fails, makes the count `unknown`.
+- **Disown keeps the index's lines until it has settled, then empties it
+  under the prune's rule** (§7.4, A15; that it empties it only once settled is
+  the user's decision, 2026-11-23). It counts the union of the index's lines and the records
+  of the kinds the switch covers, with a GET each, adds the line of every
+  object a record names, and strips them, the objects before the records
+  that name them. No other prune takes a line of
+  those kinds meanwhile, and a dropped one goes back. Only a process whose
+  own run of zeros is done removes lines, and only those it proves free in
+  that pass, each read once more after the removal. Emptying it in every
+  pass, as first built, let an A2 land on an object whose line had just gone
+  with its response lost, and the count from the index and the records never
+  saw it again (3 of 3 on envtest). A missing or unreadable index, a GET
+  that fails, a full index, or a line this process may still owe makes the
+  count `unknown`.
+- **An index lost under Disown keeps the count `unknown`** until an operator
+  confirms (the user's decision, 2026-11-23; §7.4), by setting the index's
+  `credential-use.krateo.io/vouched-index` to its uid and the kinds the
+  switch covers: a rebuild under the
+  switch works from records that may be stripped, and doesn't set the
+  marker, unless the kind was never tracked. The event is
+  `CredentialUseIndexLost`.
 - **`DisownPrefixOptions.Index` is only read.** Its lines, with `Names`,
   replace the lists. A missing index is an error. The index is left as it
   is: once its objects are stripped it names nothing held, and a kind
-  created again prunes the stale lines at its first start.
+  created again prunes the stale lines at its first start. A Disown that
+  hadn't settled when the CRD went left the lines it needs. It doesn't read
+  the vouch: an object it can't read is in the error it returns.
 - **Tamper checks, the rebuild and the startup recheck run with the write
   loops**, so `RunInformers` stays read-only (IP4). Under leader election,
   only the leader pays the GET per dropped line. The index informer
   queues dropped lines and deletions, and the write loops drain them every
-  second, with backoff on failure. A drop is this process's own when it
-  removed the line itself: the line is marked before the write, so the
-  informer never takes it for someone else's. A drop whose object the
-  per-name cache shows without the kind's prefix, or gone, needs no check
-  (L5). A restored dropped line is counted in
+  second, with backoff on failure. A drop is this process's own
+  only in the version a successful removal of its own returned; every other
+  is checked, one whose object the per-name cache shows released included
+  (the user's decision, 2026-11-23, in place of L5's skip). Marking a line
+  before the write took a concurrent hand removal for this process's own,
+  and lost the line of a held object. A restored dropped line is counted in
   `credentialuse_index_tampered_total`, with a `CredentialUseIndexTampered`
   Warning event on the index.
 - **§10.6.6 follows IP4** (the review of the PR 8 build, 2026-11-22): the
@@ -1258,6 +1317,10 @@ RBAC changes. In PerNamePoll a 403 can be a grant still propagating
 before it reports it. Otherwise that object's batch stays unenqueued for a
 whole leader term.
 
+**Carried from the index fix** (2026-11-23): under an unsettled Disown
+switch the index's lines stay, so the grants, which follow the lines, stay
+too, and are revoked only after the emptying.
+
 **Carried from PR 5's review** (#123): PR 5 tested the late A2 of §11.3
 rule 3 with a two-process envtest, where the A2's own informer event also
 enqueues the release batch. In PerNamePoll mode no watch delivers it, so the
@@ -1274,7 +1337,11 @@ and `Exists` keep their signatures, and `Reconcile` calls
 RESTMapper from `c.RESTMapper()`; `ExistsWithOptions` needs
 `WithRESTMapper(m)` alongside `WithHeld`. `WithHeld` lists by K's marker label with
 `Limit: 1`, stops at the first object with K's prefix, and pages past a hash
-collision. A Disown switch that hasn't settled counts as an instance.
+collision. A Disown switch that hasn't settled counts as an instance, by
+`credentialuse.DisownSettled`'s three checks: the switch set and not empty,
+`disown-settled` the same string, `held-count` `"0"` (the user's decision,
+2026-11-23). A flag left by another value of the switch, or `"true"`, isn't
+settled.
 `WithHeldIndex` GETs index lines until one still carries K's prefix, and a
 missing or unreadable index is an error, never false. The package comment
 gains the new RBAC (`get` on the CRD, and `list` on the protected kinds or
@@ -1284,7 +1351,8 @@ gains the new RBAC (`get` on the CRD, and `list` on the protected kinds or
 
 **Tests** (§14): `Exists` with `WithHeld` stops at the first marked object
 and pages past a forced collision (a foreign marker on an object without the
-prefix); a Kind at zero replicas wakes for the switch; a missing or
+prefix); a Kind at zero replicas wakes for the switch, also over a flag left
+by another value, or of `"true"`; a missing or
 unreadable index keeps `WithHeld` true through the error; the revert check
 gains mutants for each rule.
 
@@ -1301,7 +1369,9 @@ tests.
 
 - `docs/configuration.md`: the options, annotations, labels and defaults;
 - `docs/api.md`: the exported API of `credentialuse` and `provisioner`, the
-  reconciler and `scaletozero` additions, and the metric instruments;
+  reconciler and `scaletozero` additions, and the metric instruments; that
+  an outside `MetricsRecorder`, core-provider's adapter among them, embeds
+  `NopMetrics`, since the interface grows;
 - `docs/usage.md`:
   - adopting the feature: `CredentialRefs`, the builder line, the predicate;
   - §13's RBAC text, and the consent text;
@@ -1312,9 +1382,19 @@ tests.
     `CredentialUseDisownUnreadable` (PR 8): grant `get` on each object the
     event names, or confirm by hand that it carries no finalizer of the kind
     and add it to the index's `credential-use.krateo.io/vouched`
-    annotation, then optionally remove its line (removing the line alone is
-    undone by the tamper check);
-  - the outside-runtime guide (§7.2);
+    annotation, or `ns/Kind[.group]/*` for a kind in a namespace none of
+    whose objects of that kind carries the holder kind's marker label, one
+    entry for each kind the event names, and remove those again once Disown
+    has settled (removing the line alone is undone by the tamper check);
+  - the runbook entries for Disown's other events (§7.4):
+    `CredentialUseIndexLost`, with the `vouched-index` steps;
+    `CredentialUseDisownIndexFull`, raise `IndexMaxLines`, or correct the
+    record of the holder it names;
+    `CredentialUseDisownRestarted`, find and stop the CRD's writer;
+  - the three checks that say Disown has settled, and the by-hand removal of
+    a finalizer that landed later than the margin;
+  - the outside-runtime guide (§7.2), with the standby rule, the call bounds
+    and the wait for calls in flight on a stop;
 - the admission policy sketch, as a reference installer copies;
 - `docs/overview.md`: the new reconcile steps;
 - `docs/index.md` and `docs/llms.txt`: entries for the design and this plan;
@@ -1359,7 +1439,8 @@ tests.
 | The provisioner | 9 |
 | The 403 retry; the PerNamePoll skip | 9 |
 | Published settings; two `RefsFunc` versions; both owner finalizer names | 3 |
-| Tamper checks skip lines with a seen R3 | 8 |
+| Tamper checks read every drop but this process's own | 8, the index fix |
+| Disown under PerName; the flag; a lost index; an A2 of unknown outcome; the standby refusal | the index fix |
 | Cross-namespace consent | 5; 9 (provisioner, poll) |
 | Provisioner with two kinds; watch-driven; 403 requeue without a worker | 9 |
 | Disown and Degraded under split ClusterRoles | 9 |
@@ -1377,6 +1458,29 @@ tests.
 | Model: the self-write filter | 4 |
 | Stress | 3 (Secrets); 4 (Targets); 5 (cross-namespace); 7 (real reconciler); 8 (PerName) |
 | Drain | 3; 7 (manager stop); 8 (index post-checks) |
+
+**Known lost coverage in the older revert checks** (found 2026-11-23 by the
+index fix, not repaired there). These mutants' anchors no longer match the
+code at the head of PR 8's stack, `eafe855`, so their rules aren't
+checked by them. Whether a later script has an equivalent hasn't been
+checked, and neither have the scripts of PRs 1 to 3a:
+
+| Script | Mutant | What moved its anchor |
+|---|---|---|
+| 3b | many names don't take one LIST | PR 8: the `probeGetLimit` condition |
+| 3b | a deleting object outside the caches isn't enqueued | PR 8: `t.s.cached(id)` replaced |
+| 3b | objects that kept only a marker aren't swept | the sweep's error is joined, not returned; probably PR 8 |
+| 4 | an A1 between levels writes the exact chain | PR 5 |
+| 4 | the last A1 isn't written | PR 5 |
+| 4 | a Guaranteed ref is held | PR 5 |
+| 4 | a ref in another namespace with a Next is only not consented | PR 5: `errUnheldChainNotYet` removed |
+| 4 | a foreign change to a content kind doesn't enqueue its holders | PR 5: `consentChanged` added |
+| 4 | our annotations count as someone else's | PR 5: another function in `dropKeys` |
+| 4 | a held ref with a Next needn't be Content | its indentation; the commit isn't traced |
+| 5 | an unheld hop isn't followed | PR 6: a second copy, for disowned hops, matches too |
+| 5 | a withdrawn ref stays with an unfollowed hop | PR 6 |
+| 6 | no live read before BeforeEstablish's A2 | PR 8: the `p.write` call |
+| 7 | HasSynced is always true | PR 8: the index informer's sync added |
 
 ## 5. Ambiguities and contradictions, and what I'd choose
 
@@ -1421,7 +1525,7 @@ for absence. json-patch v4 passes a `test` with `null` on a missing key only
 when the parent map exists (`json-patch.v4@v4.13.0/patch.go:677-693`), which
 is a library quirk, not the RFC. The first count write also has no previous
 value to test. *Choice:* every CRD write (the config, the index pointer, the
-count fields, `disown-settled`) is a GET, then a merge patch guarded by
+count fields, `disown-settled`, and a stale flag's removal) is a GET, then a merge patch guarded by
 resourceVersion. A conflict re-reads and decides again. That keeps every
 guarantee (write-once, no older count over a newer one, `disown-settled` only
 over `"0"`). It also conflicts with unrelated CRD writes, which only cost a
@@ -1445,8 +1549,9 @@ requeues") both need one. *Choice:* add `Acquired.RetryAfter`.
 request timeout" and publishes `timeoutBound`, but `Options` has no such
 field. *Choice:* `Options.TimeoutBound`, which `Track` requires. The adapter
 passes `timeout + reconcileGracePeriod` (90s by default). The rule now in
-force is `(DisownPasses − 1) × DisownInterval ≥ 2 × TimeoutBound` (PR 6),
-with an unset interval derived from `TimeoutBound` (PR 7).
+force is `(DisownPasses − 1) × DisownInterval ≥ max(2 × TimeoutBound,
+TimeoutBound + LandingMargin)` (PR 6, and the index fix), with an unset
+interval derived from `TimeoutBound` (PR 7).
 
 **A7. §7.1 vs. §12, §10.6.4 and §11.3: events and metrics.** The core must
 record events on holders, protected objects and the index, but `Clients` has
@@ -1629,6 +1734,7 @@ it in the docs.
 | P20 | A patch's 404 may name something and not mean that the object is missing: (a) with a webhook that has a namespaceSelector, in a Namespace that is gone, it names the Namespace (`webhook/predicates/namespace/matcher.go`, `MatchNamespaceSelector`); (b) a validator's refusal is passed on, with the details it gives, which may name the very object (`webhook/errors/statuserror.go`). A GET's isn't asked of admission | fix after 8 | envtest: a Namespace finalized by hand under a webhook with no server, and a validator that answers a NotFound |
 | P21 | A metadata-only patch of a custom resource through a version other than the storage one prunes the fields that version lacks, unless a conversion webhook keeps them, as any client's write does: with `None`, a CRD's versions must have equal schemas (`customresource_handler.go:874`, `:1272-1380`). Its labels and annotations are the webhook's answer, and the rest of its metadata, finalizers too, is kept whatever the webhook does (`webhook_converter.go:407-448`) | the holder-version fix | envtest 1.37.0 and 1.36.2: None and a webhook, each storage version, a storage version that moved; webhooks that drop the annotations, and the labels too; A1 itself, through the holder's declared version |
 | P22 | A list at a version one of its objects can't be converted to fails, and never leaves the object out | the holder-version fix | envtest, with a webhook that starts to fail |
+| P23 | The API server removes an object in two steps, after a patch that empties the finalizers of one being deleted and after a DELETE: what lands between them is lost (`store.go:847`, `:869-870` and `:658-680` for the patch; `:1210-1279` for the DELETE, which the test doesn't run). A failure of this premise is a Kubernetes that was mended | the H1 wait | envtest 1.37.0 and 1.36.2, races until one loses a write, and a control that removes nothing |
 
 ## 7. Size estimates
 
@@ -1682,3 +1788,38 @@ as IP1 to IP5:
 
 Every other item in §5 is an implementation choice within the design. All of
 them are recorded in the design doc's §17, "Revision 16".
+
+**On the index fix** (2026-11-23), recorded in the design's §17, "Revision
+18". What is in parentheses was decided in the fix, and isn't the user's:
+
+1. **The index's lines stay until Disown has settled**, and only then is the
+   index emptied; L5's skip is withdrawn. (E1 to E3, and the count `unknown`
+   while a line may be owed. The fix as its own PR.)
+2. **Setup refuses a span** shorter than `max(2 × TimeoutBound, TimeoutBound
+   + 60s)`. (The derived interval.)
+3. **An index lost under Disown** keeps the count `unknown` until an operator
+   confirms. (`vouched-index`, the marker, and a rebuild under the switch that
+   doesn't set it.)
+4. **The residual, with its 60s margin**: what remains needs three conditions
+   together (§10.6.3). (F: an A2 of unknown outcome is checked at once and
+   after the margin, with its release batch, and a stop doesn't cut an A2
+   short.)
+5. **The flag is the switch's value as written**, and a reader makes three
+   checks. (No A2 is made under a stale flag. No migration: no release wrote
+   `"true"`.)
+6. **Any other write of the CRD restarts a run of zeros.** (Runs that keep
+   restarting are reported.)
+7. **A process whose write loops haven't started refuses its passes.**
+8. **An operator may vouch for a namespace** (2026-11-24), a kind in it at a
+   time (decided 2026-11-25).
+9. **A kill inside a prune, as Disown is turned on** (2026-11-24): accepted
+   and documented (§10.6.3), with the objects stripped before the records.
+   The wait that would close it can be added later, with no change of the
+   index's format.
+10. **A prune leaves the line of a hold that may land yet** (2026-11-24): a
+    process's prunes remove nothing for `TimeoutBound` + 60s after its write
+    loops start, and never the line of an A2 of its own in flight or of
+    unknown outcome (§10.6.2). What is left of 4's residual is a landing later
+    than that, and, without leader election, another running process's prune.
+    The cost is 150s of lingering lines after a leader change, at
+    provider-runtime's defaults.

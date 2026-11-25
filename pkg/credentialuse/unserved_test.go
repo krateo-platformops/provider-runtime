@@ -265,11 +265,21 @@ func TestDisownAndTheJanitorOfAnUnservedKind(t *testing.T) {
 		t.Errorf("Disown's second read: %v; want the failure", err)
 	}
 
+	// The switch's reads: a pass's before its first A2, a rebuild's, and a
+	// prune's.
+	var answer error
 	r.md.PrependReactor("get", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
-		return true, nil, unservedError()
+		return true, nil, answer
 	})
-	if _, err := tr.disownLive(ctx); err == nil {
-		t.Error("a switch that couldn't be read is taken for none")
+	for name, read := range map[string]func(context.Context) (disownSet, error){"a pass's": tr.disownForHold, "a rebuild's": tr.disownLive, "a prune's": tr.disownKeeps} {
+		answer = unservedError()
+		if _, err := read(ctx); err == nil {
+			t.Errorf("%s: a switch that couldn't be read is taken for none", name)
+		}
+		answer = apierrors.NewNotFound(schema.GroupResource{Group: crdGVR.Group, Resource: crdGVR.Resource}, tr.crdName)
+		if set, err := read(ctx); err != nil || set.on() {
+			t.Errorf("%s, the CRD gone: %+v, %v; want no switch", name, set, err)
+		}
 	}
 
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),

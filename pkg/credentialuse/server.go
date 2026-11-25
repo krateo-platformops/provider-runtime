@@ -89,6 +89,15 @@ func (s clientServer) Get(ctx context.Context, gk schema.GroupKind, namespace, n
 	return c.Get(ctx, name, metav1.GetOptions{})
 }
 
+// refusedPatch is the error of a patch that was answered with a 404 no read
+// confirmed. The text has the answer and not the chain, which would lend it the
+// 404's class, so this says what the status no longer does: the API server
+// refused the patch, which didn't land (mayHaveLanded).
+type refusedPatch struct{ err error }
+
+func (e refusedPatch) Error() string { return e.err.Error() }
+func (e refusedPatch) Unwrap() error { return e.err }
+
 // Patch patches the object. A 404 of a patch isn't the API server's word that
 // the object doesn't exist: admission may answer one for another object, as a
 // webhook's namespaceSelector does for a Namespace that is gone, or a validator
@@ -96,8 +105,9 @@ func (s clientServer) Get(ctx context.Context, gk schema.GroupKind, namespace, n
 // admission isn't asked about: a 404 is confirmed by a GET, and is NotFound if
 // that GET finds nothing of this name. Anything else, the read's own failures
 // included, is an ordinary error, never of the class NotFound, whose text has
-// both answers; what isn't the API server's, as a timeout, stays in its chain.
-func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace, name string, pt types.PatchType, data []byte) (*metav1.PartialObjectMetadata, error) {
+// both answers; what isn't the API server's, as a timeout, stays in its chain,
+// and it is a refusedPatch.
+func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace, name string, pt types.PatchType, data []byte) (_ *metav1.PartialObjectMetadata, err error) {
 	c, err := s.object(gk, namespace, name)
 	if err != nil {
 		return nil, err
@@ -106,6 +116,11 @@ func (s clientServer) Patch(ctx context.Context, gk schema.GroupKind, namespace,
 	if Classify(err) != ClassNotFound {
 		return out, err
 	}
+	defer func() {
+		if Classify(err) != ClassNotFound {
+			err = refusedPatch{err}
+		}
+	}()
 	// The texts of the answers, not the errors, below: wrapped, either would
 	// lend the error its class, and the patch's is a NotFound.
 	_, read := c.Get(ctx, name, metav1.GetOptions{})

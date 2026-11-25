@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +28,311 @@ import (
 
 	"github.com/krateo-platformops/provider-runtime/pkg/logging"
 )
+
+// A lost index, missing or without the marker, has one report, its own: not
+// also that of an index that can't be read (§7.4).
+func TestALostIndexHasOneReport(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range map[string]*memStore{"missing": {}, "without the marker": {exists: true}} {
+		r := newFakeRig(t)
+		tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// As a PerName kind, with an index of the test's own.
+		tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
+		tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		var got []string
+		for len(r.events.Events) > 0 {
+			got = append(got, <-r.events.Events)
+		}
+		if len(got) != 1 || !strings.Contains(got[0], EventIndexLost) {
+			t.Errorf("%s: events %q, want one %s", name, got, EventIndexLost)
+		}
+	}
+}
+
+// The report of a lost index names the kinds the switch covers, and no other,
+// whose objects are protected still; when to list them; and the vouch, for
+// those kinds, which a switch widened to another doesn't take (§7.4).
+func TestALostIndexReportNamesTheCoveredKinds(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	o := r.options(widgetGK, ProtectedKind{GVK: secretGVK})
+	tr, err := r.s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As PerName kinds, with an index of the test's own.
+	configMap := configMapGroupKind.WithVersion("v1")
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMap, Watch: PerName}}
+	st := &memStore{exists: true, uid: "u1"}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	tr.idx.kinds[configMapGroupKind] = true
+	pass := func(value string) (got []string) {
+		r.s.disownPass(ctx, tr, parseDisown(value))
+		for len(r.events.Events) > 0 {
+			if e := <-r.events.Events; strings.Contains(e, EventIndexLost) {
+				got = append(got, e)
+			}
+		}
+		return got
+	}
+	got := pass("Secret")
+	want := []string{"no sooner than " + (tr.o.TimeoutBound + LandingMargin).String() + " after the switch", "list the objects of Secret labelled", "of no other kind",
+		"kubectl annotate --overwrite configmap -n idx " + tr.idx.name + " " + AnnotationVouchedIndex + "=u1/Secret (§7.4)"}
+	if len(got) != 1 || strings.Contains(got[0], "ConfigMap") {
+		t.Fatalf("events %q, want one, of the Secrets only", got)
+	}
+	for _, s := range want {
+		if !strings.Contains(got[0], s) {
+			t.Errorf("the event %q doesn't say %q", got[0], s)
+		}
+	}
+	st.vouches = "u1/Secret"
+	if got := pass("Secret"); len(got) != 0 {
+		t.Errorf("vouched for: events %q", got)
+	}
+	if got := pass("all"); len(got) != 1 || !strings.Contains(got[0], "=u1/ConfigMap,Secret") {
+		t.Errorf("with the switch widened: events %q, want one, of both", got)
+	}
+	// One that is missing has no uid yet.
+	st.exists = false
+	if got := pass("all"); len(got) != 1 || !strings.Contains(got[0], "=UID/ConfigMap,Secret, with its metadata.uid for UID once it exists again") {
+		t.Errorf("of a missing index: events %q", got)
+	}
+}
+
+// A live check that fails makes the count of its own kind unknown, and not
+// that of the kinds the switch covers (§7.4).
+func TestAFailedCheckOfAnotherKind(t *testing.T) {
+	ctx := context.Background()
+	for value, want := range map[string]string{"Secret": "0", "ConfigMap": "unknown"} {
+		r := newFakeRig(t)
+		tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"`+value+`"}}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		// As PerName kinds, with an index of the test's own.
+		tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMapGVK, Watch: PerName}}
+		tr.idx = testIndex(&memStore{exists: true, rebuilt: true}, r.s.newServer(tr.o.Holder))
+		tr.idx.kinds[configMapGroupKind] = true
+		tr.idx.queue([]ID{{Kind: "ConfigMap", Namespace: "ns", Name: "c"}}, false)
+		r.md.PrependReactor("get", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("down")
+		})
+		r.s.disownPass(ctx, tr, parseDisown(value))
+		crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+		if err != nil || crd.GetAnnotations()[AnnotationHeldCount] != want {
+			t.Errorf("the switch at %s: held-count %q, %v; want %s", value, crd.GetAnnotations()[AnnotationHeldCount], err, want)
+		}
+	}
+}
+
+// A tenant's record that names any number of objects the process can't read
+// keeps Disown's count unknown until an operator vouches for the kind in the
+// namespace, once; the report names the remedy, and fits in an event (§7.4).
+func TestDisownWithAVouchedNamespace(t *testing.T) {
+	ctx := context.Background()
+	var forged []ID
+	for i := range 400 {
+		forged = append(forged, secretID("team-a", fmt.Sprintf("a-rather-long-name-for-a-secret-%03d", i)))
+	}
+	r := newFakeRig(t, holderObject("team-a", "forged", forged...))
+	tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// As a PerName kind, with an index of the test's own.
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
+	st := &memStore{exists: true, rebuilt: true}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	tr.idx.maxLines = 2000
+	r.md.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, rbacForbidden(a.GetNamespace(), a.(clienttesting.GetAction).GetName())
+	})
+	recorded := func() bool {
+		h, err := r.md.Resource(tr.gvr).Namespace("team-a").Get(ctx, "forged", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ReadRecord(h).Present
+	}
+	count := func() string {
+		crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return crd.GetAnnotations()[AnnotationHeldCount]
+	}
+	r.s.disownPass(ctx, tr, parseDisown("all"))
+	var got []string
+	for len(r.events.Events) > 0 {
+		got = append(got, <-r.events.Events)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], EventDisownUnreadable) || !strings.Contains(got[0], "and 397 more") ||
+		!strings.Contains(got[0], "labelled "+MarkerLabel(widgetGK)+"=true, and once none is, add team-a/Secret/*") ||
+		!strings.Contains(got[0], "no sooner than "+(tr.o.TimeoutBound+LandingMargin).String()) || len(got[0]) > 1024 {
+		t.Errorf("events %q, of %d bytes; want one, with the namespace's remedy, of 1,024 at most", got, len(strings.Join(got, "")))
+	}
+	if !recorded() || count() != "unknown" {
+		t.Errorf("not vouched for: recorded %v, held-count %q", recorded(), count())
+	}
+	for _, other := range []string{"team-b/Secret/*", "team-a/ConfigMap/*", "team-a/*"} {
+		st.vouched = other
+		if r.s.disownPass(ctx, tr, parseDisown("all")); !recorded() || count() != "unknown" {
+			t.Errorf("%s vouched for: recorded %v, held-count %q", other, recorded(), count())
+		}
+	}
+	st.vouched = "team-a/Secret/*"
+	r.s.disownPass(ctx, tr, parseDisown("all")) // counts the record, and strips it
+	if r.s.disownPass(ctx, tr, parseDisown("all")); recorded() || count() != "0" {
+		t.Errorf("the namespace vouched for: recorded %v, held-count %q", recorded(), count())
+	}
+}
+
+// A vouch of a kind in a namespace is of that kind only: a switch widened to
+// another finds what it can't read there unvouched, and its count stays
+// unknown until that kind is vouched for too (decided 2026-11-25).
+func TestAWidenedSwitchFindsTheNewKindUnvouched(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As PerName kinds, with an index of the test's own, rebuilt for both.
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMapGVK, Watch: PerName}}
+	s, c := secretID("team-a", "s"), ID{Kind: "ConfigMap", Namespace: "team-a", Name: "c"}
+	st := &memStore{exists: true, marked: kindSet{secretGroupKind: true, configMapGroupKind: true}, lines: linesOf([]ID{c, s})}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	tr.idx.kinds[configMapGroupKind] = true
+	for _, resource := range []string{"secrets", "configmaps"} {
+		r.md.PrependReactor("get", resource, func(a clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, rbacForbidden(a.GetNamespace(), a.(clienttesting.GetAction).GetName())
+		})
+	}
+	pass := func(value string) string {
+		t.Helper()
+		if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"`+value+`"}}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		r.s.disownPass(ctx, tr, parseDisown(value))
+		crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return crd.GetAnnotations()[AnnotationHeldCount]
+	}
+	st.vouched = "team-a/Secret/*"
+	if got := pass("Secret"); got != "0" {
+		t.Errorf("the Secrets vouched for, under a switch over them: held-count %q, want 0", got)
+	}
+	if got := pass("all"); got != "unknown" {
+		t.Errorf("the switch widened to the ConfigMaps, which nobody vouched for: held-count %q, want unknown", got)
+	}
+	st.vouched = "team-a/Secret/*,team-a/ConfigMap/*"
+	if got := pass("all"); got != "0" {
+		t.Errorf("both kinds vouched for: held-count %q, want 0", got)
+	}
+}
+
+// One holder's record that doesn't fit in the index keeps that record only: a
+// tenant may forge one of any names. The others are stripped, theirs among the
+// names included (§7.4).
+func TestDisownWithARecordThatDoesntFit(t *testing.T) {
+	ctx := context.Background()
+	var forged []ID
+	for i := range 10 {
+		forged = append(forged, secretID("ns", "f"+strconv.Itoa(i)))
+	}
+	r := newFakeRig(t, holderObject("ns", "forged", forged...),
+		holderObject("ns", "honest", secretID("ns", "a"), secretID("ns", "b")),
+		holderObject("ns", "shares", forged[0]))
+	tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// As a PerName kind, with an index of the test's own, of five lines.
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}}
+	st := &memStore{exists: true, rebuilt: true}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	r.s.disownPass(ctx, tr, parseDisown("all"))
+	if want := linesOf([]ID{secretID("ns", "a"), secretID("ns", "b"), forged[0]}); !slices.Equal(st.lines, want) {
+		t.Errorf("lines %q, want %q", st.lines, want)
+	}
+	for name, kept := range map[string]bool{"forged": true, "honest": false, "shares": false} {
+		h, err := r.md.Resource(tr.gvr).Namespace("ns").Get(ctx, name, metav1.GetOptions{})
+		if err != nil || ReadRecord(h).Present != kept {
+			t.Errorf("%s: record kept %v, %v; want %v", name, ReadRecord(h).Present, err, kept)
+		}
+	}
+	crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+	if err != nil || crd.GetAnnotations()[AnnotationHeldCount] != "unknown" {
+		t.Errorf("held-count %q, %v; want unknown", crd.GetAnnotations()[AnnotationHeldCount], err)
+	}
+	var got []string
+	for len(r.events.Events) > 0 {
+		got = append(got, <-r.events.Events)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], EventDisownIndexFull) || !strings.Contains(got[0], "the records of ns/forged name") {
+		t.Errorf("events %q, want one %s naming ns/forged only", got, EventDisownIndexFull)
+	}
+}
+
+// Sets that fit are taken whole, the smallest first, within the cap and the
+// size, and one that is there already needs no room.
+func TestIndexFitting(t *testing.T) {
+	ids := func(names ...string) (out []ID) {
+		for _, n := range names {
+			out = append(out, SecretRef("ns", n).ID())
+		}
+		return out
+	}
+	var big []ID // past a ConfigMap's size
+	for i := range indexMaxBytes / 253 {
+		big = append(big, SecretRef("ns", fmt.Sprintf("%0253d", i)).ID())
+	}
+	tooLong := SecretRef("ns", strings.Repeat("x", 254)).ID()
+	for name, c := range map[string]struct {
+		lines     []ID
+		sets      [][]ID
+		add, over []ID
+		cap       int // 5, if 0
+	}{
+		"all":                     {sets: [][]ID{ids("a", "b"), ids("c")}, add: ids("a", "b", "c")},
+		"the smallest first":      {sets: [][]ID{ids("a", "b", "c", "d"), ids("e", "f")}, add: ids("e", "f"), over: ids("a", "b", "c", "d")},
+		"one that shares":         {sets: [][]ID{ids("a", "b", "c", "d", "e", "f"), ids("a")}, add: ids("a"), over: ids("b", "c", "d", "e", "f")},
+		"partly there":            {lines: ids("a", "b", "c", "d"), sets: [][]ID{ids("a", "b", "e")}, add: ids("e")},
+		"there already":           {lines: ids("a", "b", "c", "d", "e"), sets: [][]ID{ids("a", "b"), ids("f")}, over: ids("f")},
+		"a cap since lowered":     {lines: ids("a", "b", "c", "d", "e", "f"), sets: [][]ID{ids("a", "f")}},
+		"past a ConfigMap's size": {sets: [][]ID{big, ids("a")}, add: ids("a"), over: big, cap: IndexMaxLinesCeiling},
+		"what can't be a line":    {lines: ids("a", "b", "c", "d", "e"), sets: [][]ID{ids("a", "f\n"), {tooLong}}},
+	} {
+		ix := testIndex(&memStore{}, nil)
+		if c.cap > 0 {
+			ix.maxLines = c.cap
+		}
+		add, over, err := ix.fitting(linesOf(c.lines), c.sets)
+		if !slices.Equal(SortedIDs(add), c.add) || !slices.Equal(over, c.over) || (err != nil) != (len(c.over) > 0) || err != nil && !errors.Is(err, errIndexFull) {
+			t.Errorf("%s: %v, over %d, %v; want %v, over %d", name, add, len(over), err, c.add, len(c.over))
+		}
+	}
+}
 
 func TestParseDisown(t *testing.T) {
 	secret := schema.GroupKind{Kind: "Secret"}
@@ -491,7 +799,7 @@ func TestDisownSettling(t *testing.T) {
 	const name = "widgets.credentialuse.test.krateo.io"
 	crd := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
-		"metadata": map[string]any{"name": name, "resourceVersion": "1"},
+		"metadata": map[string]any{"name": name, "resourceVersion": "1", "annotations": map[string]any{AnnotationDisown: "Secret"}},
 	}}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crd)
@@ -517,7 +825,7 @@ func TestDisownSettling(t *testing.T) {
 	}
 	step := func(count int, known bool, wantCount, wantSettled string) {
 		t.Helper()
-		s.writeDisownCount(ctx, tr, disownSet{}, count, known)
+		s.writeDisownCount(ctx, tr, parseDisown("Secret"), count, known)
 		if c, st := read(); c != wantCount || st != wantSettled {
 			t.Fatalf("after a count of %d (known %v): held-count %q, settled %q; want %q, %q", count, known, c, st, wantCount, wantSettled)
 		}
@@ -526,7 +834,7 @@ func TestDisownSettling(t *testing.T) {
 	step(0, true, "0", "")
 	step(0, true, "0", "")
 	before := patches()
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 	if patches() != before+1 {
 		t.Errorf("%d patches to settle, want 1", patches()-before)
 	}
@@ -534,7 +842,7 @@ func TestDisownSettling(t *testing.T) {
 		t.Errorf("the count patch isn't guarded by the version read: %v", p)
 	}
 	before = patches()
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 	if patches() != before {
 		t.Error("an unchanged count was written: every CRD write rebuilds the API server's OpenAPI")
 	}
@@ -543,7 +851,7 @@ func TestDisownSettling(t *testing.T) {
 	step(1, true, "1", "")
 	step(0, true, "0", "")
 	step(0, true, "0", "")
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 
 	// Another process's non-zero count, read on the CRD, resets this one's
 	// run, and so does an unknown count.
@@ -556,17 +864,17 @@ func TestDisownSettling(t *testing.T) {
 	step(0, false, "unknown", "")
 	step(0, true, "0", "")
 	step(0, true, "0", "")
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 
 	// A switch that no longer covers what the pass counted: nothing is
 	// written, and the run starts over.
-	step(0, true, "0", "true")
+	step(0, true, "0", "Secret")
 	if _, err := dyn.Resource(crdGVR).Patch(ctx, name, types.MergePatchType,
 		[]byte(`{"metadata":{"annotations":{"`+AnnotationHeldCount+`":"0","`+AnnotationDisownSettled+`":null,"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	before = patches()
-	s.writeDisownCount(ctx, tr, disownSet{}, 0, true)
+	s.writeDisownCount(ctx, tr, parseDisown("Secret"), 0, true)
 	if patches() != before {
 		t.Error("a count for another switch was written")
 	}
@@ -578,7 +886,7 @@ func TestDisownSettling(t *testing.T) {
 		t.Fatalf("held-count %q, settled %q after two zero passes under the new switch; want not settled", c, st)
 	}
 	s.writeDisownCount(ctx, tr, all, 0, true)
-	if _, st := read(); st != "true" {
+	if _, st := read(); st != "all" {
 		t.Fatal("not settled after three zero passes under the new switch")
 	}
 
@@ -686,6 +994,382 @@ func lastPatch(acts []clienttesting.Action) clienttesting.PatchAction {
 	return nil
 }
 
+// TestDisownSettledIsTheSwitchsValue: Disown has settled only under the
+// switch's value as written, whatever the kinds it covers, and never with no
+// switch; anything else left there is stale, an old "true" included. The
+// index's lines stay until then (§7.4; the user's decision, 2026-11-23).
+func TestDisownSettledIsTheSwitchsValue(t *testing.T) {
+	ann := func(kv ...string) map[string]string {
+		out := map[string]string{}
+		for i := 0; i < len(kv); i += 2 {
+			out[kv[i]] = kv[i+1]
+		}
+		return out
+	}
+	d, c, s := AnnotationDisown, AnnotationHeldCount, AnnotationDisownSettled
+	for name, tc := range map[string]struct {
+		ann            map[string]string
+		settled, stale bool
+	}{
+		"settled":                   {ann(d, "all", c, "0", s, "all"), true, false},
+		"settled, some kinds":       {ann(d, "Secret, ConfigMap", c, "0", s, "Secret, ConfigMap"), true, false},
+		"not settled":               {ann(d, "all", c, "0"), false, false},
+		"no switch, nothing left":   {nil, false, false},
+		"no switch, a count left":   {ann(c, "0"), false, false},
+		"no switch, a flag left":    {ann(c, "0", s, "all"), false, true},
+		"no switch, an empty flag":  {ann(c, "0", s, ""), false, false},
+		"an empty switch and flag":  {ann(d, "", c, "0", s, ""), false, false},
+		"a count":                   {ann(d, "all", c, "1", s, "all"), false, false},
+		"unknown":                   {ann(d, "all", c, "unknown", s, "all"), false, false},
+		"widened":                   {ann(d, "all", c, "0", s, "Secret"), false, true},
+		"narrowed":                  {ann(d, "Secret", c, "0", s, "all"), false, true},
+		"reordered":                 {ann(d, "ConfigMap,Secret", c, "0", s, "Secret,ConfigMap"), false, true},
+		"another spacing":           {ann(d, "Secret, ConfigMap", c, "0", s, "Secret,ConfigMap"), false, true},
+		"an old build's true":       {ann(d, "all", c, "0", s, "true"), false, true},
+		"an old true and no switch": {ann(c, "0", s, "true"), false, true},
+	} {
+		if got := DisownSettled(tc.ann); got != tc.settled {
+			t.Errorf("%s: settled %v, want %v", name, got, tc.settled)
+		}
+		if got := staleSettled(tc.ann); got != tc.stale {
+			t.Errorf("%s: stale %v, want %v", name, got, tc.stale)
+		}
+		if got, want := keptKinds(tc.ann).on(), parseDisown(tc.ann[d]).on() && !tc.settled; got != want {
+			t.Errorf("%s: the lines stay: %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestDisownRunsOverAnUnchangedCRD: a run of zero passes is of passes over
+// one version of the CRD, but for this process's own writes: a switch turned
+// off and on again, whatever the informer delivered, starts it over. A
+// process whose run isn't done leaves the flag of one whose run is (§7.4).
+func TestDisownRunsOverAnUnchangedCRD(t *testing.T) {
+	on := map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0"}
+	done := map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0", AnnotationDisownSettled: "all"}
+	stale := map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0", AnnotationDisownSettled: "true"}
+	pass := func(d *disownState, ann map[string]string, start, end, cur string) (bool, bool) {
+		if d.startRV = start; cur == "0" {
+			d.zeros++
+		} else {
+			d.zeros = 0
+		}
+		settled, write := d.decide(ann, end, cur, 3)
+		d.rv = end
+		return settled, write
+	}
+	d := &disownState{}
+	for i, want := range []bool{false, false, true} {
+		if settled, write := pass(d, on, "5", "5", "0"); settled != want || write != want {
+			t.Errorf("pass %d over an unchanged CRD: settled %v, write %v, want %v", i+1, settled, write, want)
+		}
+	}
+	// Changed since the last pass: this one is the first of a new run.
+	d = &disownState{}
+	pass(d, on, "5", "5", "0")
+	pass(d, on, "5", "5", "0")
+	for i, want := range []bool{false, false, true} {
+		if settled, _ := pass(d, on, "7", "7", "0"); settled != want {
+			t.Errorf("pass %d after the CRD changed: settled %v, want %v", i+1, settled, want)
+		}
+	}
+	// Changed during a pass: that pass is of no run.
+	d = &disownState{}
+	pass(d, on, "5", "5", "0")
+	pass(d, on, "5", "6", "0")
+	for i, want := range []bool{false, false, true} {
+		if settled, _ := pass(d, on, "6", "6", "0"); settled != want {
+			t.Errorf("pass %d after the CRD changed during one: settled %v, want %v", i+1, settled, want)
+		}
+	}
+	d = &disownState{}
+	if settled, write := pass(d, done, "5", "5", "0"); settled || write {
+		t.Errorf("another process's flag, of this switch: settled %v, write %v; want it left alone", settled, write)
+	}
+	if settled, write := pass(d, stale, "5", "5", "0"); settled || !write {
+		t.Errorf("a flag of another value: settled %v, write %v; want it cleared", settled, write)
+	}
+	if settled, write := pass(d, done, "5", "5", "1"); settled || !write {
+		t.Errorf("a hold under another process's flag: settled %v, write %v; want it cleared", settled, write)
+	}
+}
+
+// TestDisownsFirstPassNeedsItsCRD: a pass that couldn't read the CRD as it
+// started is of no run: the switch may have been set during it (§7.4).
+func TestDisownsFirstPassNeedsItsCRD(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	if _, err := r.dyn.Resource(crdGVR).Patch(ctx, tr.crdName, types.MergePatchType,
+		[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"all"}}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	fail := true
+	r.dyn.PrependReactor("get", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return fail, nil, errors.New("the CRD can't be read")
+	})
+	r.s.disownStarts(ctx, tr)
+	fail = false
+	for i := range tr.o.DisownPasses + 1 {
+		if i > 0 {
+			r.s.disownStarts(ctx, tr)
+		}
+		if got, want := r.s.writeDisownCount(ctx, tr, parseDisown("all"), 0, true), i == tr.o.DisownPasses; got != want {
+			t.Errorf("pass %d: settled %v, want %v", i+1, got, want)
+		}
+	}
+}
+
+// TestDisownReportsARunThatKeepsRestarting: the CRD changes under every
+// pass, as with two writers that never agree: Disown doesn't settle, and
+// writes nothing; each restart is counted; and once they have gone on for two
+// spans, the CRD's newest writer at them is reported, at most once per
+// eventThrottle, and neither older ones nor, though it is newer, the entry of
+// the count's and the flag's own writes. Once the CRD
+// stays as it is, Disown settles, and nothing more is counted (§7.4).
+func TestDisownReportsARunThatKeepsRestarting(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	entry := func(manager, subresource, fields string, age time.Duration) metav1.ManagedFieldsEntry {
+		at := metav1.NewTime(r.clk.Now().Add(-age))
+		return metav1.ManagedFieldsEntry{Manager: manager, Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "apiextensions.k8s.io/v1",
+			Time: &at, FieldsType: "FieldsV1", FieldsV1: metav1.NewFieldsV1(fields), Subresource: subresource}
+	}
+	crd := crdOf(widgetGK)
+	crd.SetAnnotations(map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0"})
+	crd.SetManagedFields([]metav1.ManagedFieldsEntry{
+		entry("older", "", `{"f:spec":{"f:scope":{}}}`, time.Hour),
+		entry("hub-writer", "", `{"f:spec":{"f:versions":{}}}`, time.Minute),
+		entry("kube-apiserver", "status", `{"f:status":{"f:conditions":{}}}`, 2*time.Minute),
+		entry("the-tracker", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}}}}`, 0),
+		entry("spoke-writer", "", `{"f:metadata":{"f:annotations":{"f:`+AnnotationHeldCount+`":{}},"f:labels":{"f:x":{}}}}`, time.Second),
+		entry("oldest", "", `{"f:spec":{"f:group":{}}}`, 2*time.Hour),
+	})
+	rv, changing := 1, true
+	r.dyn.PrependReactor("get", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		if changing {
+			rv++
+		}
+		u := crd.DeepCopy()
+		u.SetResourceVersion(strconv.Itoa(rv))
+		return true, u, nil
+	})
+	var patches int
+	r.dyn.PrependReactor("patch", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		patches++
+		u := crd.DeepCopy()
+		u.SetResourceVersion(strconv.Itoa(rv))
+		return true, u, nil
+	})
+	pass := func() bool {
+		r.s.disownStarts(ctx, tr)
+		settled := r.s.writeDisownCount(ctx, tr, parseDisown("all"), 0, true)
+		r.clk.Step(tr.o.DisownInterval)
+		return settled
+	}
+	reports := func() []string {
+		return slices.DeleteFunc(r.takeEvents(), func(e string) bool { return !strings.Contains(e, EventDisownRestarted) })
+	}
+	span := time.Duration(tr.o.DisownPasses-1) * tr.o.DisownInterval
+	restarts := func() int { return r.metrics.count("disown_restarts " + kindLabel(widgetGK)) }
+	n := int(2 * span / tr.o.DisownInterval)
+	for range n {
+		if pass() {
+			t.Fatal("settled under a CRD that keeps changing")
+		}
+	}
+	if got := reports(); len(got) != 0 || restarts() != n {
+		t.Errorf("before two spans: reports %v, %d restarts counted; want none, and %d", got, restarts(), n)
+	}
+	pass()
+	got := reports()
+	if len(got) != 1 {
+		t.Fatalf("after two spans: %d reports %v, want one", len(got), got)
+	}
+	if !strings.Contains(got[0], "spoke-writer (Update,") || !strings.Contains(got[0], strconv.Itoa(n+1)+" times") {
+		t.Errorf("the report %q doesn't name the newest writer, or not how often", got[0])
+	}
+	for _, other := range []string{"the-tracker", "hub-writer", "kube-apiserver", "older", "oldest"} {
+		if strings.Contains(got[0], other) {
+			t.Errorf("the report %q names %s, which made no restart", got[0], other)
+		}
+	}
+	for range int(eventThrottle/tr.o.DisownInterval) - 1 {
+		pass()
+	}
+	if got := reports(); len(got) != 0 {
+		t.Errorf("reported again within its throttle: %v", got)
+	}
+	pass()
+	if got := reports(); len(got) != 1 {
+		t.Errorf("%d reports once the throttle is over, want one", len(got))
+	}
+	if patches != 0 {
+		t.Errorf("%d writes of an unchanged count", patches)
+	}
+	changing = false
+	before, settled := restarts(), false
+	for range tr.o.DisownPasses + 1 {
+		settled = pass()
+	}
+	if !settled || patches == 0 {
+		t.Errorf("settled %v, with %d writes, once the CRD stays as it is", settled, patches)
+	}
+	// The change seen at the first of those passes was the last.
+	if n := restarts() - before; n > 1 {
+		t.Errorf("%d restarts counted over a CRD that stays as it is", n)
+	}
+}
+
+// TestDisownReportsWritersThatOverwriteEachOther: writers of one field, each
+// of which takes it, and so its entry in managedFields, from the one before:
+// the report names the newest at each restart of the streak, the last three,
+// each with its operation and subresource; and nobody of a streak before
+// (§7.4).
+func TestDisownReportsWritersThatOverwriteEachOther(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr := r.track(t, widgetGK)
+	crd := crdOf(widgetGK)
+	crd.SetAnnotations(map[string]string{AnnotationDisown: "all", AnnotationHeldCount: "0"})
+	rv := 1
+	answer := func(clienttesting.Action) (bool, runtime.Object, error) {
+		rv++
+		u := crd.DeepCopy()
+		u.SetResourceVersion(strconv.Itoa(rv))
+		return true, u, nil
+	}
+	r.dyn.PrependReactor("get", "customresourcedefinitions", answer)
+	r.dyn.PrependReactor("patch", "customresourcedefinitions", answer)
+	pass := func(writer string, count int) {
+		manager, subresource, _ := strings.Cut(writer, "/")
+		at := metav1.NewTime(r.clk.Now())
+		crd.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: manager, Operation: metav1.ManagedFieldsOperationUpdate, Subresource: subresource,
+			APIVersion: "apiextensions.k8s.io/v1", Time: &at, FieldsType: "FieldsV1", FieldsV1: metav1.NewFieldsV1(`{"f:metadata":{"f:labels":{"f:x":{}}}}`)}})
+		r.s.disownStarts(ctx, tr)
+		r.s.writeDisownCount(ctx, tr, parseDisown("all"), count, true)
+		r.clk.Step(tr.o.DisownInterval)
+	}
+	for _, streak := range []struct{ writers, want []string }{
+		{[]string{"writer-a", "writer-b/status"}, []string{"writer-a (Update,", "writer-b (Update of status,"}},
+		{[]string{"writer-c"}, []string{"writer-c (Update,"}},
+		{[]string{"writer-d", "writer-e", "writer-f", "writer-g"}, []string{"writer-d (Update,", "writer-g (Update,", "writer-f (Update,"}},
+	} {
+		// Two spans, and the pass that reports.
+		for i := range 2*(tr.o.DisownPasses-1) + 1 {
+			pass(streak.writers[i%len(streak.writers)], 0)
+		}
+		got := slices.DeleteFunc(r.takeEvents(), func(e string) bool { return !strings.Contains(e, EventDisownRestarted) })
+		if len(got) != 1 {
+			t.Fatalf("%v: %d reports %v, want one", streak.writers, len(got), got)
+		}
+		if n := strings.Count(got[0], "writer-"); n != len(streak.want) {
+			t.Errorf("%v: the report %q names %d writers, want %d", streak.writers, got[0], n, len(streak.want))
+		}
+		at := -1
+		for _, w := range streak.want {
+			i := strings.Index(got[0], w)
+			if i <= at {
+				t.Errorf("%v: the report %q doesn't name %v, the last first", streak.writers, got[0], streak.want)
+			}
+			at = i
+		}
+		pass("writer-x", 1) // a hold ends the streak
+		r.clk.Step(eventThrottle)
+	}
+}
+
+// TestAHoldClearsAStaleFlag: before a pass's first A2, a disown-settled that
+// a switch of another value left is removed, guarded by the version the
+// switch was read at; a flag of the value it has now stays. One that can't be
+// removed fails the read, and so the A2, naming the grant (§7.4).
+func TestAHoldClearsAStaleFlag(t *testing.T) {
+	ctx := context.Background()
+	const name = "widgets.credentialuse.test.krateo.io"
+	gvk := crdGVR.GroupVersion().WithKind("CustomResourceDefinition")
+	for title, tc := range map[string]struct {
+		ann   map[string]string
+		fail  error
+		clear bool
+		want  string // in the error
+	}{
+		"off, a flag left":      {ann: map[string]string{AnnotationHeldCount: "0", AnnotationDisownSettled: "all"}, clear: true},
+		"off, an old true left": {ann: map[string]string{AnnotationHeldCount: "0", AnnotationDisownSettled: "true"}, clear: true},
+		"narrowed":              {ann: map[string]string{AnnotationDisown: "Secret", AnnotationHeldCount: "0", AnnotationDisownSettled: "all"}, clear: true},
+		"its own":               {ann: map[string]string{AnnotationDisown: "Secret", AnnotationHeldCount: "0", AnnotationDisownSettled: "Secret"}},
+		"nothing":               {},
+		"a conflict": {ann: map[string]string{AnnotationDisownSettled: "all"}, clear: true, want: "leftover",
+			fail: apierrors.NewConflict(schema.GroupResource{Group: crdGVR.Group, Resource: crdGVR.Resource}, name, errors.New("changed"))},
+		"no grant": {ann: map[string]string{AnnotationDisownSettled: "all"}, clear: true, want: "grant patch on customresourcedefinitions",
+			fail: apierrors.NewForbidden(schema.GroupResource{Group: crdGVR.Group, Resource: crdGVR.Resource}, name,
+				errors.New(`User "u" cannot patch resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope`))},
+	} {
+		m := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: name, ResourceVersion: "9", Annotations: tc.ann}}
+		m.SetGroupVersionKind(gvk)
+		scheme := metadatafake.NewTestScheme()
+		must(metav1.AddMetaToScheme(scheme))
+		crd := &unstructured.Unstructured{Object: map[string]any{"apiVersion": gvk.GroupVersion().String(), "kind": gvk.Kind,
+			"metadata": map[string]any{"name": name, "resourceVersion": "9"}}}
+		dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crd)
+		dyn.PrependReactor("patch", "customresourcedefinitions", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return tc.fail != nil, nil, tc.fail
+		})
+		tr := &Tracker{s: &Shared{c: Clients{Dynamic: dyn, Metadata: metadatafake.NewSimpleMetadataClient(scheme, m)}}, gk: widgetGK, crdName: name}
+		set, err := tr.disownForHold(ctx)
+		if (err != nil) != (tc.want != "") || err != nil && !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error naming %q", title, err, tc.want)
+		}
+		if err == nil && set.key() != parseDisown(tc.ann[AnnotationDisown]).key() {
+			t.Errorf("%s: the switch read is %+v", title, set)
+		}
+		p := lastPatch(dyn.Actions())
+		if (p != nil) != tc.clear {
+			t.Errorf("%s: patched %v, want %v", title, p != nil, tc.clear)
+		}
+		if p != nil && !strings.Contains(string(p.GetPatch()), `"resourceVersion":"9"`) {
+			t.Errorf("%s: the patch isn't guarded by the version read: %s", title, p.GetPatch())
+		}
+	}
+}
+
+// TestDisownPassesAreAnIntervalApart: a tracker's next pass is due an
+// interval after this one was about to start, not after the loop's look,
+// however long another tracker's pass took in between: the passes of a run
+// span its intervals (§7.4).
+func TestDisownPassesAreAnIntervalApart(t *testing.T) {
+	r := newFakeRig(t)
+	trackers := map[string]*Tracker{"widgets": r.track(t, widgetGK), "gadgets": r.track(t, gadgetGK)}
+	for _, tr := range trackers {
+		must(tr.crd.GetStore().Add(&metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: tr.crdName,
+			Annotations: map[string]string{AnnotationDisown: "all"}}}))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := map[string]time.Time{}
+	r.md.PrependReactor("list", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		res := a.GetResource().Resource
+		if trackers[res] != nil && started[res].IsZero() {
+			started[res] = r.clk.Now()
+			r.clk.Step(30 * time.Second) // the pass takes this long
+			if len(started) == len(trackers) {
+				cancel()
+			}
+		}
+		return false, nil, nil
+	})
+	r.s.runDisown(ctx)
+	if len(started) != len(trackers) {
+		t.Fatalf("passes started: %v, want one of each tracker", started)
+	}
+	for res, tr := range trackers {
+		if want := started[res].Add(tr.o.DisownInterval); tr.disown.next.Before(want) {
+			t.Errorf("%s: the next pass is due %s before an interval after this one started", res, want.Sub(tr.disown.next))
+		}
+	}
+}
+
 // TestDisownPassCounts: a pass counts a holder whose record names a covered
 // ref, with no finalizer anywhere, and a list that fails makes the count
 // unknown, never zero (§7.4).
@@ -718,6 +1402,44 @@ func TestDisownPassCounts(t *testing.T) {
 		r.s.disownPass(ctx, tr, parseDisown("all"))
 		if got := crdCount(t, r); got != "0" {
 			t.Errorf("held-count %q after the strip, want 0", got)
+		}
+	})
+	// The objects first, and a record only once those it names are stripped:
+	// while one may be held, a record names it (§7.4).
+	t.Run("the order of the strips", func(t *testing.T) {
+		s := heldObject(secretGVK, "ns", "s", "uid-s", widgetGK, "ns")
+		s.Labels[MarkerLabel(widgetGK)] = "true"
+		r := newFakeRig(t, s, holderObject("ns", "h", secretID("ns", "s")))
+		tr := r.track(t, widgetGK)
+		switchOn(t, r)
+		var mu sync.Mutex
+		var order []string
+		failing := true
+		r.md.PrependReactor("patch", "*", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			res := a.GetResource().Resource
+			order = append(order, res)
+			if failing && res == "secrets" {
+				return true, nil, apierrors.NewInternalError(errors.New("down"))
+			}
+			return false, nil, nil
+		})
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if want := []string{"secrets"}; !slices.Equal(order, want) {
+			t.Errorf("with the Secret's strip failing, patched %v, want %v: its record stays", order, want)
+		}
+		if got := crdCount(t, r); got != "2" {
+			t.Errorf("held-count %q, want 2: the record and the finalizer", got)
+		}
+		failing, order = false, nil
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if want := []string{"secrets", "widgets"}; !slices.Equal(order, want) {
+			t.Errorf("patched %v, want %v", order, want)
+		}
+		r.s.disownPass(ctx, tr, parseDisown("all"))
+		if got := crdCount(t, r); got != "0" {
+			t.Errorf("held-count %q after the strips, want 0", got)
 		}
 	})
 	t.Run("a list that fails", func(t *testing.T) {

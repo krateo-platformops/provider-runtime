@@ -211,6 +211,8 @@ func newWriteRig(t *testing.T, cfg *rest.Config, so cu.SharedOptions, change fun
 	clients := clientsFor(t, cfg)
 	clients.Events = r.events
 	r.s = cu.NewShared(clients, so)
+	r.s.SetLandingMargin(0) // disownOptions' passes are short
+	r.s.SetPruneQuiet(0)
 	o := widgetOptions(r.c.enqueue)
 	o.DeletionGrace = testGrace
 	o.ProbeInterval = time.Second
@@ -434,6 +436,7 @@ func TestU5AndTheGrace(t *testing.T) {
 	var lonePending atomic.Bool
 	loneDeleted := make(chan struct{})
 	r := newWriteRig(t, env.Config, cu.SharedOptions{}, nil, func(s *cu.Shared) {
+		s.SetReleaseWait(nil) // the test times a release against its grace
 		s.HookCalls(func(ctx context.Context, c cu.Call) error {
 			// Hold every batch's read of "lone" until the test has deleted
 			// it, so that the batch decides on the deleted Secret.

@@ -181,11 +181,7 @@ func TestAHoldInANamespaceThatIsGone(t *testing.T) {
 	goneGK := schema.GroupKind{Group: "gone.example.com", Kind: "Gone"}
 	holdSecret(t, goneGK, ns, "p")
 	line := cu.SecretRef(ns, "s").ID().String()
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": line}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createIndex(t, idx, line)
 	removeNamespace(t, ns, "s")
 
 	rep, err := cu.DisownPrefix(ctx, clientsFor(t, env.Config), cu.DisownPrefixOptions{Holder: goneGK, Names: []cu.Ref{cu.SecretRef(ns, "p")}})
