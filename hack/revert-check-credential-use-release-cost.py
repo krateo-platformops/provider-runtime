@@ -202,11 +202,11 @@ LIST = [
     ("a PutBack of nothing queues its key", QU,
      [("\tif len(ids) == 0 || q.stopped {\n", "\tif q.stopped {\n")], "TestAKeysTurnIsBounded"),
     ("a record's held names wait with the rest", IN,
-     [("; ok && hasFinalizer(m, f) {\n\t\t\theld =", "; false && ok && hasFinalizer(m, f) {\n\t\t\theld =")], "TestAHeldObjectDoesntWaitBehindAFlood"),
+     [("; ok && hasFinalizer(m, f) {\n\t\t\theld[id] = true", "; false && ok && hasFinalizer(m, f) {\n\t\t\theld[id] = true")], "TestAHeldObjectDoesntWaitBehindAFlood"),
     ("a record's other names aren't queued", IN,
-     [("\tif len(rest) > 0 {\n\t\tt.s.queue.Add(k, rest...)\n", "\tif false && len(rest) > 0 {\n\t\tt.s.queue.Add(k, rest...)\n")], "TestAHeldObjectDoesntWaitBehindAFlood"),
-    ("a record of held names alone asks for its namespace", IN,
-     [("\tif len(rest) > 0 {\n\t\tt.s.queue.Add(k, rest...)\n", "\tif true || len(rest) > 0 {\n\t\tt.s.queue.Add(k, rest...)\n")], "TestAHoldTheCachesDontShowIsReadInTime"),
+     [("\tt.s.queue.addKnown(batchKey{t.gk, n}, ids, func(id ID) bool { return held[id] })\n", "\tt.s.queue.addKnown(batchKey{t.gk, n}, slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return !held[id] }), func(id ID) bool { return held[id] })\n")], "TestAHeldObjectDoesntWaitBehindAFlood"),
+    ("a record's names are an Add each", IN,
+     [("\tt.s.queue.addKnown(batchKey{t.gk, n}, ids, func(id ID) bool { return held[id] })\n", "\tfor _, id := range ids {\n\t\tt.s.queue.addKnown(batchKey{t.gk, n}, []ID{id}, func(id ID) bool { return held[id] })\n\t}\n")], "TestARecordsChangeIsOneBatch"),
 ]
 MUTANTS = [m[:3] for m in LIST]
 KILLERS = {m[0]: {C: m[3]} for m in LIST}
