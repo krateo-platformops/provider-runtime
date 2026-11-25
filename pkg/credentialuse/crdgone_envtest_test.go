@@ -826,26 +826,57 @@ func TestAKindThatGoesAndReturns(t *testing.T) {
 
 // A holder kind whose CRD goes and returns namespaced, while a process that
 // mapped it cluster-scoped runs throughout, its write loops too (§6.2, §6.4):
-// what a holder of the new CRD uses stays, and what none uses goes. Not checked:
-// an API server that still serves the deleted CRD.
+// the end-to-end check of the list that it makes whole, and filters. A
+// holder's deletion queues what it named; R2's list finds the other holder of
+// one of them, which stays, and none of the other, which goes. With the filter
+// reverted the list in a namespace is empty, and both go. Not checked: an API
+// server that still serves the deleted CRD.
 func TestAHolderKindThatReturnsNamespacedUnderARunningProcess(t *testing.T) {
 	cutest.Require(t, env)
 	ctx := context.Background()
 	a, cached := env.Namespace(t, "scope-run"), env.Namespace(t, "scope-run")
 	crd := newScopeCRD(t, a)
 	crd.create(apiextensionsv1.ClusterScoped)
-	// The Secrets of a are outside its caches: every batch reads the holders
-	// live.
+	// The Secrets of a are outside its caches: R0 settles none of them, and
+	// every batch reads the holders live.
 	s, old := crd.track(cu.SharedOptions{Namespaces: []string{cached}})
 	running(t, s)
-	ref := cu.SecretRef(a, "a-used")
+	used, unused := cu.SecretRef(a, "a-used"), cu.SecretRef(a, "b-unused")
 	crd.remove()
-	crd.gone(old, ref, a)
+	crd.gone(old, used, a)
 	crd.create(apiextensionsv1.NamespaceScoped)
-	crd.holder(a, "h", ref)
+	crd.holder(a, "h", used)
+	// h2 names both, as a holder pass's A1 records them before its A2s.
+	rec, err := cu.EncodeRecord([]cu.ID{used.ID(), unused.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2 := &unstructured.Unstructured{Object: map[string]any{}}
+	h2.SetGroupVersionKind(crd.kind())
+	h2.SetNamespace(a)
+	h2.SetName("h2")
+	h2.SetFinalizers([]string{ownerFinalizer})
+	h2.SetAnnotations(map[string]string{cu.AnnotationRefs: rec})
+	if _, err := crd.at(a).Create(ctx, h2, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	holdSecret(t, crd.kind().GroupKind(), a, "a-used")
 	holdSecret(t, crd.kind().GroupKind(), a, "b-unused")
-	cutest.Eventually(t, time.Minute, func() error {
+	// The old process's holder informer, which lists the kind in every
+	// namespace, has both again after its 404s.
+	cutest.Eventually(t, 2*time.Minute, func() error {
+		if n := old.CachedHolders(); n != 2 {
+			return fmt.Errorf("the holder cache has %d holders: %w", n, cutest.ErrNotYet)
+		}
+		return nil
+	})
+	if _, err := crd.at(a).Patch(ctx, "h2", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := crd.at(a).Delete(ctx, "h2", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cutest.Eventually(t, 2*time.Minute, func() error {
 		if f := finalizersOf(t, a, "b-unused"); len(f) != 0 {
 			return fmt.Errorf("the unused Secret's finalizers are %v: %w", f, cutest.ErrNotYet)
 		}

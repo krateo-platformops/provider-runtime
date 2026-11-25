@@ -216,7 +216,7 @@ KILLERS = {
     "an object in a namespace none can have is asked for": {C: "TestANameNoObjectCanHave"},
     "a cluster-scoped object named with a namespace is asked for": {C: "TestANameNoObjectCanHave|TestNoWatchOfANameNoObjectCanHave"},
     "a list in a namespace none can have is made": {C: "TestANameNoObjectCanHave"},
-    "the holder kind's list in a namespace its mapping can't have is none": {C: "TestR2OfAHolderKindMappedClusterScoped|TestAListOfAHolderKindMappedClusterScopedIsFiltered|TestABatchWhoseHolderListFails|TestAHolderKindThatReturnsNamespaced"},
+    "the holder kind's list in a namespace its mapping can't have is none": {C: "TestR2OfAHolderKindMappedClusterScoped|TestAListOfAHolderKindMappedClusterScopedIsFiltered|TestABatchWhoseHolderListFails|TestAHolderKindThatReturnsNamespaced|TestAHolderKindThatReturnsNamespacedUnderARunningProcess"},
     "any cluster-scoped kind's list in a namespace is made": {C: "TestANameNoObjectCanHave|TestAListOfAHolderKindMappedClusterScopedIsFiltered"},
     "the holder kind's list isn't filtered": {C: "TestR2OfAHolderKindMappedClusterScoped|TestAListOfAHolderKindMappedClusterScopedIsFiltered"},
     "the holder kind's list keeps those in no namespace": {C: "TestR2OfAHolderKindMappedClusterScoped|TestAListOfAHolderKindMappedClusterScopedIsFiltered"},

@@ -3229,6 +3229,12 @@ design exists to prevent. Two more triggers release such objects:
   backoff until it succeeds: a recheck that is skipped can strand a hold.
   Only what failed is retried: each kind's lists, and each index, alone.
 
+A hold written outside the cached namespaces while the write loops run, by
+anything but a holder pass, as by hand, and that no holder's record names,
+reaches no informer and no batch: it waits for the next of these triggers.
+One that a record names is queued by its holder's events, as any other
+(`TestAHolderKindThatReturnsNamespacedUnderARunningProcess`).
+
 The lists only find what to recheck; R1 to R3 then read and write each
 object as for any batch, so nothing is released earlier than §5 allows.
 They need list on each protected kind **in every namespace**, which such
