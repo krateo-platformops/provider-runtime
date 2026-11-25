@@ -904,8 +904,16 @@ func (ix *index) removeAndCheck(ctx context.Context, ids []ID, disown bool) erro
 func (ix *index) removeChunk(parent context.Context, ids []ID, disown bool) error {
 	whole, cancel := context.WithTimeout(context.WithoutCancel(parent), ix.bound)
 	defer cancel()
-	ctx, cancelCheck := context.WithTimeout(whole, ix.checkBound)
+	check, cancelCheck := context.WithTimeout(whole, ix.checkBound)
 	defer cancelCheck()
+	// The calls before the re-add don't see the check's deadline, only its
+	// end. A client's rate limiter refuses at once a call whose turn would
+	// come after its context's deadline: behind a backlog, every read of the
+	// check would fail that way, as an unread object's, its line put back,
+	// and the prune would report nothing, so its bare objects weren't
+	// retried. Waiting its turn, a read is cut, and the prune says so
+	// (§10.6.2).
+	ctx := context.Context(noDeadline{check})
 	if ix.keptLive != nil && disown {
 		set, err := ix.keptLive(ctx)
 		if err != nil {

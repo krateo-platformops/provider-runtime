@@ -3660,8 +3660,12 @@ another writer's change.
      calls a second, where a teardown's 1,000 would make 50s. They end 10s
      after the write began, and the lines of the objects they didn't come to
      are put back in the 5s that are left, a vouched object's too, which
-     fails the prune: its bare objects are retried. A write that fails ends
-     the prune, and the lines after it stay. *Liveness:* what the reads found
+     fails the prune: its bare objects are retried. The 10s are an end, not a
+     deadline the client sees: its rate limiter refuses at once a call whose
+     turn would come after a deadline, and behind a backlog every read would
+     then fail as an unread object's, its line put back with no error, so that
+     nothing retried the prune. Waiting its turn, a read is cut instead. A
+     write that fails ends the prune, and the lines after it stay. *Liveness:* what the reads found
      bare before the cut stays removed, so a prune always gains, unless the
      reads before the check, or one read of it, outlast the 10s: the live read
      of the switch before the removal, the removal with its retries on a

@@ -814,6 +814,28 @@ func TestAFailedPruneIsRetriedAlone(t *testing.T) {
 	}
 }
 
+// A prune behind a backlog of its client's rate limiter is cut, and its bare
+// object retried with backoff, its line kept meanwhile; refused at once, the
+// object was settled with its line back, and nothing pruned it (§10.6.2).
+func TestAPruneBehindALimiterBacklogIsRetried(t *testing.T) {
+	s := secretID("ns", "s")
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	st := &memStore{exists: true, lines: linesOf([]ID{s})}
+	tr.idx = testIndex(st, limitedServer{r.s.newServer(tr.o.Holder), backlogged(100*time.Millisecond, 20)})
+	tr.idx.bound, tr.idx.checkBound = 2*time.Second, 200*time.Millisecond
+	k := batchKey{widgetGK, "ns"}
+	r.s.releaseBatch(context.Background(), k, []ID{s})
+	if retry, _ := timersOf(r.s.queue, k); !slices.Equal(retry, []ID{s}) {
+		t.Errorf("the retry covers %v, want the released Secret, whose line the cut check put back", retry)
+	}
+	if !slices.Equal(st.lines, linesOf([]ID{s})) {
+		t.Errorf("lines %q, want the Secret's, until its retry", st.lines)
+	}
+}
+
 // A kind that can't be listed doesn't stop the others, in a batch that asks
 // for a whole namespace outside the caches, nor in the startup recheck, which
 // lists nothing twice that it could list once.

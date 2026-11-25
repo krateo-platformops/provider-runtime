@@ -24,6 +24,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	testingclock "k8s.io/utils/clock/testing"
 
+	"golang.org/x/time/rate"
+
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 )
 
@@ -737,6 +739,68 @@ func TestAPruneCutShort(t *testing.T) {
 	ix.maxLines, ix.checkBound = len(many), time.Minute
 	if err := ix.prune(ctx, many); !errors.Is(err, context.Canceled) || len(st.lines) != pruneChunk {
 		t.Errorf("a prune stopped in its first write = %v, with %d lines left, want %d", err, len(st.lines), pruneChunk)
+	}
+}
+
+// limitedServer's reads wait for their turn at lim first, as a client's do at
+// its rate limiter.
+type limitedServer struct {
+	server
+	lim *rate.Limiter
+}
+
+func (s limitedServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if err := s.lim.Wait(ctx); err != nil {
+		// As client-go's request wraps it (rest/request.go,
+		// tryThrottleWithInfo): a refusal isn't the context's error.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("client rate limiter Wait returned an error: %w", err)
+		}
+		return nil, err
+	}
+	return s.server.Get(ctx, gk, ns, name)
+}
+
+// backlogged is a limiter of a call every d, with n calls ahead of the next.
+func backlogged(d time.Duration, n int) *rate.Limiter {
+	lim := rate.NewLimiter(rate.Every(d), 1)
+	for range n {
+		lim.Reserve()
+	}
+	return lim
+}
+
+// A client's rate limiter refuses at once a call whose turn would come after
+// its context's deadline. Behind a backlog longer than a prune's check, the
+// check waits its turn, is cut, puts the line back, and says so, so that its
+// bare object is retried; refused, the read failed as an unread object's, the
+// line went back, and the prune said nothing (§10.6.2). A backlog shorter
+// than the check is waited for.
+func TestAPruneBehindALimiterBacklog(t *testing.T) {
+	bare := SecretRef("ns", "bare").ID()
+	for name, tc := range map[string]struct {
+		lim  func() *rate.Limiter // made as the case starts
+		cut  bool
+		left []string
+	}{
+		"2s of backlog":    {func() *rate.Limiter { return backlogged(100*time.Millisecond, 20) }, true, linesOf([]ID{bare})},
+		"50ms of backlog":  {func() *rate.Limiter { return backlogged(10*time.Millisecond, 5) }, false, nil},
+		"none, as a check": {func() *rate.Limiter { return rate.NewLimiter(rate.Inf, 1) }, false, nil},
+	} {
+		st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare}), rv: 1}
+		ix := testIndex(st, limitedServer{&objServer{}, tc.lim()})
+		ix.bound, ix.checkBound = 2*time.Second, 200*time.Millisecond
+		start := time.Now()
+		err := ix.prune(context.Background(), []ID{bare})
+		if errors.Is(err, context.DeadlineExceeded) != tc.cut || !tc.cut && err != nil {
+			t.Errorf("%s: prune = %v, want cut short %v", name, err, tc.cut)
+		}
+		if !slices.Equal(st.lines, tc.left) {
+			t.Errorf("%s: lines %q, want %q", name, st.lines, tc.left)
+		}
+		if took := time.Since(start); tc.cut && took < ix.checkBound {
+			t.Errorf("%s: the prune ended after %s, before its check's bound: its read didn't wait its turn", name, took)
+		}
 	}
 }
 
