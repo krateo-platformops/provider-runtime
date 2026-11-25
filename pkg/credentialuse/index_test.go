@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http/httptrace"
 	"slices"
 	"strconv"
 	"strings"
@@ -129,6 +130,33 @@ func (s *objServer) Get(_ context.Context, gk schema.GroupKind, ns, name string)
 // List lists nothing: the tests that use objServer read by name.
 func (s *objServer) List(context.Context, schema.GroupKind, string) ([]metav1.PartialObjectMetadata, error) {
 	return nil, nil
+}
+
+// hangingStore is an index store whose reads, once sent, aren't answered.
+type hangingStore struct{ *memStore }
+
+func (s hangingStore) get(ctx context.Context) (indexVersion, error) {
+	if tr := httptrace.ContextClientTrace(ctx); tr != nil && tr.GetConn != nil {
+		tr.GetConn("the test's")
+	}
+	<-ctx.Done()
+	return indexVersion{}, ctx.Err()
+}
+
+// The write loops' recheck of an index whose read isn't answered ends in the time of
+// a page, and the parts after it run.
+func TestTheIndexsRecheckReadHasATime(t *testing.T) {
+	was := livePageTime
+	livePageTime = 50 * time.Millisecond
+	defer func() { livePageTime = was }()
+	ix := testIndex(hangingStore{&memStore{exists: true}}, &objServer{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := ix.recheck(ctx, func(ID, string) {})
+	var cut *noAnswer
+	if !errors.As(err, &cut) || ctx.Err() != nil {
+		t.Errorf("%v, the caller's context %v; want the read cut in its own time", err, ctx.Err())
+	}
 }
 
 func testIndex(st indexStore, srv server) *index {

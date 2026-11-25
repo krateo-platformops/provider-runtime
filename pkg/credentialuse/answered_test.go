@@ -151,6 +151,43 @@ func TestAnsweredTimesEachAttempt(t *testing.T) {
 	}
 }
 
+// A second attempt that isn't answered is cut in its own time, not in the 5 minutes
+// that the first one's answer gave.
+func TestAnsweredCutsASecondAttempt(t *testing.T) {
+	var asked atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if asked.Add(1) > 1 {
+			select {
+			case <-time.After(20 * time.Second):
+			case <-req.Context().Done():
+			}
+			return
+		}
+		st := apierrors.NewTooManyRequests("busy", 1).Status()
+		st.APIVersion, st.Kind = "v1", "Status"
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(st)
+	}))
+	defer api.Close()
+	md, err := metadata.NewForConfig(&rest.Config{Host: api.URL, QPS: 1000, Burst: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := clientServer{md: md, mapper: newFakeRig(t).s.c.Mapper}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	began := time.Now()
+	_, err = answered(ctx, 300*time.Millisecond, func(ctx context.Context) (*metav1.PartialObjectMetadata, error) {
+		return srv.Get(ctx, secretGroupKind, "ns", "s")
+	})
+	var cut *noAnswer
+	if !errors.As(err, &cut) || ctx.Err() != nil || asked.Load() != 2 || time.Since(began) > 5*time.Second {
+		t.Errorf("%v after %d attempts and %s, the caller's context %v; want the second cut in its time", err, asked.Load(), time.Since(began), ctx.Err())
+	}
+}
+
 // What follows an answer's first byte has a time too: a body that stalls is cut.
 func TestAnsweredCutsABodyThatStalls(t *testing.T) {
 	was := answerRest
