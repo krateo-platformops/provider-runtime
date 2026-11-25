@@ -2521,7 +2521,7 @@ chain code stays, and stays tested, but nothing in production reaches it:
 |---|---|
 | New (no owner finalizer), with no record that names a ref in another namespace | `MustNotConnect`. No call by the core, no Connect, no finalizer. Synced=False/ReconcileError with the error, which names the ref; Ready=NotObserved; backoff |
 | New, with a record that names a ref in another namespace | The same, after the gate, which may write the drop of a withdrawn ref. It isn't established, but it counts as a user (§6.1), so without the gate it would keep that ref held against its owner |
-| Established | `Degraded`. Nothing written but the gate's drop, if any: the rest of its record, its `unheld` list and its holds stay as they are; a record that can't be parsed stays so (§4). A release reads that same record, so it takes only what §5 always lets it take. Synced stays True/ReconcileSuccess, and its message says `credential-use: refs refused, not held: <the error, cut> (§9)` for as long as it is refused (decided 2026-11-25; §12). `CredentialUseDegraded` and a log line once (below), the counter every pass, under the reason `ChainsNotSupported`, and the gauge `credentialuse_refused_holders`. It connects as today, and `Resolved` finds nothing |
+| Established | `Degraded`. Nothing written but the gate's drop, if any: the rest of its record, its `unheld` list and its holds stay as they are; a record that can't be parsed stays so (§4). A release reads that same record, so it takes only what §5 always lets it take. On a pass whose Synced is True/ReconcileSuccess, its message says `credential-use: refs refused, not held: <the error, cut> (§9)`, for as long as it is refused; any other Synced (an Observe or Connect error, a policy report, a deferral, a paused holder) says its own outcome instead (decided 2026-11-25; §12). `CredentialUseDegraded` and a log line once (below), the counter every pass, under the reason `ChainsNotSupported`, and the gauge `credentialuse_refused_holders`. It connects as today, and `Resolved` finds nothing |
 | Established and being deleted | The same, then its external Delete runs, and `Forget` removes the record in the write that removes its finalizer, which releases what it held |
 | Being deleted, without an owner finalizer | provider-runtime doesn't acquire on it (§8 step 5), so nothing is refused |
 | It names no `Next` again | The next pass writes the exact record, holds what it names, and releases the rest |
@@ -2545,8 +2545,9 @@ records each once more. **The event doesn't last**: the API server drops it
 after its `--event-ttl`, about an hour, and client-go's broadcaster queues
 1,000 events and drops the rest, so after a restart with many refused holders
 most of theirs are never sent. **What lasts** is Synced's message on the holder,
-which a refused pass sets with the status write every pass makes anyway, so it
-costs no write of its own and keeps its transition time; the gauge
+which a refused pass sets in every status write it makes, so it costs no write
+of its own and keeps its transition time (a pass that stops at the trace marker,
+or on a conflict, writes no status, and changes nothing); the gauge
 `credentialuse_refused_holders`, which counts the holders whose last pass in
 this process was refused, new and established, and drops one at a pass that
 isn't refused, at `Forget` and at the holder's deletion; and the counter, every
@@ -4762,12 +4763,15 @@ successful pass, and never to a failure that isn't in Connect or Observe.
 It is message text, not a new condition (U4).
 
 **The one exception: a refused chain** (decided 2026-11-25). While an
-established holder's refs are refused (§9), its Synced stays
-True/ReconcileSuccess, and its message is exactly
+established holder's refs are refused (§9), on a pass whose Synced is
+True/ReconcileSuccess its message is exactly
 `credential-use: refs refused, not held: <the refusal's error> (§9)`, on one
-line: the error quotes and cuts the ref. It is set with the status write that
-every pass makes, so it costs none of its own, and keeps the condition's
-transition time while it doesn't change. The first pass that isn't refused,
+line: the error quotes and cuts the ref. Any other Synced (an Observe or
+Connect error, a policy report, a deferral, a paused holder) says its own
+outcome instead. The message is set in every status write the pass makes, so it
+costs no write of its own, and keeps the condition's transition time while it
+doesn't change; a pass that writes no status (it stops at the trace marker, or
+on an Acquire or a status conflict) changes nothing. The first pass that isn't refused,
 a failed one included, takes it off. A refusal lasts until the provider or
 the object changes, and its event doesn't (§9), so the object itself says it.
 A new holder's Synced is False/ReconcileError with the error, as for any

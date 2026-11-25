@@ -184,6 +184,9 @@ MUTANTS = [
      [("\tt.noteRefused(obj.GetUID(), errors.Is(a.Err, ErrChainsNotSupported))\n", "\tif errors.Is(a.Err, ErrChainsNotSupported) {\n\t\tt.noteRefused(obj.GetUID(), true)\n\t}\n")]),
     ("Forget leaves the count", TR, [("\tt.noteRefused(obj.GetUID(), false)\n", "")]),
     ("a holder's deletion leaves the count", IN, [("\th.t.noteRefused(m.UID, false)\n", "")]),
+    ("a replaced UID leaves the count", IN, [("\t\th.t.noteRefused(o.UID, false)\n", "")]),
+    ("a replaced UID leaves its report", IN, [("\t\th.t.refused.forget(o.UID)\n", "")]),
+    ("a rebind doesn't send the gauge", TR, [("\tt.reportHeld()\n\tt.reportRefused()\n", "\tt.reportHeld()\n")]),
     ("the gauge isn't exported", TMC,
      [("\tm.cu.refusedHolders.Record(context.Background(), int64(n), holderKind(holderKindLabel))\n", "")]),
     # reconcilertest.
@@ -212,6 +215,7 @@ BOTH = {C: "TestARefusedPassGatesWhatTheRecordNames|TestKeptRefsInAnotherNamespa
 ONCE = {C: "TestARefusedChainIsReportedOnce"}
 SYNCED = {R: "TestCredentialUseSyncedSaysARefusal"}
 GAUGE = {C: "TestTheRefusedHoldersGauge"}
+REPLACED = {C: "TestTheRefusedHoldersGaugeOfAReplacedHolder"}
 
 KILLERS = {
     "a chain is refused before the gate": BOTH,
@@ -276,6 +280,9 @@ KILLERS = {
     "a pass that isn't refused leaves the count": GAUGE,
     "Forget leaves the count": GAUGE,
     "a holder's deletion leaves the count": GAUGE,
+    "a replaced UID leaves the count": REPLACED,
+    "a replaced UID leaves its report": REPLACED,
+    "a rebind doesn't send the gauge": REPLACED,
     "the gauge isn't exported": {TM: "TestCredentialUseMetrics"},
     "AssertCredentialRefsCover follows chains": COVER,
     "AssertCredentialRefsCover follows chains by default": {C: "TestNothingInProductionFollowsChains", RT: "TestAssertCredentialRefsCoverRefusesAChain"},

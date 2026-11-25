@@ -891,6 +891,53 @@ func TestTheRefusedHoldersGauge(t *testing.T) {
 	}
 }
 
+// TestTheRefusedHoldersGaugeOfAReplacedHolder: a holder deleted and created
+// again under its name in a watch's gap comes as an update to a new UID, with
+// no deletion: the old UID is forgotten there too, so it counts once. And a
+// Track that rebinds the sinks gives the new metrics the gauge at once.
+func TestTheRefusedHoldersGaugeOfAReplacedHolder(t *testing.T) {
+	ctx := context.Background()
+	old := holderObject("ns", "h")
+	r := newFakeRig(t, old, namespaceObject("ns"))
+	g := &refusedGauge{}
+	o := r.options(widgetGK)
+	o.Metrics = g
+	tr, err := r.s.Track(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chained := SecretRef("ns", "outer")
+	chained.Next = func(*unstructured.Unstructured) ([]Ref, error) { return nil, nil }
+	r.setRefs("h", chained)
+	if _, err := tr.Acquire(ctx, old.DeepCopy()); err != nil || g.last() != 1 {
+		t.Fatalf("Acquire: %v; gauge %d, want 1", err, g.last())
+	}
+	replaced := holderObject("ns", "h")
+	replaced.UID = "w-ns-h-again"
+	if err := r.md.Tracker().Update(widgetsGVR, replaced, "ns"); err != nil {
+		t.Fatal(err)
+	}
+	holderHandler{tr}.OnUpdate(old, replaced)
+	if got := g.last(); got != 0 {
+		t.Errorf("after the update to a new UID: gauge %d, want 0", got)
+	}
+	if !tr.refused.first(consentKey{holder: old.UID}) || !tr.degradedLogged.first(consentKey{holder: old.UID}) {
+		t.Error("the old UID's reports are still remembered")
+	}
+	if _, err := tr.Acquire(ctx, replaced.DeepCopy()); err != nil || g.last() != 1 {
+		t.Errorf("the new holder's refused pass: %v; gauge %d, want 1", err, g.last())
+	}
+
+	rebound := &refusedGauge{}
+	o.Metrics = rebound
+	if again, err := r.s.Track(ctx, o); err != nil || again != tr {
+		t.Fatalf("a second Track = %v, %v; want the same tracker", again, err)
+	}
+	if got := rebound.last(); got != 1 {
+		t.Errorf("the rebound metrics' gauge %d, want 1 at once", got)
+	}
+}
+
 // TestARefusedPassOverAnUnparseableRecord: a refused pass writes nothing, so a
 // record that can't be parsed stays so, and keeps what it held, as for a paused
 // holder (§4, §11.3): only a pass that reaches its last A1 writes a valid one.
