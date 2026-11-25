@@ -74,7 +74,7 @@ MUTANTS = [
     ("a call isn't counted", AQ,
      [("\tif p.calls != nil {\n\t\tended = p.calls.begin()\n\t}\n", "")]),
     ("a call's end isn't counted", AQ,
-     [("\t\tendCheck()\n\t\tended()\n", "\t\tendCheck()\n")]),
+     [("\t\tendCheck()\n\t\tended()\n", "\t\tendCheck()\n\t\t_ = ended\n")]),
     ("the drain doesn't wait for the calls", WL,
      [("\tbusy := func() bool { return stopping.Err() == nil || waited() > 0 }\n", "\tbusy := func() bool { return stopping.Err() == nil || waited() > 1<<30 }\n")]),
     ("the drain doesn't wait for the stop", WL,
