@@ -379,6 +379,9 @@ func TestAnElectionAfterAFloodReleasesWhatTheIndexNames(t *testing.T) {
 
 	resetPublished(t, cutest.WidgetGVR)
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	// The prunes a start keeps back (§10.6.2) would come after the test's minute;
+	// the release is what this test is about, and its prune at once.
+	s.SetPruneQuiet(0)
 	o := widgetOptions(newController(t).enqueue)
 	o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
 	perName(&o)
