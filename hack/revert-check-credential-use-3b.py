@@ -33,8 +33,8 @@ FILES = ["writeloops.go", "janitor.go", "prober.go", "tracker.go", "informers.go
 MUTANTS = [
     # writeloops.go: RunWriteLoops and the release loop (§7.5, §6.2).
     ("the write loops don't wait for the informers' sync", "writeloops.go",
-     [("\tselect {\n\tcase <-s.syncedCh:\n\tcase <-s.runDone:\n\t\treturn errInformersEnded\n\tcase <-ctx.Done():\n\t\treturn nil\n\t}\n\n\tctx, cancel := context.WithCancel(ctx)",
-       "\tctx, cancel := context.WithCancel(ctx)")]),
+     [("\tselect {\n\tcase <-s.syncedCh:\n\tcase <-s.runDone:\n\t\treturn errInformersEnded\n\tcase <-ctx.Done():\n\t\treturn nil\n\t}\n\n\tstopping := ctx",
+       "\tstopping := ctx")]),
     ("the write loops don't rescan", "writeloops.go",
      [("\ts.rescan()\n\tvar wg sync.WaitGroup", "\tvar wg sync.WaitGroup")]),
     ("a batch of an untracked kind is worked with another tracker", "writeloops.go",
