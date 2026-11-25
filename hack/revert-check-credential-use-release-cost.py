@@ -23,8 +23,8 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
-BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC = [C + f for f in ("batchrecords.go", "release.go", "writeloops.go", "queue.go", "server.go", "missedkinds.go", "tracker.go", "informers.go", "answered.go", "shared.go", "uncached.go")]
-FILES = [BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC]
+BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC, IX = [C + f for f in ("batchrecords.go", "release.go", "writeloops.go", "queue.go", "server.go", "missedkinds.go", "tracker.go", "informers.go", "answered.go", "shared.go", "uncached.go", "index.go")]
+FILES = [BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC, IX]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file. The
 # last of each is the killing tests, all of pkg/credentialuse.
@@ -113,6 +113,11 @@ LIST = [
      [("\t\tGetConn:              func(string) { within(limit) },\n", "")], "TestAnsweredCutsADialThatHangs"),
     ("an attempt that is answered is timed to the next one's end", AN,
      [("\t\tGotFirstResponseByte: func() { within(answerRest) },\n", "")], "TestAnsweredTimesEachAttempt"),
+    ("a second attempt has the first's answer's time", AN,
+     [("\t\tGetConn:              func(string) { within(limit) },\n", "\t\tGetConn:              func(string) { first.Do(func() { within(limit) }) },\n"),
+      ("\tout, err := call(httptrace", "\tvar first sync.Once\n\tout, err := call(httptrace")], "TestAnsweredCutsASecondAttempt"),
+    ("the recheck's read of the index has no time", IX,
+     [("\treturn answered(ctx, livePageTime, ix.store.get)\n", "\treturn ix.store.get(ctx)\n")], "TestTheIndexsRecheckReadHasATime"),
     ("a body has no time", AN,
      [("func() { within(answerRest) },\n", "func() { within(time.Hour) },\n")], "TestAnsweredCutsABodyThatStalls"),
     ("a later round leaves Namespaces for another turn", RL,

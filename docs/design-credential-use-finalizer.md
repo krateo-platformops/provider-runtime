@@ -930,7 +930,11 @@ releases wait. So:
   or more are among them; the Namespaces 10s and twice the longest of their objects'
   times; the list a minute a page, and before it a minute for each protected kind when
   the batch is a namespace's outside the caches; in PerName mode, a minute for each line
-  a prune took. **Behind a backlog B of calls in the limiter**, whose wait counts in R1's
+  a prune took, and in the write loops' recheck a minute for the index. An answer that
+  begins and doesn't end, its first byte read, has 5 minutes more; and client-go makes a
+  call that is answered 429 up to 10 times, each with its time and 5 minutes more, so a
+  server that keeps answering so can keep one call for about an hour, where nothing
+  bounded it before. **Behind a backlog B of calls in the limiter**, whose wait counts in R1's
   10s, a turn makes a read of each sort, a Namespace's, a page and a patch, B each: with
   B over 10s about 4 to 5 B of a worker for the release of one known object, and B for
   a made-up name, as each read of every name cost before. Not limited here, and not more than before: the

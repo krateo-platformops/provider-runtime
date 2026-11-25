@@ -1036,6 +1036,12 @@ const (
 	carriesRBACDenied
 )
 
+// readStore reads the index live, in the time of a list's page: the write loops'
+// recheck makes it before the parts after it.
+func (ix *index) readStore(ctx context.Context) (indexVersion, error) {
+	return answered(ctx, livePageTime, ix.store.get)
+}
+
 // read is a live GET of id, which must be answered in the time of a list's page: the
 // release loop makes it after a prune, and the write loops' recheck makes one for each
 // line, before the parts after it.
@@ -2137,7 +2143,7 @@ func (s *Shared) recheckIndex(ctx context.Context, t *Tracker, done map[ID]bool)
 // try before this one dealt with, which this one skips, and adds to.
 func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func(id ID, n string)) error {
 	var errs []error
-	cur, err := ix.store.get(ctx)
+	cur, err := ix.readStore(ctx)
 	if Classify(err) == ClassNotFound || err == nil && ix.needsRebuild(cur) {
 		// Gone, or never rebuilt since its creation (§10.6.6). A rebuild
 		// that fails doesn't stop the recheck of the lines there are: its
@@ -2148,7 +2154,7 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 		} else if err != nil {
 			errs = append(errs, err)
 		}
-		cur, err = ix.store.get(ctx)
+		cur, err = ix.readStore(ctx)
 		if gone && Classify(err) == ClassNotFound {
 			// No index, and no holders to rebuild it from: no line to
 			// recheck, and none to write (§6.4, what it doesn't cover).
