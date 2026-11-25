@@ -185,10 +185,11 @@ func (q *batchQueue) AddHeld(k batchKey, ids ...ID) {
 }
 
 // addKnown is Add of ids, of which held says which are known to carry K's
-// finalizer for N, as AddHeld adds them. With none it does nothing.
+// finalizer for N, as AddHeld adds them. With none it covers the namespace, as Add
+// does: callers that mean nothing don't call it.
 func (q *batchQueue) addKnown(k batchKey, ids []ID, held func(ID) bool) {
 	if len(ids) == 0 {
-		return
+		ids = []ID{fillAll}
 	}
 	if q.afterAdd != nil {
 		defer q.afterAdd(k)

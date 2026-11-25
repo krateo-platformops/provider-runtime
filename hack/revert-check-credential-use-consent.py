@@ -159,8 +159,12 @@ MUTANTS = [
      [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\t_ = is\n\tids := slices.Concat(was.IDs)\n")]),
     ("a batch for each record", IN,
      [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\tif len(was.IDs) > 0 {\n\t\th.t.s.queue.Add(batchKey{h.t.gk, old.Namespace}, was.IDs...)\n\t}\n\tids := slices.Concat(was.IDs, is.IDs)\n")]),
+    # With the release's cost, the event's names go through addNamed, whose own guard
+    # keeps none out, to the queue's addKnown, which takes none as the whole namespace,
+    # as Add does: the mutant removes both guards.
     ("no names queue the namespace", IN,
-     [("\tif len(ids) > 0 { // with none", "\tif true || len(ids) > 0 { // with none")]),
+     [("\tif len(ids) > 0 { // with none", "\tif true || len(ids) > 0 { // with none"),
+      ("func (t *Tracker) addNamed(n string, ids []ID) {\n\tif len(ids) == 0 {\n\t\treturn\n\t}\n", "func (t *Tracker) addNamed(n string, ids []ID) {\n")]),
     # What is forgotten.
     ("a holder that is gone keeps its turns", IN,
      [("\th.t.proto.gateTurns.forget(m.UID)\n", "")]),
