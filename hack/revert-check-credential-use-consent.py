@@ -156,7 +156,7 @@ MUTANTS = [
     ("the old record's names aren't queued", IN,
      [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\t_ = was\n\tids := slices.Concat(is.IDs)\n")]),
     ("the new record's names aren't queued", IN,
-     [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\tids := slices.Concat(was.IDs)\n")]),
+     [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\t_ = is\n\tids := slices.Concat(was.IDs)\n")]),
     ("a batch for each record", IN,
      [("\tids := slices.Concat(was.IDs, is.IDs)\n", "\tif len(was.IDs) > 0 {\n\t\th.t.s.queue.Add(batchKey{h.t.gk, old.Namespace}, was.IDs...)\n\t}\n\tids := slices.Concat(was.IDs, is.IDs)\n")]),
     ("no names queue the namespace", IN,
