@@ -19,6 +19,8 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/utils/clock"
 	testingclock "k8s.io/utils/clock/testing"
+
+	"golang.org/x/time/rate"
 )
 
 // Retries: what fails is retried, with backoff, and nothing else is, nor
@@ -833,6 +835,65 @@ func TestAPruneBehindALimiterBacklogIsRetried(t *testing.T) {
 	}
 	if !slices.Equal(st.lines, linesOf([]ID{s})) {
 		t.Errorf("lines %q, want the Secret's, until its retry", st.lines)
+	}
+}
+
+// As the write loops stop they make the live checks the index holds in
+// memory, a re-add a prune couldn't write among them, whatever their
+// backoff, waiting their turn at the client's limiter, within their bound;
+// what the bound leaves is logged, with how many (§10.6.3, decided
+// 2026-11-25).
+func TestAStopDrainsTheIndexsChecks(t *testing.T) {
+	s := secretID("ns", "s")
+	for name, tc := range map[string]struct {
+		backlog int // calls ahead, of 100ms each
+		written bool
+	}{
+		"behind a backlog shorter than the bound": {3, true},
+		"behind one longer than the bound":        {40, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "h", s))
+			w := &warnings{}
+			o := r.options(widgetGK)
+			o.Logger = w
+			tr, err := r.s.Track(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.run(t)
+			r.drain()
+			st := &memStore{exists: true}
+			lim := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
+			tr.idx = testIndex(st, limitedServer{r.s.newServer(tr.o.Holder), lim})
+			bound := 2 * time.Second
+			r.s.hooks.drainBound = &bound
+			stop := r.runWrites(t)
+			tr.idx.queue([]ID{s}, false)
+			tr.idx.mu.Lock()
+			tr.idx.pending[s].due = time.Now().Add(time.Hour) // its backoff
+			tr.idx.mu.Unlock()
+			for range tc.backlog {
+				lim.Reserve()
+			}
+			start := time.Now()
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+			took := time.Since(start)
+			if got := slices.Equal(st.lines, linesOf([]ID{s})); got != tc.written {
+				t.Errorf("lines %q after the stop; want the Secret's written %v", st.lines, tc.written)
+			}
+			w.mu.Lock()
+			said := slices.ContainsFunc(w.got, func(g string) bool { return strings.Contains(g, "left undone") && strings.Contains(g, "left 1 ") })
+			w.mu.Unlock()
+			if said == tc.written {
+				t.Errorf("warnings %q; want one of the check left undone %v", w.got, !tc.written)
+			}
+			if took > bound+time.Second {
+				t.Errorf("the stop took %s, past its bound of %s", took, bound)
+			}
+		})
 	}
 }
 

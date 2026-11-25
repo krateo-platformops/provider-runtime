@@ -29,6 +29,14 @@ const (
 	// startup recheck's, and the index's checks', are bounded by them too.
 	releaseBackoffBase = time.Second
 	releaseBackoffMax  = 5 * time.Minute
+	// stopDrainBound bounds the drain, as the write loops stop, of the live
+	// checks an index holds in memory (§10.6.3, decided 2026-11-25): the
+	// 10s an A2 in flight is given after a stop (a2Grace), for what else a
+	// stop owes the index.
+	stopDrainBound = a2Grace
+	// drainPause is the wait between the drain's rounds, while some of its
+	// checks fail.
+	drainPause = 200 * time.Millisecond
 )
 
 // errInformersEnded is RunWriteLoops' error when RunInformers ends first.
@@ -86,6 +94,9 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		cancel()
 		s.mu.Unlock()
 		s.writeWG.Wait()
+		// Nothing of the loops runs any more, so nothing else queues a
+		// check; what is queued dies with the process unless it is made now.
+		s.drainIndexes(ctx)
 		// What the release loop counted outside the caches is stale once it
 		// stops: only the process that runs the write loops reports it.
 		for _, t := range s.trackerList() {
@@ -139,6 +150,38 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 	cancel()
 	wg.Wait()
 	return err
+}
+
+// drainIndexes makes, as the write loops stop, the live checks every index
+// holds in memory, within stopDrainBound of the loops' end (§10.6.3, decided
+// 2026-11-25): the re-adds a prune couldn't write, the checks an acquirer's
+// line check queued when it failed, the checks of lines someone else dropped,
+// and the late checks of A2s of unknown outcome whose margin was over. Each
+// reads its object live and writes its line back if it carries the kind's
+// prefix, or can't be read, as the write loops would have. What the bound
+// leaves is logged, with how many.
+func (s *Shared) drainIndexes(parent context.Context) {
+	d := stopDrainBound
+	if b := s.hooks.drainBound; b != nil {
+		d = *b
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), d)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, t := range s.trackerList() {
+		if t.idx == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if left := t.idx.drain(ctx); left > 0 {
+				t.warn("credential-use: the write loops stopped with live checks of the index left undone: their lines may be missing until their holders' next passes (§10.6.3)",
+					"kind", t.gk.String(), "index", t.idx.ref(), "left", left, "bound", d.String())
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // rescan enqueues, from every protected cache, the batch of each (K, N)

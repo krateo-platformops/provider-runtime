@@ -305,6 +305,8 @@ type hooks struct {
 	// pruneQuiet replaces how long the prunes are kept back once the write
 	// loops have started.
 	pruneQuiet *time.Duration
+	// drainBound replaces stopDrainBound.
+	drainBound *time.Duration
 }
 
 // landingMargin is LandingMargin, or the tests' own.

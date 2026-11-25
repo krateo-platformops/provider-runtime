@@ -214,6 +214,10 @@ func newFakeRigWith(t *testing.T, o SharedOptions, objs ...runtime.Object) *fake
 	r.s = newShared(Clients{Metadata: gatedMetadata{r.md, r}, Dynamic: r.dyn, Mapper: mapper, Discovery: r.disc.client(), Events: r.events}, o, r.clk)
 	r.s.syncTimeout.Store(int64(20 * time.Second))
 	r.s.releaseWait = nil // the tests of the wait set their own
+	// A stop's drain of what fails for good in a test is short; the tests of
+	// the drain set their own.
+	drain := 200 * time.Millisecond
+	r.s.hooks.drainBound = &drain
 	return r
 }
 

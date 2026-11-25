@@ -1655,6 +1655,33 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	return err
 }
 
+// drain makes every live check pending, whatever its backoff, in rounds while
+// some fail, until none is left or ctx ends, and returns how many are left
+// (§10.6.3).
+func (ix *index) drain(ctx context.Context) int {
+	left := func() int {
+		ix.mu.Lock()
+		defer ix.mu.Unlock()
+		return len(ix.pending)
+	}
+	for {
+		ix.mu.Lock()
+		for _, r := range ix.pending {
+			r.due = time.Time{}
+		}
+		ix.mu.Unlock()
+		_ = ix.recheckTick(ctx, time.Now())
+		if n := left(); n == 0 || ctx.Err() != nil {
+			return n
+		}
+		select {
+		case <-ctx.Done():
+			return left()
+		case <-time.After(drainPause):
+		}
+	}
+}
+
 // --- the index's informer (§10.6.6) ---
 
 // indexHandler hands each version of the index the informer delivers to

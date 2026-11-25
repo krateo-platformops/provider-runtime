@@ -1956,8 +1956,17 @@ then know:
   15s.
 - **A write of a prune, once begun, runs to its end**, within 15s, its check
   and its re-add included (§10.6.2); a prune whose context has ended begins
-  no other. So `RunWriteLoops` returns up to about 15s after its context
-  ended.
+  no other.
+- **Then the write loops drain** what the index holds in memory to write
+  (decided 2026-11-25; §10.6.3): every live check queued, within 10s. So
+  `RunWriteLoops` returns up to about 25s after its context ended, or after
+  `RunInformers` ended, which a manager stops first, among the runnables
+  that don't need leader election. That is within the manager's 30s, and
+  while the process still holds its Lease: controller-runtime v0.25.2
+  cancels the leader election only once the runnables have stopped
+  (`pkg/manager/internal.go`), so a manager that releases the Lease on a
+  stop does so after the drain. The next leader starts up to 10s later than
+  before, and no two leaders write the index at once.
 
 controller-runtime's manager waits for a stopping controller's workers, and
 for the write loops, within its `GracefulShutdownTimeout`, 30s by default
@@ -3776,13 +3785,22 @@ and before any post-check ran. Its object then keeps the finalizer with no
 line. The marker label still finds it (§10.6.6). A pruner killed between its
 removal and its re-add leaves the same: P held, recorded, and without its
 line, until the holder's next pass adds it, or another process whose index
-watch showed the line checks its drop (§10.6.6). So does one whose re-add
-failed, and was queued in memory, as behind a backlog of its client's rate
-limiter past what is left of the write's 15s, when the process ends, killed
-or stopped, before the write loops retry it. The startup recheck doesn't
-find it: it reads only the lines there are. The holder's next pass does,
-since even a skip ensures the line. With Disown turned on meanwhile it is
-the third residual, below.
+watch showed the line checks its drop (§10.6.6). So does a re-add that
+failed, and was queued in memory, as behind a backlog of the client's rate
+limiter past what is left of the write's 15s, when the process is killed
+before the write loops retry it. The startup recheck doesn't find it: it
+reads only the lines there are. The holder's next pass does, since even a
+skip ensures the line. **A stop drains** what is queued (decided 2026-11-25):
+as the write loops end, after their last prune, they make every live check
+the index holds in memory, whatever its backoff, within 10s, the bound an A2
+in flight is given after a stop (§7.2). Those are the re-adds a prune
+couldn't write, the checks an acquirer queued when its line check failed, the
+checks of lines someone else dropped, and the late checks of A2s whose margin
+was over. What the 10s leave is logged, with how many, and is the killed
+case. A check that an acquirer still finishing queues after the drain has
+ended is too; a late check whose margin isn't over isn't made early, which
+is condition 2 below. A kill stays the accepted case (2026-11-24). With
+Disown turned on meanwhile it is the third residual, below.
 
 **A hold that lands when nobody looks any more is the other residual** (the
 user's decision, 2026-11-23). The argument above needs both checks to run, the
@@ -6369,6 +6387,7 @@ user's decisions being named as theirs in those sections:
 | A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |
 | A process whose write loops haven't started refuses its passes | §7.2, §7.5 |
 | An operator's vouch of a kind in a namespace, `team-a/Secret/*` (for a namespace 2026-11-24; of its kind, decided 2026-11-25): a bare `team-a/*` is malformed, and a switch widened to another kind finds it unvouched | §7.4, §10.6.6 |
+| A stop drains the live checks the index holds in memory, within 10s, before the write loops end (decided 2026-11-25); a kill stays the accepted case | §7.2, §10.6.3 |
 
 ## 18. Open questions for the user
 
