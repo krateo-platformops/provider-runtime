@@ -54,6 +54,36 @@ func TestATurnsWorkDoesntGrowWithWhatWaits(t *testing.T) {
 	}
 }
 
+// A holder's event is one Add of both its records' names, those the caches show held
+// too, which a split into two would make two (#138).
+func TestARecordsChangeWithHeldNamesIsOneBatch(t *testing.T) {
+	x, y := secretID("other", "x"), secretID("other", "y")
+	r := newFakeRig(t, namespaceObject("ns"), namespaceObject("other"), heldObject(secretGVK, "other", "x", "u-x", widgetGK, "ns"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	eventually(t, "the caches to show x held", func() bool {
+		m, ok := (trackerViews{tr}).Protected(x)
+		return ok && hasFinalizer(m, fWidgetNS)
+	})
+	eventually(t, "x's batch", func() bool { return r.s.queue.Len() > 0 })
+	r.drain()
+	adds := 0
+	var got []ID
+	r.s.queue.afterAdd = func(batchKey) {
+		adds++
+		for r.s.queue.Len() > 0 {
+			k, ids, _ := r.s.queue.Get(context.Background())
+			got = append(got, ids...)
+			r.s.queue.Done(k)
+		}
+	}
+	holderHandler{tr}.OnUpdate(holderObject("ns", "h", x), holderObject("ns", "h", x, y))
+	r.s.queue.afterAdd = nil
+	if adds != 1 || !slices.Equal(SortedIDs(got), []ID{x, y}) {
+		t.Errorf("%d Adds of %v, want one of both names", adds, got)
+	}
+}
+
 // A held Secret whose last holder goes, behind 5,000 names of its own key, is
 // released in the next turn.
 func TestAHeldObjectDoesntWaitBehindAFlood(t *testing.T) {

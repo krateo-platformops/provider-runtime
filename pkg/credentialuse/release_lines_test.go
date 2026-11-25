@@ -293,3 +293,33 @@ func (e countedError) Error() string {
 	e.n.Add(1)
 	return "counted"
 }
+
+// An object whose wait (§6.4) is over, and that a turn doesn't get to, keeps its wait:
+// put back unread, it isn't decided, and the turn that reads it releases it at once.
+// Forgotten, it would wait again at every turn that reaches it, and behind more than 64
+// known objects of its key at every turn, never be released.
+func TestARestKeepsItsWait(t *testing.T) {
+	_, objs := found(64)
+	objs = append(objs, deleting(heldObject(secretGVK, "out", "w", "u-w", widgetGK, "out"), time.Now().Add(-time.Hour)))
+	r, _, l := quiet(t, objs...)
+	k, w := batchKey{widgetGK, "out"}, secretID("out", "w")
+	draws := 0
+	r.s.releaseWait = func() time.Duration { draws++; return time.Second }
+	r.s.queue.Add(k, w)
+	r.turn(context.Background())
+	if draws != 1 || !r.heldBy(t, widgetGK, "out", "w") {
+		t.Fatalf("%d waits drawn, the object held %v; want it to wait", draws, r.heldBy(t, widgetGK, "out", "w"))
+	}
+	ids, _ := found(64)
+	r.s.queue.AddHeld(k, ids...) // known, and before it when its wait ends
+	r.clk.Step(time.Second)
+	l.take()
+	r.turn(context.Background())
+	if got := l.take(); len(got) != 64 || slices.Contains(got, w) {
+		t.Fatalf("the turn read %d objects, the one that waited %v; want the 64 before it", len(got), slices.Contains(got, w))
+	}
+	r.turn(context.Background())
+	if draws != 1 || r.heldBy(t, widgetGK, "out", "w") {
+		t.Errorf("%d waits drawn, the object held %v; want its one wait, and it released", draws, r.heldBy(t, widgetGK, "out", "w"))
+	}
+}
