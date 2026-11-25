@@ -3664,14 +3664,19 @@ another writer's change.
      deadline the client sees: its rate limiter refuses at once a call whose
      turn would come after a deadline, and behind a backlog every read would
      then fail as an unread object's, its line put back with no error, so that
-     nothing retried the prune. Waiting its turn, a read is cut instead. A
-     write that fails ends the prune, and the lines after it stay. *Liveness:* what the reads found
+     nothing retried the prune. Waiting its turn, a read is cut instead.
+     *Its cost:* behind a backlog of 10s or more, a write of a prune holds
+     its release worker the 10s before it fails, where it failed at once, and
+     within its 15s in all; and a read cut while it waits keeps its place in
+     the limiter, a call's turn spent for nothing unless none asked after
+     it, about one a write: the reads after it are cut before they ask. A write that fails ends the
+     prune, and the lines after it stay. *Liveness:* what the reads found
      bare before the cut stays removed, so a prune always gains, unless the
-     reads before the check, or one read of it, outlast the 10s: the live read
-     of the switch before the removal, the removal with its retries on a
-     conflict, and the read after it share them with the check. Then no write
-     of it gains: its lines linger, and none is lost, until the reads are
-     faster.
+     reads before the check, or one read of it, outlast the 10s: the live
+     read of the switch before the removal, the removal with its retries on
+     a conflict, and the read after it share them with the check. Then no
+     write of it gains: its lines linger, and none is lost, until the reads
+     are faster.
 - **Lines for Missing refs** (revision 16). The line is added before A2,
   so a ref whose A2 finds NotFound has a line but no hold. It is kept while
   some holder's record names the ref: PerNamePoll needs its grant for the
@@ -3771,8 +3776,13 @@ and before any post-check ran. Its object then keeps the finalizer with no
 line. The marker label still finds it (§10.6.6). A pruner killed between its
 removal and its re-add leaves the same: P held, recorded, and without its
 line, until the holder's next pass adds it, or another process whose index
-watch showed the line checks its drop (§10.6.6). With Disown turned on
-meanwhile it is the third residual, below.
+watch showed the line checks its drop (§10.6.6). So does one whose re-add
+failed, and was queued in memory, as behind a backlog of its client's rate
+limiter past what is left of the write's 15s, when the process ends, killed
+or stopped, before the write loops retry it. The startup recheck doesn't
+find it: it reads only the lines there are. The holder's next pass does,
+since even a skip ensures the line. With Disown turned on meanwhile it is
+the third residual, below.
 
 **A hold that lands when nobody looks any more is the other residual** (the
 user's decision, 2026-11-23). The argument above needs both checks to run, the

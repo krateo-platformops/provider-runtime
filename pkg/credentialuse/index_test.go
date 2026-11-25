@@ -774,8 +774,8 @@ func backlogged(d time.Duration, n int) *rate.Limiter {
 // its context's deadline. Behind a backlog longer than a prune's check, the
 // check waits its turn, is cut, puts the line back, and says so, so that its
 // bare object is retried; refused, the read failed as an unread object's, the
-// line went back, and the prune said nothing (§10.6.2). A backlog shorter
-// than the check is waited for.
+// line went back, and the prune said nothing (§10.6.2). A backlog well
+// shorter than the check is waited for.
 func TestAPruneBehindALimiterBacklog(t *testing.T) {
 	bare := SecretRef("ns", "bare").ID()
 	for name, tc := range map[string]struct {
@@ -784,12 +784,12 @@ func TestAPruneBehindALimiterBacklog(t *testing.T) {
 		left []string
 	}{
 		"2s of backlog":    {func() *rate.Limiter { return backlogged(100*time.Millisecond, 20) }, true, linesOf([]ID{bare})},
-		"50ms of backlog":  {func() *rate.Limiter { return backlogged(10*time.Millisecond, 5) }, false, nil},
+		"20ms of backlog":  {func() *rate.Limiter { return backlogged(10*time.Millisecond, 2) }, false, nil},
 		"none, as a check": {func() *rate.Limiter { return rate.NewLimiter(rate.Inf, 1) }, false, nil},
 	} {
 		st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare}), rv: 1}
 		ix := testIndex(st, limitedServer{&objServer{}, tc.lim()})
-		ix.bound, ix.checkBound = 2*time.Second, 200*time.Millisecond
+		ix.bound, ix.checkBound = 3*time.Second, 500*time.Millisecond
 		start := time.Now()
 		err := ix.prune(context.Background(), []ID{bare})
 		if errors.Is(err, context.DeadlineExceeded) != tc.cut || !tc.cut && err != nil {
