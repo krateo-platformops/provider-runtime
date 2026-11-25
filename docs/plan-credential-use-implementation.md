@@ -1136,7 +1136,8 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   remedy.
 - **The release batch reports `Bare`**: the objects R1 read, or R3's
   response showed, without a finalizer of the kind, or gone. The prune runs
-  after R3, up to 50 in one write. A prune that fails retries the batch.
+  after R3, up to 50 in one write. A prune that fails retries the objects
+  it would have pruned.
 - **The acquirer keeps the line on every pass.** It adds the line before
   each A2, `BeforeEstablish`'s included, unless the index informer's view
   shows it. It checks the line live after each successful A2. A pass that
