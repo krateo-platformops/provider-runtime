@@ -863,12 +863,12 @@ func TestAStopDrainsTheIndexsChecks(t *testing.T) {
 			}
 			r.run(t)
 			r.drain()
-			st := &memStore{exists: true}
+			st := &memStore{exists: true, rebuilt: true} // marked: the startup recheck rebuilds nothing
 			lim := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
 			tr.idx = testIndex(st, limitedServer{r.s.newServer(tr.o.Holder), lim})
 			bound := 2 * time.Second
 			r.s.hooks.drainBound = &bound
-			stop := r.runWrites(t)
+			stop := r.runWritesStarted(t)
 			tr.idx.queue([]ID{s}, false)
 			tr.idx.mu.Lock()
 			tr.idx.pending[s].due = time.Now().Add(time.Hour) // its backoff
@@ -897,6 +897,21 @@ func TestAStopDrainsTheIndexsChecks(t *testing.T) {
 	}
 }
 
+// runWritesStarted is runWrites, once the loops have started. A stop before
+// then can end RunWriteLoops at its first select, which runs no loop and so
+// drains nothing: a select with its context ended and the informers synced
+// takes either.
+func (r *fakeRig) runWritesStarted(t *testing.T) (stop func() error) {
+	t.Helper()
+	stop = r.runWrites(t)
+	eventually(t, "the write loops to start", func() bool {
+		r.s.mu.Lock()
+		defer r.s.mu.Unlock()
+		return r.s.writeCtx != nil
+	})
+	return stop
+}
+
 // drainRig is a rig whose Widgets hold Secret ns/s, recorded, with an index of
 // the test's own, whose drain on a stop has bound.
 func drainRig(t *testing.T, bound time.Duration) (*fakeRig, *Tracker, *memStore, *warnings) {
@@ -911,7 +926,7 @@ func drainRig(t *testing.T, bound time.Duration) (*fakeRig, *Tracker, *memStore,
 	}
 	r.run(t)
 	r.drain()
-	st := &memStore{exists: true}
+	st := &memStore{exists: true, rebuilt: true} // marked: the startup recheck rebuilds nothing
 	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 	r.s.hooks.drainBound = &bound
 	return r, tr, st, w
@@ -932,7 +947,7 @@ func TestAStopWaitsForTheCallsInFlight(t *testing.T) {
 	s := secretID("ns", "s")
 	t.Run("a call that queues a check after the loops ended", func(t *testing.T) {
 		r, tr, st, w := drainRig(t, 500*time.Millisecond)
-		stop := r.runWrites(t)
+		stop := r.runWritesStarted(t)
 		end := r.s.calls.begin()
 		go func() {
 			time.Sleep(800 * time.Millisecond) // past the bound from the loops' end
@@ -950,7 +965,7 @@ func TestAStopWaitsForTheCallsInFlight(t *testing.T) {
 		r, _, _, w := drainRig(t, 300*time.Millisecond)
 		grace := 300 * time.Millisecond
 		r.s.hooks.callGrace = &grace
-		stop := r.runWrites(t)
+		stop := r.runWritesStarted(t)
 		end := r.s.calls.begin()
 		defer end()
 		start := time.Now()
@@ -969,7 +984,7 @@ func TestAStopWaitsForTheCallsInFlight(t *testing.T) {
 		grace := 2 * time.Second
 		r.s.hooks.callGrace = &grace
 		tr.idx.srv = &objServer{fail: map[ID]bool{s: true}} // the drain goes on
-		stop := r.runWrites(t)
+		stop := r.runWritesStarted(t)
 		tr.idx.queue([]ID{s}, false)
 		var mu sync.Mutex
 		var end func()
@@ -1055,11 +1070,11 @@ func TestADrainAfterTheInformersEndedWaitsForTheStop(t *testing.T) {
 	tr := r.track(t, widgetGK)
 	stopInformers := r.run(t)
 	r.drain()
-	st := &memStore{exists: true}
+	st := &memStore{exists: true, rebuilt: true} // marked: the startup recheck rebuilds nothing
 	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
 	bound := 300 * time.Millisecond
 	r.s.hooks.drainBound = &bound
-	stopWrites := r.runWrites(t)
+	stopWrites := r.runWritesStarted(t)
 	if err := stopInformers(); err != nil {
 		t.Fatal(err)
 	}
