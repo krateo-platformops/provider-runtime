@@ -2010,11 +2010,16 @@ else changed in between.
   changed, when an A2 from before it has landed, confirm by hand that it
   carries no finalizer of K and add it
   to the index's `credential-use.krateo.io/vouched` annotation. Disown then
-  settles, and removes the line itself. **Or vouch for a namespace**, with
-  `team-a/*`, once none of its objects of the kinds the switch covers carries
-  K's marker label, which takes one list of each: a tenant may name any number
+  settles, and removes the line itself. **Or vouch for a kind in a
+  namespace**, with `team-a/Secret/*`, once none of its objects of that kind
+  carries K's marker label, which takes one list: a tenant may name any number
   of objects the process can't read, in a spec or in a record it forges, and
-  each would need a vouch of its own (the user's decision, 2026-11-24).
+  each would need a vouch of its own (the user's decision, 2026-11-24). The
+  entry names its kind (decided 2026-11-25), and the event names an entry for
+  each kind and namespace it can't read in. A switch widened to another kind
+  finds what it can't read of that kind unvouched, so the count stays
+  `"unknown"` until the operator has looked at that kind too. A bare
+  `team-a/*` is malformed.
   Removing the line by hand
   alone does nothing: the tamper check restores the line of an object it
   can't read (§10.6.6). The vouch, the user's decision of
@@ -3245,9 +3250,12 @@ another writer's change.
      of step 2 are one GET a line, so 50 lines make 2.5s of a client's 20
      calls a second, where a teardown's 1,000 would make 50s. They end 10s
      after the write began, and the lines of the objects they didn't come to
-     are put back in the 5s that are left, which fails the prune: its batch
-     is retried. A write that fails ends the prune, and the lines after it
-     stay.
+     are put back in the 5s that are left, a vouched object's too, which
+     fails the prune: its bare objects are retried. A write that fails ends
+     the prune, and the lines after it stay. *Liveness:* what the reads found
+     bare before the cut stays removed, so a prune always gains, unless a
+     single read outlasts the 10s. Then no write of it gains: its lines
+     linger, and none is lost, until the reads are faster.
 - **Lines for Missing refs** (revision 16). The line is added before A2,
   so a ref whose A2 finds NotFound has a line but no hold. It is kept while
   some holder's record names the ref: PerNamePoll needs its grant for the
@@ -3281,13 +3289,19 @@ another writer's change.
   What it leaves is pruned later, under the rules above: the write loops read
   each object live once the wait is over, 10s for an A2 in flight. One whose
   read fails is read again 30s later; one the authorizer refuses keeps its
-  line until a startup recheck. What is left dies with the process, and the
-  next startup recheck finds it.
+  line until a startup recheck. One of a kind the Disown switch covers is
+  dropped from what is left, and is the emptying's, once Disown has settled
+  (§7.4). What is left dies with the process, and the next startup recheck
+  finds it.
 
   *The cost:* after every start of the write loops, a leader change included,
   the lines of what was released linger, 150s at provider-runtime's defaults
   (a `TimeoutBound` of 90s). Meanwhile they count towards the cap (§10.6.4),
-  and each has its watch. By argument alone 70s would do with leader election,
+  and each has its watch. Once they are due the write loops read each with a
+  GET, in one tick: after a restart over 2,000 bare lines that is about 100s
+  at a client's 20 calls a second, and the index's other ticks, of every kind,
+  wait behind it, the live checks of dropped lines and the late checks among
+  them. By argument alone 70s would do with leader election,
   since no A2 begins once its context has ended, one in flight goes on for at
   most 10s (§7.2), and the landing margin is 60s; it isn't modelled. The 150s
   also cover a pass that isn't cut short, but not a process that is paused past
@@ -3346,7 +3360,9 @@ leaves P with the finalizer and without a line only when all three of these
 hold together:
 
 1. **The sender makes no check after the A2**: its response is lost, or the
-   sender is killed between the response and the check.
+   sender is killed between the response and the check; or the check ran and
+   failed, or its add did, as on a full index, so that the line is queued in
+   memory only, and the sender ends before the write loops retry it.
 2. **The late check doesn't see the landing** (§10.6.2): the sender ends
    within `LandingMargin`, killed, or by a stop whose grace period ends, or the
    write lands later than `LandingMargin`.
@@ -3398,7 +3414,9 @@ line. With any one off, in seven cases, it reaches none.
   In the four without 3 **no schedule has the line taken at all**: they show
   that a line nothing takes is there, and nothing more.
 - **What it leaves out:** a grace period that ends is a kill there. One
-  holder, one object, one batch.
+  holder, one object, one batch. A check that fails, and is queued, isn't
+  searched: what is queued dies with the process, so by reading one whose
+  sender ends before the retry is a kill before the check.
 - **The pruner's rules for a hold that may land yet** have cases of their own,
   searched at 5a72b68 within the same bounds, the sender's own at a5340fe. Four
   reach none with all three conditions and a landing within the margin. No
@@ -3597,6 +3615,14 @@ and the PerName kinds the rebuild was of, as the Disown switch lists them.
   one for that kind, and not for the others. A kind moved away is taken out of
   the marker by that rebuild, under the switch too, so that moved back it
   needs one again.
+- **A copy applied or replaced over the live index**, as `kubectl replace`
+  or `apply` of a backup's contents onto the ConfigMap that still exists,
+  keeps its uid and its marker, and may lack the lines of holds made since. A
+  process whose index watch had those lines sees them dropped, and checks
+  each (above). One that hadn't, as when no process of the kind ran
+  meanwhile, is left with the restored copy's case in place, and the marker
+  doesn't show it: a hold without its line, which the marker label still
+  finds (§10.6.3's remedy).
 - **An index whose marker is `"true"`**, the value before 2026-11-24, isn't
   marked, and is rebuilt at the next start. No tag has written one.
 
@@ -3610,20 +3636,22 @@ the operator's word in its place, for Disown's count only.
 `credential-use.krateo.io/vouched` annotation lists, comma-separated and
 written as the unheld annotation names refs (`team-a/Secret/nogrant`), the
 objects an operator has checked by hand to carry no finalizer of K. An entry
-`team-a/*` is every object of that namespace (the user's decision,
-2026-11-24); there is none for every namespace, or for one kind of it.
-Malformed entries are ignored, with a warning once per value. While a vouched object
+`team-a/Secret/*` is every object of that kind in that namespace (the user's
+decision, 2026-11-24, for a namespace; of its kind, decided 2026-11-25); there
+is none for every namespace, nor for every kind of one, and a bare `team-a/*`
+is malformed. Malformed entries are ignored, with a warning once per value. While a vouched object
 can't be read, Disown's count and its strip skip it, the startup recheck
 skips it after its read fails, the tamper check doesn't restore its
 dropped line, a prune may remove its line, and a rebuild doesn't add it. Every other unreadable
 line keeps the superset's rule: restored, and counted unknown. A vouched
 object that can be read and carries K's prefix is treated as any other,
 counted and kept, and the wrong vouch is logged, when it was vouched for by
-name: a namespace's vouch says nothing of what can be read there. The process
-never writes the annotation, and its own writes keep it. **A vouch stays until
-it is removed**, and a later hold of an object that then can't be read, its
-grant revoked, isn't in the index's superset: remove a namespace's once Disown
-has settled.
+name: a kind's vouch in a namespace says nothing of what can be read there.
+The process never writes the annotation, and its own writes keep it. **A vouch
+stays until it is removed**, and a later hold of an object that then can't be
+read, its grant revoked, isn't in the index's superset: remove a kind's vouch
+once Disown has settled. A read that a prune's bound cut short is no read: the
+vouch isn't of it, and its line goes back (§10.6.2).
 
 **If the ConfigMap is deleted**, the tracker recreates it and rebuilds it
 from the records. It lists the holders of K, takes the union of their
@@ -4651,7 +4679,8 @@ on krateo-057:
   but Disown's emptying for a while after the write loops start, and for a
   kind tracked while they run; none of an A2 of this process in flight, or of
   unknown outcome, one begun during the removal included; what is left is
-  pruned once it is due, unless it is held, named or unreadable by then; the
+  pruned once it is due, unless it is held, named or unreadable by then, or of
+  a kind the switch covers, which is left to the emptying; the
   index is told of an A2 before its line is ensured, and of its end after its
   check, in a pass and before establishing.
 - **The flag** (§7.4): a switch turned off and on again while nothing runs
@@ -5527,6 +5556,7 @@ user's decisions being named as theirs in those sections:
 | A pass strips the objects before the records, and a record only once every object it names is stripped | §7.4 |
 | A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |
 | A process whose write loops haven't started refuses its passes | §7.2, §7.5 |
+| An operator's vouch of a kind in a namespace, `team-a/Secret/*` (for a namespace 2026-11-24; of its kind, decided 2026-11-25): a bare `team-a/*` is malformed, and a switch widened to another kind finds it unvouched | §7.4, §10.6.6 |
 
 ## 18. Open questions for the user
 

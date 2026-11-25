@@ -1128,8 +1128,10 @@ only PR 6. **Size:** about 1,300 lines of production code and 1,600 of tests.
   - a prune may remove its line;
   - a rebuild doesn't add it.
 
-  An entry `ns/*` is every object of a namespace (the user's decision,
-  2026-11-24), once none there carries the kind's marker label. Once readable and carrying the prefix, it is treated normally, and the
+  An entry `ns/Kind[.group]/*` is every object of that kind in a namespace
+  (for a namespace, the user's decision, 2026-11-24; of its kind, decided
+  2026-11-25), once none of them carries the kind's marker label; a bare
+  `ns/*` is malformed. Once readable and carrying the prefix, it is treated normally, and the
   wrong vouch is logged. Every other unreadable line keeps the superset's
   rule. The process never writes the annotation, and its writes keep it,
   as they keep the rebuilt marker. Disown's event names the vouch as the
@@ -1374,9 +1376,10 @@ tests.
     `CredentialUseDisownUnreadable` (PR 8): grant `get` on each object the
     event names, or confirm by hand that it carries no finalizer of the kind
     and add it to the index's `credential-use.krateo.io/vouched`
-    annotation, or `ns/*` for a namespace none of whose objects carries the
-    kind's marker label, and remove that one again once Disown has settled
-    (removing the line alone is undone by the tamper check);
+    annotation, or `ns/Kind[.group]/*` for a kind in a namespace none of
+    whose objects of that kind carries the holder kind's marker label, one
+    entry for each kind the event names, and remove those again once Disown
+    has settled (removing the line alone is undone by the tamper check);
   - the runbook entries for Disown's other events (§7.4):
     `CredentialUseIndexLost`, with the `vouched-index` steps;
     `CredentialUseDisownIndexFull`, raise `IndexMaxLines`, or correct the
@@ -1801,7 +1804,8 @@ them are recorded in the design doc's §17, "Revision 16".
 6. **Any other write of the CRD restarts a run of zeros.** (Runs that keep
    restarting are reported.)
 7. **A process whose write loops haven't started refuses its passes.**
-8. **An operator may vouch for a namespace** (2026-11-24).
+8. **An operator may vouch for a namespace** (2026-11-24), a kind in it at a
+   time (decided 2026-11-25).
 9. **A kill inside a prune, as Disown is turned on** (2026-11-24): accepted
    and documented (§10.6.3), with the objects stripped before the records.
    The wait that would close it can be added later, with no change of the

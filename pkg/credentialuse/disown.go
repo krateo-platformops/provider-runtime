@@ -391,7 +391,7 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 	perName := t.disownPerName(set)
 	var lined []ID          // the index's lines of the kinds set covers
 	var unreadable []string // the objects of those that couldn't be read, with why
-	var where []string      // their namespaces
+	var where []string      // the vouches of their kinds in their namespaces
 	var texts []string      // and the errors
 	var vouched vouches
 	unlined := map[ID]bool{}    // recorded objects whose line couldn't be added
@@ -455,7 +455,9 @@ func (s *Shared) disownPass(ctx context.Context, t *Tracker, set disownSet) {
 				unstripped[id] = true
 				known = false
 				unreadable = append(unreadable, unheldRef(id)+": "+shortError(err))
-				where = append(where, id.Namespace)
+				if id.Namespace != "" {
+					where = append(where, kindVouch(id))
+				}
 				texts = append(texts, err.Error())
 				continue
 			}
@@ -618,8 +620,9 @@ const EventDisownUnreadable = "CredentialUseDisownUnreadable"
 // the gauge on every pass, and, when there are some, a log line and a
 // Warning event on the CRD naming the first with why, and how many more, which
 // the event sink throttles while that stays the same. A record, which a tenant
-// may write, can name any number; where are their namespaces, one of which an
-// operator may vouch for whole. texts are their errors, for the log:
+// may write, can name any number; where are the entries that vouch for their
+// kinds in their namespaces, each of which an operator may add. texts are their
+// errors, for the log:
 // an event with them would be a new one at every pass whose errors vary. A pass
 // the process's stop cut short says nothing, and leaves the gauge: its reads
 // failed for that.
@@ -635,14 +638,8 @@ func (t *Tracker) reportDisownUnreadable(ctx context.Context, unreadable, where,
 		"or, no sooner than " + (t.o.TimeoutBound + t.s.landingMargin()).String() + " after the switch was last changed, " +
 		"confirm by hand that it carries no finalizer of " + kindLabel(t.gk) + " and add it to the " + AnnotationVouched +
 		" annotation of the index " + t.idx.ref() + " (§7.4)"
-	var all []string
-	for _, ns := range slices.Compact(slices.Sorted(slices.Values(where))) {
-		if ns != "" {
-			all = append(all, ns+"/*")
-		}
-	}
-	if len(all) > 0 {
-		note += "; or, for what can't be read in a namespace, list its objects labelled " + MarkerLabel(t.gk) + "=true, and once none is, add " + fewOf(all, 3)
+	if all := slices.Compact(slices.Sorted(slices.Values(where))); len(all) > 0 {
+		note += "; or, for what can't be read of a kind in a namespace, list its objects of that kind labelled " + MarkerLabel(t.gk) + "=true, and once none is, add " + fewOf(all, 3)
 	}
 	crd := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: t.crdName}}
 	crd.SetGroupVersionKind(crdGVR.GroupVersion().WithKind("CustomResourceDefinition"))
@@ -677,6 +674,12 @@ func (t *Tracker) reportIndexLost(cur indexVersion, kinds map[schema.GroupKind]b
 	t.s.events.record(crd, "Warning", EventIndexLost, note)
 	t.warn("credential-use: the index was lost while Disown is on; its count stays unknown until an operator vouches for the index",
 		"kind", t.gk.String(), "crd", t.crdName, "index", t.idx.ref(), "uid", cur.uid)
+}
+
+// kindVouch is the entry of AnnotationVouched for every object of id's kind in
+// its namespace, written <namespace>/<Kind[.group]>/* (decided 2026-11-25).
+func kindVouch(id ID) string {
+	return unheldRef(ID{Group: id.Group, Kind: id.Kind, Namespace: id.Namespace, Name: "*"})
 }
 
 // notServed reports whether err is a 404 that isn't about an object: its kind

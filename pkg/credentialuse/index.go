@@ -942,10 +942,14 @@ func (ix *index) checkRemoved(check, ctx context.Context, tried []string, kept f
 			back = append(back, id)
 			continue
 		}
-		switch ix.carries(check, id) {
-		case carriesNot:
-		case carriesYes:
+		switch c := ix.carries(check, id); {
+		case c == carriesNot:
+		case c == carriesYes:
 			carry = append(carry, id)
+		case check.Err() != nil:
+			// Cut short, so not read: no vouch is of it, and its line goes
+			// back (§10.6.2).
+			back = append(back, id)
 		default:
 			unread = append(unread, id)
 		}
@@ -1023,43 +1027,54 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 }
 
 // vouches are what an operator vouched for to carry no finalizer of the kind,
-// while it can't be read (§10.6.6): objects, and every object of namespaces.
+// while it can't be read (§10.6.6): objects, and every object of a kind in a
+// namespace.
 type vouches struct {
-	ids        map[ID]bool
-	namespaces map[string]bool
+	ids   map[ID]bool
+	kinds map[vouchedKind]bool
+}
+
+// vouchedKind is every object of a kind in a namespace, as an entry
+// <namespace>/<Kind[.group]>/* vouches for it (decided 2026-11-25).
+type vouchedKind struct {
+	namespace string
+	gk        schema.GroupKind
 }
 
 // has reports whether id is vouched for.
 func (v vouches) has(id ID) bool {
-	return v.ids[id] || id.Namespace != "" && v.namespaces[id.Namespace]
+	return v.ids[id] || id.Namespace != "" && v.kinds[vouchedKind{id.Namespace, id.GroupKind()}]
 }
 
 // names reports whether id is vouched for by name: found to carry the prefix,
-// the vouch is wrong. A namespace's is of what can't be read there, and says
-// nothing of what can.
+// the vouch is wrong. A kind's in a namespace is of what can't be read there,
+// and says nothing of what can.
 func (v vouches) names(id ID) bool { return v.ids[id] }
 
 // parseVouched reads AnnotationVouched: comma-separated refs written
-// <namespace>/<Kind[.group]>/<name>, and namespaces written <namespace>/*,
-// blanks trimmed; a malformed entry is ignored, and reported once per value of
-// the annotation.
+// <namespace>/<Kind[.group]>/<name>, and kinds in a namespace written
+// <namespace>/<Kind[.group]>/*, blanks trimmed; a malformed entry, as a bare
+// <namespace>/*, is ignored, and reported once per value of the annotation.
 func (ix *index) parseVouched(v string) vouches {
-	out := vouches{ids: map[ID]bool{}, namespaces: map[string]bool{}}
+	out := vouches{ids: map[ID]bool{}, kinds: map[vouchedKind]bool{}}
 	var bad []string
 	for _, e := range strings.Split(v, ",") {
 		if e = strings.TrimSpace(e); e == "" {
 			continue
 		}
-		if ns, all := strings.CutSuffix(e, "/*"); all && len(validation.IsDNS1123Label(ns)) == 0 {
-			out.namespaces[ns] = true
-			continue
-		}
 		id, ok := parseUnheldRef(e)
-		if !ok || id.Name == "*" {
+		switch {
+		case !ok || id.Kind == "*":
 			bad = append(bad, e)
-			continue
+		case id.Name == "*":
+			if len(validation.IsDNS1123Label(id.Namespace)) != 0 {
+				bad = append(bad, e)
+				continue
+			}
+			out.kinds[vouchedKind{id.Namespace, id.GroupKind()}] = true
+		default:
+			out.ids[id] = true
 		}
-		out.ids[id] = true
 	}
 	if len(bad) > 0 {
 		ix.mu.Lock()
@@ -1888,7 +1903,7 @@ func (t *Tracker) newTrackerIndex() error {
 			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
 	}
 	ix.onVouchMalformed = func(entries []string) {
-		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name>, or <namespace>/* (§10.6.6)",
+		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name>, or <namespace>/<Kind[.group]>/* for every object of a kind in a namespace (§10.6.6)",
 			"kind", t.gk.String(), "index", ix.ref(), "entries", strings.Join(entries, ", "))
 	}
 	ix.onVouchWrong = func(id ID) {

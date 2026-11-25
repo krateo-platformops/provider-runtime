@@ -135,8 +135,8 @@ func TestAFailedCheckOfAnotherKind(t *testing.T) {
 }
 
 // A tenant's record that names any number of objects the process can't read
-// keeps Disown's count unknown until an operator vouches for the namespace,
-// once; the report names the remedy, and fits in an event (§7.4).
+// keeps Disown's count unknown until an operator vouches for the kind in the
+// namespace, once; the report names the remedy, and fits in an event (§7.4).
 func TestDisownWithAVouchedNamespace(t *testing.T) {
 	ctx := context.Background()
 	var forged []ID
@@ -180,21 +180,70 @@ func TestDisownWithAVouchedNamespace(t *testing.T) {
 		got = append(got, <-r.events.Events)
 	}
 	if len(got) != 1 || !strings.Contains(got[0], EventDisownUnreadable) || !strings.Contains(got[0], "and 397 more") ||
-		!strings.Contains(got[0], "labelled "+MarkerLabel(widgetGK)+"=true, and once none is, add team-a/*") ||
+		!strings.Contains(got[0], "labelled "+MarkerLabel(widgetGK)+"=true, and once none is, add team-a/Secret/*") ||
 		!strings.Contains(got[0], "no sooner than "+(tr.o.TimeoutBound+LandingMargin).String()) || len(got[0]) > 1024 {
 		t.Errorf("events %q, of %d bytes; want one, with the namespace's remedy, of 1,024 at most", got, len(strings.Join(got, "")))
 	}
 	if !recorded() || count() != "unknown" {
 		t.Errorf("not vouched for: recorded %v, held-count %q", recorded(), count())
 	}
-	st.vouched = "team-b/*"
-	if r.s.disownPass(ctx, tr, parseDisown("all")); !recorded() || count() != "unknown" {
-		t.Errorf("another namespace vouched for: recorded %v, held-count %q", recorded(), count())
+	for _, other := range []string{"team-b/Secret/*", "team-a/ConfigMap/*", "team-a/*"} {
+		st.vouched = other
+		if r.s.disownPass(ctx, tr, parseDisown("all")); !recorded() || count() != "unknown" {
+			t.Errorf("%s vouched for: recorded %v, held-count %q", other, recorded(), count())
+		}
 	}
-	st.vouched = "team-a/*"
+	st.vouched = "team-a/Secret/*"
 	r.s.disownPass(ctx, tr, parseDisown("all")) // counts the record, and strips it
 	if r.s.disownPass(ctx, tr, parseDisown("all")); recorded() || count() != "0" {
 		t.Errorf("the namespace vouched for: recorded %v, held-count %q", recorded(), count())
+	}
+}
+
+// A vouch of a kind in a namespace is of that kind only: a switch widened to
+// another finds what it can't read there unvouched, and its count stays
+// unknown until that kind is vouched for too (decided 2026-11-25).
+func TestAWidenedSwitchFindsTheNewKindUnvouched(t *testing.T) {
+	ctx := context.Background()
+	r := newFakeRig(t)
+	tr, err := r.s.Track(ctx, r.options(widgetGK, ProtectedKind{GVK: secretGVK}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As PerName kinds, with an index of the test's own, rebuilt for both.
+	tr.o.Protected = []ProtectedKind{{GVK: secretGVK, Watch: PerName}, {GVK: configMapGVK, Watch: PerName}}
+	s, c := secretID("team-a", "s"), ID{Kind: "ConfigMap", Namespace: "team-a", Name: "c"}
+	st := &memStore{exists: true, marked: kindSet{secretGroupKind: true, configMapGroupKind: true}, lines: linesOf([]ID{c, s})}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	tr.idx.kinds[configMapGroupKind] = true
+	for _, resource := range []string{"secrets", "configmaps"} {
+		r.md.PrependReactor("get", resource, func(a clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, rbacForbidden(a.GetNamespace(), a.(clienttesting.GetAction).GetName())
+		})
+	}
+	pass := func(value string) string {
+		t.Helper()
+		if _, err := r.dyn.Resource(crdGVR).Patch(ctx, "widgets."+widgetGK.Group, types.MergePatchType,
+			[]byte(`{"metadata":{"annotations":{"`+AnnotationDisown+`":"`+value+`"}}}`), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		r.s.disownPass(ctx, tr, parseDisown(value))
+		crd, err := r.dyn.Resource(crdGVR).Get(ctx, "widgets."+widgetGK.Group, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return crd.GetAnnotations()[AnnotationHeldCount]
+	}
+	st.vouched = "team-a/Secret/*"
+	if got := pass("Secret"); got != "0" {
+		t.Errorf("the Secrets vouched for, under a switch over them: held-count %q, want 0", got)
+	}
+	if got := pass("all"); got != "unknown" {
+		t.Errorf("the switch widened to the ConfigMaps, which nobody vouched for: held-count %q, want unknown", got)
+	}
+	st.vouched = "team-a/Secret/*,team-a/ConfigMap/*"
+	if got := pass("all"); got != "0" {
+		t.Errorf("both kinds vouched for: held-count %q, want 0", got)
 	}
 }
 

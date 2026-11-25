@@ -740,6 +740,23 @@ func TestAPruneCutShort(t *testing.T) {
 	}
 }
 
+// A check cut short by its bound read nothing of what it didn't come to, so a
+// vouch of a kind in a namespace isn't of it: its line goes back, as every
+// other's (§10.6.2). What it read, and can't, the vouch covers.
+func TestAPruneCutShortInAVouchedKind(t *testing.T) {
+	denied, stuck := SecretRef("ns", "a-denied").ID(), SecretRef("ns", "b-stuck").ID()
+	objs := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{}, forbid: map[ID]bool{denied: true}}
+	st := &memStore{exists: true, rebuilt: true, vouched: "ns/Secret/*", lines: linesOf([]ID{denied, stuck}), rv: 1}
+	ix := testIndex(st, stuckServer{stopServer{objs}, stuck})
+	ix.bound, ix.checkBound = time.Minute, 50*time.Millisecond
+	if err := ix.prune(context.Background(), []ID{denied, stuck}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("prune = %v, want that its check was cut short", err)
+	}
+	if want := linesOf([]ID{stuck}); !slices.Equal(st.lines, want) || len(ix.pending) != 0 {
+		t.Errorf("lines %q, pending %v; want %q, and none", st.lines, ix.pending, want)
+	}
+}
+
 // stuckServer's read of one object doesn't answer.
 type stuckServer struct {
 	stopServer
@@ -1728,7 +1745,7 @@ func TestParseVouched(t *testing.T) {
 			{Group: "x.io", Kind: "Cluster", Name: "c"}:                                            true,
 			{Group: "core.krateo.io", Kind: "KubernetesTarget", Namespace: "team-b", Name: "prod"}: true,
 		}
-		if len(got.ids) != len(want) || len(got.namespaces) != 0 {
+		if len(got.ids) != len(want) || len(got.kinds) != 0 {
 			t.Fatalf("parsed %v, want %v", got, want)
 		}
 		for id := range want {
@@ -1740,18 +1757,25 @@ func TestParseVouched(t *testing.T) {
 	if len(reports) != 1 || !slices.Equal(reports[0], []string{"nonsense", "a/b/c/d"}) {
 		t.Errorf("reports %q, want the two malformed entries once", reports)
 	}
-	// Namespaces, whole; neither every namespace, nor what has none.
+	// A kind in a namespace, whole; neither a namespace of every kind, nor
+	// every namespace, nor what has none (decided 2026-11-25).
 	reports = nil
-	got := ix.parseVouched("team-a/*, */*,/*,*,team-b/Secret/*,team_c/*")
-	if len(got.ids) != 0 || !maps.Equal(got.namespaces, map[string]bool{"team-a": true}) {
-		t.Errorf("parsed %v, want team-a only", got)
+	target := schema.GroupKind{Group: "core.krateo.io", Kind: "KubernetesTarget"}
+	got := ix.parseVouched("team-a/Secret/*, team-b/KubernetesTarget.core.krateo.io/*, team-a/*, */*,/*,*,*/Secret/*,/Secret/*,team_c/Secret/*,team-a/*/*")
+	if want := map[vouchedKind]bool{{"team-a", secretGroupKind}: true, {"team-b", target}: true}; len(got.ids) != 0 || !maps.Equal(got.kinds, want) {
+		t.Errorf("parsed %v, want %v", got, want)
 	}
-	if len(reports) != 1 || !slices.Equal(reports[0], []string{"*/*", "/*", "*", "team-b/Secret/*", "team_c/*"}) {
+	if len(reports) != 1 || !slices.Equal(reports[0], []string{"team-a/*", "*/*", "/*", "*", "*/Secret/*", "/Secret/*", "team_c/Secret/*", "team-a/*/*"}) {
 		t.Errorf("reports %q, want the malformed entries", reports)
 	}
-	in := SecretRef("team-a", "s").ID()
-	if !got.has(in) || got.names(in) || got.has(SecretRef("team-b", "s").ID()) || got.has(ID{Kind: "Cluster", Name: "c"}) {
-		t.Errorf("%v: has and names don't follow the namespace", got)
+	in, inTarget := SecretRef("team-a", "s").ID(), ID{Group: target.Group, Kind: target.Kind, Namespace: "team-b", Name: "prod"}
+	if !got.has(in) || got.names(in) || !got.has(inTarget) || got.names(inTarget) {
+		t.Errorf("%v: has and names don't follow the kind in its namespace", got)
+	}
+	for _, out := range []ID{SecretRef("team-b", "s").ID(), {Kind: "ConfigMap", Namespace: "team-a", Name: "c"}, {Group: target.Group, Kind: target.Kind, Namespace: "team-a", Name: "prod"}, {Kind: "Cluster", Name: "c"}} {
+		if got.has(out) {
+			t.Errorf("%v vouches for %v", got, out)
+		}
 	}
 	if got, ok := parseUnheldRef(unheldRef(SecretRef("ns", "s").ID())); !ok || got != SecretRef("ns", "s").ID() {
 		t.Errorf("parseUnheldRef(unheldRef) = %v, %v", got, ok)
@@ -1827,16 +1851,16 @@ func TestAVouchedLine(t *testing.T) {
 	}
 }
 
-// A vouched namespace is a vouch for each of its objects that can't be read,
-// and for none that can: one that carries the prefix is treated as any other,
-// and isn't a wrong vouch (§10.6.6).
+// A vouch of a kind in a namespace is a vouch for each of its objects of that
+// kind that can't be read, and for none that can: one that carries the prefix
+// is treated as any other, and isn't a wrong vouch (§10.6.6).
 func TestAVouchedNamespace(t *testing.T) {
 	ctx := context.Background()
 	in, out, carrying := SecretRef("team-a", "in").ID(), SecretRef("team-b", "out").ID(), SecretRef("team-a", "carrying").ID()
 	prefix, _ := FinalizerPrefix(widgetGK)
 	srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{carrying: {ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "carrying", Finalizers: []string{prefix + "team-a"}}}},
 		forbid: map[ID]bool{in: true, out: true}}
-	st := &memStore{exists: true, rebuilt: true, vouched: "team-a/*", lines: linesOf([]ID{in, carrying})}
+	st := &memStore{exists: true, rebuilt: true, vouched: "team-a/Secret/*", lines: linesOf([]ID{in, carrying})}
 	ix := testIndex(st, srv)
 	ix.onVouchWrong = func(id ID) { t.Errorf("a wrong vouch of %v", id) }
 	var denials []ID
@@ -1856,7 +1880,7 @@ func TestAVouchedNamespace(t *testing.T) {
 	}
 	rec, _ := EncodeRecord([]ID{in, out, carrying})
 	h := metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "h", Annotations: map[string]string{AnnotationRefs: rec}}}
-	st2 := &memStore{exists: true, vouched: "team-a/*"}
+	st2 := &memStore{exists: true, vouched: "team-a/Secret/*"}
 	if err := testIndex(st2, holdersServer{srv, []metav1.PartialObjectMetadata{h}}).rebuild(ctx); err != nil || !slices.Equal(st2.lines, linesOf([]ID{out, carrying})) {
 		t.Errorf("after the rebuild: %v, %q", err, st2.lines)
 	}
