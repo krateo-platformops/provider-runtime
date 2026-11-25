@@ -735,7 +735,7 @@ func recordsDisowned(h *metav1.PartialObjectMetadata, set disownSet) bool {
 	if !rec.Present {
 		return false
 	}
-	if set.all || rec.Unparseable {
+	if set.all {
 		return true
 	}
 	return slices.ContainsFunc(rec.IDs, func(id ID) bool { return set.covers(id.GroupKind()) })
@@ -744,7 +744,10 @@ func recordsDisowned(h *metav1.PartialObjectMetadata, set disownSet) bool {
 // disownHolderPatch is the merge patch that strips set's refs from holder h:
 // its record without them (none at all for "all", an unparseable record
 // included) and, for "all", its unheld list; guarded by h's resourceVersion.
-// It reports false when h has nothing to strip.
+// With kinds, an unparseable record is left to its holder's next pass, which
+// rewrites it without them: it may name refs of the other kinds, and without it
+// those would be released before that pass. It reports false when h has nothing
+// to strip.
 func disownHolderPatch(h *metav1.PartialObjectMetadata, set disownSet) ([]byte, bool) {
 	rec := ReadRecord(h)
 	_, hasUnheld := h.Annotations[AnnotationUnheld]
@@ -752,7 +755,10 @@ func disownHolderPatch(h *metav1.PartialObjectMetadata, set disownSet) ([]byte, 
 	if rec.Present {
 		keep := slices.DeleteFunc(slices.Clone(rec.IDs), func(id ID) bool { return set.covers(id.GroupKind()) })
 		switch {
-		case set.all || rec.Unparseable || len(keep) == 0:
+		case set.all:
+			annotations[AnnotationRefs] = nil
+		case rec.Unparseable:
+		case len(keep) == 0:
 			annotations[AnnotationRefs] = nil
 		case len(keep) != len(rec.IDs):
 			v, err := EncodeRecord(keep)

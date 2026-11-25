@@ -87,6 +87,9 @@ type Tracker struct {
 	// misplaced are the holders in the index namespace whose refusal was
 	// logged, once each (§10.6.1).
 	misplaced *reportedSet
+	// unparseable are the holders whose unparseable record was logged, once
+	// each (§4).
+	unparseable *reportedSet
 
 	// sinkMu guards sink. Every call to a sink holds it for reading, so
 	// that rebind, which holds it for writing, returns only once no call to
@@ -232,6 +235,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		degradedLogged: newReportedSet(),
 		refused:        newReportedSet(),
 		misplaced:      newReportedSet(),
+		unparseable:    newReportedSet(),
 		sink:           sinksOf(o),
 	}
 	t.proto = &protocol{
@@ -606,6 +610,7 @@ func (t *Tracker) Forget(obj metav1.Object) bool {
 	t.degradedLogged.forget(obj.GetUID())
 	t.refused.forget(obj.GetUID())
 	t.noteRefused(obj.GetUID(), false)
+	t.unparseable.forget(obj.GetUID())
 	t.missing.set(types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, nil, t.s.clock.Now(), t.o.ProbeInterval)
 	return t.proto.forget(obj)
 }

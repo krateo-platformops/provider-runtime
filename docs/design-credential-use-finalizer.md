@@ -232,11 +232,15 @@ namespace, name): two keys of one Secret are one ref. A future format gets a
 new key (`refs.v2`), and a reader that knows both reads both.
 
 **A record that can't be parsed counts as a user** of every protected
-object its namespace's check considers. It fails safe, and is logged with
-the holder's name. The holder's next acquire that reaches its last A1
-overwrites it with a valid record. One that ends before it doesn't: a `Refs`
-error, a holder in the index namespace, a refused chain (§9). The record then
-stays unparseable, and keeps what it counts as used, as a paused holder's
+object its namespace's check considers. It fails safe, and each process whose
+informer delivers it, while it counts so, logs a warning, once per holder, with
+its namespace, name and kind, and nothing of the record. The holder's next
+acquire that reaches its last A1 overwrites it with a valid record. Until then
+it counts, for every object held for its namespace, as a holder that names it
+does (§5); when it stops counting as a user of them all, they are all checked
+again (§10.2). An acquire that ends before its last A1 doesn't overwrite it: a
+`Refs` error, a holder in the index namespace, a refused chain (§9). The record
+then stays unparseable, and keeps what it counts as used, as a paused holder's
 record does (§11.3).
 
 **Annotation, not status.** Every kind has annotations, unstructured
@@ -399,6 +403,10 @@ same write that removes its owner finalizer (§8). The exclusion covers
 everything else that can leave a stale record behind: a third party
 removing the owner finalizer, or someone else's finalizer keeping H around.
 It also breaks foreground-deletion cycles (§11.8).
+
+A holder whose record can't be parsed uses every P in question, and stops when
+it is gone, when its record is repaired or removed, or when it is being deleted
+without the owner finalizer. §10.2 queues what it kept: its record can't.
 
 ### 6.2 The two sides
 
@@ -852,10 +860,13 @@ again every 5 minutes, for as long as it fails: it isn't dropped when no record
 names it any more, since a hold may still be there. That has no bound, a name
 of a kind that can't be mapped included; bounding what a holder's data can put
 there is the release cost's change. R0's keep is a decision as any other, so it
-ends a pending retry: its user's event runs the batch again. Two users have no
-such event yet, and their fixes are their own: one whose record can't be parsed,
-which names nothing to queue when it goes, and a ghost of a kind whose CRD is
-gone, which the cache keeps. The protocol's
+ends a pending retry: its user's event runs the batch again, that of one whose
+record can't be parsed included, which queues all that the caches show as held
+for its namespace (§10.2), and so every hold R0 keeps for it. What isn't held
+isn't queued: a PerName object whose index prune failed, live and watched, and
+bare, keeps its line until the write loops' next start, or the next batch that
+names it. One user has no such event yet, and its fix is its
+own: a ghost of a kind whose CRD is gone, which the cache keeps. The protocol's
 model decides one batch (`RequeueAt` is all it reads of a schedule), and has
 none for what failed, what asked, or the backoff: those are the release loop's,
 tested on the queue by enumeration and on the loop. A time a batch asks for, a
@@ -2088,8 +2099,14 @@ in every process:
   or one of an indexed kind that couldn't be read, keeps its record, and is
   counted, until the next pass. Two aren't kept: a record of objects of a
   LabelScoped kind whose list failed, since the marker label finds them still,
-  and the count is unknown meanwhile; and one that can't be parsed, which
-  names nothing. **The order matters in PerName mode**: Disown finds an object
+  and the count is unknown meanwhile; and, with "all", one that can't be
+  parsed, which names nothing. A switch for some kinds leaves a record that
+  can't be parsed to its holder's next pass, which rewrites it without them: it
+  may name refs of the other kinds, which nothing would hold in between (§10.2's
+  batch of the namespace releases what has no user). It doesn't count it
+  either, since no pass could bring the count to zero while its holder is
+  paused; the objects of the kinds it covers are stripped and counted as ever.
+  **The order matters in PerName mode**: Disown finds an object
   by its line or by a record, so while one may be held, a record names it. With the records
   first, a process killed between the two strips, with a prune of the same
   object's line between its removal and its re-add, left an object held that
@@ -3074,7 +3091,48 @@ Its index maps each recorded ref to holders. The index serves:
 - **R0's fast path**;
 - **mapping holder events to release batches**: a create, an update whose
   record or owner finalizer changed, and a delete map to the protected
-  objects in the old and the new record, and enqueue their (K, N) batch;
+  objects in the old and the new record, and enqueue their (K, N) batch.
+  **A holder that stops being a user of everything** (its record couldn't be
+  parsed, and it is gone, repaired, or deleting without its owner finalizer,
+  §6.1) enqueues the batch of its whole namespace: every object that carries
+  K's finalizer for N, in the caches, and, where they don't cover N, in N by a
+  live list (found in a review of the release's cost, 2026-11-24). What it kept
+  is in no record, and an object already being deleted has no event left to
+  come, so nothing would look at it again before the write loops' next start: a
+  namespace's teardown waited on a holder that was gone. So does a holder that
+  a relist finds gone, or replaced by another of its name, after a watch gap:
+  its record may have become unparseable, or have named others, in the gap.
+  - **A pass's own repair** writes all the refs it records in one A1, where they
+    are all direct, as every pass's are in this release (§9): so the batch finds
+    them recorded. A refused chain's pass writes no record, so one that can't be
+    parsed stays, and counts, until its refs name no `Next`. **A chain that is
+    followed,** by the tests only, repairs the record with the chain so far, at
+    its first level's A1, and until its last one a batch may release what lies
+    behind a hop. The release that follows chains must write no A1 over a record
+    it can't parse until it knows the chain;
+  - **Not covered**, and found by the write loops' next start, or by a holder
+    that names the object:
+    - a hold for N on an object of another namespace M that the caches don't
+      cover (§10.5). M's own teardown doesn't help: it queues M's batch, not N's;
+    - an object in a namespace that the caches cover, whose held label someone
+      stripped: no label-scoped cache has it (§10.1);
+    - a PerName name whose watch is forbidden, or hasn't synced: the fill reads
+      the watches. Once it syncs, its add queues the object's batch;
+    - a holder whose record became unparseable and was repaired inside one
+      watch gap, with what it kept meanwhile; and one whose deletion no process
+      saw because its kind's CRD went with it.
+  - **Its cost.** The events queue it once, however big the record and however
+    often it changes while it waits; what its own failures and graces requeue
+    is the release loop's (§6.2). It reads every cached object of every protected
+    kind, with no call; where the caches don't cover N, it lists N's held
+    objects live, once per protected kind. Objects that aren't being deleted,
+    with users in the cache, and those with a deleting user, cost nothing more;
+    the others, a deleting object with live users among them, cost what R1 and
+    R2 do. Whoever can edit a holder can cause one for each pair of writes of
+    its record, or for one write and a pass of the holder, which repairs it. An
+    object that a batch fails at is forgotten as failing by the next that keeps
+    it by R0, as for the unparseable holder (§6.2): so toggles restart its
+    backoff, and its retries go at about their rate, beside those batches;
 - **enqueueing holders when a protected object changes** (§9.2), through
   `CredentialUseSource` or `Options.Enqueue`. A label-scoped informer
   delivers an object losing its label as a deletion. That is the signature
