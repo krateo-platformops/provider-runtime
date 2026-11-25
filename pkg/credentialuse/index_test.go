@@ -838,6 +838,64 @@ func TestTheDrain(t *testing.T) {
 	})
 }
 
+// A drain's round reads whether a call is in flight before it counts what is
+// left: a call that queues its check and ends between the two is waited for,
+// and its check made (§10.6.3).
+func TestTheDrainReadsBusyBeforeItCounts(t *testing.T) {
+	held := SecretRef("ns", "held").ID()
+	st := &memStore{exists: true, rebuilt: true}
+	ix := testIndex(st, &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}})
+	inFlight := true
+	ix.drainBetween = func() {
+		if inFlight {
+			ix.queue([]ID{held}, false) // its line check failed
+			inFlight = false            // and it ended
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if left, _, _ := ix.drain(ctx, func() bool { return inFlight }, func(ID, string) {}); left != 0 || !slices.Equal(st.lines, linesOf([]ID{held})) {
+		t.Errorf("%d left, lines %q; want the check the call queued made", left, st.lines)
+	}
+}
+
+// requeueServer queues its first read's object again, as a drop delivered
+// while its check reads it.
+type requeueServer struct {
+	*objServer
+	ix   **index
+	done *bool
+}
+
+func (s requeueServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if !*s.done {
+		*s.done = true
+		(*s.ix).queue([]ID{{Group: gk.Group, Kind: gk.Kind, Namespace: ns, Name: name}}, true)
+	}
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
+// A check queued again during a drain's round is the new one's: the round
+// doesn't put back the backoff it found (§10.6.3).
+func TestTheDrainKeepsACheckQueuedAgain(t *testing.T) {
+	held := SecretRef("ns", "held").ID()
+	var ix *index
+	done := false
+	ix = testIndex(&memStore{exists: true, rebuilt: true}, requeueServer{&objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}}, &ix, &done})
+	ix.queue([]ID{held}, false)
+	ix.mu.Lock()
+	ix.pending[held].fails, ix.pending[held].due = 3, time.Now().Add(time.Hour)
+	ix.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond) // one round
+	defer cancel()
+	ix.drain(ctx, func() bool { return false }, func(ID, string) {})
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if r := ix.pending[held]; r == nil || r.fails != 0 || !r.due.IsZero() {
+		t.Errorf("the check queued again: %+v; want it due now, with no failures", r)
+	}
+}
+
 // A client's rate limiter refuses at once a call whose turn would come after
 // its context's deadline. Behind a backlog longer than a prune's check, the
 // check waits its turn, is cut, puts the line back, and says so, so that its

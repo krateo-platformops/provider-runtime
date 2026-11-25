@@ -53,7 +53,10 @@ var errWriteLoopsRunning = errors.New("credential-use: RunWriteLoops is already 
 // the missing-ref prober and the label janitor. It needs leader election
 // (§7.5, IP4), and it may start before, with or after RunInformers: it waits
 // for the informers' first sync, then rescans the protected caches and
-// starts. It returns at once when RunInformers ends.
+// starts. When RunInformers ends, the loops end with it, and it returns once
+// they have, and its drain after them, which waits for ctx's end, and for the
+// acquirer calls begun before it, within 25s of the loops' end (§7.2,
+// §10.6.3).
 //
 // The rescan enqueues the batch of every (K, N) finalizer on every cached
 // protected object, and every object whose labels the janitor would clean.
@@ -74,6 +77,14 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 	}
 
 	stopping := ctx // its end is the manager's stop of the leader's runnables
+	var stopMu sync.Mutex
+	var stoppedAt, endedAt time.Time // stopping's end, and the loops'
+	unhook := context.AfterFunc(stopping, func() {
+		stopMu.Lock()
+		stoppedAt = time.Now()
+		stopMu.Unlock()
+	})
+	defer unhook()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.mu.Lock()
@@ -101,7 +112,17 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		// Nothing of the loops runs any more. What is queued dies with the
 		// process unless it is made now, and the acquirers still ending may
 		// queue more (§10.6.3).
-		s.drainIndexes(stopping)
+		stopMu.Lock()
+		if endedAt.IsZero() {
+			endedAt = time.Now()
+		}
+		ended := endedAt
+		stopMu.Unlock()
+		s.drainIndexes(stopping, ended, func() time.Time {
+			stopMu.Lock()
+			defer stopMu.Unlock()
+			return stoppedAt
+		})
 		// What the release loop counted outside the caches is stale once it
 		// stops: only the process that runs the write loops reports it.
 		for _, t := range s.trackerList() {
@@ -152,6 +173,9 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 	case <-s.runDone:
 		err = errInformersEnded
 	}
+	stopMu.Lock()
+	endedAt = time.Now()
+	stopMu.Unlock()
 	cancel()
 	wg.Wait()
 	return err
@@ -168,14 +192,16 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 // The acquirers may still queue some: a manager stops the informers first,
 // whose end ends the loops, and only then the controllers, whose calls go on
 // up to callGrace after that (§7.2). So the drain goes on while stopping
-// lives, or a call begun before it ended is in flight, and stopDrainBound
-// after the last moment one of them was so, or after its own start; at most
-// callGrace and stopDrainBound after its start. A call begun after the stop
-// isn't waited for: its controller wasn't stopped with the loops. What the
-// drain leaves is logged, with how many: the checks left undone, the late
-// holds whose margin isn't over, and the calls still in flight, whose checks
-// may be lost, beside the prunes put off.
-func (s *Shared) drainIndexes(stopping context.Context) {
+// lives, or a call begun before it ended (stoppedAt) is in flight, and
+// stopDrainBound after the last moment one of them was so, or after its own
+// start; at most callGrace and stopDrainBound after the loops ended, when
+// stopping did or RunInformers did, whichever was first, so that a prune's
+// write that ran on after that doesn't push the stop past a manager's 30s. A
+// call begun after the stop isn't waited for: its controller wasn't stopped
+// with the loops. What the drain leaves is logged, with how many: the checks
+// left undone, the late holds whose margin isn't over, and the calls still in
+// flight, whose checks may be lost, beside the prunes put off.
+func (s *Shared) drainIndexes(stopping context.Context, ended time.Time, stoppedAt func() time.Time) {
 	d, grace := stopDrainBound, callGrace
 	if b := s.hooks.drainBound; b != nil {
 		d = *b
@@ -183,21 +209,14 @@ func (s *Shared) drainIndexes(stopping context.Context) {
 	if g := s.hooks.callGrace; g != nil {
 		grace = *g
 	}
-	capped, cancel := context.WithTimeout(context.WithoutCancel(stopping), grace+d)
+	capped, cancel := context.WithDeadline(context.WithoutCancel(stopping), ended.Add(grace+d))
 	defer cancel()
 	ctx, quiet := context.WithCancel(capped)
 	defer quiet()
-	var mu sync.Mutex
-	var stoppedAt time.Time // when the drain first saw stopping ended
 	// waited are the calls in flight the drain waits for: those begun
 	// before stopping ended, or all while it hasn't.
 	waited := func() int {
-		mu.Lock()
-		if stoppedAt.IsZero() && stopping.Err() != nil {
-			stoppedAt = time.Now()
-		}
-		at := stoppedAt
-		mu.Unlock()
+		at := stoppedAt()
 		if at.IsZero() {
 			at = time.Now()
 		}

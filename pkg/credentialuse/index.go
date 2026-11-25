@@ -393,6 +393,9 @@ type index struct {
 	onVouchMalformed func(entries []string)
 	onVouchForeign   func(entries []string)
 	onVouchWrong     func(id ID)
+	// drainBetween, in tests, runs in a drain's round between its read of
+	// busy and its count of what is left.
+	drainBetween func()
 
 	snap atomic.Pointer[indexSnapshot]
 
@@ -1675,19 +1678,26 @@ func (ix *index) drain(ctx context.Context, busy func() bool, enqueue func(id ID
 		ix.mu.Lock()
 		before := make(map[ID]recheck, len(ix.pending))
 		for id, r := range ix.pending {
-			before[id] = recheck{due: r.due, fails: r.fails}
+			before[id] = recheck{due: r.due, fails: r.fails, queued: r.queued}
 			r.due = time.Time{}
 		}
 		ix.mu.Unlock()
 		_ = ix.recheckTick(ctx, ix.now())
 		ix.mu.Lock()
 		for id, r := range ix.pending {
-			if b, ok := before[id]; ok {
+			// One queued again during the round is the new one's.
+			if b, ok := before[id]; ok && r.queued == b.queued {
 				r.due, r.fails = b.due, b.fails
 			}
 		}
 		ix.mu.Unlock()
-		if left, late, deferred = counts(); left == 0 && !busy() || ctx.Err() != nil {
+		// Busy is read before the count: a call that wasn't in flight then
+		// queues nothing after it, and one that was is waited for.
+		b := busy()
+		if ix.drainBetween != nil {
+			ix.drainBetween()
+		}
+		if left, late, deferred = counts(); left == 0 && !b || ctx.Err() != nil {
 			return left, late, deferred
 		}
 		select {

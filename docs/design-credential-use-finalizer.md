@@ -1964,13 +1964,16 @@ then know:
   loops, and only then the controllers with the write loops' own context.
   An `Acquire` then goes on up to 15s. So the drain goes on while the write
   loops' context lives, or an acquirer call begun before it ended is in
-  flight, and its 10s count from the last moment one of them was so; at
-  most 25s after its start, the 15s and the 10s. A call begun after that isn't
-  waited for: its controller wasn't stopped with the loops.
-- **So `RunWriteLoops` returns up to 25s after the controllers' cancel**:
-  the 15s of the last prune's write or of the acquirers, whichever is later,
-  and the drain's 10s. That fits in the manager's default 30s while the
-  first group stops within about 5s; ours stops in well under 1s. It is
+  flight, and its 10s count from the last moment one of them was so. A
+  call begun after that isn't waited for: its controller wasn't stopped
+  with the loops.
+- **So `RunWriteLoops` returns at most 25s after the loops ended**, when the
+  informers or its context ended, whichever was first: the 15s of the
+  acquirers or of the last prune's write, and the drain's 10s, whatever the
+  prune took. That fits in the manager's default 30s, from which only the
+  stop of our informers, well under 1s, comes before. When the controllers'
+  cancel comes more than 10s after the informers' end, the cap may cut the
+  drain short of a call's check, which is then logged. It is
   while the process still holds its Lease: controller-runtime v0.25.2
   cancels the leader election only once the runnables have stopped
   (`pkg/manager/internal.go`), so a manager that releases the Lease on a
