@@ -1053,6 +1053,63 @@ func TestAuditGapUnknownRemoval(t *testing.T) {
 	}
 }
 
+// noopA2 is an A2 of pass p on o that writes epoch, which o's finalizer has
+// already: the API server changes nothing, and answers the version there is.
+func (b *auditRun) noopA2(p *stPass, o stObj, epoch string) {
+	b.call(stCall{proc: 1, g: "5", pass: p.id, op: "a2", obj: o, fin: auditFin, wrote: epoch}, func(c *stCall) { c.from(b.last[o]) })
+}
+
+// An A2 that wrote nothing is a hold its pass believes in from its answer on,
+// and no bound of anything: its revision is of an older write. And an epoch is
+// written once on an object, for a finalizer (§6.2).
+func TestAuditGapNoopA2(t *testing.T) {
+	// The mutant's shape: a holder announces after the batch's list, its A2
+	// confirms the hold the object has, and R3's epoch test passes over it.
+	t.Run("a release over a hold that an A2 confirmed", func(t *testing.T) {
+		b := newAuditRun(stressPlain).acquired()
+		b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+		b.batch()
+		b.put(auditH, "uh", func(v *stVersion) { v.spec = "s" })
+		p := b.pass()
+		b.a1(p, auditS)
+		b.noopA2(p, auditS, "e1")
+		b.end(p, auditS)
+		b.r3()
+		b.want(t, "EPOCH-REUSED", "RELEASED-OVER-A-USER", "RELEASED-WHAT-IT-HADNT-READ")
+	})
+	// Only an A2 puts a credential-use finalizer on: here, the first one.
+	t.Run("its A2 comes after the record, by its time", func(t *testing.T) {
+		b := newAuditRun(stressPlain).acquired()
+		p := b.pass()
+		b.a1(p, auditS)
+		b.noopA2(p, auditS, "e1")
+		b.end(p, auditS)
+		b.want(t, "EPOCH-REUSED")
+	})
+	t.Run("its revision bounds no NotFound", func(t *testing.T) {
+		b := newAuditRun(stressPlain)
+		b.create(auditS2, "v1")
+		b.a2(b.pass(), auditS2, "e1") // passes that never return aren't judged
+		w := b.began(auditS)
+		b.call(stCall{op: "get", obj: auditS, err: "not found", notFound: true}, func(*stCall) { b.remove(auditS) })
+		b.answer(w, answerStatus, "u1")
+		b.noopA2(b.pass(), auditS2, "e1")
+		b.want(t, "EPOCH-REUSED")
+	})
+	t.Run("an epoch written again, after a release", func(t *testing.T) {
+		b := newAuditRun(stressPlain).acquired()
+		b.put(auditH, "uh", func(v *stVersion) { v.spec, v.rec = "", nil })
+		b.batch()
+		b.r3()
+		b.put(auditH, "uh", func(v *stVersion) { v.spec = "s" })
+		p := b.pass()
+		b.a1(p, auditS)
+		b.a2(p, auditS, "e1")
+		b.end(p, auditS)
+		b.want(t, "EPOCH-REUSED")
+	})
+}
+
 // One key of the queue is one worker's at a time (§10.2).
 func TestAuditGapTwoWorkers(t *testing.T) {
 	b := newAuditRun(stressPlain)

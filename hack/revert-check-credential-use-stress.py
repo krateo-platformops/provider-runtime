@@ -92,7 +92,7 @@ MUTANTS = [
     # R3 without the epoch test.
     ("R3 doesn't test the epoch", [NO_EPOCH_TEST], [UNREAD, OVER]),
     ("R3 doesn't test the epoch, and is 200ms late", [NO_EPOCH_TEST, LATE_R3], [UNREAD, OVER, EARLY]),
-    ("every A2 writes the same epoch", [(AQ, "\tepoch, err := p.newEpoch()\n", "\tepoch, err := \"e\", error(nil)\n")], [UNREAD, OVER]),
+    ("every A2 writes the same epoch", [(AQ, "\tepoch, err := p.newEpoch()\n", "\tepoch, err := \"e\", error(nil)\n")], [UNREAD, OVER, "EPOCH-REUSED"]),
     # A release that skips the grace.
     ("a release skips the grace", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead)\n")], [EARLY]),
     ("the grace is half as long", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace/2)\n")], [EARLY]),
