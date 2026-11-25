@@ -1762,7 +1762,15 @@ func (t *Tracker) setupIndex(ctx context.Context) error {
 	// and rebuilding it (§10.6.6). A rebuild that fails here is left to the
 	// write loops, which retry it with backoff, and the next start finds the
 	// marker still absent.
-	if err := ix.rebuild(ctx); err != nil {
+	switch err := ix.rebuild(ctx); {
+	case errors.Is(err, errKindGone):
+		// The CRD went while the kind was being tracked, maybe before its
+		// informer listed it: its return rebuilds the index (crdReturned),
+		// and nothing before it can.
+		t.crdWentAway.Store(true)
+		t.warn("credential-use: the holder kind's CRD went while its index was set up; the index is rebuilt when the CRD returns",
+			"kind", t.gk.String(), "index", ix.ref())
+	case err != nil:
 		ix.markLost()
 		t.warn("credential-use: rebuilding the new index failed; the write loops retry it",
 			"kind", t.gk.String(), "index", ix.ref(), "error", err.Error())

@@ -300,6 +300,52 @@ func TestTheCRDsReturnRebuildsTheIndex(t *testing.T) {
 	}
 }
 
+// The CRD gone while the kind's index is set up: the setup says that the CRD's
+// return rebuilds the index, and not that the write loops retry it, which they
+// don't; and the return does, though the CRD informer may never have seen it
+// go.
+func TestAnIndexSetUpWhileTheKindIsGone(t *testing.T) {
+	ctx := context.Background()
+	s := secretID("ns", "s")
+	// The CRD goes after the setup's check of the index namespace, which lists
+	// the holders there, and before the rebuild's list of them all. (A
+	// reactor is added before anything runs: the fake's chain isn't guarded.)
+	var gone atomic.Bool
+	r, sink, _ := perNameFakeRig(t, []runtime.Object{heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns")}, func(r *fakeRig) {
+		r.md.PrependReactor("list", "widgets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			if gone.Load() && a.GetNamespace() == "" {
+				return true, nil, errTest404
+			}
+			return false, nil, nil
+		})
+	}, s)
+	tr := r.s.trackers[widgetGK]
+	gone.Store(true)
+	r.removeCRD(t, widgetGK)
+	// The marker of before, which needs the rebuild (§10.6.6).
+	cm, err := r.dyn.Resource(configMapGVR).Namespace("idx").Get(ctx, IndexName(widgetGK), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.SetAnnotations(map[string]string{AnnotationRebuilt: "true"})
+	if _, err := r.dyn.Resource(configMapGVR).Namespace("idx").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tr.crdWentAway.Store(false) // as for an informer that never saw it go
+	if err := tr.setupIndex(ctx); err != nil {
+		t.Fatalf("setupIndex: %v", err)
+	}
+	if n := sink.warned("the write loops retry it"); n != 0 {
+		t.Errorf("the setup says the write loops retry the rebuild: %q", sink.warns)
+	}
+	if n := sink.warned("the index is rebuilt when the CRD returns"); n != 1 {
+		t.Errorf("the setup doesn't say what rebuilds the index: %q", sink.warns)
+	}
+	if !tr.crdWentAway.Load() {
+		t.Error("the CRD's return won't rebuild the index")
+	}
+}
+
 // A CRD seen with another uid is one that went and came back between two of
 // the informer's looks: its return rebuilds the index too.
 func TestACRDWithAnotherUIDIsAReturn(t *testing.T) {
