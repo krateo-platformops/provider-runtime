@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
 
@@ -136,6 +137,7 @@ func TestIndexPointerWrittenOnce(t *testing.T) {
 	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
 	track := func(ns string) error {
 		s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: ns})
+		s.SetPruneQuiet(0)
 		o := widgetOptions(func(types.NamespacedName) {})
 		perName(&o)
 		_, err := s.Track(context.Background(), o)
@@ -372,6 +374,7 @@ func perNameProcess(t *testing.T, cfg *rest.Config, idx string, connect func(con
 	}()
 	clients.Events = rec
 	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	o := widgetOptions(c.enqueue)
 	o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
 	perName(&o)
@@ -414,80 +417,247 @@ func TestIndexNeverEstablishedHolderDeletedWhileDown(t *testing.T) {
 }
 
 // §10.6.8, interleaving 3, in PerName mode: a pass's A1 and line land before
-// the Disown switch, and its A2 after the loop has stripped the record, the
-// Secret and the index. The A2's check after it puts the line back, so the
-// loop's next pass counts the finalizer through the index: the settling
-// resets, and the loop strips it again.
+// the Disown switch, and its A2 after the loop has stripped the record and
+// counted zero. Disown keeps the line until it has settled, so its next pass
+// counts the finalizer through the index, the record being gone: the
+// settling resets, and the loop strips it again. So it does when the late
+// A2's response is lost, and the pass never checks its line after it (§7.4).
+//
+// The line keeps the Secret's per-name watch too, whose event has the
+// release loop take the late hold, nobody using it, before Disown's next
+// pass: with it running the end is the same, whichever strips it first. With
+// it held off, only Disown's count can find the hold.
 func TestIndexA1BeforeTheDisownSwitch(t *testing.T) {
 	cutest.Require(t, env)
+	for _, tc := range []struct{ lost, releases bool }{{lost: false}, {lost: true}, {lost: true, releases: true}} {
+		t.Run(fmt.Sprintf("response lost=%v, release loop=%v", tc.lost, tc.releases), func(t *testing.T) {
+			lost := tc.lost
+			ctx := context.Background()
+			set := disowning(t)
+			idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-late")
+			createSecret(t, ns, "s")
+			createWidget(t, ns, "w", "s")
+			line := secretLine(ns, "s")
+			var armed, fired atomic.Bool
+			reached, release, landed := make(chan struct{}), make(chan struct{}), make(chan error, 2)
+			theA2 := func(c cu.Call) bool {
+				return c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.StrategicMergePatchType
+			}
+			// Index writes without the line, before Disown has settled.
+			var early atomic.Int32
+			unsettled := func() bool { return settledAtZero(t)() != nil }
+			r := perNameRig(t, idx, func(o *cu.Options) {
+				// Two intervals fit in TimeoutBound, which bounds the A2: it
+				// lands after the first zero count, and before its end.
+				o.DisownInterval, o.DisownPasses, o.TimeoutBound = 2*time.Second, 6, 5*time.Second
+			}, func(s *cu.Shared) {
+				s.HookCalls(func(_ context.Context, c cu.Call) error {
+					if c.Op == "index-update" && armed.Load() && !slices.Contains(c.Lines, line) && unsettled() {
+						early.Add(1)
+					}
+					// R2's list of the holders in ns: without it the release
+					// loop never decides. Disown lists every namespace.
+					if !tc.releases && c.Op == "list" && c.GK == widgetGK && c.Namespace == ns {
+						return errors.New("the release loop can't list the holders")
+					}
+					if !armed.Load() || !theA2(c) || !fired.CompareAndSwap(false, true) {
+						return nil
+					}
+					close(reached)
+					select {
+					case <-release:
+					case <-time.After(time.Minute):
+						return errors.New("never released")
+					}
+					if !lost {
+						return nil
+					}
+					epoch, err := cu.NewEpoch()
+					if err == nil {
+						var p cu.Patch
+						if p, err = cu.AcquireStrategicPatch(widgetGK, ns, epoch); err == nil {
+							_, err = env.Kube.CoreV1().Secrets(ns).Patch(ctx, "s", p.Type, p.Data, metav1.PatchOptions{})
+						}
+					}
+					landed <- err
+					return apierrors.NewTimeoutError("the response was lost", 1)
+				}, func(c cu.Call, err error) {
+					if !lost && fired.Load() && theA2(c) {
+						select {
+						case landed <- err:
+						default:
+						}
+					}
+				})
+			})
+			armed.Store(true)
+			r.c.enqueue(widgetNN(ns, "w"))
+			select {
+			case <-reached:
+			case <-time.After(time.Minute):
+				t.Fatal("the pass never reached its A2")
+			}
+			lined(t, idx, line, true)
+			set("all")
+			// The loop strips the record, and then counts zero: what it
+			// counts from here on is the late hold, not the record.
+			cutest.Eventually(t, time.Minute, func() error {
+				w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(ctx, "w", metav1.GetOptions{})
+				if err != nil {
+					return err
+				}
+				if a := widgetCRDAnnotations(t); cu.ReadRecord(w).Present || a[cu.AnnotationHeldCount] != "0" {
+					return fmt.Errorf("record %v, held-count %q: %w", cu.ReadRecord(w).Present, a[cu.AnnotationHeldCount], cutest.ErrNotYet)
+				}
+				return nil
+			})
+			lined(t, idx, line, true)
+			counts := watchHeldCount(t)
+			close(release)
+			select {
+			case err := <-landed:
+				if err != nil {
+					t.Fatalf("the late A2: %v", err)
+				}
+			case <-time.After(time.Minute):
+				t.Fatal("the late A2 never landed")
+			}
+			if !unsettled() {
+				t.Fatal("Disown settled before the late A2 landed; the test needs it to land before")
+			}
+			cutest.Eventually(t, 2*time.Minute, settledAtZero(t))
+			seen := counts()
+			stripped(t, ns, "s")
+			if !tc.releases && !slices.Contains(seen, "1") {
+				t.Errorf("held-count from the late A2 on: %v; want it counted before settling", seen)
+			}
+			if n := early.Load(); n != 0 {
+				t.Errorf("the line was removed %d times before Disown settled", n)
+			}
+			lined(t, idx, line, false)
+		})
+	}
+}
+
+// Disown adds the lines of the objects a record names before it strips the
+// record: a hold of one may still land (§7.4). Here the line was taken before
+// the switch, as a prune may, and only the record names the Secret. The line
+// goes once Disown has settled.
+func TestDisownLinesWhatTheRecordsName(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
 	set := disowning(t)
-	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-late")
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-lines")
 	createSecret(t, ns, "s")
 	createWidget(t, ns, "w", "s")
-	var armed, fired atomic.Bool
-	reached, release, landed := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	theA2 := func(c cu.Call) bool {
-		return c.Op == "patch" && c.GK.Kind == "Secret" && c.Namespace == ns && c.PatchType == types.StrategicMergePatchType
+	line := secretLine(ns, "s")
+	rec, err := cu.EncodeRecord([]cu.ID{cu.SecretRef(ns, "s").ID()})
+	if err != nil {
+		t.Fatal(err)
 	}
-	r := perNameRig(t, idx, disownOptions, func(s *cu.Shared) {
-		s.HookCalls(func(ctx context.Context, c cu.Call) error {
-			if !armed.Load() || !theA2(c) || !fired.CompareAndSwap(false, true) {
-				return nil
-			}
-			close(reached)
-			select {
-			case <-release:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}, func(c cu.Call, err error) {
-			if fired.Load() && theA2(c) {
-				select {
-				case landed <- err:
-				default:
-				}
-			}
-		})
-	})
-	armed.Store(true)
-	r.c.enqueue(widgetNN(ns, "w"))
-	select {
-	case <-reached:
-	case <-time.After(time.Minute):
-		t.Fatal("the pass never reached its A2")
+	r := perNameRig(t, idx, disownOptions, nil)
+	r.c.stop() // no pass holds the Secret
+	if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Patch(ctx, "w", types.MergePatchType,
+		[]byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, cu.AnnotationRefs, rec)), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	lined(t, idx, secretLine(ns, "s"), true)
+	lined(t, idx, line, false)
+	stripped := func() bool {
+		w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(ctx, "w", metav1.GetOptions{})
+		return err == nil && !cu.ReadRecord(w).Present
+	}
 	set("all")
-	// The loop strips the record and empties the index.
-	cutest.Eventually(t, time.Minute, func() error {
-		w, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(ns).Get(context.Background(), "w", metav1.GetOptions{})
-		if err != nil {
-			return err
+	for deadline := time.Now().Add(time.Minute); !stripped(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the record wasn't stripped")
 		}
-		if cu.ReadRecord(w).Present {
-			return cutest.ErrNotYet
-		}
-		return nil
-	})
-	lined(t, idx, secretLine(ns, "s"), false)
-
-	counts := watchHeldCount(t)
-	close(release)
-	select {
-	case err := <-landed:
-		if err != nil {
-			t.Fatalf("the late A2: %v", err)
-		}
-	case <-time.After(time.Minute):
-		t.Fatal("the late A2 never returned")
+	}
+	lines, ok := indexLines(t, idx)
+	if !ok || !slices.Contains(lines, line) {
+		t.Errorf("with the record stripped, the index has %v; want the Secret's line", lines)
 	}
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
-	seen := counts()
+	lined(t, idx, line, false)
+}
+
+// What empties the index when the process that settled Disown stops first
+// (§7.4): the lines left name nothing held, and the next process counts
+// none, settles by its own run, and empties it.
+func TestDisownLinesLeftByTheSettler(t *testing.T) {
+	cutest.Require(t, env)
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-left")
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	line := secretLine(ns, "s")
+	var refuse atomic.Bool
+	r := perNameRig(t, idx, disownOptions, func(s *cu.Shared) {
+		s.HookCalls(func(_ context.Context, c cu.Call) error {
+			if refuse.Load() && c.Op == "index-update" && !slices.Contains(c.Lines, line) {
+				return errors.New("the process stops before it empties the index")
+			}
+			return nil
+		}, nil)
+	})
+	r.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "s", "w")
+	lined(t, idx, line, true)
+	refuse.Store(true)
+	set("all")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	r.stop()
+	lined(t, idx, line, true)
 	stripped(t, ns, "s")
-	if !slices.ContainsFunc(seen, func(v string) bool { return v != "0" && v != "" }) {
-		t.Errorf("held-count from the late A2 on: %v; want a non-zero count before settling", seen)
+
+	// The flag the first process left stays: it is of this switch, and
+	// nothing has been held since.
+	counts, settled := watchHeldCount(t), watchCRDAnnotation(t, cu.AnnotationDisownSettled)
+	perNameRig(t, idx, disownOptions, nil)
+	lined(t, idx, line, false)
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if seen := counts(); slices.ContainsFunc(seen, func(v string) bool { return v != "0" }) {
+		t.Errorf("held-count with only a bare line left: %v; want 0 throughout", seen)
 	}
+	if seen := settled(); slices.ContainsFunc(seen, func(v string) bool { return v != "all" }) {
+		t.Errorf("disown-settled in the second process: %v; want all throughout", seen)
+	}
+}
+
+// A switch turned off and on again starts the settling over, and a hold made
+// in between is counted and stripped (§7.4). The flag of the run before is
+// gone before the hold is there, though the loop may not have looked yet. No
+// pass runs after the switch is back, so that only Disown drops the ref.
+func TestDisownTurnedOffAndOnAgain(t *testing.T) {
+	cutest.Require(t, env)
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-again")
+	createSecret(t, ns, "s")
+	createWidget(t, ns, "w", "s")
+	r := perNameRig(t, idx, disownOptions, nil)
+	r.c.enqueue(widgetNN(ns, "w"))
+	established(t, ns, "s", "w")
+	set("all")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	lined(t, idx, secretLine(ns, "s"), false)
+	setWidgetCRDAnnotations(t, map[string]any{cu.AnnotationDisown: nil})
+	r.c.enqueue(widgetNN(ns, "w"))
+	cutest.Eventually(t, time.Minute, heldFor(ns, "s", ns))
+	if v := widgetCRDAnnotations(t)[cu.AnnotationDisownSettled]; v != "" {
+		t.Errorf("held again, with disown-settled %q still there", v)
+	}
+	established(t, ns, "s", "w")
+	lined(t, idx, secretLine(ns, "s"), true)
+	r.c.stop()
+	counts, again := watchHeldCount(t), time.Now()
+	set("all")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
+	if got, min := time.Since(again), (disownPasses-1)*disownInterval-150*time.Millisecond; got < min {
+		t.Errorf("settled %s after the switch was set again, want at least %s", got, min)
+	}
+	if seen := counts(); !slices.ContainsFunc(seen, func(v string) bool { return v != "0" && v != "" && v != "unknown" }) {
+		t.Errorf("held-count after the switch was set again: %v; want the hold counted", seen)
+	}
+	stripped(t, ns, "s")
 	lined(t, idx, secretLine(ns, "s"), false)
 }
 
@@ -555,10 +725,25 @@ type gates struct {
 	mu      sync.Mutex
 	reached map[string]chan struct{}
 	opened  map[string]chan struct{}
+	dead    chan struct{} // closed when the process is killed
 }
 
 func newGates() *gates {
-	return &gates{reached: map[string]chan struct{}{}, opened: map[string]chan struct{}{}}
+	return &gates{reached: map[string]chan struct{}{}, opened: map[string]chan struct{}{}, dead: make(chan struct{})}
+}
+
+// errKilled is a call of a killed process: it doesn't happen.
+var errKilled = errors.New("the process was killed")
+
+// killed is errKilled once the process is killed: a context that ends is a
+// stop, which what mustn't be cut short outlives, and not a crash.
+func (g *gates) killed() error {
+	select {
+	case <-g.dead:
+		return errKilled
+	default:
+		return nil
+	}
 }
 
 func (g *gates) chans(name string) (reached, opened chan struct{}) {
@@ -582,7 +767,9 @@ func (g *gates) hold(ctx context.Context, name string) error {
 	g.mu.Unlock()
 	select {
 	case <-opened:
-		return nil
+		return g.killed()
+	case <-g.dead:
+		return errKilled
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -642,8 +829,10 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	g := newGates()
 	var armed, r3Issued, a2Issued, pruneIssued atomic.Bool
 	var relIndexGets, acqUpdates, relUpdates atomic.Int32
-	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
-	s.HookCalls(func(ctx context.Context, c cu.Call) error {
+	hook := func(ctx context.Context, c cu.Call) error {
+		if err := g.killed(); err != nil {
+			return err
+		}
 		role := roleOf(ctx)
 		if role == "rel" && c.Op == "index-get" {
 			if n := relIndexGets.Add(1); armed.Load() && sc.startup && n == 2 {
@@ -680,23 +869,34 @@ func runSuperset(t *testing.T, sc supersetCase) {
 			return g.hold(ctx, "check")
 		}
 		return nil
-	}, nil)
-	o := widgetOptions(func(types.NamespacedName) {})
-	o.DeletionGrace = testGrace
-	perName(&o)
-	tr, err := s.Track(context.Background(), o)
-	if err != nil {
-		t.Fatal(err)
 	}
-	d := newDriver(tr)
+	// The pruner's process, and the acquirer's: a process's prune leaves the
+	// line of an A2 of its own (§10.6.2).
+	process := func() (*cu.Shared, *cu.Tracker) {
+		s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+		s.SetPruneQuiet(0)
+		s.HookCalls(hook, nil)
+		o := widgetOptions(func(types.NamespacedName) {})
+		o.DeletionGrace = testGrace
+		perName(&o)
+		tr, err := s.Track(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, tr
+	}
+	s, tr := process()
+	acquirer, acquirerTr := process()
+	d := newDriver(acquirerTr)
 	runCtx, kill := context.WithCancel(withRole(context.Background(), "rel"))
 	var loops sync.WaitGroup
 	t.Cleanup(func() {
 		kill()
 		loops.Wait()
 	})
-	stopInformers := runningInformers(t, s)
+	stopInformers, stopAcquirer := runningInformers(t, s), runningInformers(t, acquirer)
 	t.Cleanup(stopInformers)
+	t.Cleanup(stopAcquirer)
 	startLoops := func() {
 		loops.Add(1)
 		go func() {
@@ -772,10 +972,12 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	g.wait(t, "post") // H2's A2 landed; its read waits
 
 	crash := func() {
+		close(g.dead) // every later call of the process fails
 		kill()
 		killPasses()
 		loops.Wait()
 		stopInformers()
+		stopAcquirer()
 		_ = passResult()
 	}
 	prune := "prune"
@@ -815,7 +1017,7 @@ func runSuperset(t *testing.T, sc supersetCase) {
 	}
 
 	if sc.crashAt != "" {
-		// The process died between a write and its check: P carries the
+		// The processes died between a write and its check: P carries the
 		// finalizer without its line, until H2's next pass, whose written
 		// set is empty, adds it before its A2 (§10.6.3, L2).
 		if err := heldFor(ns, "s", ns)(); err != nil {
@@ -898,6 +1100,7 @@ func eventSeen(t *testing.T, r *writeRig, parts ...string) {
 	cutest.Eventually(t, time.Minute, func() error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		var some []string
 		for _, e := range r.seen {
 			all := true
 			for _, p := range parts {
@@ -906,14 +1109,17 @@ func eventSeen(t *testing.T, r *writeRig, parts ...string) {
 			if all {
 				return nil
 			}
+			if strings.Contains(e, parts[0]) {
+				some = append(some, e)
+			}
 		}
-		return fmt.Errorf("no event with %q: %w", parts, cutest.ErrNotYet)
+		return fmt.Errorf("no event with %q; with the first of them: %q: %w", parts, some, cutest.ErrNotYet)
 	})
 }
 
 // A hand edit that drops a held line is restored, with the event and the
-// tampering metric; a dropped line whose R3 the per-name watch has shown,
-// a bare Secret's, is never read (§10.6.6, L5).
+// tampering metric; a bare Secret's dropped line is read once, though the
+// per-name watch shows it bare, and stays dropped (§10.6.6).
 func TestIndexTampering(t *testing.T) {
 	cutest.Require(t, env)
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-tamper")
@@ -955,12 +1161,18 @@ func TestIndexTampering(t *testing.T) {
 		}
 		return nil
 	})
-	time.Sleep(2 * time.Second) // the write loops' ticks
-	if n := bareGets.Load(); n != 0 {
-		t.Errorf("the bare Secret's dropped line was read %d times; its R3 was in the per-name cache", n)
+	cutest.Eventually(t, time.Minute, func() error {
+		if bareGets.Load() == 0 {
+			return fmt.Errorf("the bare Secret's dropped line wasn't read: %w", cutest.ErrNotYet)
+		}
+		return nil
+	})
+	time.Sleep(3 * time.Second) // the write loops' ticks: no second read
+	if n := bareGets.Load(); n != 1 {
+		t.Errorf("the bare Secret's dropped line was read %d times, want once", n)
 	}
-	if lines, _ := indexLines(t, idx); slices.Contains(lines, secretLine(ns, "bare")) {
-		t.Errorf("the bare Secret's line came back: %v", lines)
+	if lines, ok := indexLines(t, idx); !ok || slices.Contains(lines, secretLine(ns, "bare")) {
+		t.Errorf("the bare Secret's line came back, or the index is gone: %v", lines)
 	}
 	if pending, _ := r.tr.PendingIndexChecks(); len(pending) != 0 {
 		t.Errorf("checks still pending: %v", pending)
@@ -1002,8 +1214,116 @@ func TestIndexRebuildMergesWithAConcurrentAdd(t *testing.T) {
 	}
 }
 
+// vouchIndex sets the operator's vouch for the index itself in idx, for uid,
+// or for the ConfigMap that is there.
+func vouchIndex(t *testing.T, idx, uid string) {
+	t.Helper()
+	editIndex(t, idx, func(cm *corev1.ConfigMap) {
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		if uid == "" {
+			uid = string(cm.UID)
+		}
+		cm.Annotations[cu.AnnotationVouchedIndex] = uid + "/Secret"
+	})
+}
+
+// staysUnknown waits until Disown's count is "unknown", and checks that it
+// stays so for longer than a run of zero passes.
+func staysUnknown(t *testing.T) {
+	t.Helper()
+	cutest.Eventually(t, time.Minute, func() error {
+		if a := widgetCRDAnnotations(t); a[cu.AnnotationHeldCount] != "unknown" {
+			return fmt.Errorf("held-count %q: %w", a[cu.AnnotationHeldCount], cutest.ErrNotYet)
+		}
+		return nil
+	})
+	counts, settled := watchHeldCount(t), watchCRDAnnotation(t, cu.AnnotationDisownSettled)
+	time.Sleep((disownPasses + 2) * disownInterval)
+	if seen := counts(); slices.ContainsFunc(seen, func(v string) bool { return v != "unknown" }) {
+		t.Errorf("held-count while unknown: %v", seen)
+	}
+	if seen := settled(); slices.ContainsFunc(seen, func(v string) bool { return v != "" }) {
+		t.Errorf("disown-settled while the count is unknown: %v", seen)
+	}
+}
+
+// Whether a missing index is a lost one, with Disown on before the kind's
+// first Track (§7.4): it is when the CRD shows that the kind was tracked
+// before, by the pointer or the published settings; a kind never tracked
+// settles; and an index that is there, rebuilt, is intact whatever the CRD
+// shows, and its lines count.
+func TestIndexLostUnderDisown(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	ref := func(idx string) string { return idx + "/" + widgetIndex }
+	for name, tc := range map[string]struct {
+		before func(t *testing.T, idx, ns string)
+		lost   bool
+	}{
+		"never tracked": {before: func(*testing.T, string, string) {}},
+		"a pointer, and no index": {before: func(t *testing.T, idx, _ string) {
+			setWidgetCRDAnnotations(t, map[string]any{cu.AnnotationIndex: ref(idx)})
+		}, lost: true},
+		"moved from LabelScoped": {before: func(t *testing.T, _, _ string) {
+			s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{})
+			s.SetLandingMargin(0)
+			o := widgetOptions(func(types.NamespacedName) {})
+			o.DeletionGrace, o.ProbeInterval = testGrace, time.Second
+			disownOptions(&o)
+			if _, err := s.Track(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+		}, lost: true},
+		// Its index is another kind's, and has no line of a Secret.
+		"moved from LabelScoped into a marked index": {before: func(t *testing.T, idx, ns string) {
+			createSecret(t, ns, "leftover")
+			acquireAs(t, ns, "leftover")
+			createIndexFor(t, idx, "Target."+cutest.Group)
+		}, lost: true},
+		"the CRD recreated, the index kept": {before: func(t *testing.T, idx, ns string) {
+			createSecret(t, ns, "leftover")
+			acquireAs(t, ns, "leftover")
+			createIndex(t, idx, secretLine(ns, "leftover"))
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			set := disowning(t)
+			idx, ns := indexNamespace(t), env.Namespace(t, "idx-lost")
+			set("all")
+			r := perNameRig(t, idx, disownOptions, func(*cu.Shared) { tc.before(t, idx, ns) })
+			if !tc.lost {
+				cutest.Eventually(t, time.Minute, settledAtZero(t))
+				if name != "never tracked" {
+					stripped(t, ns, "leftover")
+				}
+				return
+			}
+			staysUnknown(t)
+			eventSeen(t, r, cu.EventIndexLost, cu.AnnotationVouchedIndex)
+			// Another ConfigMap's vouch isn't this one's.
+			vouchIndex(t, idx, "00000000-0000-0000-0000-000000000000")
+			staysUnknown(t)
+			if name == "moved from LabelScoped into a marked index" {
+				if f := finalizersOf(t, ns, "leftover"); len(f) != 1 {
+					t.Errorf("the Secret's finalizers are %v, want the hold the index has no line of", f)
+				}
+				// The steps.
+				if _, err := env.Kube.CoreV1().Secrets(ns).Patch(ctx, "leftover", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			vouchIndex(t, idx, "")
+			cutest.Eventually(t, time.Minute, settledAtZero(t))
+		})
+	}
+}
+
 // A missing or unreadable index keeps Disown's count "unknown", never "0"
-// (§10.6.5, L4); once it can be read again, Disown settles.
+// (§10.6.5, L4). Once an unreadable one can be read again, Disown settles.
+// A missing one was lost: the rebuild under the switch doesn't settle it
+// either, until an operator vouches for the new index (§7.4).
 func TestIndexUnreadableKeepsTheCountUnknown(t *testing.T) {
 	cutest.Require(t, env)
 	for _, missing := range []bool{false, true} {
@@ -1046,6 +1366,17 @@ func TestIndexUnreadableKeepsTheCountUnknown(t *testing.T) {
 				t.Errorf("held-count was 0 with the index unreadable: %v", seen)
 			}
 			failing.Store(false)
+			if missing {
+				cutest.Eventually(t, time.Minute, func() error {
+					if _, ok := indexLines(t, idx); !ok {
+						return fmt.Errorf("the index isn't recreated: %w", cutest.ErrNotYet)
+					}
+					return nil
+				})
+				staysUnknown(t)
+				eventSeen(t, r, cu.EventIndexLost, cu.AnnotationVouchedIndex)
+				vouchIndex(t, idx, "")
+			}
 			cutest.Eventually(t, time.Minute, settledAtZero(t))
 		})
 	}
@@ -1118,6 +1449,7 @@ func TestIndexNamespaceChecks(t *testing.T) {
 	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
 	track := func(idx string) (*cu.Tracker, error) {
 		s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+		s.SetPruneQuiet(0)
 		o := widgetOptions(func(types.NamespacedName) {})
 		perName(&o)
 		return s.Track(context.Background(), o)
@@ -1183,6 +1515,7 @@ func TestIndexCreatedAtStartRebuildsFromRecords(t *testing.T) {
 	resetPublished(t, cutest.WidgetGVR)
 	t.Cleanup(func() { resetPublished(t, cutest.WidgetGVR) })
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	o := widgetOptions(func(types.NamespacedName) {})
 	perName(&o)
 	if _, err := s.Track(context.Background(), o); err != nil {
@@ -1307,7 +1640,51 @@ func indexRebuilt(t *testing.T, idx string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cm.Annotations[cu.AnnotationRebuilt] == "true"
+	return cm.Annotations[cu.AnnotationRebuilt] == string(cm.UID)+"/Secret"
+}
+
+// An index restored from a backup isn't complete, whatever it carries: it may
+// lack the lines of holds made after the backup, whose records are gone.
+// Disown over it doesn't settle, until an operator vouches for it (§7.4,
+// §10.6.6).
+func TestARestoredIndexIsALostOne(t *testing.T) {
+	cutest.Require(t, env)
+	ctx := context.Background()
+	set := disowning(t)
+	idx, ns := indexNamespace(t), env.Namespace(t, "idx-restored")
+	cms := env.Kube.CoreV1().ConfigMaps(idx)
+	r := perNameRig(t, idx, disownOptions, nil)
+	if !indexRebuilt(t, idx) {
+		t.Fatal("the index of a kind never tracked isn't marked")
+	}
+	backup, err := cms.Get(ctx, widgetIndex, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.stop()
+	// Held since the backup, its record gone and its release not done yet.
+	createSecret(t, ns, "s")
+	acquireAs(t, ns, "s")
+	if err := cms.Delete(ctx, widgetIndex, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	backup.ResourceVersion, backup.UID, backup.ManagedFields = "", "", nil
+	if _, err := cms.Create(ctx, backup, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	set("all")
+	r = perNameRig(t, idx, disownOptions, nil)
+	staysUnknown(t)
+	if f := finalizersOf(t, ns, "s"); len(f) != 1 {
+		t.Errorf("the Secret's finalizers are %v, want the hold", f)
+	}
+	eventSeen(t, r, cu.EventIndexLost, cu.AnnotationVouchedIndex)
+	// The steps: the hold comes off by its marker label, and the vouch.
+	if _, err := env.Kube.CoreV1().Secrets(ns).Patch(ctx, "s", types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	vouchIndex(t, idx, "")
+	cutest.Eventually(t, time.Minute, settledAtZero(t))
 }
 
 // heldBeforeTheIndex has a LabelScoped process hold Secret ns/s for Widget
@@ -1336,6 +1713,7 @@ func TestIndexCrashBeforeTheRebuildIsRebuiltAtRestart(t *testing.T) {
 	// The process creates the index, and dies before its rebuild: every
 	// list of the holders fails, and it never runs.
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	created := false
 	s.HookCalls(func(_ context.Context, c cu.Call) error {
 		if c.Op == "index-create" {
@@ -1378,6 +1756,7 @@ func TestIndexAcquirerCreatedIndexIsRebuiltAtStart(t *testing.T) {
 	// A process whose Track found the index rebuilt, and whose write loops
 	// never run.
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
 	o := widgetOptions(func(types.NamespacedName) {})
 	perName(&o)
 	tr, err := s.Track(context.Background(), o)
@@ -1452,17 +1831,12 @@ func (l *warnLog) matching(s string) []string {
 // it, its holder being gone (§10.6.5).
 func TestIndexStartupRecheckWithoutTheWatch(t *testing.T) {
 	cutest.Require(t, env)
-	ctx := context.Background()
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-recheck-nowatch")
 	const sa = "cu-nowatch"
 	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch"})
 	createSecret(t, ns, "s")
 	acquireAs(t, ns, "s") // held for ns, by a holder that is gone
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": secretLine(ns, "s") + "\n"}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createIndex(t, idx, secretLine(ns, "s"))
 	_, c, _ := perNameProcess(t, env.AsServiceAccount("default", sa), idx, nil)
 	cutest.Eventually(t, time.Minute, notHeldFor(ns, "s", ns))
 	lined(t, idx, secretLine(ns, "s"), false)
@@ -1568,6 +1942,7 @@ func TestIndexRecheckWithAnUnreadableRecordedObject(t *testing.T) {
 	fTarget, _ := cu.FinalizerName(targetGK, ns)
 
 	s := cu.NewShared(clientsFor(t, env.Config), cu.SharedOptions{IndexNamespace: idx, Namespaces: []string{cached}})
+	s.SetPruneQuiet(0)
 	s.HookCalls(func(_ context.Context, c cu.Call) error {
 		if c.Op == "get" && c.GK.Kind == "Secret" && c.Namespace == ns && c.Name == "a-nogrant" {
 			return apierrors.NewServiceUnavailable("the API server can't read a-nogrant")
@@ -1644,16 +2019,11 @@ func (m *deniedMetrics) get() (int, int) {
 // counted once; a readable stale hold beside it is released (§10.6.5).
 func TestIndexRecheckDoesntRetryADeniedLine(t *testing.T) {
 	cutest.Require(t, env)
-	ctx := context.Background()
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-denied")
 	createSecret(t, ns, "a-denied")
 	createSecret(t, ns, "z-held")
 	acquireAs(t, ns, "z-held")
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": secretLine(ns, "a-denied") + "\n" + secretLine(ns, "z-held") + "\n"}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	createIndex(t, idx, secretLine(ns, "a-denied"), secretLine(ns, "z-held"))
 	m := &deniedMetrics{}
 	logs := &warnLog{}
 	var deniedGets atomic.Int32
@@ -1688,22 +2058,24 @@ func TestIndexRecheckDoesntRetryADeniedLine(t *testing.T) {
 // Disown under resourceNames RBAC with an index line for a Secret outside
 // the grant, which no record names: it can't be read, so held-count stays
 // "unknown", never zero, and a Warning event on the CRD names it, with the
-// gauge; once the line is removed by hand, the documented remedy, Disown
-// settles (§7.4, the user's decision of 2026-11-22).
+// gauge; removing the line by hand doesn't help, and once an operator vouches
+// for the Secret, the documented remedy, Disown settles (§7.4, the user's
+// decision of 2026-11-22). No write removes the line before that (§7.4).
 func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	cutest.Require(t, env)
-	ctx := context.Background()
 	set := disowning(t)
 	idx, ns := indexNamespace(t), env.Namespace(t, "idx-disown-unreadable")
 	const sa = "cu-disown-unreadable"
 	grantPerName(t, ns, idx, sa, []string{"s"}, []string{"get", "patch", "list", "watch"})
+	stripUnreadableRecords(t, kubeAs(t, env.AsServiceAccount("default", sa)))
 	createSecret(t, ns, "nogrant")
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: widgetIndex, Namespace: idx, Annotations: map[string]string{cu.AnnotationRebuilt: "true"}},
-		Data: map[string]string{"entries": secretLine(ns, "nogrant") + "\n"}}
-	if _, err := env.Kube.CoreV1().ConfigMaps(idx).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	var keepLine atomic.Bool // the index can't be written while set
+	createIndex(t, idx, secretLine(ns, "nogrant"))
+	line := secretLine(ns, "nogrant")
+	// No index write that would leave the index without the line gets
+	// through until the test has seen Disown settle over it; tried counts
+	// them.
+	var mayGo atomic.Bool
+	var tried atomic.Int32
 	m := &deniedMetrics{}
 	r := newWriteRig(t, env.AsServiceAccount("default", sa), cu.SharedOptions{IndexNamespace: idx}, func(o *cu.Options) {
 		perName(o)
@@ -1711,8 +2083,9 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		o.Metrics = m
 	}, func(s *cu.Shared) {
 		s.HookCalls(func(_ context.Context, c cu.Call) error {
-			if keepLine.Load() && c.Op == "index-update" {
-				return errors.New("the index can't be written")
+			if (c.Op == "index-update" || c.Op == "index-create") && !mayGo.Load() && !slices.Contains(c.Lines, line) {
+				tried.Add(1)
+				return errors.New("the index can't lose the line")
 			}
 			return nil
 		}, nil)
@@ -1728,9 +2101,8 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	if _, n := m.get(); n < 1 {
 		t.Errorf("disown_unreadable = %d, want the unreadable Secret counted", n)
 	}
-	// The other tests' holders' records, which the first pass strips, may
-	// name more; from the second pass the set is the one Secret's, and its
-	// event isn't sent again on every pass.
+	// The set is the one Secret's, and its event isn't sent again on every
+	// pass.
 	time.Sleep(2 * disownInterval)
 	unreadableEvents := func() int {
 		r.mu.Lock()
@@ -1757,7 +2129,6 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 	// A pass between the removal and the restore may count the empty index
 	// as "0", which is a true count then; the restore makes the next pass
 	// "unknown" again, so Disown never settles on the removal alone.
-	line := secretLine(ns, "nogrant")
 	settledSeen := watchCRDAnnotation(t, cu.AnnotationDisownSettled)
 	setIndexLines(t, idx, func(l []string) []string { return slices.DeleteFunc(l, func(x string) bool { return x == line }) })
 	lined(t, idx, line, true)
@@ -1768,15 +2139,17 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		return nil
 	})
 	time.Sleep(disownPasses*disownInterval + 2*time.Second)
-	if seen := settledSeen(); slices.Contains(seen, "true") {
+	if seen := settledSeen(); slices.ContainsFunc(seen, func(v string) bool { return v != "" }) {
 		t.Fatalf("disown-settled after the hand removal alone: %v", seen)
 	}
 
-	// The remedy: the operator vouches for it, and leaves the line. Disown's
-	// emptying can't remove the line while the index can't be written, so
-	// every pass meets the vouched line it can't read: it skips it, and
-	// settles. Then the emptying removes the line for good.
-	keepLine.Store(true)
+	// The remedy: the operator vouches for it, and leaves the line. Every
+	// pass meets the vouched line it can't read, skips it, and settles; then
+	// the emptying, which the hook holds back until the test has looked,
+	// removes the line for good.
+	if n := tried.Load(); n != 0 {
+		t.Errorf("%d index writes tried to remove the line before Disown settled", n)
+	}
 	editIndex(t, idx, func(cm *corev1.ConfigMap) {
 		if cm.Annotations == nil {
 			cm.Annotations = map[string]string{}
@@ -1784,17 +2157,50 @@ func TestDisownWithAnUnreadableIndexLine(t *testing.T) {
 		cm.Annotations[cu.AnnotationVouched] = ns + "/Secret/nogrant"
 	})
 	cutest.Eventually(t, time.Minute, settledAtZero(t))
-	if lines, _ := indexLines(t, idx); !slices.Contains(lines, line) {
+	if lines, ok := indexLines(t, idx); !ok {
+		t.Fatal("the index went before Disown settled")
+	} else if !slices.Contains(lines, line) {
 		t.Fatalf("the vouched line went before Disown settled: %v; the test needs Disown to meet it", lines)
 	}
-	keepLine.Store(false)
+	mayGo.Store(true)
 	lined(t, idx, line, false)
 	time.Sleep(2 * time.Second) // the write loops' ticks
-	if lines, _ := indexLines(t, idx); slices.Contains(lines, line) {
+	if lines, ok := indexLines(t, idx); !ok {
+		t.Error("the index went after Disown's emptying")
+	} else if slices.Contains(lines, line) {
 		t.Errorf("the vouched line came back: %v", lines)
 	}
 	if v := indexAnnotations(t, idx)[cu.AnnotationVouched]; v != ns+"/Secret/nogrant" {
 		t.Errorf("the vouched annotation after Disown's writes: %q", v)
+	}
+}
+
+// stripUnreadableRecords removes the records, left by other tests, that name
+// a Secret k can't read: Disown keeps a line for every object a record
+// names, so a test of a restricted process would count them unknown. A
+// record whose Secrets k can read, or that are gone for it, stays.
+func stripUnreadableRecords(t *testing.T, k kubernetes.Interface) {
+	t.Helper()
+	ctx := context.Background()
+	widgets, err := env.Dynamic.Resource(cutest.WidgetGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range widgets.Items {
+		w := &widgets.Items[i]
+		for _, id := range cu.ReadRecord(w).IDs {
+			if id.Kind != "Secret" || id.Group != "" {
+				continue
+			}
+			if _, err := k.CoreV1().Secrets(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{}); !apierrors.IsForbidden(err) {
+				continue
+			}
+			if _, err := env.Dynamic.Resource(cutest.WidgetGVR).Namespace(w.GetNamespace()).Patch(ctx, w.GetName(), types.MergePatchType,
+				[]byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, cu.AnnotationRefs)), metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				t.Fatal(err)
+			}
+			break
+		}
 	}
 }
 
@@ -1894,7 +2300,9 @@ func TestDisownEmptiesTheIndexItself(t *testing.T) {
 		t.Errorf("held-count before settling: %v; want the hold counted", seen)
 	}
 	stripped(t, ns, "x")
-	if lines, _ := indexLines(t, idx); len(lines) != 0 {
-		t.Errorf("the index after Disown: %v; want it empty", lines)
+	// The emptying follows the write of the settled flag.
+	lined(t, idx, secretLine(ns, "x"), false)
+	if lines, ok := indexLines(t, idx); !ok || len(lines) != 0 {
+		t.Errorf("the index after Disown: %v, %v; want it there, and empty", lines, ok)
 	}
 }

@@ -36,7 +36,8 @@ const modelIndexAnnotation = "entries"
 // modelIndexStore is the index over the model: an object whose lines live
 // in an annotation, written with a merge patch guarded by its
 // resourceVersion, as the ConfigMap's Update is. Each call is a step of its
-// actor's schedule, and is logged.
+// actor's schedule, and is logged. Its marker is "true": no copy of the index
+// is restored here, and no kind moved.
 type modelIndexStore struct {
 	m   *apimodel.Model
 	a   *apimodel.Actor
@@ -45,7 +46,11 @@ type modelIndexStore struct {
 }
 
 func (s modelIndexStore) version(o *metav1.PartialObjectMetadata) indexVersion {
-	return indexVersion{lines: decodeIndex(o.Annotations[modelIndexAnnotation]), rv: o.ResourceVersion, rebuilt: o.Annotations[AnnotationRebuilt] == "true"}
+	v := indexVersion{lines: decodeIndex(o.Annotations[modelIndexAnnotation]), rv: o.ResourceVersion}
+	if o.Annotations[AnnotationRebuilt] == "true" {
+		v.marked = kindSet{secretGroupKind: true}
+	}
+	return v
 }
 
 func (s modelIndexStore) get(context.Context) (indexVersion, error) {
@@ -62,10 +67,10 @@ func (s modelIndexStore) get(context.Context) (indexVersion, error) {
 	return v, err
 }
 
-func (s modelIndexStore) update(_ context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s modelIndexStore) update(_ context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	var v indexVersion
 	ann := map[string]any{modelIndexAnnotation: encodeIndex(lines)}
-	if rebuilt {
+	if mark != nil {
 		ann[AnnotationRebuilt] = "true"
 	}
 	data, _ := json.Marshal(map[string]any{"metadata": map[string]any{
@@ -84,12 +89,9 @@ func (s modelIndexStore) update(_ context.Context, cur indexVersion, lines []str
 	return v, err
 }
 
-func (s modelIndexStore) create(_ context.Context, lines []string, rebuilt bool) (indexVersion, error) {
+func (s modelIndexStore) create(_ context.Context, lines []string) (indexVersion, error) {
 	var v indexVersion
 	ann := map[string]string{modelIndexAnnotation: encodeIndex(lines)}
-	if rebuilt {
-		ann[AnnotationRebuilt] = "true"
-	}
 	err := s.a.Call(s.who+" index create", func() error {
 		if err := s.m.Create(modelIndexKey, metav1.ObjectMeta{Annotations: ann}); err != nil {
 			return err

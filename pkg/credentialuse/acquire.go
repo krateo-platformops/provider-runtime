@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -101,6 +102,11 @@ type protocol struct {
 	seen            *firstSight
 	reports         reports
 	newEpoch        func() (string, error)
+	// a2Bound bounds an A2 whose caller's context has no deadline: the
+	// kind's TimeoutBound; 0 is no bound.
+	a2Bound time.Duration
+	// a2Grace and callGrace, if set, replace the constants of those names.
+	a2Grace, callGrace time.Duration
 	// restoredEpochRequeue, if set, replaces the constant of that name
 	// (epochRequeue).
 	restoredEpochRequeue time.Duration
@@ -168,6 +174,107 @@ type lineKeeper interface {
 	// postCheck reads the index live after a successful A2, and adds id's
 	// line again if a concurrent prune removed it.
 	postCheck(ctx context.Context, id ID) error
+	// unknownA2 is told of an A2 for holder namespace n whose outcome is
+	// unknown, so that it may have landed, or may yet: it checks id's line as
+	// postCheck does, and checks id again once the landing margin is over.
+	unknownA2(ctx context.Context, id ID, n string)
+	// holding is told of an A2 of id from before its line is ensured until
+	// the function it returns is called, once its outcome is known, or
+	// unknownA2 told of it: no prune of this process takes its line then.
+	holding(id ID) (done func())
+}
+
+const (
+	// a2Grace is how long an A2 in flight goes on once its caller's context
+	// has ended before its deadline, as a stop ends it: a write cut short
+	// may have landed, or may yet, and nobody would know (§6.2).
+	a2Grace = 10 * time.Second
+	// callGrace is how long after its caller's context has ended one Acquire
+	// or BeforeEstablish goes on at most, its last A2 and the line check
+	// after it included, however many refs it holds (§7.2).
+	callGrace = 15 * time.Second
+)
+
+// callContexts are one call's contexts for what mustn't be cut short: they
+// keep the caller's values, and not its cancellation.
+type callContexts struct {
+	// write is an A2's: it ends at the caller's deadline, or at the
+	// protocol's own bound without one, or a2Grace after the caller's
+	// context ended.
+	write context.Context
+	// check is the line check's after it: it ends callGrace after the
+	// caller's context ended.
+	check context.Context
+	stop  func()
+}
+
+// graces are a2Grace and callGrace, or a test's own.
+func (p *protocol) graces() (a2, call time.Duration) {
+	a2, call = a2Grace, callGrace
+	if p.a2Grace > 0 {
+		a2 = p.a2Grace
+	}
+	if p.callGrace > 0 {
+		call = p.callGrace
+	}
+	return a2, call
+}
+
+// checkIn is cc's context for one line check, which may take callGrace even
+// while the caller's context lives: an API server that hangs mustn't hold a
+// pass without a deadline.
+func (p *protocol) checkIn(cc callContexts) (context.Context, context.CancelFunc) {
+	_, call := p.graces()
+	return context.WithTimeout(cc.check, call)
+}
+
+// detach returns the contexts of one call under ctx.
+func (p *protocol) detach(ctx context.Context) callContexts {
+	a2, call := p.graces()
+	base := context.WithoutCancel(ctx)
+	check, endCheck := context.WithCancel(base)
+	var write context.Context
+	var endWrite context.CancelFunc
+	if d, ok := ctx.Deadline(); ok {
+		write, endWrite = context.WithDeadline(base, d)
+	} else if p.a2Bound > 0 {
+		write, endWrite = context.WithTimeout(base, p.a2Bound)
+	} else {
+		write, endWrite = context.WithCancel(base)
+	}
+	var mu sync.Mutex
+	var timers []*time.Timer
+	stopped := false
+	unhook := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !stopped {
+			timers = append(timers, time.AfterFunc(a2, endWrite), time.AfterFunc(call, endCheck))
+		}
+	})
+	return callContexts{write: write, check: check, stop: func() {
+		unhook()
+		mu.Lock()
+		stopped = true
+		for _, t := range timers {
+			t.Stop()
+		}
+		mu.Unlock()
+		endWrite()
+		endCheck()
+	}}
+}
+
+// mayHaveLanded reports whether a write that failed with err may have
+// landed, or may yet: anything but an answer of the API server that refuses
+// it, a 4xx. A patch's 404 that no read confirmed is one (refusedPatch).
+func mayHaveLanded(err error) bool {
+	var refused refusedPatch
+	if errors.As(err, &refused) {
+		return false
+	}
+	st, ok := statusOf(err)
+	return err != nil && (!ok || st.Code < 400 || st.Code >= 500 || st.Code == http.StatusRequestTimeout)
 }
 
 // keepsLine reports whether refs of kind gk have index lines.
@@ -274,6 +381,8 @@ func isBuiltin(gk schema.GroupKind) bool { return gk.Group == "" }
 // in the Acquired: MustNotConnect for a holder that isn't established,
 // Degraded for one that is.
 func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (Acquired, error) {
+	cc := p.detach(ctx)
+	defer cc.stop()
 	var a Acquired
 	established := IsEstablished(obj, p.ownerFinalizers)
 	deleting := obj.GetDeletionTimestamp() != nil
@@ -618,17 +727,25 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 					next = append(next, more...)
 					continue
 				}
+				done := p.holding(id)
 				if p.keepsLine(id.GroupKind()) {
 					// The line before A2 (§10.6.2): an add that fails, as on
 					// a full index, stops before A2.
 					if err := p.lines.ensure(ctx, id); err != nil {
+						done()
 						return fail(fmt.Errorf("credential-use: adding the index line of %s: %w", quotedLine(id), err), "Index")
 					}
 				}
-				switch class, uid, err := p.write(ctx, id, namespace); class {
+				class, uid, err := p.write(ctx, cc, id, namespace)
+				var checkErr error
+				if class == ClassNone {
+					checkErr = p.checkLine(cc, id, uid, namespace)
+				}
+				done()
+				switch class {
 				case ClassNone:
-					if err := p.checkLine(ctx, id, uid, namespace); err != nil {
-						return fail(err, "Index")
+					if checkErr != nil {
+						return fail(checkErr, "Index")
 					}
 					a.Held = append(a.Held, r)
 					held = true
@@ -814,7 +931,27 @@ func (p *protocol) announce(ctx context.Context, obj metav1.Object, want []ID, u
 // anything else (Degraded, or fail closed). A successful write is recorded
 // in written, keyed by the incarnation the response names, at the time the
 // request was issued.
-func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, types.UID, error) {
+//
+// A write that may have landed with its outcome unknown, or may yet, gets
+// its line checked here, as a successful one does after it, and again once
+// the landing margin is over; and the release batch it owes, should its
+// holder be gone by now (§10.6.2). It isn't cut short by a stop (detach);
+// none begins once ctx has ended.
+func (p *protocol) write(ctx context.Context, cc callContexts, id ID, namespace string) (class Class, uid types.UID, err error) {
+	if err := ctx.Err(); err != nil {
+		return ClassOther, "", err
+	}
+	issuedOne := false
+	defer func() {
+		if issuedOne && mayHaveLanded(err) && p.keepsLine(id.GroupKind()) {
+			check, cancel := p.checkIn(cc)
+			defer cancel()
+			p.lines.unknownA2(check, id, namespace)
+			if p.enqueueBatch != nil {
+				p.enqueueBatch(id, namespace)
+			}
+		}
+	}()
 	epoch, err := p.newEpoch()
 	if err != nil {
 		return ClassOther, "", err
@@ -826,7 +963,8 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, t
 			return ClassOther, "", err
 		}
 		issued := p.clock.Now()
-		out, err := p.srv.Patch(ctx, gk, id.Namespace, id.Name, pt.Type, pt.Data)
+		issuedOne = true
+		out, err := p.srv.Patch(cc.write, gk, id.Namespace, id.Name, pt.Type, pt.Data)
 		if err != nil {
 			return Classify(err), "", err
 		}
@@ -836,6 +974,7 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, t
 	}
 	var last error
 	for range maxGuardedAttempts {
+		issuedOne = false // a conflict didn't land, and this read isn't a write
 		current, err := p.srv.Get(ctx, gk, id.Namespace, id.Name)
 		if err != nil {
 			return Classify(err), "", err
@@ -845,7 +984,8 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, t
 			return ClassOther, "", err
 		}
 		issued := p.clock.Now()
-		out, err := p.srv.Patch(ctx, gk, id.Namespace, id.Name, pt.Type, pt.Data)
+		issuedOne = true
+		out, err := p.srv.Patch(cc.write, gk, id.Namespace, id.Name, pt.Type, pt.Data)
 		if err == nil {
 			p.ver.wrote(out.UID, namespace, issued)
 			p.wroteDeleting(id, namespace, out)
@@ -856,6 +996,7 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, t
 		}
 		last = err
 	}
+	issuedOne = false // every one conflicted
 	return ClassOther, "", fmt.Errorf("credential-use: %d conflicting writes in a row: %w", maxGuardedAttempts, last)
 }
 
@@ -864,16 +1005,27 @@ func (p *protocol) write(ctx context.Context, id ID, namespace string) (Class, t
 // line survived a concurrent prune is unknown, so the A2's written entry
 // goes: the holder's next pass writes A2 again, and checks again, rather
 // than skipping.
-func (p *protocol) checkLine(ctx context.Context, id ID, uid types.UID, n string) error {
+func (p *protocol) checkLine(cc callContexts, id ID, uid types.UID, n string) error {
 	if !p.keepsLine(id.GroupKind()) {
 		return nil
 	}
+	ctx, cancel := p.checkIn(cc)
+	defer cancel()
 	err := p.lines.postCheck(ctx, id)
 	if err == nil {
 		return nil
 	}
 	p.ver.released(uid, n)
 	return fmt.Errorf("credential-use: checking the index line of %s after holding it: %w", id, err)
+}
+
+// holding tells the index of an A2 of id that is about to be made
+// (lineKeeper), and of its end when the function it returns is called.
+func (p *protocol) holding(id ID) (done func()) {
+	if !p.keepsLine(id.GroupKind()) {
+		return func() {}
+	}
+	return p.lines.holding(id)
 }
 
 // wroteDeleting tells heldDeleting of an A2 response that shows its object
@@ -889,6 +1041,8 @@ func (p *protocol) wroteDeleting(id ID, namespace string, out *metav1.PartialObj
 // Missing live, and holds any that now exists. On an error, the caller
 // doesn't add its finalizer this pass.
 func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acquired) error {
+	cc := p.detach(ctx)
+	defer cc.stop()
 	liveDisowned := p.liveDisown(ctx)
 	for _, u := range a.Unheld {
 		if u.Reason != ReasonMissing {
@@ -923,16 +1077,21 @@ func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acq
 		case d:
 			continue
 		}
+		done := p.holding(id)
 		if p.keepsLine(id.GroupKind()) {
 			if err := p.lines.ensure(ctx, id); err != nil {
+				done()
 				return fmt.Errorf("credential-use: adding the index line of %s before establishing: %w", quotedLine(id), err)
 			}
 		}
-		class, uid, err := p.write(ctx, id, obj.GetNamespace())
+		class, uid, err := p.write(ctx, cc, id, obj.GetNamespace())
 		if class != ClassNone {
+			done()
 			return fmt.Errorf("credential-use: holding %s before establishing (%s): %w", id, class, err)
 		}
-		if err := p.checkLine(ctx, id, uid, obj.GetNamespace()); err != nil {
+		err = p.checkLine(cc, id, uid, obj.GetNamespace())
+		done()
+		if err != nil {
 			return err
 		}
 		if cross && p.enqueueBatch != nil {

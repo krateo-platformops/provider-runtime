@@ -1,10 +1,12 @@
 package credentialuse
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -31,7 +33,7 @@ import (
 //
 //   - the acquirer adds the line before A2, and live-reads the index after a
 //     successful A2, adding the line again if a concurrent prune removed it;
-//   - a pruner removes lines only after R3, in one write per batch, and then
+//   - a pruner removes lines only after R3, pruneChunk in one write, and then
 //     live-reads each object it pruned, adding the line back if a concurrent
 //     A2 put a finalizer of the kind on it again.
 //
@@ -188,13 +190,51 @@ func union(a, b []string) []string {
 type indexVersion struct {
 	lines []string
 	rv    string
-	// rebuilt: the index carries AnnotationRebuilt (§10.6.6).
-	rebuilt bool
-	// vouched is AnnotationVouched's value, as the operator wrote it.
-	vouched string
+	// marked are the kinds AnnotationRebuilt, of its own uid, lists (§10.6.6);
+	// nil without it.
+	marked kindSet
+	// vouched is AnnotationVouched's value, as the operator wrote it;
+	// vouchedIndex, AnnotationVouchedIndex's. uid is the ConfigMap's.
+	vouched, vouchedIndex, uid string
 	// obj is the ConfigMap itself, for the next guarded Update; nil from the
 	// model's store.
 	obj *unstructured.Unstructured
+}
+
+// kindSet is a set of protected kinds.
+type kindSet = map[schema.GroupKind]bool
+
+// complete reports whether v names every hold of kinds: for each, a rebuild
+// of this very ConfigMap completed that covered it, or an operator vouched for
+// the two after a loss (§7.4).
+func (v indexVersion) complete(kinds kindSet) bool {
+	vouched := kindsOf(v.vouchedIndex, v.uid)
+	for gk := range kinds {
+		if !v.marked[gk] && !vouched[gk] {
+			return false
+		}
+	}
+	return len(kinds) > 0
+}
+
+// kindsOf are the kinds that value, of AnnotationRebuilt or
+// AnnotationVouchedIndex, lists for the index uid; nil when it is another's.
+func kindsOf(value, uid string) kindSet {
+	of, list, ok := strings.Cut(value, "/")
+	if !ok || uid == "" || of != uid {
+		return nil
+	}
+	return parseDisown(list).kinds
+}
+
+// valueOf is the value that lists kinds for the index uid: kindsOf's inverse.
+func valueOf(uid string, kinds kindSet) string {
+	var labels []string
+	for gk := range kinds {
+		labels = append(labels, kindLabel(gk))
+	}
+	slices.Sort(labels)
+	return uid + "/" + strings.Join(labels, ",")
 }
 
 // indexStore is where the index lives: the ConfigMap, through the dynamic
@@ -204,12 +244,12 @@ type indexStore interface {
 	// doesn't exist.
 	get(ctx context.Context) (indexVersion, error)
 	// update writes lines over cur, guarded by cur's resourceVersion, and
-	// with rebuilt sets AnnotationRebuilt in the same write; without, it
-	// leaves the annotation as cur had it.
-	update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error)
-	// create creates the index with lines, carrying AnnotationRebuilt only
-	// with rebuilt.
-	create(ctx context.Context, lines []string, rebuilt bool) (indexVersion, error)
+	// with mark sets AnnotationRebuilt to its kinds in the same write; with
+	// nil, it leaves the annotation as cur had it.
+	update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error)
+	// create creates the index with lines, without AnnotationRebuilt, whose
+	// value is the uid it then gets.
+	create(ctx context.Context, lines []string) (indexVersion, error)
 }
 
 // configMapStore is the index ConfigMap, through the dynamic client: get,
@@ -227,8 +267,9 @@ func newConfigMapStore(dyn dynamic.Interface, namespace, name string) configMapS
 // versionOf reads an index ConfigMap.
 func versionOf(u *unstructured.Unstructured) indexVersion {
 	data, _, _ := unstructured.NestedString(u.Object, "data", indexDataKey)
-	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u,
-		rebuilt: u.GetAnnotations()[AnnotationRebuilt] == "true", vouched: u.GetAnnotations()[AnnotationVouched]}
+	ann, uid := u.GetAnnotations(), string(u.GetUID())
+	return indexVersion{lines: decodeIndex(data), rv: u.GetResourceVersion(), obj: u, uid: uid,
+		marked: kindsOf(ann[AnnotationRebuilt], uid), vouched: ann[AnnotationVouched], vouchedIndex: ann[AnnotationVouchedIndex]}
 }
 
 func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
@@ -239,7 +280,7 @@ func (s configMapStore) get(ctx context.Context) (indexVersion, error) {
 	return versionOf(u), nil
 }
 
-func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []string, rebuilt bool) (indexVersion, error) {
+func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
 	if cur.obj == nil {
 		return indexVersion{}, errors.New("credential-use: an index update needs the version it read")
 	}
@@ -247,12 +288,12 @@ func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []st
 	if err := unstructured.SetNestedField(u.Object, encodeIndex(lines), "data", indexDataKey); err != nil {
 		return indexVersion{}, err
 	}
-	if rebuilt {
+	if mark != nil {
 		ann := u.GetAnnotations()
 		if ann == nil {
 			ann = map[string]string{}
 		}
-		ann[AnnotationRebuilt] = "true"
+		ann[AnnotationRebuilt] = valueOf(string(u.GetUID()), mark)
 		u.SetAnnotations(ann)
 	}
 	out, err := s.c.Update(ctx, u, metav1.UpdateOptions{})
@@ -262,16 +303,13 @@ func (s configMapStore) update(ctx context.Context, cur indexVersion, lines []st
 	return versionOf(out), nil
 }
 
-func (s configMapStore) create(ctx context.Context, lines []string, rebuilt bool) (indexVersion, error) {
+func (s configMapStore) create(ctx context.Context, lines []string) (indexVersion, error) {
 	u := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata":   map[string]any{"name": s.name, "namespace": s.namespace},
 		"data":       map[string]any{indexDataKey: encodeIndex(lines)},
 	}}
-	if rebuilt {
-		u.SetAnnotations(map[string]string{AnnotationRebuilt: "true"})
-	}
 	out, err := s.c.Create(ctx, u, metav1.CreateOptions{})
 	if err != nil {
 		return indexVersion{}, err
@@ -283,7 +321,8 @@ func (s configMapStore) create(ctx context.Context, lines []string, rebuilt bool
 // latest version, or this process's latest write.
 type indexSnapshot struct {
 	lines   map[string]bool
-	vouched map[ID]bool
+	vouched vouches
+	rebuilt bool // the marker is of the index's kinds
 }
 
 // index is one holder kind's index (§10.6), for its PerName kinds. Its
@@ -311,10 +350,21 @@ type index struct {
 	// holder cache: a line for an object without the kind's finalizer is
 	// kept while one does (§10.6.2). Nil is never.
 	recorded func(id ID) bool
-	// released reports whether this process's per-name cache shows id
-	// without the kind's prefix, or gone: a dropped line whose R3 the
-	// tracker saw needs no check (§10.6.6, L5). Nil is never.
-	released func(id ID) bool
+	// disowning reads live whether the Disown switch covers a PerName kind:
+	// the records may have been stripped, so a rebuild from them can't tell
+	// that it found every hold (§7.4). Nil is never.
+	disowning func(ctx context.Context) (bool, error)
+	// keptLive reads live, and keptCached tells from the CRD's cache, the
+	// kinds whose lines stay: those the Disown switch covers while it hasn't
+	// settled (§7.4). Nil is none.
+	keptLive   func(ctx context.Context) (disownSet, error)
+	keptCached func(gk schema.GroupKind) bool
+	// now is the clock, and margin how long after its context ended an A2
+	// may land (LandingMargin).
+	now    func() time.Time
+	margin time.Duration
+	// bound and checkBound are pruneBound and pruneCheckBound.
+	bound, checkBound time.Duration
 	// onLines sees every version of the index this process reads or
 	// writes, with its lines: the fill gauge and event (§10.6.4).
 	onLines func(lines []string)
@@ -334,8 +384,11 @@ type index struct {
 	// kind's prefix is unknown.
 	onRestoredUnread func(id ID)
 	// onVouchMalformed reports the malformed entries of the vouched
-	// annotation; onVouchWrong, a vouched object that carries the prefix.
+	// annotation; onVouchForeign, its entries of a kind the index doesn't
+	// have, which vouch for nothing; onVouchWrong, a vouched object that
+	// carries the prefix.
 	onVouchMalformed func(entries []string)
+	onVouchForeign   func(entries []string)
 	onVouchWrong     func(id ID)
 
 	snap atomic.Pointer[indexSnapshot]
@@ -345,25 +398,42 @@ type index struct {
 	inf cache.SharedIndexInformer
 
 	mu sync.Mutex
-	// pruned are the lines this process removed that its informer hasn't
-	// yet delivered as dropped: their drop is this process's own, not
-	// someone else's (§10.6.6).
-	pruned map[string]int
+	// own are this process's latest removals whose drop its informer hasn't
+	// delivered, at most maxOwnRemovals: a drop is this process's own only
+	// when the version that shows it is one a successful write of it
+	// returned (§10.6.6).
+	own []ownRemoval
 	// pending are the objects to check live, and re-add the line of if
 	// they carry the kind's prefix: lines someone else dropped, and re-adds
 	// that failed. tampered marks those that came from a drop.
 	pending map[ID]*recheck
+	// late are the A2s whose outcome this process doesn't know, and when
+	// the landing margin after each is over: the write loops then check its
+	// object live, as a pending one, and enqueue its release batch. One entry
+	// per object and holder namespace, so the A2s of one margin bound it.
+	late map[lateHold]time.Time
+	// flying are the A2s of this process in flight, from before their lines
+	// are ensured. quietUntil is when this process's write loops may prune.
+	// deferred are the lines a prune left for either, and when they are due.
+	flying     map[ID]int
+	quietUntil time.Time
+	deferred   map[ID]time.Time
 	// lost: the index was seen deleted, or recreated by an add; the write
 	// loops rebuild it from the records (§10.6.6). lostDue is when the next
-	// try is due, lostFails how many failed in a row.
-	lost      bool
-	lostDue   time.Time
-	lostFails int
+	// try is due, lostFails how many failed in a row. rebuilding: one is under
+	// way, which takes lost, so that a loss meanwhile asks for another.
+	lost, rebuilding bool
+	lostDue          time.Time
+	lostFails        int
+	// fresh: the kind was never tracked before this process's Track, and
+	// had no index, so that a missing one, until this process has rebuilt
+	// it, isn't a lost one (§7.4).
+	fresh bool
 	// deniedSeen are the objects whose refused read was reported.
 	deniedSeen map[ID]bool
 	// vouchWarned are the vouched annotation's values whose malformed
-	// entries were reported; vouchWrongSeen, the vouched objects found
-	// carrying the prefix.
+	// entries, or entries of another kind, were reported; vouchWrongSeen, the
+	// vouched objects found carrying the prefix.
 	vouchWarned    map[string]bool
 	vouchWrongSeen map[ID]bool
 }
@@ -374,14 +444,58 @@ type recheck struct {
 	tampered bool
 	due      time.Time
 	fails    int
+	// queued counts how often it was queued: a check deletes it only if it
+	// wasn't queued again meanwhile, since what it read may be older.
+	queued int
+	// drop, if set, is the version whose drop alone queued it: should this
+	// process's own write turn out to have made that version, it goes.
+	drop string
 }
+
+// A lateHold is an A2 of id for holder namespace n that may land late.
+type lateHold struct {
+	id ID
+	n  string
+}
+
+// An ownRemoval is one successful removal by this process: the version it
+// returned, and the lines it removed.
+type ownRemoval struct {
+	rv    string
+	lines []string
+}
+
+const (
+	// maxOwnRemovals bounds index.own. A removal it forgets costs a live
+	// check of each of its lines.
+	maxOwnRemovals = 64
+	// pruneChunk is how many lines a prune removes in one write. Each is read
+	// after it, one GET a line, which a client's 20 calls a second make 2.5s
+	// of.
+	pruneChunk = 50
+	// pruneBound bounds the calls of one write of a prune, from its live read
+	// of the Disown switch to its check and its re-add, once it has begun,
+	// whatever its context does: below the 30s a manager gives its runnables
+	// to stop by default, so that a graceful stop doesn't come between a
+	// removal and its re-add. A removal cut short by it may land after it, as
+	// any write may (LandingMargin).
+	pruneBound = 15 * time.Second
+	// pruneCheckBound bounds those before the re-add: a check it cuts short
+	// leaves the rest of pruneBound to put back every line it didn't come to.
+	pruneCheckBound = 10 * time.Second
+	// deferRetry is when a deferred prune that failed is tried again.
+	deferRetry = 30 * time.Second
+)
 
 func newIndex(holder schema.GroupKind, prefix, namespace string, maxLines int, kinds map[schema.GroupKind]bool, store indexStore, srv server) *index {
 	return &index{
 		holder: holder, prefix: prefix, namespace: namespace, name: IndexName(holder), maxLines: maxLines,
 		kinds: kinds, store: store, srv: srv,
-		pruned:  map[string]int{},
 		pending: map[ID]*recheck{},
+		late:    map[lateHold]time.Time{},
+		flying:  map[ID]int{}, deferred: map[ID]time.Time{},
+		now: time.Now, margin: LandingMargin,
+		bound: pruneBound, checkBound: pruneCheckBound,
 	}
 }
 
@@ -393,7 +507,7 @@ func (ix *index) covers(gk schema.GroupKind) bool { return ix != nil && ix.kinds
 
 // saw keeps v as this process's view, and reports its lines.
 func (ix *index) saw(v indexVersion) {
-	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines)), vouched: ix.parseVouched(v.vouched)}
+	s := &indexSnapshot{lines: make(map[string]bool, len(v.lines)), vouched: ix.parseVouched(v.vouched), rebuilt: !ix.needsRebuild(v)}
 	for _, l := range v.lines {
 		s.lines[l] = true
 	}
@@ -426,6 +540,44 @@ func (ix *index) fits(next []string, before int) error {
 			errIndexFull, ix.ref(), size, indexMaxBytes)
 	}
 	return nil
+}
+
+// fitting returns, of sets of IDs, those whose lines fit together in an index
+// of lines, the sets taken whole, the smallest first; and the IDs of the sets
+// that don't, with why, as fits has it. What can't be a line (lineErr) needs no
+// room: no add writes it.
+func (ix *index) fitting(lines []string, sets [][]ID) (add, over []ID, err error) {
+	size := func(set []ID) (n int) {
+		for _, id := range set {
+			n += len(id.String()) + 1
+		}
+		return n
+	}
+	in := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		in[l] = true
+	}
+	count, bytes := len(lines), len(indexDataKey)+len(encodeIndex(lines))
+	sets = slices.Clone(sets)
+	slices.SortStableFunc(sets, func(a, b []ID) int { return cmp.Or(cmp.Compare(len(a), len(b)), cmp.Compare(size(a), size(b))) })
+	for _, set := range sets {
+		fresh := slices.DeleteFunc(SortedIDs(set), func(id ID) bool { return in[id.String()] || lineErr(id) != nil })
+		n := size(fresh)
+		if len(fresh) > 0 && (count+len(fresh) > ix.maxLines || bytes+n > indexMaxBytes) {
+			over = append(over, fresh...)
+			continue
+		}
+		count, bytes = count+len(fresh), bytes+n
+		for _, id := range fresh {
+			in[id.String()] = true
+			add = append(add, id)
+		}
+	}
+	over = slices.DeleteFunc(SortedIDs(over), func(id ID) bool { return in[id.String()] })
+	if len(over) > 0 {
+		err = ix.fits(union(lines, linesOf(append(slices.Clone(add), over...))), len(lines))
+	}
+	return add, over, err
 }
 
 // writeErr wraps an index write's error. A write the namespace's admission
@@ -463,12 +615,16 @@ func policyParamsMissing(err error) bool {
 // from the records (§10.6.6). It fails with errIndexFull past the cap or the
 // size. It adds no line that can't be one (lineErr): nothing of such a name is
 // held (ensure).
-func (ix *index) add(ctx context.Context, ids []ID) error { return ix.merge(ctx, ids, false) }
+func (ix *index) add(ctx context.Context, ids []ID) error { return ix.merge(ctx, ids, nil) }
 
-// merge is add; with rebuilt, it is a rebuild's last merge, and sets
-// AnnotationRebuilt in the same guarded write (§10.6.6), writing even when
-// no line is new.
-func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
+// merge is add; with mark, it is a rebuild's last merge, and sets
+// AnnotationRebuilt to the kinds mark has for the version it reads, in the
+// same guarded write (§10.6.6), writing even when no line is new, and not at
+// all for nil. One that creates the index sets it in a second write.
+func (ix *index) merge(ctx context.Context, ids []ID, mark func(cur indexVersion) kindSet) error {
+	if mark == nil {
+		mark = func(indexVersion) kindSet { return nil }
+	}
 	lines := linesOf(slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return lineErr(id) != nil }))
 	var last error
 	for range maxIndexWriteAttempts {
@@ -479,7 +635,7 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 			if err := ix.fits(lines, 0); err != nil {
 				return err
 			}
-			v, err := ix.store.create(ctx, lines, rebuilt)
+			v, err := ix.store.create(ctx, lines)
 			if Classify(err) == ClassAlreadyExists {
 				last = err
 				continue
@@ -488,15 +644,19 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 				return ix.writeErr("creating", err)
 			}
 			ix.saw(v)
-			if !rebuilt {
-				ix.markLost()
+			if mark(v) != nil {
+				// The marker has the uid it just got: the next attempt sets it.
+				last = errors.New("the index was created, and its marker isn't set")
+				continue
 			}
+			ix.markLost()
 			return nil
 		default:
 			return fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
 		}
 		next := union(cur.lines, lines)
-		if len(next) == len(cur.lines) && (!rebuilt || cur.rebuilt) {
+		kinds := mark(cur)
+		if len(next) == len(cur.lines) && kinds == nil {
 			ix.saw(cur)
 			return nil
 		}
@@ -504,7 +664,7 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 			ix.saw(cur)
 			return err
 		}
-		v, err := ix.store.update(ctx, cur, next, rebuilt)
+		v, err := ix.store.update(ctx, cur, next, kinds)
 		if Classify(err) == ClassConflict {
 			last = err
 			continue
@@ -519,18 +679,20 @@ func (ix *index) merge(ctx context.Context, ids []ID, rebuilt bool) error {
 }
 
 // remove removes lines from the index, merging with what it reads, and
-// returns the lines it removed: those the index had. A missing index has
-// nothing to remove.
-func (ix *index) remove(ctx context.Context, lines []string) ([]string, error) {
+// returns every line one of its attempts tried to remove, whatever came of
+// it: an attempt that conflicted, because someone else removed the line
+// first, and one whose outcome is unknown, leave a line out as well as one
+// that succeeded. A missing index has nothing to remove.
+func (ix *index) remove(ctx context.Context, lines []string) (tried []string, err error) {
 	var last error
 	for range maxIndexWriteAttempts {
 		cur, err := ix.store.get(ctx)
 		switch Classify(err) {
 		case ClassNone:
 		case ClassNotFound:
-			return nil, nil
+			return tried, nil
 		default:
-			return nil, fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
+			return tried, fmt.Errorf("credential-use: reading the index %s: %w", ix.ref(), err)
 		}
 		var present []string
 		next := slices.DeleteFunc(slices.Clone(cur.lines), func(l string) bool {
@@ -542,90 +704,292 @@ func (ix *index) remove(ctx context.Context, lines []string) ([]string, error) {
 		})
 		if len(present) == 0 {
 			ix.saw(cur)
-			return nil, nil
+			return tried, nil
 		}
-		// Marked before the write, so that the informer, which may deliver
-		// the new version before the write returns, never takes the drop
-		// for someone else's.
-		ix.notePruned(present, 1)
-		v, err := ix.store.update(ctx, cur, next, false)
-		if err != nil {
-			ix.notePruned(present, -1)
-		}
+		tried = union(tried, present)
+		v, err := ix.store.update(ctx, cur, next, nil)
 		if Classify(err) == ClassConflict {
 			last = err
 			continue
 		}
 		if err != nil {
-			return nil, ix.writeErr("removing from", err)
+			return tried, ix.writeErr("removing from", err)
 		}
 		ix.saw(v)
-		return present, nil
+		ix.removed(v.rv, present)
+		return tried, nil
 	}
-	return nil, fmt.Errorf("credential-use: %d conflicting writes of the index %s in a row: %w", maxIndexWriteAttempts, ix.ref(), last)
+	return tried, fmt.Errorf("credential-use: %d conflicting writes of the index %s in a row: %w", maxIndexWriteAttempts, ix.ref(), last)
 }
 
-// notePruned counts lines as this process's own removals, d at a time.
-func (ix *index) notePruned(lines []string, d int) {
+// removed records that this process's removal of lines made version rv. The
+// informer may have delivered it before the write returned, and queued its
+// drops: those go, unless something else queued them too.
+func (ix *index) removed(rv string, lines []string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	for _, l := range lines {
-		if ix.pruned[l] += d; ix.pruned[l] <= 0 {
-			delete(ix.pruned, l)
+		if id, ok := parseIndexLine(l); ok {
+			if r := ix.pending[id]; r != nil && rv != "" && r.drop == rv {
+				delete(ix.pending, id)
+			}
 		}
+	}
+	ix.own = append(ix.own, ownRemoval{rv: rv, lines: lines})
+	if n := len(ix.own) - maxOwnRemovals; n > 0 {
+		ix.own = slices.Delete(ix.own, 0, n)
 	}
 }
 
-// prune removes ids' lines in one write, then reads each object it removed
-// live, and adds back the line of any that carries the kind's prefix again,
-// or can't be read (§10.6.2): an A2 that raced the prune. A re-add that
-// fails is queued for the write loops, which retry it until it lands, and
-// the error is returned.
+// prune removes ids' lines, pruneChunk in one write, then reads every object
+// whose line an attempt tried to remove live, and adds back the line of any
+// that carries the kind's prefix again, or can't be read (§10.6.2): an A2 that
+// raced the prune, or a line someone else removed while this write
+// conflicted. A re-add that fails is queued for the write loops, which retry
+// it until it lands, and the error is returned. It stops at a write that
+// fails, and the lines after it stay.
+//
+// A write once begun runs to its end, with its check and its re-add, within
+// pruneBound, whatever ctx does: the queue dies with the process, so a stop
+// between the removal and the re-add would lose the line. A check that is cut
+// short there puts back what it didn't come to, and is an error. A prune whose
+// ctx ends begins no other write.
+//
+// While Disown covers a kind and hasn't settled, its lines stay: a hold that
+// lands late has only its line for Disown's count to find it by (§7.4). The
+// cache shows the switch first, and may lag it: it is read live before the
+// removal, and one that can't be read removes nothing. So a removal under the
+// switch began before it was set, and is put back within pruneBound of that,
+// before a run of zeros can be done: the switch is read live again after the
+// removal. One read as off then was set after the removal, so that Disown's
+// first pass comes after it and adds the lines of every record (§7.4, E2).
+//
+// A hold that may land yet keeps its line, though nothing names it any more:
+// one that another process sent, for as long as it may land after that one
+// lost its Lease or ended, and these write loops started (quietUntil); and one
+// that this process sent, in flight or of unknown outcome (owes). Their lines
+// are pruned later, unless they are needed then (deferredTick).
 func (ix *index) prune(ctx context.Context, ids []ID) error {
-	if len(ids) == 0 {
-		return nil
+	if ix.keptCached != nil {
+		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return ix.keptCached(id.GroupKind()) })
 	}
-	removed, err := ix.remove(ctx, linesOf(ids))
-	if err != nil {
-		return err
+	return ix.removeAndCheck(ctx, ix.notQuiet(ids), true)
+}
+
+// startQuiet keeps every prune back for d: the write loops have just started.
+func (ix *index) startQuiet(d time.Duration) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.quietUntil = ix.now().Add(d)
+}
+
+// notQuiet returns ids, or none of them while the prunes are kept back, and
+// defers the others.
+func (ix *index) notQuiet(ids []ID) []ID {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if !ix.now().Before(ix.quietUntil) {
+		return ids
 	}
-	vouched := ix.vouchedNow()
-	var back []ID
-	for _, l := range removed {
-		id, ok := parseIndexLine(l)
-		if !ok {
-			continue
-		}
-		if ix.keepsLine(ctx, id, vouched) {
-			back = append(back, id)
-		}
-	}
-	if len(back) == 0 {
-		return nil
-	}
-	if err := ix.add(ctx, back); err != nil {
-		ix.queue(back, false)
-		return err
+	for _, id := range ids {
+		ix.deferred[id] = ix.quietUntil
 	}
 	return nil
 }
 
-// keepsLine reads id live, after its line was removed, and reports whether
-// the line must come back: the object carries the kind's prefix, or can't be
-// read and may, unless an operator vouched for it (§10.6.6). A vouched
-// object that turns out to carry the prefix keeps its line, and the wrong
-// vouch is logged.
-func (ix *index) keepsLine(ctx context.Context, id ID, vouched map[ID]bool) bool {
-	switch ix.carries(ctx, id) {
-	case carriesNot:
-		return false
-	case carriesYes:
-		if vouched[id] {
+// owes reports whether this process has an A2 of id that may land yet, in
+// flight or of unknown outcome within the landing margin, and until when its
+// line is kept: for one in flight, as long as a stop lets one go on.
+func (ix *index) owes(id ID) (until time.Time, owed bool) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.flying[id] > 0 {
+		until, owed = ix.now().Add(a2Grace), true
+	}
+	for l, at := range ix.late {
+		if l.id == id && (!owed || at.After(until)) {
+			until, owed = at, true
+		}
+	}
+	return until, owed
+}
+
+// keepOwed reports whether id's line is kept for an A2 of this process, and
+// defers its prune.
+func (ix *index) keepOwed(id ID) bool {
+	until, owed := ix.owes(id)
+	if owed {
+		ix.mu.Lock()
+		defer ix.mu.Unlock()
+		ix.deferred[id] = until
+	}
+	return owed
+}
+
+// holding is told of an A2 of id (lineKeeper).
+func (ix *index) holding(id ID) (done func()) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.flying[id]++
+	return func() {
+		ix.mu.Lock()
+		defer ix.mu.Unlock()
+		if ix.flying[id]--; ix.flying[id] <= 0 {
+			delete(ix.flying, id)
+		}
+	}
+}
+
+// deferredTick prunes the deferred lines that are due, of the objects a live
+// read finds bare, under prune's rule. One that can't be read keeps its line:
+// for good when the authorizer refused it, and otherwise until a later tick.
+func (ix *index) deferredTick(ctx context.Context, now time.Time) error {
+	ix.mu.Lock()
+	var due []ID
+	for id, at := range ix.deferred {
+		if !now.Before(at) {
+			due = append(due, id)
+			delete(ix.deferred, id)
+		}
+	}
+	ix.mu.Unlock()
+	if len(due) == 0 {
+		return nil
+	}
+	var bare, again []ID
+	for _, id := range SortedIDs(due) {
+		switch ix.carries(ctx, id) {
+		case carriesNot:
+			bare = append(bare, id)
+		case carriesUnknown:
+			again = append(again, id)
+		}
+	}
+	err := ix.prune(ctx, ix.prunable(bare))
+	if err != nil {
+		again = append(again, bare...)
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	for _, id := range again {
+		if _, ok := ix.deferred[id]; !ok {
+			ix.deferred[id] = now.Add(deferRetry)
+		}
+	}
+	return err
+}
+
+// empty is prune for Disown's own emptying, once it has settled: the switch
+// is on, and doesn't keep the lines.
+func (ix *index) empty(ctx context.Context, ids []ID) error {
+	return ix.removeAndCheck(ctx, ids, false)
+}
+
+func (ix *index) removeAndCheck(ctx context.Context, ids []ID, disown bool) error {
+	for chunk := range slices.Chunk(ids, pruneChunk) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := ix.removeChunk(ctx, chunk, disown); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeChunk is removeAndCheck of one write.
+func (ix *index) removeChunk(parent context.Context, ids []ID, disown bool) error {
+	whole, cancel := context.WithTimeout(context.WithoutCancel(parent), ix.bound)
+	defer cancel()
+	ctx, cancelCheck := context.WithTimeout(whole, ix.checkBound)
+	defer cancelCheck()
+	if ix.keptLive != nil && disown {
+		set, err := ix.keptLive(ctx)
+		if err != nil {
+			return fmt.Errorf("credential-use: reading the Disown switch before pruning the index %s: %w", ix.ref(), err)
+		}
+		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return set.covers(id.GroupKind()) })
+	}
+	if ids = slices.DeleteFunc(slices.Clone(ids), ix.keepOwed); len(ids) == 0 {
+		return nil
+	}
+	tried, err := ix.remove(ctx, linesOf(ids))
+	if len(tried) == 0 {
+		return err
+	}
+	kept := func(schema.GroupKind) bool { return false }
+	if disown && ix.keptLive != nil {
+		set, kerr := ix.keptLive(ctx)
+		if kept = set.covers; kerr != nil {
+			// Whether Disown keeps them is unknown: they go back.
+			kept = func(schema.GroupKind) bool { return true }
+			err = errors.Join(err, fmt.Errorf("credential-use: reading the Disown switch after pruning the index %s: %w", ix.ref(), kerr))
+		}
+	}
+	return errors.Join(err, ix.checkRemoved(ctx, whole, tried, kept))
+}
+
+// checkRemoved is the check after a removal of lines tried: it adds back the
+// lines that must stay, those of the kinds kept among them. It reads the
+// objects within check, and once that has ended puts back the lines of those
+// it didn't come to, within ctx, which outlives it.
+func (ix *index) checkRemoved(check, ctx context.Context, tried []string, kept func(schema.GroupKind) bool) error {
+	var back, carry, unread []ID
+	for _, l := range tried {
+		id, ok := parseIndexLine(l)
+		if !ok {
+			continue
+		}
+		// An A2 of this process begun since the check before the removal.
+		if kept(id.GroupKind()) || ix.keepOwed(id) {
+			back = append(back, id)
+			continue
+		}
+		switch c := ix.carries(check, id); {
+		case c == carriesNot:
+		case c == carriesYes:
+			carry = append(carry, id)
+		case check.Err() != nil:
+			// Cut short, so not read: no vouch is of it, and its line goes
+			// back (§10.6.2).
+			back = append(back, id)
+		default:
+			unread = append(unread, id)
+		}
+	}
+	var cut error
+	if err := check.Err(); err != nil {
+		cut = fmt.Errorf("credential-use: the check after a removal from the index %s was cut short, and the lines it didn't come to are put back: %w", ix.ref(), err)
+	}
+	if len(back)+len(carry)+len(unread) == 0 {
+		return cut
+	}
+	back = append(back, carry...)
+	// What can't be read may carry the prefix, unless an operator vouched
+	// for it (§10.6.6): read live, since the vouch may have been withdrawn.
+	// An index that can't be read vouches for nothing.
+	var vouched vouches
+	if cur, err := ix.store.get(ctx); err == nil {
+		vouched = ix.parseVouched(cur.vouched)
+	}
+	for _, id := range carry {
+		if vouched.names(id) {
 			ix.vouchWrong(id)
 		}
-		return true
 	}
-	return !vouched[id]
+	for _, id := range unread {
+		if !vouched.has(id) {
+			back = append(back, id)
+		}
+	}
+	if len(back) == 0 {
+		return cut
+	}
+	if err := ix.add(ctx, back); err != nil {
+		ix.queue(back, false)
+		return errors.Join(cut, err)
+	}
+	return cut
 }
 
 // What a live read found of an object's holds.
@@ -665,24 +1029,63 @@ func (ix *index) carries(ctx context.Context, id ID) carriage {
 	return carriesUnknown
 }
 
+// vouches are what an operator vouched for to carry no finalizer of the kind,
+// while it can't be read (§10.6.6): objects, and every object of a kind in a
+// namespace.
+type vouches struct {
+	ids   map[ID]bool
+	kinds map[vouchedKind]bool
+}
+
+// vouchedKind is every object of a kind in a namespace, as an entry
+// <namespace>/<Kind[.group]>/* vouches for it (decided 2026-11-25).
+type vouchedKind struct {
+	namespace string
+	gk        schema.GroupKind
+}
+
+// has reports whether id is vouched for.
+func (v vouches) has(id ID) bool {
+	return v.ids[id] || id.Namespace != "" && v.kinds[vouchedKind{id.Namespace, id.GroupKind()}]
+}
+
+// names reports whether id is vouched for by name: found to carry the prefix,
+// the vouch is wrong. A kind's in a namespace is of what can't be read there,
+// and says nothing of what can.
+func (v vouches) names(id ID) bool { return v.ids[id] }
+
 // parseVouched reads AnnotationVouched: comma-separated refs written
-// <namespace>/<Kind[.group]>/<name>, blanks trimmed; a malformed entry is
-// ignored, and reported once per value of the annotation.
-func (ix *index) parseVouched(v string) map[ID]bool {
-	out := map[ID]bool{}
-	var bad []string
+// <namespace>/<Kind[.group]>/<name>, and kinds in a namespace written
+// <namespace>/<Kind[.group]>/*, blanks trimmed; a malformed entry, as a bare
+// <namespace>/*, is ignored, and reported once per value of the annotation.
+func (ix *index) parseVouched(v string) vouches {
+	out := vouches{ids: map[ID]bool{}, kinds: map[vouchedKind]bool{}}
+	var bad, foreign []string
 	for _, e := range strings.Split(v, ",") {
 		if e = strings.TrimSpace(e); e == "" {
 			continue
 		}
 		id, ok := parseUnheldRef(e)
-		if !ok {
+		switch {
+		case !ok || id.Kind == "*":
 			bad = append(bad, e)
 			continue
+		case id.Name == "*":
+			if len(validation.IsDNS1123Label(id.Namespace)) != 0 {
+				bad = append(bad, e)
+				continue
+			}
+			out.kinds[vouchedKind{id.Namespace, id.GroupKind()}] = true
+		default:
+			out.ids[id] = true
 		}
-		out[id] = true
+		// Of a kind with no lines, as secret for Secret, or Secret.v1 with
+		// a version for a group: it vouches for nothing the index names.
+		if !ix.kinds[id.GroupKind()] {
+			foreign = append(foreign, e)
+		}
 	}
-	if len(bad) > 0 {
+	if len(bad)+len(foreign) > 0 {
 		ix.mu.Lock()
 		first := !ix.vouchWarned[v]
 		if first {
@@ -692,8 +1095,11 @@ func (ix *index) parseVouched(v string) map[ID]bool {
 			ix.vouchWarned[v] = true
 		}
 		ix.mu.Unlock()
-		if first && ix.onVouchMalformed != nil {
+		if first && len(bad) > 0 && ix.onVouchMalformed != nil {
 			ix.onVouchMalformed(bad)
+		}
+		if first && len(foreign) > 0 && ix.onVouchForeign != nil {
+			ix.onVouchForeign(foreign)
 		}
 	}
 	return out
@@ -713,13 +1119,12 @@ func parseUnheldRef(s string) (ID, bool) {
 	return ID{Group: group, Kind: kind, Namespace: parts[0], Name: parts[2]}, true
 }
 
-// vouchedNow is the vouched objects of the index as this process last saw
-// it.
-func (ix *index) vouchedNow() map[ID]bool {
+// vouchedNow is the vouches of the index as this process last saw it.
+func (ix *index) vouchedNow() vouches {
 	if s := ix.snap.Load(); s != nil {
 		return s.vouched
 	}
-	return nil
+	return vouches{}
 }
 
 // vouchWrong reports, once per object, a vouched object found carrying the
@@ -804,6 +1209,37 @@ func (ix *index) postCheck(ctx context.Context, id ID) error {
 	return nil
 }
 
+// unknownA2 is the acquirer's step after an A2 whose outcome is unknown
+// (§10.6.2): the check after a successful one, at once, for a write that has
+// landed; and one more once the landing margin is over, for a write that
+// lands after a prune took the line its object then seemed not to need.
+func (ix *index) unknownA2(ctx context.Context, id ID, n string) {
+	due := ix.now().Add(ix.margin)
+	ix.mu.Lock()
+	ix.late[lateHold{id, n}] = due
+	ix.mu.Unlock()
+	_ = ix.postCheck(ctx, id) // what fails is queued
+}
+
+// lateTick queues the live check of each A2 whose landing margin is over, and
+// hands enqueue its release batch, as the acquirer owes it: its holder may be
+// gone.
+func (ix *index) lateTick(now time.Time, enqueue func(id ID, n string)) {
+	ix.mu.Lock()
+	var due []lateHold
+	for l, at := range ix.late {
+		if !now.Before(at) {
+			due = append(due, l)
+			delete(ix.late, l)
+			ix.queueLocked([]ID{l.id}, false, "")
+		}
+	}
+	ix.mu.Unlock()
+	for _, l := range due {
+		enqueue(l.id, l.n)
+	}
+}
+
 // prunable returns those of ids whose lines may go: of a PerName kind, and
 // named by no holder's record (§10.6.2). The caller has read each, live,
 // without a finalizer of the kind, or gone.
@@ -826,12 +1262,20 @@ func (ix *index) prunable(ids []ID) []ID {
 func (ix *index) queue(ids []ID, tampered bool) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	ix.queueLocked(ids, tampered, "")
+}
+
+// queueLocked is queue, for a drop that version drop showed, if set. ix.mu
+// is held.
+func (ix *index) queueLocked(ids []ID, tampered bool, drop string) {
 	for _, id := range ids {
 		if r := ix.pending[id]; r != nil {
 			r.tampered = r.tampered || tampered
+			r.queued++
+			r.drop = ""
 			continue
 		}
-		ix.pending[id] = &recheck{tampered: tampered}
+		ix.pending[id] = &recheck{tampered: tampered, drop: drop}
 	}
 }
 
@@ -846,49 +1290,33 @@ func (ix *index) markLost() {
 
 // observed is the informer's handler's work on a new version of the index
 // (§10.6.6). old is the version before it, or nil for the first. Every line
-// old had that cur hasn't was dropped: this process's own removals are
-// expected; a drop alongside an R3 this process saw needs nothing; every
-// other is queued for a live check.
+// old had that cur hasn't was dropped. A drop is this process's own only if
+// cur is the version a successful removal of it returned; every other is
+// queued for a live check, which costs a GET at most. One delivered before
+// this process's write returned is queued too, until the write returns with
+// that version (removed).
 func (ix *index) observed(old *indexVersion, cur indexVersion) {
 	ix.saw(cur)
-	present := map[string]bool{}
-	for _, l := range cur.lines {
-		present[l] = true
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	var mine []string
+	if i := slices.IndexFunc(ix.own, func(o ownRemoval) bool { return o.rv != "" && o.rv == cur.rv }); i >= 0 {
+		mine = ix.own[i].lines
+		ix.own = slices.Delete(ix.own, i, i+1)
+	}
+	if old == nil {
+		return
 	}
 	var check []ID
-	ix.mu.Lock()
-	for l := range ix.pruned {
-		if present[l] {
-			// Back since this process removed it: a later drop is
-			// someone else's.
-			delete(ix.pruned, l)
+	for _, l := range old.lines {
+		if slices.Contains(cur.lines, l) || slices.Contains(mine, l) {
+			continue
 		}
-	}
-	if old != nil {
-		for _, l := range old.lines {
-			if present[l] {
-				continue
-			}
-			if ix.pruned[l] > 0 {
-				if ix.pruned[l]--; ix.pruned[l] == 0 {
-					delete(ix.pruned, l)
-				}
-				continue
-			}
-			id, ok := parseIndexLine(l)
-			if !ok || !ix.kinds[id.GroupKind()] {
-				continue
-			}
-			if ix.released != nil && ix.released(id) {
-				continue // the R3 is in the per-name cache (L5)
-			}
+		if id, ok := parseIndexLine(l); ok && ix.kinds[id.GroupKind()] {
 			check = append(check, id)
 		}
 	}
-	ix.mu.Unlock()
-	if len(check) > 0 {
-		ix.queue(check, true)
-	}
+	ix.queueLocked(check, true, cur.rv)
 }
 
 // ids returns the IDs of v's lines of the PerName kinds.
@@ -931,7 +1359,7 @@ func (ix *index) rebuild(ctx context.Context) error {
 			}
 		}
 	}
-	var vouched map[ID]bool
+	var vouched vouches
 	if cur, err := ix.store.get(ctx); err == nil {
 		vouched = ix.parseVouched(cur.vouched)
 	}
@@ -939,12 +1367,12 @@ func (ix *index) rebuild(ctx context.Context) error {
 	for _, id := range SortedIDs(keysOf(named)) {
 		switch ix.carries(ctx, id) {
 		case carriesYes:
-			if vouched[id] {
+			if vouched.names(id) {
 				ix.vouchWrong(id)
 			}
 			keep = append(keep, id)
 		case carriesUnknown, carriesRBACDenied:
-			if vouched[id] {
+			if vouched.has(id) {
 				continue // vouched by an operator while it can't be read
 			}
 			keep = append(keep, id)
@@ -954,14 +1382,99 @@ func (ix *index) rebuild(ctx context.Context) error {
 	if len(unread) > 0 && ix.onUnreadable != nil {
 		ix.onUnreadable(unread)
 	}
-	// The last merge, which sets the marker in the same write.
-	return ix.merge(ctx, keep, true)
+	// The last merge, which sets the marker in the same write, unless
+	// Disown may have stripped the records it was rebuilt from: read after
+	// the list, a switch that is off had stripped none of them.
+	complete := true
+	if ix.disowning != nil && !ix.isFresh() {
+		on, err := ix.disowning(ctx)
+		if err != nil {
+			return fmt.Errorf("credential-use: reading the Disown switch to rebuild the index %s: %w", ix.ref(), err)
+		}
+		complete = !on
+	}
+	if err := ix.merge(ctx, keep, func(cur indexVersion) kindSet { return ix.mark(cur, complete) }); err != nil {
+		return err
+	}
+	if complete {
+		ix.setFresh(false)
+	}
+	return nil
+}
+
+// mark is what a rebuild sets cur's marker to: the index's kinds when it is
+// complete, and otherwise those of them it was marked with; nil when that is
+// what it is marked with already. A kind that isn't the index's any more is
+// taken out either way: its holds have no lines now, so a rebuild that covers
+// it is due before it counts again.
+func (ix *index) mark(cur indexVersion, complete bool) kindSet {
+	want := kindSet{}
+	for gk := range ix.kinds {
+		if complete || cur.marked[gk] {
+			want[gk] = true
+		}
+	}
+	if maps.Equal(want, cur.marked) {
+		return nil
+	}
+	return want
+}
+
+func (ix *index) isFresh() bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	return ix.fresh
+}
+
+func (ix *index) setFresh(fresh bool) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.fresh = fresh
+}
+
+// unsure reports whether a line of one of kinds may be missing: one whose
+// live check, or re-add, is pending, or any, until a rebuild that is due.
+func (ix *index) unsure(kinds map[schema.GroupKind]bool) bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.lost || ix.rebuilding {
+		return true
+	}
+	for id := range ix.pending {
+		if kinds[id.GroupKind()] {
+			return true
+		}
+	}
+	for l := range ix.late {
+		if kinds[l.id.GroupKind()] {
+			return true
+		}
+	}
+	return false
+}
+
+// readSure reads the index live for a count of kinds, and reports whether no
+// line of one may be missing from it (unsure), before the read and after it:
+// a re-add that was pending before it may land too late for it, and be pending
+// no more after it.
+func (ix *index) readSure(ctx context.Context, kinds map[schema.GroupKind]bool) (cur indexVersion, sure bool, err error) {
+	sure = !ix.unsure(kinds)
+	cur, err = ix.store.get(ctx)
+	return cur, sure && !ix.unsure(kinds), err
+}
+
+// switchChanged asks for the rebuild of an index without the marker, which a
+// rebuild under the switch leaves it without.
+func (ix *index) switchChanged() {
+	if s := ix.snap.Load(); s != nil && !s.rebuilt {
+		ix.markLost()
+	}
 }
 
 // needsRebuild reports whether v, a version of the index read live, lacks
-// the marker of a completed rebuild (§10.6.6): Track and the startup recheck
-// rebuild it then.
-func (ix *index) needsRebuild(v indexVersion) bool { return !v.rebuilt }
+// the marker of a completed rebuild of the index's kinds, or has one of others
+// (§10.6.6): Track and the startup recheck rebuild it then.
+func (ix *index) needsRebuild(v indexVersion) bool { return !maps.Equal(v.marked, ix.kinds) }
 
 // lostTick runs the rebuild if one is due, and reports whether one ran
 // and failed.
@@ -969,24 +1482,23 @@ func (ix *index) lostTick(ctx context.Context, now time.Time) error {
 	ix.mu.Lock()
 	due := ix.lost && !now.Before(ix.lostDue)
 	if due {
-		ix.lost = false
+		ix.lost, ix.rebuilding = false, true
 	}
 	ix.mu.Unlock()
 	if !due {
 		return nil
 	}
 	err := ix.rebuild(ctx)
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.rebuilding = false
 	if err == nil {
-		ix.mu.Lock()
 		ix.lostFails = 0
-		ix.mu.Unlock()
 		return nil
 	}
-	ix.mu.Lock()
 	ix.lost = true
 	ix.lostDue = now.Add(backoffAfter(ix.lostFails))
 	ix.lostFails++
-	ix.mu.Unlock()
 	return err
 }
 
@@ -999,13 +1511,17 @@ func backoffAfter(n int) time.Duration {
 // recheckTick makes the live checks that are due: each object that carries
 // the kind's prefix gets its line back, in one write, and a dropped line so
 // restored is reported as tampering (§10.6.6). A check that fails is retried
-// with backoff.
+// with backoff. An object queued again while its check runs is checked
+// again: what this check read may be older. The write loops and Disown both
+// make them, so one that fails stays, whatever the other's found.
 func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	ix.mu.Lock()
 	var due []ID
+	queued, tamper := map[ID]int{}, map[ID]bool{}
 	for id, r := range ix.pending {
 		if !now.Before(r.due) {
 			due = append(due, id)
+			queued[id], tamper[id] = r.queued, r.tampered
 		}
 	}
 	ix.mu.Unlock()
@@ -1014,10 +1530,26 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	}
 	due = SortedIDs(due)
 	vouched := ix.vouchedNow()
-	var back, failed, done, unread []ID
+	// The kinds whose lines Disown keeps, read live once, if a bare object's
+	// line was dropped.
+	var kept *disownSet
+	keeps := func(gk schema.GroupKind) (bool, error) {
+		if ix.keptLive == nil {
+			return false, nil
+		}
+		if kept == nil {
+			set, err := ix.keptLive(ctx)
+			if err != nil {
+				return false, err
+			}
+			kept = &set
+		}
+		return kept.covers(gk), nil
+	}
+	var back, failed, done, unread, bare []ID
 	for _, id := range due {
 		c := ix.carries(ctx, id)
-		if vouched[id] && c != carriesYes && c != carriesNot {
+		if vouched.has(id) && c != carriesYes && c != carriesNot {
 			// An operator vouched that it carries no finalizer of the
 			// kind: its dropped line stays dropped while it can't be read
 			// (§10.6.6).
@@ -1026,7 +1558,7 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		}
 		switch c {
 		case carriesYes:
-			if vouched[id] {
+			if vouched.names(id) {
 				ix.vouchWrong(id)
 			}
 			back = append(back, id)
@@ -1038,7 +1570,17 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 			back = append(back, id)
 			unread = append(unread, id)
 		case carriesNot:
-			done = append(done, id)
+			switch keep, err := keeps(id.GroupKind()); {
+			case err != nil:
+				failed = append(failed, id)
+			case keep:
+				// Disown hasn't settled: a hold may still land on it, and
+				// only its line would show it (§7.4).
+				back = append(back, id)
+				bare = append(bare, id)
+			default:
+				done = append(done, id)
+			}
 		default:
 			failed = append(failed, id)
 		}
@@ -1055,19 +1597,29 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 	for _, id := range append(done, back...) {
 		if r := ix.pending[id]; r != nil {
 			switch {
+			case slices.Contains(bare, id): // nothing is held
 			case r.tampered && slices.Contains(unread, id) && slices.Contains(back, id):
 				restoredUnread = append(restoredUnread, id)
 			case r.tampered && slices.Contains(back, id):
 				tampered = append(tampered, id)
 			}
+			if r.queued != queued[id] {
+				r.due, r.fails = time.Time{}, 0
+				continue
+			}
 			delete(ix.pending, id)
 		}
 	}
 	for _, id := range failed {
-		if r := ix.pending[id]; r != nil {
-			r.due = now.Add(backoffAfter(r.fails))
-			r.fails++
+		r := ix.pending[id]
+		if r == nil {
+			// Another check of it, which read it before this one did, has
+			// taken it meanwhile.
+			r = &recheck{tampered: tamper[id]}
+			ix.pending[id] = r
 		}
+		r.due = now.Add(backoffAfter(r.fails))
+		r.fails++
 	}
 	ix.mu.Unlock()
 	if ix.onTampered != nil {
@@ -1179,9 +1731,13 @@ func (t *Tracker) setupIndex(ctx context.Context) error {
 	cur, err := ix.store.get(ctx)
 	switch Classify(err) {
 	case ClassNone:
+		ix.setFresh(false)
 	case ClassNotFound:
 		// Created without the marker: only the rebuild below sets it.
-		if _, err := ix.store.create(ctx, nil, false); err != nil && Classify(err) != ClassAlreadyExists {
+		switch _, err := ix.store.create(ctx, nil); {
+		case Classify(err) == ClassAlreadyExists:
+			ix.setFresh(false)
+		case err != nil:
 			return ix.writeErr("creating", err)
 		}
 		cur = indexVersion{}
@@ -1326,7 +1882,13 @@ func (t *Tracker) newTrackerIndex() error {
 	}
 	ix := newIndex(t.gk, t.prefix, s.o.IndexNamespace, s.indexMaxLines(), kinds, store, t.proto.srv)
 	ix.recorded = t.recorded
-	ix.released = t.names.released
+	ix.now, ix.margin = s.clock.Now, s.landingMargin()
+	ix.disowning = func(ctx context.Context) (bool, error) {
+		set, err := t.disownLive(ctx)
+		return len(t.disownPerName(set)) > 0, err
+	}
+	ix.keptLive = t.disownKeeps
+	ix.keptCached = func(gk schema.GroupKind) bool { return keptKinds(t.crdCached()).covers(gk) }
 	ix.onLines = func(lines []string) {
 		ratio := float64(len(lines)) / float64(ix.maxLines)
 		sinkMetrics{t}.IndexFillRatio(kindLabel(t.gk), ratio)
@@ -1353,8 +1915,13 @@ func (t *Tracker) newTrackerIndex() error {
 			"kind", t.gk.String(), "index", ix.ref(), "object", id.String())
 	}
 	ix.onVouchMalformed = func(entries []string) {
-		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name> (§10.6.6)",
+		t.warn("credential-use: entries of the index's vouched annotation can't be read, and are ignored: write each as <namespace>/<Kind[.group]>/<name>, or <namespace>/<Kind[.group]>/* for every object of a kind in a namespace (§10.6.6)",
 			"kind", t.gk.String(), "index", ix.ref(), "entries", strings.Join(entries, ", "))
+	}
+	ix.onVouchForeign = func(entries []string) {
+		_, kinds, _ := strings.Cut(valueOf("", ix.kinds), "/")
+		t.warn("credential-use: entries of the index's vouched annotation are of a kind the index has no lines of, and vouch for nothing: write the kind as the index's lines name it, Kind or Kind.group, with no version (§10.6.6)",
+			"kind", t.gk.String(), "index", ix.ref(), "entries", strings.Join(entries, ", "), "kinds", kinds)
 	}
 	ix.onVouchWrong = func(id ID) {
 		t.warn("credential-use: an object vouched for in the index carries a finalizer of the kind: the vouch is wrong, and is ignored for it (§10.6.6)",
@@ -1414,12 +1981,30 @@ func (s *Shared) runIndexes(ctx context.Context) {
 				if err := t.idx.lostTick(ctx, now); err != nil {
 					t.warn("credential-use: rebuilding the index failed; it is retried", "kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
 				}
+				t.idx.lateTick(now, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
 				if err := t.idx.recheckTick(ctx, now); err != nil {
 					t.warn("credential-use: a live check for the index failed; it is retried", "kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
+				}
+				if err := t.idx.deferredTick(ctx, now); err != nil {
+					t.warn("credential-use: a prune of the index that was put off failed; it is retried", "kind", t.gk.String(), "index", t.idx.ref(), "error", err.Error())
 				}
 			}
 		}
 	}
+}
+
+// startQuiet keeps t's prunes back as its write loops start (§10.6.2): an A2
+// of the process that ran them before, which ended or lost its Lease by now,
+// may land until then.
+func (t *Tracker) startQuiet() {
+	if t.idx == nil {
+		return
+	}
+	d := t.o.TimeoutBound + t.s.landingMargin()
+	if q := t.s.hooks.pruneQuiet; q != nil {
+		d = *q
+	}
+	t.idx.startQuiet(d)
 }
 
 // recheckIndex is the write loops' startup recheck from t's index (§10.2,
@@ -1468,7 +2053,7 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 			bare = append(bare, id)
 			continue
 		default:
-			if vouched[id] {
+			if vouched.has(id) {
 				// An operator checked by hand that it carries no finalizer
 				// of the kind: while it can't be read, it is skipped,
 				// neither reported nor retried (§10.6.6).
@@ -1499,7 +2084,7 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 		}
 		if !held {
 			bare = append(bare, id)
-		} else if vouched[id] {
+		} else if vouched.names(id) {
 			// Readable, and held: treated as any other, its batch enqueued.
 			ix.vouchWrong(id)
 		}

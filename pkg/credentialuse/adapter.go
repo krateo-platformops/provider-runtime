@@ -38,10 +38,8 @@ type KindOptions struct {
 	ProbeInterval time.Duration
 	// DisownInterval and DisownPasses are Disown's pass interval and its
 	// consecutive zero passes (§7.4). An unset DisownInterval is derived
-	// from TimeoutBound, as Options.DisownInterval says: max(60s, ⌈2 ×
-	// TimeoutBound / (DisownPasses − 1)⌉), rounded up to a whole second, so
-	// a long reconcile timeout needs no setting. One set here is validated
-	// as given.
+	// from TimeoutBound, as Options.DisownInterval says, so a long reconcile
+	// timeout needs no setting. One set here is validated as given.
 	DisownInterval time.Duration
 	DisownPasses   int
 }

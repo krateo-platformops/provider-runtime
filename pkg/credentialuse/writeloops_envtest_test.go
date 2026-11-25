@@ -211,6 +211,8 @@ func newWriteRig(t *testing.T, cfg *rest.Config, so cu.SharedOptions, change fun
 	clients := clientsFor(t, cfg)
 	clients.Events = r.events
 	r.s = cu.NewShared(clients, so)
+	r.s.SetLandingMargin(0) // disownOptions' passes are short
+	r.s.SetPruneQuiet(0)
 	o := widgetOptions(r.c.enqueue)
 	o.DeletionGrace = testGrace
 	o.ProbeInterval = time.Second

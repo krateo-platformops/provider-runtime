@@ -351,6 +351,8 @@ func TestARefWithoutItsNamespaceIsMissing(t *testing.T) {
 	c := newController(t)
 	clients := clientsFor(t, env.Config)
 	s := cu.NewShared(clients, cu.SharedOptions{IndexNamespace: idx})
+	s.SetPruneQuiet(0)
+	s.SetLandingMargin(0) // disownOptions' passes are short
 	o := widgetOptions(c.enqueue)
 	o.Holder, o.ProbeInterval = gvk, time.Second
 	disownOptions(&o)
@@ -440,7 +442,7 @@ func TestARefWithoutItsNamespaceIsMissing(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if a := u.GetAnnotations(); a[cu.AnnotationHeldCount] != "0" || a[cu.AnnotationDisownSettled] != "true" {
+		if a := u.GetAnnotations(); !cu.DisownSettled(a) {
 			return fmt.Errorf("held-count %q, settled %q: %w", a[cu.AnnotationHeldCount], a[cu.AnnotationDisownSettled], cutest.ErrNotYet)
 		}
 		return nil

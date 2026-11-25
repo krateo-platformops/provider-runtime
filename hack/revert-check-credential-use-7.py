@@ -172,7 +172,7 @@ MUTANTS = [
      [("\tt.degradedLogged.forget(obj.GetUID())\n", "")]),
     # The review of PR 7.
     ("the interval isn't derived", C + "shared.go",
-     [("\t\to.DisownInterval = defaultDisownInterval(o.DisownPasses, o.TimeoutBound)", "\t\to.DisownInterval = DefaultDisownInterval")]),
+     [("\t\to.DisownInterval = defaultDisownInterval(o.DisownPasses, disownSpan(o.TimeoutBound, s.landingMargin()))", "\t\to.DisownInterval = DefaultDisownInterval")]),
     ("the derived interval isn't rounded to a second", C + "shared.go",
      [("\tif r := d % time.Second; r != 0 {\n\t\td += time.Second - r\n\t}\n", "")]),
     ("the derived interval isn't published", C + "setup.go",

@@ -167,6 +167,9 @@ func (c *credentialUse) ready(kind string) error {
 		}
 		return err
 	}
+	if c.wiring != nil {
+		return c.wiring.notWriting(kind, time.Now())
+	}
 	return nil
 }
 
@@ -476,8 +479,13 @@ type sharedWiring struct {
 	failed   chan struct{}
 	failErr  error
 
+	// writing: the write loops have started in this process.
+	writing atomic.Bool
+
 	mu      sync.Mutex
 	sources []*credentialUseSource
+	// waiting is when the first pass ran without the write loops.
+	waiting time.Time
 }
 
 func newSharedWiring(s *credentialuse.Shared) *sharedWiring {
@@ -510,6 +518,30 @@ func (w *sharedWiring) fail(err error) {
 		w.failErr = err
 		close(w.failed)
 	})
+}
+
+// notWriting is the error of a pass in a process whose write loops haven't
+// started, as on a standby whose controller doesn't need leader election:
+// what a hold owes after it (the check of an A2 whose outcome is unknown, the
+// re-adds, the releases) would wait for an election that may never come. The
+// pass does nothing. A leader's passes may start just before its write loops;
+// passes still without them sourceStartTimeout later fail the manager (§7.5;
+// the user's decision, 2026-11-23).
+func (w *sharedWiring) notWriting(kind string, now time.Time) error {
+	if w.writing.Load() {
+		return nil
+	}
+	w.mu.Lock()
+	if w.waiting.IsZero() {
+		w.waiting = now
+	}
+	waited := now.Sub(w.waiting)
+	w.mu.Unlock()
+	err := fmt.Errorf("credential-use: %s was reconciled in a process whose write loops haven't started: they need leader election, and so must its controller (leave NeedLeaderElection unset, or true)", kind)
+	if waited >= sourceStartTimeout {
+		w.fail(err)
+	}
+	return err
 }
 
 // register adds a Reconciler's source to those the write-loop runnable
@@ -604,6 +636,7 @@ func (l writeLoopsRunnable) run(ctx context.Context, writeLoops func(context.Con
 	defer cancel()
 	errc := make(chan error, 1)
 	go func() { errc <- writeLoops(ctx) }()
+	w.writing.Store(true)
 	check := max(sourceStartTimeout/8, 10*time.Millisecond)
 	tick := time.NewTicker(check)
 	defer tick.Stop()

@@ -9,7 +9,7 @@ timestamp: 2026-11-09T00:00:00Z
 
 # Credential-use finalizer
 
-**Status:** design, revision 17. Nothing is built yet; the build follows
+**Status:** design, revision 18. Nothing is built yet; the build follows
 [the implementation plan](./plan-credential-use-implementation.md), eleven
 stacked PRs that ship as v1.13.0. The
 user chose the approach: a finalizer on each Secret an object uses, the
@@ -18,7 +18,8 @@ binding here: U1 to U7 on the first review, NQ1 to NQ4 on the second, and
 IP1 to IP5 on the implementation plan. Revision 16 amends the text where
 the plan found it ambiguous once coded (§17, "Revision 16"). Revision 17
 amends the skip rule and the grace's clock after the independent review of
-the protocol's code (§17, "Revision 17").
+the protocol's code (§17, "Revision 17"). Revision 18 amends the index's
+dropped lines and Disown's settling (§17, "Revision 18").
 §17 maps every review item to the section that resolves it, and §18 holds
 what is still open.
 
@@ -590,7 +591,7 @@ While a kind isn't served:
 | R2, when the **holder** kind isn't served | the list fails, and the batch is retried. It is never "no users": a live CRD read could tell, and isn't made yet |
 | the index's checks (§10.6) | the line is kept, or put back, and the check is retried |
 | the janitor | retried with backoff |
-| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or what it can't read as a whole (a LabelScoped kind, the holders, or the index): its kind isn't served. A strip that fails is left for the next pass. A switch that can't be read fails the hold |
+| Disown (§7.4) | `held-count` is `"unknown"`, and `CredentialUseDisownUnreadable` names the object, or what it can't read as a whole (a LabelScoped kind, the holders, or the index): its kind isn't served. A strip that fails is left for the next pass, and so is the record that names the object. A switch that can't be read fails the hold |
 | `DisownPrefix` | reports the failure, and goes on with the rest |
 
 **The cost, and the way out.** A protected kind whose CRD is removed for good
@@ -627,11 +628,11 @@ finalizers left on objects that a CRD installed again would serve.
   refuses a GVK it can't map (§7.3), so a process that still names the old one
   doesn't start.
 - **A switch that lists the other kinds** lets Disown settle for them, in both
-  modes: the kind is then neither counted nor stripped (§7.4), so
-  `disown-settled` is `true` with the finalizers its objects have left on them.
+  modes: the kind is then neither counted nor stripped (§7.4), so it settles
+  with the finalizers its objects have left on them.
 - **Or say it is gone**, once the objects are. *PerName:* vouch for each object
   (§10.6.6): Disown skips what it can't read of a vouched object, so it
-  settles, and a prune drops the line. *LabelScoped:* no vouch applies; only
+  settles, and then drops the line. *LabelScoped:* no vouch applies; only
   the next way settles Disown with the switch at `all`.
 - **And take the kind out of the tracker's `Protected`, and restart**, in this
   order: stop naming it, let the holders' passes drop it from their records,
@@ -1481,8 +1482,11 @@ reconciling any holder. Part by part:
   process counts the same cluster, live. The count fields are written by
   merge patches guarded by the CRD's resourceVersion, after a GET that read
   their previous values, and `disown-settled` only when that GET read
-  `held-count` as `"0"`. A process that reads a non-zero count written
-  by another resets its own zero counter.
+  `held-count` as `"0"` and the CRD unchanged since this process's first
+  zero pass, its own writes of the count aside. A process that reads a
+  non-zero count written by another resets its own zero counter. Any write
+  of another process's starts the run over (§7.4); those of the count stop
+  once every process counts the same.
 - **Old pods in an overlapping rollout** that run a runtime without this
   feature don't acquire, and don't `Forget`. A holder whose owner finalizer
   an old pod removed, leaving the record, no longer counts as a user
@@ -1560,8 +1564,9 @@ type Options struct {
 	DisownInterval time.Duration            // §7.4; default 60s, longer when TimeoutBound needs it
 	DisownPasses   int                      // §7.4; consecutive zero passes, default 5
 	// TimeoutBound is the kind's largest reconcile or request timeout. It is
-	// required: §7.3 checks (DisownPasses − 1) × DisownInterval against twice
-	// it, derives an unset DisownInterval from it (§7.4), and publishes it.
+	// required: §7.3 checks (DisownPasses − 1) × DisownInterval against it
+	// and LandingMargin, derives an unset DisownInterval from it (§7.4), and
+	// publishes it.
 	// provider-runtime passes its timeout plus grace, 90s by default.
 	TimeoutBound   time.Duration
 	// Enqueue, Logger and Metrics are the kind's sinks; an equal Track
@@ -1569,6 +1574,7 @@ type Options struct {
 	// waits for the calls in flight, which is what guarantees that no event
 	// reaches an old sink once Track returns, so a sink that blocks would
 	// block Track.
+	// An implementation of MetricsRecorder embeds NopMetrics (§12).
 	Logger         logging.Logger
 	Metrics        MetricsRecorder
 }
@@ -1645,6 +1651,10 @@ func Resolved(ctx context.Context, ref Ref) (*unstructured.Unstructured, bool)
 
 func FinalizerName(holder schema.GroupKind, namespace string) (string, error)
 
+// DisownSettled reports whether a holder CRD's annotations say that Disown
+// has settled under its switch as it is now: §7.4's three checks.
+func DisownSettled(ann map[string]string) bool
+
 // DisownPrefix strips a deleted holder kind's holds (§7.4).
 func DisownPrefix(ctx context.Context, c Clients, o DisownPrefixOptions) (DisownReport, error)
 
@@ -1655,6 +1665,10 @@ type DisownPrefixOptions struct {
 	Names     []Ref                 // or an explicit list of objects
 	DryRun    bool                  // report only
 }
+
+// LandingMargin is how long after its context ended a write is allowed to
+// land (§7.4): a margin, not a proof.
+const LandingMargin = 60 * time.Second
 
 const (
 	AnnotationRefs = "credential-use.krateo.io/refs.v1"
@@ -1673,7 +1687,11 @@ For unstructured-runtime:
 1. **At start:** `NewShared` once per process, `Track` once per holder
    kind, then `Run(ctx)`. Run it under the leader election the controller
    already uses, because the release side writes. Kinds discovered later
-   can call `Track` at any time.
+   can call `Track` at any time. **Reconcile only in a process whose write
+   loops run** (the user's decision, 2026-11-23): they make good what a call
+   leaves owing, the check of an A2 whose outcome is unknown, the re-adds and
+   the release batches (§10.6.2). provider-runtime refuses the passes of any
+   other process (§7.5).
 2. **In every reconcile**, after reading the object and before anything
    reads a Secret or a protected object, deletion passes included:
    `a, err := t.Acquire(ctx, obj)`.
@@ -1701,9 +1719,39 @@ For unstructured-runtime:
    provider-runtime's `r.IgnoreCredentialUseRecord()` does (M6).
 6. RBAC as in §13. In PerName or PerNamePoll mode, also set
    `SharedOptions.IndexNamespace` (§10.6.1).
+7. **On a stop, wait for the calls in flight** before the process exits.
 
 "Find the last user" is the release loop's job, inside `Run`. `Users` is
 exported for diagnostics and tests.
+
+**A call outlives its context, within bounds** (decided 2026-11-23), so that a stop cuts no write short whose outcome nobody would
+then know:
+
+- **An A2 in flight** when its caller's context is cancelled goes on, with
+  the caller's values, until the caller's own deadline, or 10s after the
+  cancellation, whichever comes first. Without a deadline it is bounded by
+  `TimeoutBound`. No A2 begins once the context has ended.
+- **One `Acquire` or `BeforeEstablish`** returns at most 15s after its
+  context ended, its last A2 and the line checks after it included, however
+  many refs it holds. While the context lives, one line check takes at most
+  15s.
+- **A write of a prune, once begun, runs to its end**, within 15s, its check
+  and its re-add included (§10.6.2); a prune whose context has ended begins
+  no other. So `RunWriteLoops` returns up to about 15s after its context
+  ended.
+
+controller-runtime's manager waits for a stopping controller's workers, and
+for the write loops, within its `GracefulShutdownTimeout`, 30s by default
+for all its runnables together. Two things end a pass without that wait, as
+a kill does: a pass that takes longer than the grace period, and **a lost
+Lease**, after which controller-runtime v0.25.2 waits for nothing
+(`pkg/manager/internal.go`). Another process's write loops may run by then.
+An A2 cut short that way may have landed, or may yet, with nobody left to
+check its line at once or after the landing margin: condition 2 of §10.6.3's
+residual. With leader election its line stays meanwhile: the next leader's
+write loops prune nothing at first (§10.6.2), so what is left is a landing
+later than that. Without it, another process that has been running may prune
+the line.
 
 ### 7.3 Setup: idempotent, after start, refuses to start on error
 
@@ -1733,10 +1781,11 @@ exported for diagnostics and tests.
   - an invalid finalizer prefix;
   - an unmappable holder or protected kind;
   - an empty `OwnerFinalizers`;
-  - `(DisownPasses − 1) × DisownInterval` below twice the kind's largest
-    reconcile or request timeout, `TimeoutBound` (§7.4): an explicit
-    `DisownInterval` too short for it, or `DisownPasses` below 2. An unset
-    interval is derived so that it suffices;
+  - `(DisownPasses − 1) × DisownInterval` below `max(2 × TimeoutBound,
+    TimeoutBound + LandingMargin)`, `TimeoutBound` being the kind's largest
+    reconcile or request timeout (§7.4): an explicit `DisownInterval` too
+    short for it, or `DisownPasses` below 2. An unset interval is derived so
+    that it suffices;
   - in PerName and PerNamePoll modes: no `IndexNamespace`; **an
     `IndexNamespace` that doesn't exist**, which fails with
     `credential-use: index namespace krateo-credential-use not found: install it (installer release) before enabling PerName`;
@@ -1768,9 +1817,11 @@ exported for diagnostics and tests.
   rewriting a holder's record back and forth, and each rewrite triggers A1
   and a release batch, until the rollout finishes.
 - **Writing the CRD** (revision 16). Every CRD write (this config, the index
-  pointer of §10.6.1, and Disown's count fields of §7.4) is a GET, then a
+  pointer of §10.6.1, Disown's count fields of §7.4, and a pass's removal of
+  a stale `disown-settled` before its first A2, §7.4) is a GET, then a
   merge patch guarded by the CRD's resourceVersion. A conflict re-reads and
-  decides again. An earlier revision asked for "a patch that tests the
+  decides again; a pass's removal that conflicts instead fails the pass,
+  which is made again. An earlier revision asked for "a patch that tests the
   annotation is absent", but RFC 6902 has no test for absence: json-patch v4
   passes a `test` with `null` on a missing key only when the parent map
   exists (`gopkg.in/evanphx/json-patch.v4@v4.13.0/patch.go:677-693`), a
@@ -1820,12 +1871,22 @@ in every process:
   `Disowned`, the object proceeds as today, and nothing is ever
   `MustNotConnect`. `Disowned` is never written to the `unheld` annotation,
   which Disown strips with the record.
-- The loop strips the record from every holder of K, with a merge patch
-  guarded by resourceVersion.
-- It removes every finalizer with K's prefix, and its epoch, from every
+- The loop removes every finalizer with K's prefix, and its epoch, from every
   protected object, using R3's JSON patch without the user check. It
   removes K's marker label, and the held label where that was the last
   `credential-use.` finalizer.
+- **Then** it strips the record from every holder of K, with a merge patch
+  guarded by resourceVersion. A holder that names an object whose strip failed,
+  or one of an indexed kind that couldn't be read, keeps its record, and is
+  counted, until the next pass. Two aren't kept: a record of objects of a
+  LabelScoped kind whose list failed, since the marker label finds them still,
+  and the count is unknown meanwhile; and one that can't be parsed, which
+  names nothing. **The order matters in PerName mode**: Disown finds an object
+  by its line or by a record, so while one may be held, a record names it. With the records
+  first, a process killed between the two strips, with a prune of the same
+  object's line between its removal and its re-add, left an object held that
+  nothing named, and Disown settled over it (found in the model). The lines
+  of the objects the records name are still added before either strip (E2).
 
 **"Safe" is observable cluster-wide**, not only on one process's gauge.
 Every pass of the Disown loop, once per `DisownInterval` (60s by default,
@@ -1837,78 +1898,305 @@ makes a GET per line (§10.6). Either way it adds the holders that still
 carry a record. The result goes on the CRD:
 
 ```
+credential-use.krateo.io/disown: all            # the operator's switch
 credential-use.krateo.io/held-count: "0"
-credential-use.krateo.io/disown-settled: "true"
+credential-use.krateo.io/disown-settled: all    # the switch's value, as written
 ```
+
+**Disown has settled when all three hold** (the user's decision, 2026-11-23),
+and every reader checks all three:
+
+1. `credential-use.krateo.io/disown` is set and not empty;
+2. `credential-use.krateo.io/disown-settled` is the same string;
+3. `credential-use.krateo.io/held-count` is `"0"`.
+
+`disown-settled` alone says nothing: it may be left from another value of
+the switch, or from a switch that is gone. `credentialuse.DisownSettled(ann)`
+makes the three checks, for the runtime's own readers and for outside ones.
+The flag holds the switch's value **as written**: `Secret,ConfigMap` and
+`ConfigMap, Secret` cover the same kinds, and differ, as any whitespace,
+order or duplicate does. Rewriting the switch that way starts the run over,
+and the flag is written again under the new value. A `disown-settled` of
+`"true"`, the form before the flag held the value, is the value of no
+switch, so it reads as not settled. No release wrote it.
 
 **Settling counts consecutive zero passes, not wall-clock time** (L4). A
 process sets `disown-settled` once it has seen `DisownPasses` (**5** by
-default) consecutive passes count zero.
+default) consecutive passes of its own count zero, over a CRD that nobody
+else changed in between.
 
-- **Setup validates** `(DisownPasses − 1) × DisownInterval ≥ 2 ×
-  TimeoutBound`, the kind's largest reconcile or request timeout (L3). The
-  first pass runs as soon as the switch is seen, so `DisownPasses` zero
-  passes span one interval fewer (the review of PR 6). provider-runtime's
-  reconcile timeout plus its grace is 90s by default, so the minimum is
-  180s, and the defaults give 4 × 60s = 240s.
+- **Setup validates** `(DisownPasses − 1) × DisownInterval ≥ max(2 ×
+  TimeoutBound, TimeoutBound + LandingMargin)`, where `TimeoutBound` is the
+  kind's largest reconcile or request timeout (L3) and `LandingMargin` is a
+  constant, 60s, the API server's default `--request-timeout` (the user's
+  decision, 2026-11-23). It is a margin, not a proof: nothing bounds from
+  end to end how long after its context ended a write may still land. The
+  first pass runs as soon as the switch is seen, so
+  `DisownPasses` zero passes span one interval fewer (the review of PR 6).
+  provider-runtime's reconcile timeout plus its grace is 90s by default, so
+  the minimum is 180s, and the defaults give 4 × 60s = 240s.
+- **What the span gives.** Let T be when the switch was set. A pass that
+  read it live as off started before T, so its context ends by T +
+  `TimeoutBound`, `BeforeEstablish` included. The first zero pass starts at
+  or after T, and each next one at least an interval later: each tracker's
+  clock is read after its switch, so another tracker's slow pass can't eat
+  into the span. So the last zero pass starts at least `LandingMargin`
+  after the last such context ended, and reads a write that landed within
+  it. **A write that lands later than the margin isn't covered**: Disown may
+  already have settled.
 - **An unset `DisownInterval` is derived from `TimeoutBound`**:
-  `max(60s, ⌈2 × TimeoutBound / (DisownPasses − 1)⌉)`, rounded up to a
-  whole second, after `DisownPasses`' default (the user's decision,
-  2026-11-22). The derived value is what §7.3 publishes on the CRD, so every
+  `max(60s, ⌈span / (DisownPasses − 1)⌉)`, with the span above, rounded up
+  to a whole second, after `DisownPasses`' default (the user's decision,
+  2026-11-22; the span as of 2026-11-23). The derived value is what §7.3 publishes on the CRD, so every
   process of the kind agrees on it; an interval set explicitly is validated
   as given. For example, git-provider's 4m reconcile timeout gives a
   `TimeoutBound` of 270s, so the interval is ⌈540s / 4⌉ = 135s, and Disown
   settles in 4 × 135s = 540s after the first zero pass.
+- **A run is of passes over an unchanged CRD** (the user's decision,
+  2026-11-23). Each pass reads the CRD's resourceVersion as it starts, and
+  again as it writes its count. A CRD that changed since the pass before,
+  other than by this process's own count write, makes this pass the first
+  of a new run. One that changed during the pass, or couldn't be read as it
+  started, counts for no run. So a switch turned off and on again between
+  two passes, during which a hold may have been made, is never taken for
+  one that stayed on, whatever the informer delivered: the live reads see
+  the version. The cost is that **any other write of the CRD starts the run
+  over too**, another process's write of the count included, which stops
+  once every process counts the same.
+- **A CRD that keeps changing is reported**, since Disown then never
+  settles. Once runs that started over have gone on for two spans, `2 ×
+  (DisownPasses − 1) × DisownInterval`, with nothing held, a Warning event
+  on the CRD, `CredentialUseDisownRestarted`, and a log line name the CRD's
+  newest writer at each of those restarts, the last three managers, each with
+  its operation and subresource, at most once per 10 minutes per process.
+  managedFields keep only the last writer of each field, so the process
+  remembers them through the restarts; one that comes in after a report is
+  named by the next. **Two writers under one manager name look like one**, as
+  the two core-provider writers of a remote kind's hub copy may. `credentialuse_disown_restarts_total` counts every
+  restart. **The remedy** is to find and stop the writer. For core-provider's CRDs:
+  79 composition CRDs on krateo-057 were watched for 560s with no
+  resourceVersion change (measured, with a working control); managedFields'
+  newest write was about 14 hours old; its apply path returns early when
+  nothing changed (read); a version bump is several writes over minutes,
+  with one possibly later (read); spokes, and the hub copy of a remote kind
+  (two core-provider writers), were not measured.
 - **The `disown-settled` write tests that `held-count` is `"0"`**, so it
   can't land over a newer non-zero count.
 - **A process that reads a non-zero count** written by another process
-  resets its own zero counter.
+  resets its own zero counter. A process whose own run isn't done leaves the
+  flag of one whose run is, if it is of the switch's value now.
+- **A late hold that the release loop takes off** before any of Disown's
+  passes sees it is counted by none, and starts no run over. It needn't: the
+  run's first pass is after the switch, so its last pass starts at least
+  `LandingMargin` after every pass begun before the switch has ended, and it
+  reads the object by its line or its marker label, live.
 - **A count that can't be made**, because the index is missing or
   unreadable, or a list fails, is written as `held-count: "unknown"`. That
   clears `disown-settled`, and is never read as zero (§10.6.5).
 - **The holders' list, a LabelScoped kind's, or the index, when it can't be
   read,** keeps the count `"unknown"`, and the same event and a log line say
-  which, with the failure's class and what to do about it.
+  which, with the failure's class and what to do about it. A lost index
+  (below) has its own event, and not this one too.
 - **An object in the index or a record that can't be read** keeps the count
   `"unknown"` too, since it may carry K's finalizer (the user's decision,
   2026-11-22). Under `resourceNames` RBAC that is a Secret outside the
   grant: an ensure wrote its line before an A2 that got a 403. Disown says
   so: a Warning event on the CRD, `CredentialUseDisownUnreadable`, names
-  each such object and why (`team-a/Secret/nogrant: forbidden`), throttled
-  while the set stays the same; a log line; and the gauge
+  the first three and why (`team-a/Secret/nogrant: forbidden`), and how many
+  more, throttled while that stays the same; a log line, with the first 50;
+  and the gauge
   `credentialuse_disown_unreadable`. **The remedy:** grant `get` on the
-  object, or confirm by hand that it carries no finalizer of K and add it
-  to the index's `credential-use.krateo.io/vouched` annotation, and then,
-  optionally, remove its line. Disown then settles. Removing the line
-  alone isn't enough: the tamper check restores the line of an object it
-  can't read (§10.6.6). The vouch, the user's decision of 2026-11-22, is
-  described in §10.6.6.
+  object, or, no sooner than `TimeoutBound` + 60s after the switch was last
+  changed, when an A2 from before it has landed, confirm by hand that it
+  carries no finalizer of K and add it
+  to the index's `credential-use.krateo.io/vouched` annotation. Disown then
+  settles, and removes the line itself. **Or vouch for a kind in a
+  namespace**, with `team-a/Secret/*`, once none of its objects of that kind
+  carries K's marker label, which takes one list: a tenant may name any number
+  of objects the process can't read, in a spec or in a record it forges, and
+  each would need a vouch of its own (the user's decision, 2026-11-24). The
+  entry names its kind (decided 2026-11-25), and the event names an entry for
+  each kind and namespace it can't read in. A switch widened to another kind
+  finds what it can't read of that kind unvouched, so the count stays
+  `"unknown"` until the operator has looked at that kind too. A bare
+  `team-a/*` is malformed.
+  Removing the line by hand
+  alone does nothing: the tamper check restores the line of an object it
+  can't read (§10.6.6). The vouch, the user's decision of
+  2026-11-22, is described in §10.6.6. An object that only a record names
+  gets a line before its record is stripped (below), and one that can't be
+  read, so can't be stripped, keeps its holder's record too, and the count
+  `"unknown"`, until it can be read or is vouched for.
+- **A line this process may still owe** keeps the count `"unknown"`: while a
+  live check or a re-add of a covered kind's line is pending, the landing
+  margin of an A2 of unknown outcome is running (§10.6.2), or a rebuild is
+  due, the index read may lack a held object's line. It looks before the
+  read and after it: a re-add pending before may land too late for the read,
+  and be pending no more after it.
 
-A non-zero count clears the flag. **Downgrading the runtime, removing the interface from the connecter,
-or uninstalling is safe once `held-count` is `0` and `disown-settled` is
-`true`.** Any process can write the fields, because each one counts the
-same cluster, live.
+A non-zero or unknown count clears the flag. **Downgrading the runtime,
+removing the interface from the connecter, or uninstalling is safe once
+the three checks above hold**, but for what lands later than the margin and,
+in PerName mode, a kill inside a prune, both below. Any process can write the fields, because each one counts the same
+cluster, live.
+
+**A hold that lands later than the landing margin isn't covered.** Disown
+may have settled by then, and the index's line may be gone. P then carries a
+finalizer that nothing counts. The remedy is to remove it by hand: its exact
+form is `credential-use.<kind>.<group>/<namespace>` (§3), and after the CRD
+is gone, `DisownPrefix` with `Names` removes it.
+
+**A kill inside a prune isn't covered either** (PerName; the user's decision,
+2026-11-24). A process that is pruning P's line as the switch is set, and is
+killed between the removal and its re-add, can leave a hold that Disown
+settles over, if a Disown pass read the index between the prune's read of the
+switch and its removal, and an A2 on P lands after that pass read P. §10.6.3
+has the conditions, what the model searched, and what would close it. The
+remedy is the same.
+
+**The index's lines stay until Disown has settled** (PerName; the user's
+decision, 2026-11-23). A hold that lands late has only its line for the
+count to find it by. So:
+
+- **Only a process that has settled empties the index**, after its own run
+  of zeros, in a pass that writes the flag or reads it as already written
+  for the same switch. Then it removes only the lines it proves free in that
+  pass, after its strip: the object, read live, is gone or carries no
+  finalizer of K, or is vouched for and can't be read. Each is read once
+  more after the removal, and its line added back if it carries one
+  (§10.6.2). A line added since the pass read the index stays, for the next
+  pass.
+- **No other prune takes a line meanwhile** (E1). A prune leaves out the
+  lines of the kinds the switch covers while it is unsettled, as the CRD's
+  cache has it, and then as a live read before its removal has it; when that
+  read fails, it removes nothing. After the removal it reads the switch live
+  again: lines removed under an unsettled switch go back, and so do they all
+  when that read fails. A switch set after that read found it off has its
+  first Disown pass after the removal, and E2 adds the lines then.
+
+  So a removal under the switch began, with its write's first live read,
+  before the switch was set, and that write's 15s run from then: they cover
+  **both reads, the removal with its retries, the reads of its objects, at
+  most 50, and the re-add, as calls**, however many lines the prune has
+  (§10.6.2). The line is back within 15s of the switch, and the last pass of
+  a run starts at least `TimeoutBound` + 60s after it. The 15s don't cover
+  two things. A removal cut short may still land later, as any write
+  may (the landing margin): 75s after the switch at the latest, which the
+  last pass is past with a `TimeoutBound` of 15s or more, and the drop is
+  then found and checked as anyone's is (§10.6.6). And a re-add that fails is
+  queued: until it lands, that process's Disown counts `"unknown"`.
+- **A record's refs get their lines before the record is stripped** (E2).
+  A1 comes before A2, so an A2 that lands after the strip has its object's
+  line there for a later pass's count, even one a prune took before the
+  switch was set. An index that can't take the lines, a full one, leaves
+  those records unstripped and the count `"unknown"`, with the Warning event
+  `CredentialUseDisownIndexFull`, which names `SharedOptions.IndexMaxLines`
+  and the holders. **Each holder's lines are taken or left whole, the smallest
+  first**, in one write: a record is an annotation a tenant may write, so one
+  of 2,500 made-up names stays, and keeps the count unknown, but doesn't keep
+  another holder's record. A line added so is for any name a record carries,
+  with or without its target's consent (§11.3), since a forged record can't be
+  told from one whose consent was withdrawn; in PerName mode a line grants
+  nothing, and costs one watch and one GET a pass while the switch is
+  unsettled. **What the provisioner of PerNamePoll does with such a line is
+  open** (§10.7, not built).
+- **A dropped line of a bare object goes back** while the switch is
+  unsettled (E3), and isn't reported as tampering.
+
+**The switch turned off before it settled** leaves the lines of objects
+that carry nothing. They are pruned at the next startup recheck, or with the
+next release batch of the same object. In PerNamePoll mode their grants stay
+as long, since the grants follow the lines (§10.7.1). **A process that
+stopped between settling and emptying** leaves lines the same way; a line
+whose object carries no finalizer of K never counts as a hold.
+
+**An index lost while the switch is on** (PerName; the user's decision,
+2026-11-23). Disown strips the records a rebuild would work from, so a
+rebuild under the switch can't tell that it found every hold. It merges what
+it finds, and leaves `credential-use.krateo.io/rebuilt` unset. An index
+without that marker keeps the count `"unknown"`, with a Warning event on the
+CRD, `CredentialUseIndexLost`, which names the steps:
+
+1. **no sooner than `TimeoutBound` + 60s after the switch was last changed**,
+   when an A2 of a pass from before it has landed, list the objects of the
+   kinds the switch covers, **and of no other**, by K's marker label, which
+   needs list rights, and remove from each every finalizer with K's prefix.
+   The objects of a kind the switch doesn't cover are protected still;
+2. set `credential-use.krateo.io/vouched-index` on the index ConfigMap to
+   `<uid>/<kinds>`, its own `metadata.uid` and those kinds as the switch
+   writes them (`Secret,KubernetesTarget.core.krateo.io`), with
+   `kubectl annotate --overwrite`: a restored copy may carry another's.
+
+The count then reads the index as complete, for those kinds. The value has
+the uid so that the word holds for that ConfigMap only: a later loss, or a
+restored copy, needs a new one; and the kinds, so that a switch widened to
+another kind, whose objects nobody listed, needs a new one too. A kind once
+vouched for stays so while the switch is narrowed, or off: its later holds
+have their lines. A value without kinds vouches for none. The process never
+writes it. Turning the switch off
+lets a rebuild complete instead, from the records there are, and every
+holder's next pass adds its own lines. It also forgets the loss: an object
+whose finalizer no record names any more is then found only by its marker
+label (§10.6.6).
+
+A kind that was never tracked has nothing to lose: its first index is
+complete when its rebuild is, under the switch too. Its CRD carries neither
+the index pointer nor the published settings, which every `Track` writes.
+Three cases follow:
+
+- **The CRD created again, its index intact:** the index has the marker, and
+  its lines are counted.
+- **The CRD and the index both gone:** the new CRD can't be told from a new
+  kind's, so Disown doesn't see holds left from before. `DisownPrefix` with
+  `Names`, before the CRD is created again, is what finds them; after it,
+  they are removed by hand.
+- **A process that stopped before emptying:** above.
+
+A kind moved from LabelScoped was tracked before. With the switch set before
+its first PerName start, its new index is one without the marker, and the
+count stays `"unknown"` until it is vouched for.
+
+The rule errs on the wrong side in two cases: the second of those, and a
+kind whose writes of the settings and of the pointer were both starved
+(§7.3) at every start before the loss. It errs on the safe side in one: a
+kind's first `Track` that fails after it published the settings, or wrote the
+pointer, and before its index was rebuilt, isn't the first for the next one.
+With the switch set before that, it reports a lost index that never held
+anything, until it is vouched for, or the switch is off.
+
+**A pass never holds under a stale flag** (decided 2026-11-23).
+The live read of the switch before a pass's first A2 also reads
+`disown-settled`. One that isn't the switch's value, left from a switch that
+was removed or changed, is removed first, guarded by the version read. A
+removal that fails fails the hold: no A2. A 403 names the grant it needs,
+`patch` on the CRD. So a hold made now never stands under a flag that would
+say nothing is held, should the old value of the switch come back.
+
+**Removing the switch clears `held-count` and `disown-settled`**, at most
+once per `DisownInterval`.
 
 **Writing the fields** (L5, L6). Every write of these fields is a merge patch
 guarded by the CRD's resourceVersion, after a GET that read the previous
 values (§7.3, "Writing the CRD"). Of two processes racing, one conflicts
 and re-reads, so neither overwrites a newer count with an older one. **A
 CRD write makes the API server rebuild its OpenAPI**, so the fields are
-written only when they change. Apart from the one-time index pointer
-(§10.6), these are the only CRD writes the design makes.
+written only when they change. Apart from the one-time settings and index
+pointer (§7.3, §10.6) and the removal of a stale flag, these are the only
+CRD writes the design makes.
 
 **A Kind at zero replicas** has no tracker running, so nothing updates the
 count. Two things cover that (L5):
 
-- **`WithHeld` keeps the controller up while the switch is set and
-  `disown-settled` isn't `true`** (§11.6). Setting the switch on a
-  scaled-down Kind wakes its controller, which then performs Disown.
+- **`WithHeld` keeps the controller up while the switch is set and Disown
+  hasn't settled under it**, by the three checks (§11.6). Setting the switch
+  on a scaled-down Kind wakes its controller, which then performs Disown.
 - **An operator can check without starting it:**
   `credentialuse.DisownPrefix` with `DryRun: true` reports, from a live
   count, what it would strip, and changes nothing.
 
 **A pass that started before the switch** may still land an A2 after the
-strip. §10.6.8, interleaving 3, shows why consecutive zero passes catch it.
+strip. §10.6.8, interleaving 3, shows why consecutive zero passes catch one
+that lands within the margin.
 
 **Namespaces outside `SharedOptions.Namespaces`.** Disown doesn't use the
 caches. Its lists are live and cluster-wide, so it reaches every namespace,
@@ -1927,7 +2215,10 @@ lists the protected kinds live by K's marker label, removes every finalizer
 with the prefix `credential-use.<kind>.<group>/` and its epoch, and removes
 the labels as above. In PerName mode it takes the names from the index,
 whose location it can no longer read from the CRD, so it is given the index
-explicitly, or a name list. It only reads the index. It refuses to run while the CRD still exists,
+explicitly, or a name list. It only reads the index, whose lines stay until
+Disown has settled, so an unfinished Disown leaves it what it needs. It
+doesn't read the vouch: an object it can't read is in the error it returns,
+with the rest stripped. It refuses to run while the CRD still exists,
 even if it is being deleted, because then holders may still be deleting and
 need their refs. With `DryRun: true` it only reports. It ships as a function
 and as a one-shot Job recipe in the docs.
@@ -1983,7 +2274,17 @@ refs are needed before Connect, when there is no client yet.
   `EnableWarmup` (`pkg/config/controller.go:70-78`): sources then start
   before election, and the source's `WaitForSync` would time out on
   informers that hadn't started. Safety doesn't depend on the split
-  (§6.8);
+  (§6.8).
+
+  **A process whose write loops haven't started reconciles nothing** (the
+  user's decision, 2026-11-23). A controller with `NeedLeaderElection` set
+  to false would reconcile on a standby, and what its holds owe after them,
+  the check of an A2 whose outcome is unknown, the re-adds and the releases,
+  would wait for an election that may never come. So until the write-loops
+  runnable has started in this process, each pass of a kind with
+  credential-use does nothing and returns an error that says so, and a pass
+  still without them 2 minutes later (`sourceStartTimeout`) fails the manager. A
+  leader's passes may start just before its write loops, and are retried;
 - calls `Track`. Its `Enqueue` forwards to the queue `CredentialUseSource`
   receives in `Start`, and does nothing before then. Nothing is lost by
   that: no `Reconcile` runs before the source has started and synced, and
@@ -2926,12 +3227,38 @@ another writer's change.
      missing (a concurrent prune removed it), it adds it again. A check
      that fails fails the hold, and drops the A2's `written` entry, so the
      holder's next pass writes A2 and checks again.
+  3. **An A2 whose outcome is unknown** (no response, or a 5xx or 408; not a
+     404, which refuses it, whatever the read that follows says, §6.2) may
+     have landed, or may yet (decided 2026-11-23). It gets the
+     same check at once. Once `LandingMargin` is over, the write loops read
+     P live, and add its line back if P carries K's prefix. Its release batch
+     is enqueued both times, since its holder may be gone. These are
+     deduplicated per (P, K, N), and another such A2 starts the margin over.
+     §7.2 says how long a stop lets an A2, and its check, go on.
 - **The pruner removes after R3, then checks after.**
-  1. After a release batch's R3s, it removes, **in one write per batch**
-     (L1), the lines of the objects whose K's marker label R3 removed.
-  2. After that write succeeds, it **live-GETs each pruned P**. If P carries
-     a finalizer with K's prefix again (a concurrent A2 re-added it), it
-     adds the line back.
+  1. After a release batch's R3s, it removes, **up to 50 in one write**
+     (L1), the lines of the objects whose K's marker label R3 removed. Each
+     write has the two steps below to itself, before the next.
+  2. After that write, it **live-GETs each P whose line any attempt of it
+     tried to remove**. If P carries a finalizer with K's prefix again (a
+     concurrent A2 re-added it), it adds the line back. That covers the
+     attempts that conflicted, whose line someone else may have removed
+     meanwhile, and a removal whose response was lost.
+  3. **Once begun, a write's steps 1 and 2 run to their end**, within 15s,
+     whatever the context does: what is queued dies with the process, so a
+     stop between the removal and the re-add would lose the line. The reads
+     of step 2 are one GET a line, so 50 lines make 2.5s of a client's 20
+     calls a second, where a teardown's 1,000 would make 50s. They end 10s
+     after the write began, and the lines of the objects they didn't come to
+     are put back in the 5s that are left, a vouched object's too, which
+     fails the prune: its bare objects are retried. A write that fails ends
+     the prune, and the lines after it stay. *Liveness:* what the reads found
+     bare before the cut stays removed, so a prune always gains, unless the
+     reads before the check, or one read of it, outlast the 10s: the live read
+     of the switch before the removal, the removal with its retries on a
+     conflict, and the read after it share them with the check. Then no write
+     of it gains: its lines linger, and none is lost, until the reads are
+     faster.
 - **Lines for Missing refs** (revision 16). The line is added before A2,
   so a ref whose A2 finds NotFound has a line but no hold. It is kept while
   some holder's record names the ref: PerNamePoll needs its grant for the
@@ -2940,12 +3267,48 @@ another writer's change.
 - **The startup recheck's prune** follows the same rule. It prunes the lines
   whose objects carry no finalizer with K's prefix, and that no record names,
   then live-GETs those objects, and adds back any that now do.
-- **Disown's emptying** (§7.4) follows it too: after its strip, it prunes the
-  lines of the kinds the switch covers and live-GETs those objects. An A2
-  from a pass begun before the switch that lands after the strip keeps its
-  line, and the next pass counts it.
+- **Disown keeps the lines of the kinds it covers until it has settled**
+  (§7.4). Every prune above leaves them out, by the CRD's cache and then by a
+  live read of the switch, without which it removes nothing; and puts back
+  what it removed if a second live read, after its removal, finds the switch
+  set and unsettled, or fails.
+  Disown's own emptying, once settled, follows the pruner's rule too.
 - **A re-add that fails** after a prune is retried by the write loops until
   it lands.
+- **A prune leaves the line of a hold that may land yet** (the user's
+  decision, 2026-11-24), though nothing names its object any more, and a read
+  finds it bare:
+  1. **One the process before sent.** For `TimeoutBound` + `LandingMargin`
+     after a process's write loops start, and for a kind tracked while they
+     run after its `Track`, its prunes remove nothing. With leader election
+     the sender has ended, or lost its Lease, before they start. Disown's own
+     emptying isn't kept back: it follows a run of zeros as long as that.
+  2. **One this process sent.** No prune, Disown's emptying included, removes
+     the line of an object for which this process has an A2 in flight, from
+     before its line is ensured until that line is checked, or one of unknown
+     outcome, until the landing margin is over. It looks before the removal,
+     and after it puts back the line of one begun meanwhile.
+
+  What it leaves is pruned later, under the rules above: the write loops read
+  each object live once the wait is over, 10s for an A2 in flight. One whose
+  read fails is read again 30s later; one the authorizer refuses keeps its
+  line until a startup recheck. One of a kind the Disown switch covers is
+  dropped from what is left, and is the emptying's, once Disown has settled
+  (§7.4). What is left dies with the process, and the next startup recheck
+  finds it.
+
+  *The cost:* after every start of the write loops, a leader change included,
+  the lines of what was released linger, 150s at provider-runtime's defaults
+  (a `TimeoutBound` of 90s). Meanwhile they count towards the cap (§10.6.4),
+  and each has its watch. Once they are due the write loops read each with a
+  GET, in one tick: after a restart over 2,000 bare lines that is about 100s
+  at a client's 20 calls a second, and the index's other ticks, of every kind,
+  wait behind it, the live checks of dropped lines and the late checks among
+  them. By argument alone 70s would do with leader election,
+  since no A2 begins once its context has ended, one in flight goes on for at
+  most 10s (§7.2), and the landing margin is 60s; it isn't modelled. The 150s
+  also cover a pass that isn't cut short, but not a process that is paused past
+  its Lease and goes on later.
 
 #### 10.6.3 Why the index stays a superset
 
@@ -2987,7 +3350,186 @@ holder's next pass adds the line before A2 again (L2).
 reconciled again: a holder that never got its owner finalizer, deleted
 while every process of the kind is down, after a prune had removed its line
 and before any post-check ran. Its object then keeps the finalizer with no
-line. The marker label still finds it (§10.6.6).
+line. The marker label still finds it (§10.6.6). A pruner killed between its
+removal and its re-add leaves the same: P held, recorded, and without its
+line, until the holder's next pass adds it, or another process whose index
+watch showed the line checks its drop (§10.6.6). With Disown turned on
+meanwhile it is the third residual, below.
+
+**A hold that lands when nobody looks any more is the other residual** (the
+user's decision, 2026-11-23). The argument above needs both checks to run, the
+acquirer's after its A2 has landed. With a pruner that makes its own, an A2
+leaves P with the finalizer and without a line only when all three of these
+hold together:
+
+1. **The sender makes no check after the A2**: its response is lost, or the
+   sender is killed between the response and the check; or the check ran and
+   failed, or its add did, as on a full index, so that the line is queued in
+   memory only, and the sender ends before the write loops retry it.
+2. **The late check doesn't see the landing** (§10.6.2): the sender ends
+   within `LandingMargin`, killed, or by a stop whose grace period ends, or the
+   write lands later than `LandingMargin`.
+3. **A prune takes P's line before the landing**, because no record in the
+   pruner's holder cache names P, and neither rule of §10.6.2 for a hold that
+   may land yet keeps it. Two things are left that it can be:
+   - **a landing later than the rules wait for**, whoever prunes: later than
+     `LandingMargin` after its outcome was unknown, for the sender's own prune;
+     or than `TimeoutBound` + `LandingMargin` after the write loops of its
+     successor started;
+   - **without leader election, the prune of another process** whose write
+     loops have run for longer than that, and so have not just started.
+
+The late check can come later than the margin, behind the write loops' other
+work, as the deferred prunes after a restart (§10.6.2). That widens 2 from a
+sender that ends within the margin to one that ends before its late check. It
+doesn't widen 3: until the late check, the hold's entry keeps the line from
+this process's own prunes, its successor prunes nothing for its quiet time,
+and an A2 that lands within the margin has landed by then, so a release batch
+after it reads P held. What can still take the line is what 3 names.
+
+With one of them off, the line is there:
+
+- **without 1**, the check sees the line missing and adds it back, or the
+  pruner's check after it sees the finalizer: the two cases above;
+- **without 2**, the sender, alive, reads P after the landing and adds its
+  line back, and its release batch releases P if its holder is gone;
+- **without 3**, nothing takes the line: a prune leaves the line of an
+  object that a record in its holder cache names, and that of a hold that
+  may land yet (§10.6.2).
+
+**The remedy** is to remove the finalizer by hand. Its exact form is
+`credential-use.<kind>.<group>/<namespace>` (§3); the marker label finds the
+object (§10.6.6); and once the CRD is gone, `DisownPrefix` with `Names`
+removes it.
+
+**What the model shows** (`TestModelLateHold`). It searches one acquirer, one
+release batch of P in another process, with its prune, the holder's deletion,
+the late landing, and the late check with its batch, through the code of the
+acquirer, the release batch and the index. With all three conditions, in four
+ways (lost and killed within the margin, lost and landing past it, killed
+before the check, lost and killed before it), it reaches P held without its
+line. With any one off, in seven cases, it reaches none.
+
+- **Its bound** (under `CREDENTIALUSE_MODEL_DEEP`; CI's is in §14): every
+  schedule with at most three preemptions, and two in
+  the three cases where the late check and its batch race a holder that goes;
+  the control of the sender's own prune, below, has one.
+  Every search finished, within 2,000,000 schedules (the largest, 967,369, at
+  5a72b68). That, and a5340fe, ae2012d and 7fd7022 here and in §14, are heads of
+  this change's own branch before its rebase: the history doesn't have them.
+- **What it is given:** whether the landing is within the margin, so that the
+  late check comes after it, or not; and, in the cases without 3, that the
+  pruner sees a record naming P.
+- **What each clean case rests on:** in the cases without 1 and 2 the line
+  was taken before the landing in some schedules, and the check put it back.
+  In the four without 3 **no schedule has the line taken at all**: they show
+  that a line nothing takes is there, and nothing more.
+- **What it leaves out:** a grace period that ends is a kill there. One
+  holder, one object, one batch. A check that fails, and is queued, isn't
+  searched: what is queued dies with the process, so by reading one whose
+  sender ends before the retry is a kill before the check.
+- **The pruner's rules for a hold that may land yet** have cases of their own,
+  searched at 5a72b68 within the same bounds, the sender's own at a5340fe. Four
+  reach none with all three conditions and a landing within the margin. No
+  schedule of theirs has the line taken before the landing, and those that have
+  a prune leave it are:
+  - the sender's successor's, kept back at first: 58,436 of 66,163 with the
+    sender ended within the margin, 41,603 of 46,530 with it killed before its
+    check;
+  - the sender's own: 68,225 of 75,952 with it ended within the margin, and
+    159,536 of 385,294 with it alive.
+
+  Four still reach it, and **none is a residual of the rules' own**. Two are
+  their controls, a successor that prunes at once, which the code doesn't do:
+  33,444 of 93,215 schedules, and 27,709 of 71,700, in those two ways. The other
+  two are the margin's: a successor kept back, with the landing past the
+  margin, 36,694 of 104,931; and the sender's own prune, with the sender alive
+  and the landing past the margin, 18,990 of 54,796 with one preemption. That
+  is the 60s margin, accepted on 2026-11-23 (the user's decision), and what it
+  leaves. Another
+  process's prune is the cases above, which follow neither rule. The model has
+  no durations: "kept back" is until the landing, or past the margin not.
+
+**A kill inside a prune, as Disown is turned on**, is the third (the user's
+decision, 2026-11-24: accepted, and documented here). Here the pruner doesn't
+make its check. Disown can settle with P held when all of these come
+together:
+
+1. A process prunes P's line. It read P bare, and the prune's live read of
+   the switch, before its removal, found it off.
+2. **Between that read and the removal**, the switch is set, and a Disown
+   pass, of any process, reads the index with P's line still in it. It adds
+   no line (E2, §7.4). It finds P bare, and strips the record that names it.
+   The strip may come later.
+3. An A2 on P, of a pass that read the switch as off, lands after that
+   Disown pass has read P. If its check runs, it runs before the removal and
+   sees the line.
+4. The pruning process is killed after its removal has landed, and before
+   its re-add has.
+
+P then carries the finalizer, and neither a line nor a record names it, so
+no count finds it. One kill is enough. The sender may live, and have had its
+answer. The holder may still be there. No holder cache need be behind. What
+makes it narrow is 2: the gap is between two calls of one write of a prune,
+the live read of the switch and the removal that follows it, milliseconds in
+practice and 10s at most (§10.6.2); and the kill must come within 15s of that
+read.
+
+**Another process of the kind makes it narrower than that**, and than the
+model has it, which has no watch on the index. One whose index watch had
+shown P's line sees it dropped by a write that isn't its own, and its write
+loops, a standby's once it is elected, read P, find it held, and add the line
+back; while that check is owed its Disown counts `"unknown"` (§7.4, §10.6.6).
+So with such a process alive the path also needs its watch to be behind for a
+whole run of zeros. This is by reading the code, not from a search.
+
+- **The remedy** is the one above: the finalizer comes off by hand, the
+  marker label finds the object, and once the CRD is gone `DisownPrefix`
+  with `Names` removes it.
+- **What the model shows** (`TestModelKillInAPrune`). With one Disown
+  process, the one that dies or another, and with both, it reaches the path:
+  with the kill at the second read of the switch or at the re-add, with the
+  pruner's holder cache behind or fresh, and with the sender alive. It
+  doesn't reach it with no kill, or one before the removal or after the
+  prune; with the switch set outside that gap, or the index read outside it;
+  or with the A2 landing before the pass. The last holds every process's
+  passes until the A2 has landed, and checks that itself.
+- **Its bound:** with one Disown process, every schedule with at most two
+  preemptions; with both, at most one (searched at ae2012d, the landing before
+  the pass in 352,060 schedules). **It takes two things as given**, as
+  §14 states them: the landing margin, and a prune's bound. The dying
+  process runs one Disown pass, and the kill comes at one of the prune's own
+  calls.
+- **What would close it:** a wait. No pass strips a record before 15s (a
+  prune's bound) after its process's first pass under the switch. Every prune
+  that read the switch as off began before any process's first pass under
+  it, so has ended, or died, by then, and the line E2 then adds stays. In the
+  model no schedule reaches the path with it, within the same bound. It
+  delays the settling by one `DisownInterval`. **It changes nothing in the
+  index's format, so it can be added later.** It holds back the records a
+  pass strips, not one that goes with its holder, deleted in the same time:
+  P is then found by its line only, as in the second residual.
+
+Stripping the records before the objects would widen it: the kill could then
+also fall between a pass's two strips, with the A2 landed before the pass.
+§7.4's order is why it can't.
+
+In LabelScoped mode there is no line to lose: the marker label is in the same
+write as the finalizer.
+
+**Disown's strip and the API server's two steps** (§6.4). When the strip of
+an object being deleted, or `DisownPrefix`'s, removes its last finalizer, the
+API server stores no update: it deletes the object in a second step, with no
+precondition from the patch, so the patch's test of the resourceVersion
+doesn't reach that delete. The strip is then as exposed as R3 is. An A2 that
+lands between the steps is lost with the object. And two such writes, as
+every process's Disown makes of the same objects, can both succeed, the
+second deleting an object created again under the name meanwhile. This was
+read in `k8s.io/apiserver` v0.37.2
+(`pkg/registry/generic/registry/store.go:658-680`, `:847`, `:869-870`;
+`pkg/endpoints/handlers/patch.go:711`), and not probed for the strip. The
+index isn't exposed: its superset is of finalizers that are there, and an
+object created again carries none until an A2, which adds its line first.
 
 #### 10.6.4 Size, and when it fills (L1, L2)
 
@@ -3026,15 +3568,23 @@ line. The marker label still finds it (§10.6.6).
 `WithHeld` returns the error, so `scaletozero` keeps the controller up.
 Disown writes `held-count: "unknown"`, which is not `"0"`, so it never
 settles. The tracker keeps retrying, and recreates the index if it is
-missing (§10.6.6).
+missing (§10.6.6). Disown counts an index without the `rebuilt` marker as
+`"unknown"` too, until an operator vouches for it, or the switch is off
+(§7.4).
 
 #### 10.6.6 Tampering, deletion, and the rebuild (M2, L5)
 
 The tracker watches the ConfigMap by name (or polls it in PerNamePoll mode,
 §10.7). **A change that drops lines this process didn't remove** is checked
-line by line, except for **lines removed alongside a successful R3 the
-tracker can see**. In PerName mode, the per-object watch has already
-delivered that P lost K's last finalizer. Those need no check (L5).
+line by line, with one live GET each. **A drop is this process's own only
+when the version that shows it is the one a successful write of its own
+returned**, whichever of the event and the response comes first. Anything
+else is checked: a drop seen while a removal of the same line conflicts, or
+has an unknown outcome, may be someone else's (decided 2026-11-23). So is a drop
+the per-object watch shows released. That cache can lag a hold, and the process
+that made the drop can die before its own check after it, so L5's exception for a
+visible R3 is withdrawn (the user's decision, 2026-11-23). A drop delivered while
+its object's check runs is checked again.
 
 **Where the checks run** (IP4: the informers only read, and every write is
 in the write loops). The dropped-line checks, their restores and the
@@ -3045,7 +3595,8 @@ deletions, in a queue the write loops drain, so a standby loses nothing
 before its election. Every other dropped line therefore costs one GET per
 process that runs the write loops: N GETs per dropped line only with N
 processes and no leader election. That cost is accepted. A dropped line whose object no longer carries K's prefix
-needs nothing: another process pruned it. A dropped line whose object
+needs nothing: another process pruned it. While a Disown switch that covers
+its kind is unsettled, it goes back (§7.4, E3). A dropped line whose object
 still carries the prefix is **tampering**, or a lost race. The tracker adds
 those lines back, records a Warning event and counts
 `credentialuse_index_tampered_total`.
@@ -3053,25 +3604,67 @@ those lines back, records a Warning event and counts
 **A durable marker closes the crash window** (the user's decision,
 2026-11-22). The index carries `credential-use.krateo.io/rebuilt` only once
 a rebuild from the records has completed: the rebuild sets it in the same
-guarded write as its last merge, and every other create leaves it absent,
+guarded write as its last merge, and every create leaves it absent,
 an acquirer's or `Track`'s alike. `Track` and the startup recheck rebuild,
 by merging, an index without it. So a process that dies between creating
 the index and rebuilding it, or an acquirer that recreated a deleted index
 while no write loops ran, leaves no hold without its line past the next
 start.
 
+**The marker's value is `<uid>/<kinds>`**: the ConfigMap's own
+`metadata.uid`, so a rebuild that creates the index sets it in a second write;
+and the PerName kinds the rebuild was of, as the Disown switch lists them.
+
+- **A copy restored from a backup**, by a backup tool or by `kubectl apply`,
+  gets another uid, and may lack the lines of the holds made since: its marker
+  is another ConfigMap's, so it isn't marked, and it is rebuilt, or is a lost
+  one under Disown (§7.4).
+- **A kind moved to PerName while the index is another kind's** (decided
+  2026-11-24) is in no marker: its holds from before have no lines.
+  `Track` and the startup recheck rebuild an index whose marker isn't of
+  exactly its kinds; under a switch that covers the moved kind it is a lost
+  one for that kind, and not for the others. A kind moved away is taken out of
+  the marker by that rebuild, under the switch too, so that moved back it
+  needs one again.
+- **A copy applied or replaced over the live index**, as `kubectl replace`
+  or `apply` of a backup's contents onto the ConfigMap that still exists,
+  keeps its uid and its marker, and may lack the lines of holds made since. A
+  process whose index watch had those lines sees them dropped, and checks
+  each (above). One that hadn't, as when no process of the kind ran
+  meanwhile, is left with the restored copy's case in place, and the marker
+  doesn't show it: a hold without its line, which the marker label still
+  finds (§10.6.3's remedy).
+- **An index whose marker is `"true"`**, the value before 2026-11-24, isn't
+  marked, and is rebuilt at the next start. No tag has written one.
+
+**A rebuild under Disown doesn't set the marker** (decided 2026-11-23), unless the kind was never tracked before: the records it works
+from may be stripped. It reads the switch after its list of the holders, so
+one that is off then had stripped none of them. A change of the switch makes
+the rebuild of an index without the marker due. `vouched-index` (§7.4) is
+the operator's word in its place, for Disown's count only.
+
 **An operator's vouch** (the user's decision, 2026-11-22). The index's
 `credential-use.krateo.io/vouched` annotation lists, comma-separated and
 written as the unheld annotation names refs (`team-a/Secret/nogrant`), the
-objects an operator has checked by hand to carry no finalizer of K. Malformed
-entries are ignored, with a warning once per value. While a vouched object
+objects an operator has checked by hand to carry no finalizer of K. An entry
+`team-a/Secret/*` is every object of that kind in that namespace (the user's
+decision, 2026-11-24, for a namespace; of its kind, decided 2026-11-25); there
+is none for every namespace, nor for every kind of one, and a bare `team-a/*`
+is malformed. Malformed entries are ignored, with a warning once per value;
+so is an entry of a kind the index has no lines of, as `team-a/secret/*` or
+`team-a/Secret.v1/*`, which vouches for nothing. While a vouched object
 can't be read, Disown's count and its strip skip it, the startup recheck
 skips it after its read fails, the tamper check doesn't restore its
 dropped line, a prune may remove its line, and a rebuild doesn't add it. Every other unreadable
 line keeps the superset's rule: restored, and counted unknown. A vouched
 object that can be read and carries K's prefix is treated as any other,
-counted and kept, and the wrong vouch is logged. The process never writes
-the annotation, and its own writes keep it.
+counted and kept, and the wrong vouch is logged, when it was vouched for by
+name: a kind's vouch in a namespace says nothing of what can be read there.
+The process never writes the annotation, and its own writes keep it. **A vouch
+stays until it is removed**, and a later hold of an object that then can't be
+read, its grant revoked, isn't in the index's superset: remove a kind's vouch
+once Disown has settled. A read that a prune's bound cut short is no read: the
+vouch isn't of it, and its line goes back (§10.6.2).
 
 **If the ConfigMap is deleted**, the tracker recreates it and rebuilds it
 from the records. It lists the holders of K, takes the union of their
@@ -3119,19 +3712,22 @@ no teardown of a managed namespace can remove them.
    restart, P's line is in the index, so the recheck enqueues its batch. R2
    finds no record naming P, and R3 releases it.
 3. **A1 before the Disown switch.** A pass that began before the switch was
-   set runs A1, then the switch is set, the Disown loop strips H's record
-   and P's finalizer, and then the pass's A2 lands and re-adds the
+   set runs A1, then the switch is set, the Disown loop strips P's finalizer
+   and H's record, and then the pass's A2 lands and re-adds the
    finalizer. Two things close this:
    - every Acquire reads the switch again just before each A2, and a pass
      that sees it set stops and returns its refs unheld;
    - a pass already past that check, whose A2 lands after the strip, is
      caught by the Disown loop's next pass. The live count, from the index
      in PerName mode, sees the finalizer, so the loop strips it again, and
-     the non-zero count resets the settling.
+     the non-zero count resets the settling. The index's line is there for
+     it, since Disown keeps the lines until it has settled (§7.4).
 
-   Disown is settled only after `DisownPasses` consecutive zero passes,
-   spanning at least twice the longest reconcile (§7.4). So no pass that
-   started before the switch can still land a write after it is settled.
+   Disown is settled only after `DisownPasses` consecutive zero passes of one
+   process, the last of which starts at least `LandingMargin` after every
+   pass begun before the switch has ended (§7.4). So such a pass can't land
+   a write after it is settled, unless the write lands later than the
+   margin.
 
 ### 10.7 PerNamePoll mode: runtime-provisioned RBAC, no watches
 
@@ -3156,7 +3752,8 @@ controller named `get` and `patch`.
 - it carries only the tracker's `get` and `patch` for holds. **The
   controller's own read grants for Connect come from the provider's
   separate provisioning**, and must cover every name in the index. A line
-  is written only for a ref Connect reads, so they do.
+  is written only for a ref Connect reads, so they do, but for the lines
+  Disown adds (§7.4, E2), which may be of names they don't cover.
 
 If a GitOps tool manages the ClusterRole anyway, exclude its rules:
 
@@ -3170,8 +3767,12 @@ syncPolicy:
   syncOptions: [RespectIgnoreDifferences=true]
 ```
 
-**"As today" still holds under this split.** Disown empties the index, so
-the provisioner revokes the credential-use grants. Connect keeps working
+**"As today" still holds under this split.** Disown empties the index once
+it has settled, so the provisioner then revokes the credential-use grants.
+Until then the lines stay (§7.4), and with them the grants its strip and its
+count need. With the switch off again before it settled, the lines and the
+grants of objects that carry nothing stay until the next startup recheck.
+Connect keeps working
 through the provider's own read grants. A Degraded holder proceeds to a
 Connect that doesn't depend on the credential-use ClusterRole at all. And
 a 403 window in that ClusterRole (§10.7.1) affects only the tracker's GETs
@@ -3374,7 +3975,8 @@ Warning event on it.
   and the ref is treated as not held.
 
 **A ref without consent is not held.** The gate runs before A1, so the ref
-isn't in the record. It gets no index line, no grant and no A2, though its
+isn't in the record. It gets no index line (but from Disown, of a record
+someone forged, §7.4), no grant and no A2, though its
 `Next` is still followed (§9.4). It is listed in the holder's `unheld`
 annotation as `NotConsented` (below). Connect proceeds **exactly as today**,
 with a Warning event, `CredentialRefNotHeld`, naming the ref and the missing
@@ -3617,8 +4219,12 @@ remaining users held. **Uninstall through Disown** (§7.4). Doc text:
 
 > Before uninstalling a provider, delete its objects and wait for them to
 > go. Or annotate each holder CRD with `credential-use.krateo.io/disown=all`,
-> and wait until its `credential-use.krateo.io/held-count` is `0` and
-> `credential-use.krateo.io/disown-settled` is `true`. After an out-of-order
+> and wait until its `credential-use.krateo.io/held-count` is `0` and its
+> `credential-use.krateo.io/disown-settled` is the same string as its
+> `credential-use.krateo.io/disown`. Check all three: the switch set and not
+> empty, the flag equal to it, and the count `0`. If the count stays
+> `unknown`, or the flag doesn't come, the CRD's Warning events say why and
+> what to do (§7.4). After an out-of-order
 > uninstall, remove the objects' own finalizers first. Then, if the CRD is
 > gone, run the `DisownPrefix` Job. Otherwise remove by hand the
 > `credential-use.<kind>.<group>/<namespace>` finalizers, the annotation with
@@ -3661,9 +4267,11 @@ after which the Kind can scale down.
 
 In PerName mode, `WithHeld` reads the index instead, through
 `WithHeldIndex(index types.NamespacedName)`, and GETs lines until one still
-carries K's prefix (§10.6). In both modes, **a set Disown switch whose
-`disown-settled` isn't `true` counts as an instance** (§7.4), so the
-controller runs until Disown has finished.
+carries K's prefix (§10.6). In both modes, **a set Disown switch that hasn't
+settled counts as an instance**, by §7.4's three checks
+(`credentialuse.DisownSettled`), so the controller runs until Disown has
+finished. A `disown-settled` that isn't the switch's value, `"true"`
+included, hasn't settled it.
 
 This is a `pkg/scaletozero` change, shipped in the same release, and the
 owners (core-provider, oasgen-provider) pass the option. The marker is per
@@ -3805,12 +4413,23 @@ the first ref of the same object, which wins, §9.1),
 `credentialuse_release_rejected_total` (a release patch that failed against
 an unchanged object, §6.2), `credentialuse_disown_unreadable` (gauge, the
 objects Disown's last pass couldn't read, §7.4),
+`credentialuse_disown_restarts_total` (Disown's runs of zero passes that
+started over because the CRD changed, §7.4),
 `credentialuse_index_read_denied_total` (objects the index names that a check
 couldn't read for a 403, once each, §10.6.5) and
 `credentialuse_crd_write_starved_total`
 (§7.3). The core defines them as a
 `MetricsRecorder` interface, and `pkg/telemetry` implements it with
-OpenTelemetry.
+OpenTelemetry. **The interface grows with the metrics** (it gained
+`DisownRestarts` on 2026-11-23), so an implementation outside this module,
+such as core-provider's adapter, must embed `credentialuse.NopMetrics`.
+Otherwise one passed as `Options.Metrics` stops compiling at the next
+method, and one passed to provider-runtime's `WithMetrics`, which looks for
+the interface by a type assertion, silently records none of these metrics.
+
+**The events on the holder CRD** are Disown's, all Warnings:
+`CredentialUseDisownUnreadable`, `CredentialUseDisownIndexFull`,
+`CredentialUseIndexLost` and `CredentialUseDisownRestarted` (§7.4).
 
 ## 13. RBAC (U7)
 
@@ -3827,7 +4446,7 @@ remove the finalizers it holds there. That is a new wedge.
 | the same | `list`, `watch` | the label-scoped informer |
 | namespaces | `get`, `list`, `watch` | §5's live `deletionTimestamp` check; the metadata-only informer that sees consent on Namespaces (§11.3) |
 | the holder kind | `get`, `list`, `watch`, `patch`, `update` | the holder informer, R2's consistent list, A1 (patch), and `Forget` in the finalizer-removal Update and on its own (update) (L8) |
-| customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; the count fields and the one-time index pointer, written only on change (§7.4, §10.6) |
+| customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; the one-time settings and index pointer, the count fields, written only on change, and the removal of a stale `disown-settled` before a hold, without which that hold fails (§7.3, §7.4, §10.6) |
 | configmaps, by `resourceNames` (PerName and PerNamePoll: the kind's index) | `get`, `update`, `patch`, and `watch` in PerName mode | §10.6 |
 | configmaps, in the index namespace (`krateo-credential-use`) | `create` (it can't be scoped by name) | the tracker creates the index (§10.6.7). The namespace itself is installer's; providers never create it, and admission limits what may be written there (§10.6.1) |
 | events | `create`, `patch` | §12 |
@@ -3847,7 +4466,8 @@ user accepted, 2026-11-24).
 **A new privilege for providers with static CRDs** (L6). git-provider ships
 its CRDs in its chart, and has never needed to write them. It now needs
 `patch` on its own CRDs, by name. The writes are rare: the Disown fields
-when they change, and the PerName index pointer once. A CRD write makes the
+when they change, a stale flag's removal, and the settings and the PerName
+index pointer once. A CRD write makes the
 API server rebuild its OpenAPI, which is why nothing else writes the
 CRD.
 
@@ -4006,6 +4626,89 @@ on krateo-057:
 - Disown settles only after `DisownPasses` consecutive zero passes, and a
   re-added finalizer resets the count; a Kind at zero replicas wakes for the
   switch; `DisownPrefix` with `DryRun`.
+- **Disown under PerName** (§7.4): the lines stay until it has settled, and
+  a hold that lands late, with its response arriving or lost, is found by
+  its line; only a process whose own run is done empties the index, and only
+  lines it proves free; no prune takes a line meanwhile, whichever side of
+  its removal the switch is set on, nor with the switch unread; a full index
+  leaves the records unstripped; two processes settle apart.
+- **The residual of §10.6.3, in the model:** with its three conditions a hold
+  without its line is reached, and with any one off none is, in schedules of
+  at most three preemptions, or two where stated there. That is all "safe with
+  one off" says.
+- **Disown over the index, in the model:** the switch set, turned off and on
+  again, widened, and narrowed and widened again; the A2 answered, lost, and
+  lost with its sender killed; the holder there or gone; with a pruner whose
+  holder cache and CRD cache are behind. Two things are taken as given: **the
+  landing margin**, that a hold whose pass read the switch before the run's
+  first pass has landed, or failed, by its last; and **a prune's bound**, that
+  a prune begun before the run's first pass has ended by then, its re-add
+  included. A control per rule checks that the model sees what it is for, and
+  stops at the first schedule that does.
+- **What the index's and Disown's models are not.** Those with a Disown pass
+  have a copy of its steps, made by hand: what they run of the code is the
+  index, the acquirer, the release batch and the count's decision, and a
+  change of `disownPass` has to be made in the copies too. Only the drops'
+  model has the watch on the index, whose dropped lines a live process checks.
+  A prune here has
+  one line, so one write. The late check, a prune and Disown meet with no
+  kill only in "Disown over the index", and there in the cases with a lost
+  response and a sender that lives; two of the four with the holder gone aren't
+  exhaustive at 2, below.
+- **The bounds of the index's and Disown's models.** CI searches every
+  schedule with one preemption less than `CREDENTIALUSE_MODEL_DEEP=1` does,
+  which is the bound §10.6.3 states: the flag, 2 with two processes and 3 with
+  one (DEEP 3); the late hold, 2, and 1 with the late check and a holder that
+  goes (DEEP 3 and 2), the cases of the pruner's rules
+  included, but 1 in both for the control of the sender's own prune; Disown over
+  the index, 1 (DEEP 2); the kill inside a
+  prune, 2 for the wait that isn't built and 1 for the other clean cases (DEEP
+  2), and with two Disown processes 1 for the wait, the rest under DEEP only,
+  at 1. A search that reaches 1,000,000 schedules stops, and says that it
+  isn't exhaustive: under DEEP, two cases of Disown over the index are at 2,
+  "lost, holder gone" with the switch set, and "lost, holder gone" with it
+  off and on (every schedule with 1, and the first 1,000,000 with 2). The
+  kill's six clean cases with two Disown processes were searched whole, at 1.
+  **A search with one
+  preemption is no evidence for a case that needs two**: in "off and on" and
+  "narrowed and widened", and in the controls "a run over a changed CRD" and
+  "a pruner whose CRD cache is behind", the violation or the landing needs
+  one or two, so only DEEP covers what those controls guard.
+- **What they cost**, measured at 7fd7022 with CI's bounds on one VM size
+  (n2-standard-4), not in CI: the kill 436s to 457s over two runs (465s at
+  5a72b68), Disown
+  over the index 222s, the late hold 76s (180s at a5340fe, of which 95s are the
+  cases of the pruner's rules, new since), the flag 46s, the drops 2s. Every
+  model together took 3,970s, 66 minutes, of which these new ones are about
+  13; the older ones alone, main's at 2beee26, took 3,144s there, 52 minutes.
+  In CI's last green runs, without the new ones, the model step took 2,134s to
+  2,320s; its time with them is not measured yet. Under DEEP on that VM size:
+  the late hold 1,000s (1,486s at 5a72b68, of which 438s are those cases; the
+  control of the sender's own prune, added since, 31s at a5340fe), the
+  flag 509s, Disown over the index 5,716s, and the
+  kill's clean cases with one Disown process 626s; at ae2012d, every case of the
+  kill with two Disown processes 1,783s.
+- **A prune leaves the line of a hold that may land yet** (§10.6.2): no prune
+  but Disown's emptying for a while after the write loops start, and for a
+  kind tracked while they run; none of an A2 of this process in flight, or of
+  unknown outcome, one begun during the removal included; what is left is
+  pruned once it is due, unless it is held, named or unreadable by then, or of
+  a kind the switch covers, which is left to the emptying; the
+  index is told of an A2 before its line is ensured, and of its end after its
+  check, in a pass and before establishing.
+- **The flag** (§7.4): a switch turned off and on again while nothing runs
+  isn't settled by the old flag; no A2 under a stale flag, its removal
+  refused included; a run starts over when the CRD changes between its
+  passes or during one; the report of a CRD that keeps changing, its metric
+  and its throttle.
+- **A lost index under Disown** (§7.4): the count stays `"unknown"`, through
+  a rebuild too, until the index is vouched for by its uid; another
+  ConfigMap's uid doesn't count; a kind never tracked before settles.
+- **An A2 of unknown outcome** (§10.6.2): checked at once and after the
+  margin, its batch enqueued both times; a stop lets it, and a prune, run to
+  their bounds and no further (§7.2).
+- **A process whose write loops haven't started** does nothing in a pass,
+  and fails the manager later (§7.5).
 - A holder informer relist resets `recordSince`, and the next passes write
   (L2). The relist is forced with a 410 both on the watch-list path and on
   the List path it falls back to.
@@ -4063,7 +4766,9 @@ on krateo-057:
   `deletionGrace` refuses to start (L3). A rollout with two `RefsFunc`
   versions stays safe and is measured for churn. Both owner finalizer
   names are accepted during provider-runtime#46.
-- Tamper checks skip lines whose R3 was seen, and GET the rest (L5).
+- Tamper checks GET every dropped line once, except those of a version this
+  process's own write returned; a removal's conflict or lost response, and a
+  drop during its check, lose no line (§10.6.6).
 - **Cross-namespace consent** (§11.3): a ref without consent gets no line,
   no grant and no A2, and Connect proceeds with `CredentialRefNotHeld`;
   consent by object, by namespace, and `*` on an object; a `*` on a
@@ -4415,8 +5120,9 @@ core as §7.2 says, using `Track` after start for kinds discovered at
 runtime (§7.3).
 
 **Its holder kind is the CompositionDefinition** (the user's decision,
-2026-11-23). Compositions aren't its holders: what follows about them as holders
-is kept for a later adoption, and isn't planned.
+2026-11-23), on the hub, LabelScoped. Compositions aren't its holders: what
+follows about them as holders is kept for a later adoption, and isn't planned.
+§7.2 stands: other outside runtimes use it.
 
 - A remote CompositionDefinition names its KubernetesTarget with a `Next`
   to the kubeconfig Secret (§9.1).
@@ -4650,7 +5356,7 @@ were not retried.
 |---|---|
 | M1 The index is a true superset: Dekker on both sides with consistent reads, the startup prune included, proved on the reviewer's interleaving | §10.6.2, §10.6.3 |
 | M2 The tracker owns the index and creates it; `create` can't be scoped by name; tampering detected, merged back, with an event and a metric; an Argo CD `ignoreDifferences` note | §10.6.1, §10.6.6, §10.6.7, §13 |
-| L1 Prunes coalesced to one write per batch; a default cap of 2,000 lines; 17,000 only as the hard ceiling | §10.6.2, §10.6.4 |
+| L1 Prunes coalesced, up to 50 lines in one write; a default cap of 2,000 lines; 17,000 only as the hard ceiling | §10.6.2, §10.6.4 |
 | L2 A warning at 80%; at full, fail closed or Degraded; the remedy | §10.6.4 |
 | L3 `DisownPasses` 5; the validated span; `disown-settled` tests `held-count`; the zero counter resets on another's non-zero count | §7.4, §7.3 |
 | L4 A missing or unreadable index is an error, never "no holds" | §10.6.5, §7.4 |
@@ -4675,7 +5381,7 @@ were not retried.
 | L2 §10.6.3's sentence amended; the negligible residual | §10.6.3 |
 | L3 `DeletionGrace`, `DisownPasses`, `DisownInterval` and the timeout bound published on the CRD, write-once, start fails on disagreement; a mixed `Protected` or `RefsFunc` is safe per pass but churns; `OwnerFinalizers` is a set during provider-runtime#46 | §7.3, §7.1, §6.1 |
 | L4 A 403 on A2 is retried for about 8s; why Degraded is harmless | §10.7.2 |
-| L5 Tamper checks skip lines with a visible R3; the N× GET cost accepted | §10.6.6 |
+| L5 Tamper checks skip lines with a visible R3 (withdrawn 2026-11-23: every drop but this process's own is read); the N× GET cost accepted | §10.6.6 |
 | L6 ClusterRole updates coalesced per cycle; the cost of a 2,000-name rule, with the linear match cited | §10.7.1, §10.7.3 |
 
 **Revision 7** (cross-namespace consent and the provisioner):
@@ -4839,6 +5545,31 @@ Medium. Its points:
 | The skip proof holds as of the delivered version *rv*; the equal-lag stale pass (a process whose typed cache and informer are equally behind) is an accepted window, like L6, pinned by a test | §6.4 |
 | The exact-version rule rests on PR 3 recording `lastList` no later than a relist's versions reach the holder handler | the plan, PR 3 |
 | L3's width is about M round trips for M R3 patches in a row, not "a few milliseconds" | §6.4 |
+
+**Revision 18** (2026-11-23), after a flaky envtest showed that the index
+could lose a held object's line, and Disown settle with a finalizer left.
+A drop was taken for this process's own by the line it named, before its
+write had landed. So a removal by someone else, a conflict, or a lost
+response could swallow a drop nobody then checked. What was decided, the
+user's decisions being named as theirs in those sections:
+
+| Item | Resolved in |
+|---|---|
+| A drop is this process's own only in the version a write of its own returned; every other is read once; L5's skip of a visible R3 withdrawn | §10.6.6 |
+| Every line an attempt of a prune tried to remove is read after it; a prune, once begun, runs to its end | §10.6.2 |
+| E: the lines stay until Disown has settled; a process empties the index only after its own run of zeros, and only of lines it proves free; E1 no other prune takes a line meanwhile; E2 a record's refs get their lines before it is stripped, and a full index leaves the record; E3 a dropped line of a bare object goes back | §7.4, §10.6.2, §10.7 |
+| G: the count is `"unknown"` while this process may owe a line | §7.4 |
+| An index lost under Disown: no marker from a rebuild under the switch; `"unknown"` until `vouched-index` names the ConfigMap's uid and the kinds; three cases and two limits | §7.4, §10.6.5, §10.6.6 |
+| The landing margin: `LandingMargin`, 60s, a margin and not a proof; the span is `max(2 × TimeoutBound, TimeoutBound + LandingMargin)`; a later landing isn't covered | §7.3, §7.4, §10.6.8 |
+| F: an A2 of unknown outcome is checked at once and after the margin, with its batch; a stop doesn't cut an A2 short; every bound stated | §7.2, §10.6.2 |
+| The residual: a hold without its line needs three conditions together, shown in the model within its bound; the remedy | §10.6.3 |
+| A kill inside a prune, as Disown is turned on: accepted and documented (2026-11-24), with the wait that would close it, which can be added later | §10.6.3, §7.4 |
+| A prune leaves the line of a hold that may land yet (2026-11-24): none for `TimeoutBound` + `LandingMargin` after the write loops start, and none of an A2 of its own process; what is left of the residual is a late landing, and another process without leader election; its cost, 150s at the defaults | §10.6.2, §10.6.3, §7.2 |
+| `disown-settled` is the switch's value as written; a reader makes three checks, through `DisownSettled`; no A2 under a stale flag | §7.3, §7.4, §11.5, §11.6 |
+| A pass strips the objects before the records, and a record only once every object it names is stripped | §7.4 |
+| A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |
+| A process whose write loops haven't started refuses its passes | §7.2, §7.5 |
+| An operator's vouch of a kind in a namespace, `team-a/Secret/*` (for a namespace 2026-11-24; of its kind, decided 2026-11-25): a bare `team-a/*` is malformed, and a switch widened to another kind finds it unvouched | §7.4, §10.6.6 |
 
 ## 18. Open questions for the user
 
