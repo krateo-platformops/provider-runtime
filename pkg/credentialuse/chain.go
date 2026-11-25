@@ -95,11 +95,24 @@ func (p *protocol) refuseChains(refs []Ref) error {
 	}
 	for _, r := range refs {
 		if r.Next != nil {
-			return fmt.Errorf("%w: ref %s has a Next", ErrChainsNotSupported, r.ID())
+			return chainRefused{r.ID()}
 		}
 	}
 	return nil
 }
+
+// chainRefused is ErrChainsNotSupported for one ref. Its text quotes the ref
+// and cuts it, as an index's error does (quotedLine): a tenant may have named
+// it, and an event's note is of 1,024 bytes at most, or it is lost. The event
+// of a refusal is recorded once, so it would be lost for good; the log line
+// has the ref whole (reportOutcome).
+type chainRefused struct{ id ID }
+
+func (e chainRefused) Error() string {
+	return fmt.Sprintf("%v: ref %s has a Next", ErrChainsNotSupported, quotedLine(e.id))
+}
+
+func (chainRefused) Unwrap() error { return ErrChainsNotSupported }
 
 // resolvedKey keys the objects an Acquire read in a context (WithResolved).
 type resolvedKey struct{}

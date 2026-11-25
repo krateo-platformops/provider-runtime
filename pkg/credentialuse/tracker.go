@@ -520,8 +520,12 @@ func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
 	if !refused && !t.degradedLogged.first(key) {
 		return
 	}
-	t.warn("credential-use: the acquire failed for an established holder, which proceeds",
-		"holder", obj.GetNamespace()+"/"+obj.GetName(), "kind", t.gk.String(), "error", a.Err.Error())
+	kv := []any{"holder", obj.GetNamespace() + "/" + obj.GetName(), "kind", t.gk.String(), "error", a.Err.Error()}
+	var chain chainRefused
+	if errors.As(a.Err, &chain) {
+		kv = append(kv, "ref", chain.id.String()) // whole: the error cuts it
+	}
+	t.warn("credential-use: the acquire failed for an established holder, which proceeds", kv...)
 }
 
 // BeforeEstablish runs just before the caller adds its owner finalizer

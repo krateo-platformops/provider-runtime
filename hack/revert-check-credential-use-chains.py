@@ -55,7 +55,7 @@ APART = "\t\tif a.gateErr = err; err != nil && established {\n\t\t\tp.reports.De
 REFUSE = "\t" + IF + "\n" + APART + "\t\t" + FAIL + "\n\t}\n"
 FIRST = "\t" + IF + "\n\t\treturn fail(refused, reasonChainsRefused)\n\t}\n"
 GATE = "\t// The gate of what the record names, first (§11.3)."
-EACH = "\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())\n\t\t}\n"
+EACH = "\t\tif r.Next != nil {\n\t\t\treturn chainRefused{r.ID()}\n\t\t}\n"
 BEFORE = "\tfor _, u := range a.Unheld {\n\t\tif err := p.refuseChains([]Ref{u.Ref}); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n"
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file.
@@ -77,13 +77,13 @@ MUTANTS = [
     ("the refs without a Next are held, and the others dropped", AQ,
      [(REFUSE, "\trefs = slices.DeleteFunc(slices.Clone(refs), func(r Ref) bool { return !p.followChains && r.Next != nil })\n")]),
     ("only the first ref is checked", CH,
-     [("\tfor _, r := range refs {\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref",
-       "\tfor _, r := range refs[:min(1, len(refs))] {\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref")]),
+     [("\tfor _, r := range refs {\n\t\tif r.Next != nil {\n\t\t\treturn chainRefused",
+       "\tfor _, r := range refs[:min(1, len(refs))] {\n\t\tif r.Next != nil {\n\t\t\treturn chainRefused")]),
     ("a Guaranteed ref may have a Next", CH,
      [(EACH, sub(EACH, "r.Next != nil", "r.Next != nil && !r.Guaranteed"))]),
     ("a second ref to one object isn't checked", CH,
-     [("\tfor _, r := range refs {\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref",
-       "\tmet := map[ID]bool{}\n\tfor _, r := range refs {\n\t\tif met[r.ID()] {\n\t\t\tcontinue\n\t\t}\n\t\tmet[r.ID()] = true\n\t\tif r.Next != nil {\n\t\t\treturn fmt.Errorf(\"%w: ref")]),
+     [("\tfor _, r := range refs {\n\t\tif r.Next != nil {\n\t\t\treturn chainRefused",
+       "\tmet := map[ID]bool{}\n\tfor _, r := range refs {\n\t\tif met[r.ID()] {\n\t\t\tcontinue\n\t\t}\n\t\tmet[r.ID()] = true\n\t\tif r.Next != nil {\n\t\t\treturn chainRefused")]),
     ("a disowned kind's ref may have a Next", CH,
      [(EACH, sub(EACH, "r.Next != nil", "r.Next != nil && !p.isDisowned(r.GroupKind)"))]),
     ("a kind with Content may have a Next", CH,
@@ -106,8 +106,11 @@ MUTANTS = [
     ("a refused pass empties the record", AQ,
      [(REFUSE, sub(REFUSE, FAIL, "_, _ = p.announce(ctx, obj, nil, nil, &a)\n\t\t" + FAIL))]),
     ("the error doesn't name the ref", CH,
-     [(EACH, sub(EACH, "fmt.Errorf(\"%w: ref %s has a Next\", ErrChainsNotSupported, r.ID())", "ErrChainsNotSupported"))]),
-    ("the error doesn't wrap the sentinel", CH, [(EACH, sub(EACH, "%w", "%v"))]),
+     [(EACH, sub(EACH, "chainRefused{r.ID()}", "ErrChainsNotSupported"))]),
+    ("the error doesn't wrap the sentinel", CH,
+     [("func (chainRefused) Unwrap() error { return ErrChainsNotSupported }", "func (chainRefused) Unwrap() error { return nil }")]),
+    ("the error has the ref whole", CH, [("quotedLine(e.id))", "e.id)")]),
+    ("the log line hasn't the ref whole", TR, [("\t\tkv = append(kv, \"ref\", chain.id.String()) // whole: the error cuts it\n", "\t\t_ = chain.id\n")]),
     # Its event and log line, once per holder.
     ("a joined error is suppressed as a refusal", TR,
      [("\trefused := errors.Is(a.Err, ErrChainsNotSupported) && a.gateErr == nil\n", "\trefused := errors.Is(a.Err, ErrChainsNotSupported)\n")]),
@@ -214,6 +217,8 @@ KILLERS = {
     "a refused pass empties the record": {C: "TestARefusedChainKeepsWhatItHeld", R: "TestCredentialUseRefusesAChain"},
     "the error doesn't name the ref": {C: "TestAcquireRefusesAChainBeforeAnyWrite|TestTheTrackerRefusesChains", R: "TestCredentialUseRefusesAChain"},
     "the error doesn't wrap the sentinel": {C: "TestAcquireRefusesAChainBeforeAnyWrite", R: "TestCredentialUseRefusesAChain"},
+    "the error has the ref whole": {C: "TestARefusalOfALongName"},
+    "the log line hasn't the ref whole": {C: "TestARefusalOfALongName"},
     "the error doesn't say what to do": {C: "TestAcquireRefusesAChainBeforeAnyWrite", R: "TestCredentialUseRefusesAChain"},
     "a refused pass leaves the prober its refs": {C: "TestTheTrackerRefusesChains"},
     "a refused pass records no event": {C: "TestTheTrackerRefusesChains"},

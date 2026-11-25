@@ -1270,7 +1270,10 @@ unchanged.
 
 - `ErrChainsNotSupported`, exported, which a caller matches with
   `errors.Is` on `Acquired.Err`. It says what to do, and the error that
-  wraps it names the ref's kind, namespace and name.
+  wraps it names the ref's kind, namespace and name, quoted and cut as an
+  index line's error is (`quotedLine`): a tenant may write the name, and the
+  event of a refusal, recorded once, must fit an event's note of 1,024 bytes.
+  The log line has the ref whole.
 - **Refused in the protocol's `acquire`, before it looks at the list**, and so
   before A1 and A2: `refuseChains` over the whole list `RefsFunc` returned,
   **just after the gate of what the record names** (§11.3), which begins

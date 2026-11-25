@@ -725,6 +725,83 @@ func TestARefusedChainsGateFailureIsReported(t *testing.T) {
 	pass("refused still", 0, 2, alone)
 }
 
+// TestARefusalOfALongName: a tenant may name the ref. The refusal's event is
+// recorded once, so its note must fit: at most 1,024 bytes, or the API server
+// refuses it and the holder never says why. The note still shows which ref, on
+// one line, and the log line has the ref whole. A gate that failed too is said
+// beside it.
+func TestARefusalOfALongName(t *testing.T) {
+	const noteMax = 1024
+	ctx := context.Background()
+	for what, name := range map[string]string{
+		"a name that fits":       "outer",
+		"900 bytes":              strings.Repeat("n", 900),
+		"250,000 bytes":          strings.Repeat("n", 250_000),
+		"more bytes than runes":  strings.Repeat("é", 900),
+		"lines, and 4,000 bytes": strings.Repeat("a\nb", 1500),
+	} {
+		for _, gateFails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, the gate fails %v", what, gateFails), func(t *testing.T) {
+				r := newFakeRig(t, holderObject("ns", "h", otherSecretID()), namespaceObject("ns"), namespaceObject("other"), plainSecret("other", "s"))
+				if gateFails {
+					r.md.PrependReactor("patch", "widgets", func(clienttesting.Action) (bool, runtime.Object, error) {
+						return true, nil, apierrors.NewServiceUnavailable("the A1 is down")
+					})
+				}
+				log := &warnings{}
+				chained := SecretRef("ns", name)
+				chained.Next = func(*unstructured.Unstructured) ([]Ref, error) { return nil, nil }
+				o := r.options(widgetGK)
+				o.Logger = log
+				o.Refs = func(metav1.Object) ([]Ref, error) { return []Ref{chained}, nil }
+				tr, err := r.s.Track(ctx, o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a, err := tr.Acquire(ctx, r.currentHolder(t))
+				if err != nil || !a.Degraded || !errors.Is(a.Err, ErrChainsNotSupported) {
+					t.Fatalf("Acquire = Degraded %v, %v; want it refused", a.Degraded, err)
+				}
+				var notes []string
+				for _, e := range r.takeEvents() {
+					if note, ok := strings.CutPrefix(e, "Warning "+EventDegraded+" "); ok {
+						notes = append(notes, note)
+					}
+				}
+				if len(notes) != 1 {
+					t.Fatalf("%d events of %s, want one", len(notes), EventDegraded)
+				}
+				note := notes[0]
+				if len(note) > noteMax {
+					t.Errorf("a note of %d bytes, over the API server's %d", len(note), noteMax)
+				}
+				if want := "/Secret/ns/" + strings.SplitN(name, "\n", 2)[0]; !strings.Contains(note, quotedStart(want)) || !strings.Contains(note, "without a Next") {
+					t.Errorf("the note %.600q doesn't show the ref, or what to do", note)
+				}
+				if want := map[bool]int{true: 1}[gateFails]; strings.Count(note, "\n") != want { // errors.Join's
+					t.Errorf("the note %.600q has %d line breaks, want %d", note, strings.Count(note, "\n"), want)
+				}
+				if gateFails && !strings.Contains(note, "the A1 is down") {
+					t.Errorf("the note %.600q doesn't say why the gate failed", note)
+				}
+				if len(log.got) != 1 || !strings.Contains(log.got[0], chained.ID().String()) {
+					t.Errorf("%d log lines, or one that cuts the ref", len(log.got))
+				}
+			})
+		}
+	}
+}
+
+// quotedStart is how a quoted, cut ref starts: its first 60 ASCII bytes.
+func quotedStart(s string) string {
+	for i, r := range s {
+		if r > 126 || i >= 60 {
+			return s[:i]
+		}
+	}
+	return s
+}
+
 // TestFollowChainsReachesTheTracker: the switch the chain tests set is the
 // only difference between a tracker that refuses a chain and one that follows
 // it, here through a Guaranteed ref's lister.
