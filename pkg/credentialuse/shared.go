@@ -98,7 +98,8 @@ type ProtectedKind struct {
 	// annotation, or a hold drops fields, or is never released (§6.2).
 	GVK   schema.GroupVersionKind
 	Watch WatchMode
-	// Content keeps whole objects, for refs with a Next (§10.4).
+	// Content keeps whole objects, for refs with a Next (§10.4), which this
+	// release refuses (ErrChainsNotSupported): don't set it yet.
 	Content bool
 }
 
@@ -119,6 +120,7 @@ type Options struct {
 	// Protected are the kinds Refs may name; the default is Secret.
 	Protected []ProtectedKind
 	// MaxDepth bounds the levels of Next followed (§9.1); the default is 3.
+	// This release follows none (ErrChainsNotSupported).
 	MaxDepth int
 	// PollInterval is the holder's poll interval: it caps the backoff of a
 	// failed consent read's requeues (§11.3, M2); the default is 60s,
@@ -159,7 +161,8 @@ type Options struct {
 }
 
 // RefsFunc names what obj reads to reach its external system. It must make
-// no API calls, and is called only to acquire, never to release (§7.1).
+// no API calls, and is called only to acquire, never to release (§7.1). In
+// this release no ref it returns may have a Next (ErrChainsNotSupported).
 type RefsFunc func(obj metav1.Object) ([]Ref, error)
 
 // The defaults of Options (§7.1).
@@ -278,6 +281,10 @@ type hooks struct {
 	// released sees, and may change, what a batch's release returned, before
 	// the release loop acts on it.
 	released func(*ReleaseResult)
+	// followChains has the trackers follow chains, which production refuses
+	// in this release (ErrChainsNotSupported, §9): the tests' way to the
+	// chain code, which the next release uses.
+	followChains bool
 	// landingMargin replaces LandingMargin, so that Disown's passes can be
 	// short.
 	landingMargin *time.Duration

@@ -30,7 +30,8 @@ type KindOptions struct {
 	// LabelScoped. A custom resource that serves several versions must
 	// convert without losing a field, a label or an annotation (§6.2).
 	Protected []ProtectedKind
-	// MaxDepth bounds the levels of Next followed (§9.1).
+	// MaxDepth bounds the levels of Next followed (§9.1). This release
+	// follows none (ErrChainsNotSupported).
 	MaxDepth int
 	// DeletionGrace is §5's grace.
 	DeletionGrace time.Duration

@@ -20,6 +20,12 @@ the plan found it ambiguous once coded (§17, "Revision 16"). Revision 17
 amends the skip rule and the grace's clock after the independent review of
 the protocol's code (§17, "Revision 17"). Revision 18 amends the index's
 dropped lines and Disown's settling (§17, "Revision 18").
+
+**The first tag holds direct refs only** (the user's decision, 2026-11-24).
+A ref with a `Next`, a chain, is refused with a clear error, before the pass
+looks at the list. §9 says what that looks like and why; the chain design in §9 and
+§10.4 is built and tested, and ships in the next release.
+
 §17 maps every review item to the section that resolves it, and §18 holds
 what is still open.
 
@@ -227,8 +233,11 @@ new key (`refs.v2`), and a reader that knows both reads both.
 
 **A record that can't be parsed counts as a user** of every protected
 object its namespace's check considers. It fails safe, and is logged with
-the holder's name. The holder's next acquire overwrites it with a valid
-record.
+the holder's name. The holder's next acquire that reaches its last A1
+overwrites it with a valid record. One that ends before it doesn't: a `Refs`
+error, a holder in the index namespace, a refused chain (§9). The record then
+stays unparseable, and keeps what it counts as used, as a paused holder's
+record does (§11.3).
 
 **Annotation, not status.** Every kind has annotations, unstructured
 objects included. Annotations survive backup, restore and GitOps re-applies
@@ -1522,17 +1531,22 @@ type Ref struct {
 	Namespace string           // empty for a cluster-scoped object
 	Name      string
 
-	// Next, when set, names the refs found inside this object. The tracker
-	// calls it after the object is held, with the object it read (§9),
-	// without managedFields and status (§10.4). It returns an error when the
-	// object lacks what it reads, never nil refs (§9.1).
+	// Next must be nil in this release: Acquire refuses a list with a ref
+	// that has one, with ErrChainsNotSupported (§9). In the next release it
+	// names the refs found inside this object. The tracker calls it after
+	// the object is held, with the object it read, without managedFields and
+	// status (§10.4). It returns an error when the object lacks what it
+	// reads, never nil refs (§9.1).
 	Next func(obj *unstructured.Unstructured) ([]Ref, error)
 
 	// Guaranteed declares that the object's own controller already keeps it
-	// alive while the holder exists (§9.3). It is neither recorded nor held;
-	// its Next is still followed.
+	// alive while the holder exists (§9.3). It is neither recorded nor held.
+	// In the next release, its Next is still followed.
 	Guaranteed bool
 }
+
+// ErrChainsNotSupported is Acquired.Err when a ref has a Next (§9).
+var ErrChainsNotSupported error
 
 func SecretRef(namespace, name string) Ref
 
@@ -1557,7 +1571,7 @@ type Options struct {
 	OwnerFinalizers []string                // accepted owner finalizers on holders (§6.1; two during provider-runtime#46)
 	Refs           RefsFunc
 	Protected      []ProtectedKind          // kinds Refs and Next may name; default: Secret
-	MaxDepth       int                      // levels of Next followed; default 3
+	MaxDepth       int                      // levels of Next followed; default 3 (unused in this release, §9)
 	Enqueue        func(holder types.NamespacedName) // the caller's queue (§10.2)
 	DeletionGrace  time.Duration            // §5; default 60s
 	ProbeInterval  time.Duration            // missing-ref prober; default 15s (§10.3)
@@ -1586,6 +1600,7 @@ type ProtectedKind struct {
 	Watch WatchMode // LabelScoped (default), PerName (§10.6) or PerNamePoll (§10.7)
 	// Content keeps whole objects, not metadata, in this kind's cache, for
 	// refs with a Next. For Secrets this is opt-in and holds Secret data (§10.4).
+	// Don't set it in this release: nothing needs it (§9).
 	Content bool
 }
 
@@ -1704,7 +1719,10 @@ For unstructured-runtime:
      with no failure backoff.
    - Otherwise, if `a.RetryAfter` is set (a failed live consent read that
      kept its hold, §11.3), proceed, and requeue after it.
-   - Pass `WithResolved(ctx, a)` to whatever reads the chain.
+   - Pass `WithResolved(ctx, a)` to whatever reads the chain. In this
+     release it carries nothing, because a ref with a `Next` is refused: the
+     pass's `a.Err` is `ErrChainsNotSupported`, with `a.MustNotConnect` or
+     `a.Degraded` as for any other failure (§9).
 3. **Just before adding its own finalizer:** `t.BeforeEstablish(ctx, obj, a)`.
    It live-reads refs that were Missing and holds any that now exist. On an
    error, don't add the finalizer this pass.
@@ -2411,6 +2429,9 @@ per key. In order:
      event (`CredentialUseDegraded`), count the metric, and proceed to
      Connect as today. It never gets `MustNotConnect`. An A2 rejected as
      Deleting (422) is Degraded in the same way (§11.4).
+   - **A ref with a `Next`** is such an error in this release
+     (`ErrChainsNotSupported`, §9), for both, before A1, and after the gate
+     of what the record names (§11.3). Its event is recorded once (§9).
    - **`a.Pending` and `a.RetryAfter`** (IP2). In the RBAC-propagation
      window of §10.7.2 (`a.Pending`), the pass stops before Connect, new and
      established holders alike, writes nothing, and
@@ -2449,6 +2470,107 @@ governor. They take no local slot and don't raise the ceiling. A teardown
 must not queue behind a saturated external API.
 
 ## 9. Chains: object → intermediate object → Secret (U1)
+
+**Not in this release: a chain is refused** (the user's decision,
+2026-11-24). The first tag holds only the objects the refs name themselves.
+Reviews of the built feature found defects that only chains reach. So the
+chain code stays, and stays tested, but nothing in production reaches it:
+`Acquire` refuses a list in which any ref has a `Next`, with
+`ErrChainsNotSupported`. The next release removes the refusal. Until then:
+
+- **What to do.** Name each object Connect reads as a ref of its own, with a
+  nil `Next`. An intermediate object may be named so, and is held, but what
+  it leads to isn't. A Secret whose name is only inside another object can't
+  be named, so it stays unheld, as before credential-use. `CredentialRefs`
+  must leave it out, and Connect reads the intermediate object itself, as it
+  does today, because `Resolved` has nothing. §11.9's checks then report that
+  read, rightly: `CredentialUseCheckingReader` logs and counts it, and
+  `AssertCredentialRefsCover` fails on a fixture whose Connect makes it. **So
+  the helper can't be used for such a fixture in this release**: leave the
+  fixture out, and test its refs directly. A list of reads to allow would be
+  an exported argument that the next release makes useless.
+- **What is refused.** The whole list, its direct refs with it, when any ref
+  in it has a `Next`: a Secret's, a `Guaranteed` ref's (§9.3), one in another
+  namespace, one of a kind the Disown switch covers, or the second of two
+  refs to one object. Holding the direct refs alone would write a record
+  that drops what a chain held, and would look like protection. A
+  `Guaranteed` ref without a `Next` is accepted, as before.
+- **Where.** In the protocol's `acquire`, before it looks at the list: before
+  A1 and A2, and before any read that the list asks for. Every pass of every
+  runtime goes through it, and it is the one place that follows a `Next`. A
+  list that passes has no `Next`, so no pass ever finds a ref that way:
+  nothing deeper is left to refuse. `BeforeEstablish` refuses the same refs,
+  and a pass that was refused, so that nothing reaches A2 that way either.
+  `AssertCredentialRefsCover` (§11.9) fails a connecter that names one.
+- **What runs before it: the gate of what the record names** (§11.3), which
+  begins every pass, whatever the pass comes to. It asks about the refs the
+  record names in another namespace, never about the refs `RefsFunc` named,
+  so a chain makes no call of its own. The one write it may make drops a ref
+  whose target withdrew consent. **A holder whose record names no such ref, as
+  a new one's, makes no call at all.** Whoever edits a holder can write its
+  record, and that costs a refused pass what it costs any pass: §11.3's 16
+  refs and 5s, and no more. Were the refusal first, a tenant could set the
+  field that makes the provider return a `Next`, and keep another namespace's
+  Secret held against its owner's withdrawal (found in the review of the
+  refusal).
+- **It isn't an option.** Only this repository's tests can turn chains on,
+  through an unexported field. No option, environment variable or exported
+  function does.
+
+| The holder | What it sees |
+|---|---|
+| New (no owner finalizer), with no record that names a ref in another namespace | `MustNotConnect`. No call by the core, no Connect, no finalizer. Synced=False/ReconcileError with the error, which names the ref; Ready=NotObserved; backoff |
+| New, with a record that names a ref in another namespace | The same, after the gate, which may write the drop of a withdrawn ref. It isn't established, but it counts as a user (§6.1), so without the gate it would keep that ref held against its owner |
+| Established | `Degraded`. Nothing written but the gate's drop, if any: the rest of its record, its `unheld` list and its holds stay as they are; a record that can't be parsed stays so (§4). A release reads that same record, so it takes only what §5 always lets it take. On a pass whose Synced is True/ReconcileSuccess, its message says `credential-use: refs refused, not held: <the error, cut> (§9)`, for as long as it is refused; any other Synced (an Observe or Connect error, a policy report, a deferral, a paused holder) says its own outcome instead (decided 2026-11-25; §12). `CredentialUseDegraded` and a log line once (below), the counter every pass, under the reason `ChainsNotSupported`, and the gauge `credentialuse_refused_holders`. It connects as today, and `Resolved` finds nothing |
+| Established and being deleted | The same, then its external Delete runs, and `Forget` removes the record in the write that removes its finalizer, which releases what it held |
+| Being deleted, without an owner finalizer | provider-runtime doesn't acquire on it (§8 step 5), so nothing is refused |
+| It names no `Next` again | The next pass writes the exact record, holds what it names, and releases the rest |
+
+What an established holder loses while it is refused is upkeep, and, but for
+the two cases below, no hold: a
+ref that is new, or an object recreated since, isn't held, a lost finalizer
+isn't written again, and the missing-ref prober forgets the holder (§10.3),
+since no pass of it could hold what the prober finds. A withdrawn consent is
+acted on, as in every pass (above); **that hold is one that goes and doesn't
+come back while the holder is refused**, if the owner grants consent again.
+
+**The event is recorded once per holder**, with the log line, until a pass of
+it isn't degraded, or it is forgotten. That is of a refusal alone: when the
+gate's write fails in a refused pass, the pass is reported as any failure,
+under the event throttle, and counts `Announce` as well, since a withdrawn ref
+stays held meanwhile. This state lasts until the provider or
+the object changes, so the event throttle alone would let one through per
+holder every 10 minutes for as long: 17 a second for 10,000 holders. A restart
+records each once more. **The event doesn't last**: the API server drops it
+after its `--event-ttl`, about an hour, and client-go's broadcaster queues
+1,000 events and drops the rest, so after a restart with many refused holders
+most of theirs are never sent. **What lasts** is Synced's message on the holder,
+which a refused pass sets in every status write it makes, so it costs no write
+of its own and keeps its transition time (a pass that stops at the trace marker,
+or on a conflict, writes no status, and changes nothing); the gauge
+`credentialuse_refused_holders`, which counts the holders whose last pass in
+this process was refused, new and established, and drops one at a pass that
+isn't refused, at `Forget` and at the holder's deletion; and the counter, every
+pass. A new holder's message is its condition's, as for any failure. The log
+line carries the ref whole, for an established holder only, and unbounded:
+however long the name, and with its line breaks unless the logger escapes them.
+
+**Disown (§7.4) is no remedy for a refused new holder**: it doesn't connect
+while its refs have a `Next`, whatever the switch covers. An established one
+isn't in Disown's way: the loop strips its record and the finalizers, a
+refused pass writes neither back, and the switch settles. Nor does a refused
+pass write them back once the switch is removed: those holds are the other
+ones that go and don't come back while it is refused.
+
+**A holder that held through a chain under an older build** is the
+established row, or the new one if it hadn't got its finalizer. No release
+had chains, so there is none outside a development cluster. Its record names
+the intermediate object and the Secret. Both stay held until it is deleted,
+or until its refs name no `Next`. A re-point of the intermediate object
+isn't followed: the old Secret stays held, and the new one isn't.
+
+The rest of this section, and §10.4, describe chains as the next release has
+them.
 
 core-provider's remote CompositionDefinition resolves a KubernetesTarget in
 Connect, and the target names a kubeconfig Secret. oasgen's objects name a
@@ -2537,7 +2659,9 @@ let that data stop the holder. Each conflict is a warning in the log, naming
 the holder, the object and what was asked, and counts in
 `credentialuse_refs_conflicting_total{asked}`, `asked` being `hold` or `next`
 (§12). **In a provider's tests it is refused**: `AssertCredentialRefsCover`
-fails on a conflict (§11.9).
+fails on a conflict (§11.9). While chains are refused (§9, above), only a hold
+can conflict: a list with a `Next` is refused before any ref is met, and that
+pass reports no conflict, though its list may have one.
 
 A hold of a kind the Disown switch covers is not reported, since no ref of it
 is held (§7.4). Any other hold asked for is, even without its target's consent
@@ -2622,6 +2746,9 @@ window matters only if the newly named object is deleted inside it, and §5
 already makes that recoverable unless its namespace is being deleted.
 
 ### 9.3 Refs whose lifetime is already guaranteed (C2)
+
+In this release a `Guaranteed` ref must have no `Next` (§9); what is said of
+its `Next` here is the next release's.
 
 A CompositionDefinition refuses Delete while compositions exist
 (`ErrCompositionStillExist`). So for a composition, the CompositionDefinition
@@ -2826,6 +2953,9 @@ finalizer is written (§6.7). This is how U5's "holders re-acquire the new
 incarnation" happens.
 
 ### 10.4 Content caches, for kinds with a `Next` (R9)
+
+Nothing needs `Content` in this release, which refuses a `Next` (§9). A kind
+that sets it still costs the memory, and the exposure, described here.
 
 `Next` needs the object's content, not just metadata. For a protected kind
 whose refs have a `Next`, `ProtectedKind.Content` makes that kind's informer
@@ -3925,8 +4055,11 @@ documented, not hidden.
 The next pass computes the new set. A1 writes it, adding new refs and
 dropping old ones, and A2 holds the new ones. Dropping a ref is always safe,
 because the holder will never read it again. The holder's update event maps
-the dropped refs to a release batch. A ref reached through `Next` changes
-the same way when an intermediate changes (§9.2).
+the dropped refs to a release batch. In the next release, a ref reached
+through `Next` changes the same way when an intermediate changes (§9.2). In
+this one, an update that adds a ref with a `Next` is refused whole (§9): the
+record, and so the holds, stay those of the refs before it, but for what
+§11.3's gate drops.
 
 ### 11.2 A Secret that doesn't exist yet
 
@@ -4080,8 +4213,8 @@ them, for as long as the holder stayed so; and with the target's namespace
 being deleted, its teardown waited on a holder that no longer named the
 target, and the owner's recovery, withdrawing consent, did nothing. So every
 pass **begins** by gating each ref in another namespace that the record names,
-before its refs are named and whatever it then comes to, a `Refs` error and a
-holder in the index namespace included:
+before its refs are named and whatever it then comes to, a `Refs` error, a
+refused chain (§9) and a holder in the index namespace included:
 
 - **a cached yes serves**, so it costs no call in the steady state. That holds
   on a deleting pass too, for the refs the pass doesn't name: their withdrawal
@@ -4272,7 +4405,10 @@ reconciles. That is a limit (the user's decision, 2026-11-24). **The way out:**
 Nor is anything dropped while a holder is edited faster than a pass takes, since
 every A1 then conflicts, or while the API server refuses the A1 for a cause other
 than its size (a 422 from a schema or a webhook), or while every pass's context
-ends before its A1. The gate leaves that half of what the context has.
+ends before its A1. The gate leaves that half of what the context has. Nor is
+anything dropped from a record that can't be parsed while every pass ends
+before its last A1 (§4): it names nothing to ask about, and only that A1 writes
+a valid one. That is no wider than a paused holder.
 
 **A ref that only the record keeps, recreated without the annotation, is
 dropped.** A two-step apply (the object, then its annotation) of a target that
@@ -4553,11 +4689,13 @@ These are the cases the bookkeeping misses, and how each is handled:
      against a recording client. It fails when Connect reads a Secret, or a
      `Protected` kind, that isn't in the object's refs after `Next`. It also
      fails when a path resolves to nothing, so a mistyped path doesn't
-     silently protect nothing (§16.2). Given the kind's `KindOptions`, it
-     follows refs as the tracker does when it holds them all: to the kind's
-     `MaxDepth`, in the tracker's order, and with the object as the tracker
-     gives it to a `Next` and to `Resolved`, without `managedFields` and
-     `status` (`credentialuse.NextObject`). It fails on what would stop a
+     silently protect nothing (§16.2). In this release it fails on a ref
+     with a `Next`, before it connects (§9). In the next, given the kind's
+     `KindOptions`, it follows refs as the tracker does when it holds them
+     all: to the kind's `MaxDepth`, in the tracker's order, and with the
+     object as the tracker gives it to a `Next` and to `Resolved`, without
+     `managedFields` and `status` (`credentialuse.NextObject`). It fails on
+     what would stop a
      holder, a chain that is too deep, a held ref with a `Next` of a kind
      without `Content`, or a `Next`'s error; and on refs of one object that
      conflict (§9.1), which would not. (TODO, for the release with chains:
@@ -4569,7 +4707,8 @@ These are the cases the bookkeeping misses, and how each is handled:
      controller-runtime client (§7.1), so it exposes `t.CheckRead`, and
      outside runtimes wrap their own clients around it.
 3. **`RefsFunc` or `Next` fails:** fail closed for a new holder, open for an
-   established one (§8). Release never calls them.
+   established one (§8). Release never calls them. A `Next` is never called
+   in this release: a list that has one is refused in the same way (§9).
 4. **The record removed or edited by hand:** the next pass re-announces and
    re-writes. In between, a releaser can miss the holder. That is
    documented as "don't edit `credential-use.krateo.io/refs.v1`".
@@ -4623,6 +4762,22 @@ For example:
 successful pass, and never to a failure that isn't in Connect or Observe.
 It is message text, not a new condition (U4).
 
+**The one exception: a refused chain** (decided 2026-11-25). While an
+established holder's refs are refused (§9), on a pass whose Synced is
+True/ReconcileSuccess its message is exactly
+`credential-use: refs refused, not held: <the refusal's error> (§9)`, on one
+line: the error quotes and cuts the ref. Any other Synced (an Observe or
+Connect error, a policy report, a deferral, a paused holder) says its own
+outcome instead. The message is set in every status write the pass makes, so it
+costs no write of its own, and keeps the condition's transition time while it
+doesn't change; a pass that writes no status (it stops at the trace marker, or
+on an Acquire or a status conflict) changes nothing. The first pass that isn't refused,
+a failed one included, takes it off. A refusal lasts until the provider or
+the object changes, and its event doesn't (§9), so the object itself says it.
+A new holder's Synced is False/ReconcileError with the error, as for any
+failure. Outside runtimes, in neutral terms: report a refused chain durably on
+the object, not only as an event.
+
 **Outside runtimes**, in neutral terms: when a pass fails because the
 object's credentials or the objects that lead to them can't be read, and
 the object's `unheld` annotation is non-empty, add to the failure you
@@ -4639,10 +4794,14 @@ separate, and is written on the CRD (§7.4).
 **The metrics**, all labelled `holder_kind`:
 `credentialuse_held_objects` and `credentialuse_waiting_objects` (gauges),
 `credentialuse_index_fill_ratio` (gauge, PerName and PerNamePoll),
+`credentialuse_refused_holders` (gauge, the holders whose last pass in this
+process was refused for a chain, §9; decided 2026-11-25),
 `credentialuse_degraded_total{reason}` (every fail-open of §8, which earlier
-revisions counted without naming), `credentialuse_refs_not_held_total`,
+revisions counted without naming; a refused chain has a reason of its own,
+`ChainsNotSupported`, §9), `credentialuse_refs_not_held_total`,
 `credentialuse_refs_conflicting_total{asked}` (refs that asked for more than
-the first ref of the same object, which wins, §9.1),
+the first ref of the same object, which wins, §9.1; `asked="next"` can't occur
+while chains are refused, §9),
 `credentialuse_consent_withdrawn_total`, `credentialuse_refs_read_denied_total`,
 `credentialuse_index_tampered_total`,
 `credentialuse_unrecorded_reads_total` (§11.9),
@@ -4754,6 +4913,26 @@ PerNamePoll provisioner grants only `get` and `patch`, which it holds.
 
 Doc text for consumers:
 
+> **This release holds direct refs only.** Every ref your `CredentialRefs`
+> (or `RefsFunc`) returns must have a nil `Next`: name each Secret, and each
+> other object Connect reads, as a ref of its own. If any ref has a `Next`,
+> the whole list is refused with `credentialuse.ErrChainsNotSupported`: a new
+> object doesn't connect and reports `Synced=False`; an existing one keeps
+> working, with `Synced=True` whose message says
+> `credential-use: refs refused, not held: …` for as long as it lasts, one
+> `CredentialUseDegraded` event, which expires, and the gauge
+> `credentialuse_refused_holders`; it keeps what it already holds, but
+> **nothing new is held, its direct refs included**. On an upgrade
+> to credential-use, an existing object has no record yet, so it holds
+> nothing. Disown doesn't let a refused new object connect. A Secret whose
+> name is only inside another object can't be named, so leave it out: it
+> isn't protected, as before. Read that other object in Connect as you do
+> today; `credentialuse.Resolved` returns nothing. A later release follows
+> `Next`, and will accept it. Run `reconcilertest.AssertCredentialRefsCover`
+> in your tests: it fails on a `Next`, and on a Secret that Connect reads and
+> the refs don't name, so it can't be used for a fixture whose Connect reads
+> a Secret through another object.
+>
 > If your connecter implements `CredentialRefsProvider` (or your runtime
 > calls `credentialuse`), grant, in a ClusterRole bound with a
 > ClusterRoleBinding: `get`, `list`, `watch` and `patch` on `secrets` and on
@@ -4842,7 +5021,14 @@ on krateo-057:
 - A Secret already being deleted gets a new holder with `MustNotConnect`,
   and that holder deletes freely.
 - A chain Widget → Target → Secret, with the Target deleted first in the
-  teardown; a re-pointed Target enqueues its holders.
+  teardown; a re-pointed Target enqueues its holders. These, and every other
+  test of a chain, set the tests' switch (§9).
+- A chain is refused as production builds a tracker (§9): no call at all for
+  a record that names no ref in another namespace, for a new, an established
+  and a deleting holder, wherever in the list the `Next` is; a recorded ref
+  elsewhere is gated all the same, and its withdrawal releases it, with the
+  refused chain among the cases of §11.3's gate; a holder keeps what it held and can finish its deletion; a list
+  without a `Next` is the whole chain; no production code sets the switch.
 - `kubectl replace`-style stripping of the finalizer and label enqueues
   holders, and they write again.
 - A label-scoped watch delivers losing the label as a deletion (§2).
@@ -5306,7 +5492,10 @@ writing for #510:
 - **Per-object Secrets** resolved from paths in the object's own spec come
   straight from `RefsFunc`.
 - **The Configuration-level Secret** is a chain: a ref to the Configuration,
-  with a `Next` that names its Secret. The Configuration is held too.
+  with a `Next` that names its Secret. The Configuration is held too. **The
+  first tag refuses chains (§9)**: until the next release, this Secret is
+  unheld, unless the collector can name it without reading the
+  Configuration through the API.
 - **`RefsFunc` needs the RestDefinition** that describes the paths to be
   loaded and readable. It is called only on acquire. **Release never calls
   it**, and must not, or the deadlock comes back one level out: a teardown
@@ -5364,6 +5553,9 @@ runtime (§7.3).
 follows about them as holders is kept for a later adoption, and isn't planned.
 §7.2 stands: other outside runtimes use it.
 
+- **The first tag holds direct refs only (§9).** What a CompositionDefinition
+  names itself, such as its own chart `passwordRef`, can be held with it.
+  The two items below need the next release.
 - A remote CompositionDefinition names its KubernetesTarget with a `Next`
   to the kubeconfig Secret (§9.1).
 - Compositions name their CompositionDefinition as `Guaranteed`, with a
@@ -5482,6 +5674,7 @@ The first revision is `a2ee5d1`. This revision answers its review.
 | U2 Implicit wiring; setup failure refuses to start | §7.3, §7.5 (the builder line: NQ3, below) |
 | U3 Build `Resolved` now; alone it doesn't close the window | §9.2 |
 | U4 Events, a log line and a gauge; no new condition | §12 |
+| A refused chain says so on the object: Synced=True's message, and the gauge `credentialuse_refused_holders`, the one exception to "never on a successful pass" (decided 2026-11-25) | §9, §12 |
 | U5 Hold only when unrecoverable; the residual and its remedy | §5 |
 | U6 Shared finalizer per (K, N), write-to-acquire, no drain mark, JSON-patch tests, the proof, the in-memory verified set, §15's grounds | §3, §6, §15.1, §15.7 |
 | U7 ClusterRole and ClusterRoleBinding, `resourceNames`, a namespaced Role is unsafe, core-provider's point 5 | §13 |
@@ -5820,6 +6013,13 @@ revision 16, IP1 to IP5 (§17).
 **Decided after the review of revision 16:** Krateo's minimum Kubernetes
 is **1.36**. CI runs the premise envtests, the exact RBAC message among
 them, on 1.36.2 and 1.37.0 (§6.2).
+
+**Decided on 2026-11-24:** the first tag supports direct refs only. A ref
+that uses a chain gets a clear error, and chains come in the next release
+(§9). U1 and C2 (§17) therefore ship there, not in the first tag.
+
+**Decided on 2026-11-25:** an established holder whose chain is refused says so
+on Synced=True's message, and a gauge counts such holders (§9, §12).
 
 Nothing is open.
 

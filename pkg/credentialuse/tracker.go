@@ -62,6 +62,14 @@ type Tracker struct {
 	// with an empty ref: §8 logs it once per object, until a pass that
 	// isn't degraded, or Forget, clears it.
 	degradedLogged *reportedSet
+	// refused are the holders whose refused chain was reported, event and log
+	// line both, keyed and cleared as degradedLogged is. It is apart, so that
+	// neither that nor another failure hides the other, the failed gate of a
+	// refused pass included.
+	refused *reportedSet
+	// refusedNow are the holders whose last pass was refused for a chain, new
+	// or established, for credentialuse_refused_holders (§9, §12).
+	refusedNow refusedHolders
 	// misplaced are the holders in the index namespace whose refusal was
 	// logged, once each (§10.6.1).
 	misplaced *reportedSet
@@ -104,6 +112,7 @@ func (t *Tracker) rebind(o Options) {
 	t.sink = sinksOf(o)
 	t.sinkMu.Unlock()
 	t.reportHeld()
+	t.reportRefused()
 }
 
 // enqueue adds holder nn to the kind's queue.
@@ -169,6 +178,9 @@ func (m sinkMetrics) AdmissionDenied(k string) {
 func (m sinkMetrics) ReleaseRejected(k string) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.ReleaseRejected(k) })
 }
+func (m sinkMetrics) RefusedHolders(k string, n int) {
+	m.t.withMetrics(func(r MetricsRecorder) { r.RefusedHolders(k, n) })
+}
 func (m sinkMetrics) DisownUnreadable(k string, n int) {
 	m.t.withMetrics(func(r MetricsRecorder) { r.DisownUnreadable(k, n) })
 }
@@ -204,6 +216,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		unrecorded: newReportedSet(),
 
 		degradedLogged: newReportedSet(),
+		refused:        newReportedSet(),
 		misplaced:      newReportedSet(),
 		sink:           sinksOf(o),
 	}
@@ -221,6 +234,7 @@ func (s *Shared) newTracker(o Options) (*Tracker, error) {
 		a2Bound:         o.TimeoutBound,
 		heldDeleting:    t.heldDeleting,
 		mustWait:        func(n string, o Waiting) bool { return s.mustWait(batchKey{gk, n}, o) },
+		followChains:    s.hooks.followChains,
 		maxDepth:        o.MaxDepth,
 		contentKinds:    map[schema.GroupKind]bool{},
 		contentCache:    trackerViews{t},
@@ -410,7 +424,8 @@ func (t *Tracker) dropHeld() {
 // (§7.2 item 2, §6.2 A1 and A2). It returns ErrHolderConflict when the
 // record write conflicts: the caller requeues. Every other failure is in the
 // Acquired: MustNotConnect for a holder that isn't established, Degraded for
-// one that is.
+// one that is. In this release, a ref with a Next is such a failure
+// (ErrChainsNotSupported).
 func (t *Tracker) Acquire(ctx context.Context, obj metav1.Object) (Acquired, error) {
 	// failed is a pass that ends before it names its refs. The gate of what
 	// the record names runs first in every pass (§11.3), in these as in
@@ -485,23 +500,76 @@ func (t *Tracker) heldDeleting(id ID, namespace string) {
 // throttled by the event sink, and logs it once per holder while it stays
 // degraded (§8): a pass that isn't degraded, or Forget, clears that, so the
 // next degraded pass logs again.
+//
+// A refused chain's event is recorded once too, with its log line, and cleared
+// the same way: it lasts until the provider or the object changes, so a
+// throttle alone would record one per holder every eventThrottle, for ever.
+// The counter counts every pass. That is of a refusal alone: one whose gate
+// failed too is reported as any failure, since a Secret may stay held against
+// its owner meanwhile.
 func (t *Tracker) reportOutcome(obj metav1.Object, a Acquired) {
+	t.noteRefused(obj.GetUID(), errors.Is(a.Err, ErrChainsNotSupported))
 	key := consentKey{holder: obj.GetUID()}
 	if !a.Degraded {
 		t.degradedLogged.clear(key)
+		t.refused.clear(key)
 		return
 	}
 	if a.Err == nil {
 		return
 	}
+	refused := errors.Is(a.Err, ErrChainsNotSupported) && a.gateErr == nil
+	if refused && !t.refused.first(key) {
+		return
+	}
 	if ro, ok := obj.(runtime.Object); ok {
 		t.s.events.record(ro, "Warning", EventDegraded, a.Err.Error())
 	}
-	if !t.degradedLogged.first(key) {
+	if !refused && !t.degradedLogged.first(key) {
 		return
 	}
-	t.warn("credential-use: the acquire failed for an established holder, which proceeds",
-		"holder", obj.GetNamespace()+"/"+obj.GetName(), "kind", t.gk.String(), "error", a.Err.Error())
+	kv := []any{"holder", obj.GetNamespace() + "/" + obj.GetName(), "kind", t.gk.String(), "error", a.Err.Error()}
+	var chain chainRefused
+	if errors.As(a.Err, &chain) {
+		kv = append(kv, "ref", chain.id.String()) // whole: the error cuts it
+	}
+	t.warn("credential-use: the acquire failed for an established holder, which proceeds", kv...)
+}
+
+// refusedHolders are a tracker's refused holders, by UID.
+type refusedHolders struct {
+	mu sync.Mutex
+	by map[types.UID]bool
+}
+
+// noteRefused records whether holder uid's last pass was refused for a chain,
+// and sets credentialuse_refused_holders when that changes its count. It is
+// called with no other lock of the tracker's held, and holds its own across
+// the sink, so that the gauge's values come in the order of the changes.
+func (t *Tracker) noteRefused(uid types.UID, refused bool) {
+	r := &t.refusedNow
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.by[uid] == refused {
+		return
+	}
+	if r.by == nil {
+		r.by = map[types.UID]bool{}
+	}
+	if refused {
+		r.by[uid] = true
+	} else {
+		delete(r.by, uid)
+	}
+	sinkMetrics{t}.RefusedHolders(kindLabel(t.gk), len(r.by))
+}
+
+// reportRefused sets the gauge again, as after a rebind.
+func (t *Tracker) reportRefused() {
+	r := &t.refusedNow
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sinkMetrics{t}.RefusedHolders(kindLabel(t.gk), len(r.by))
 }
 
 // BeforeEstablish runs just before the caller adds its owner finalizer
@@ -517,6 +585,8 @@ func (t *Tracker) BeforeEstablish(ctx context.Context, obj metav1.Object, a Acqu
 // (§7.2 item 4). It is mandatory. It reports whether anything changed.
 func (t *Tracker) Forget(obj metav1.Object) bool {
 	t.degradedLogged.forget(obj.GetUID())
+	t.refused.forget(obj.GetUID())
+	t.noteRefused(obj.GetUID(), false)
 	t.missing.set(types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}, nil, t.s.clock.Now(), t.o.ProbeInterval)
 	return t.proto.forget(obj)
 }

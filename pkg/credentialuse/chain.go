@@ -61,6 +61,18 @@ func (d dynamicContent) Content(ctx context.Context, gk schema.GroupKind, namesp
 	return r.Get(ctx, name, metav1.GetOptions{})
 }
 
+// ErrChainsNotSupported is the Acquired.Err of a pass one of whose refs has a
+// Next: this release holds only the objects the refs name themselves, and
+// refuses a chain (§9, "Not in this release"; the user's decision of
+// 2026-11-24). The whole list is refused, its direct refs with it, before the
+// pass looks at it, so a holder that isn't established must not connect, and
+// an established one is Degraded and keeps the record, and so the holds, it
+// has. All the pass does is gate what the record names in other namespaces, as
+// every pass does first, and drop what its owner withdrew (§11.3). A later
+// release follows chains.
+var ErrChainsNotSupported = errors.New("credential-use: chains (a Ref with a Next) aren't supported in this release: " +
+	"name each object Connect reads as a ref of its own, without a Next; one that can't be named so stays unheld")
+
 var (
 	// errChainTooDeep: a Next named refs below MaxDepth (§9.1).
 	errChainTooDeep = errors.New("credential-use: the chain is deeper than MaxDepth")
@@ -68,6 +80,39 @@ var (
 	// Content, so a re-point of it would go unseen (§10.4).
 	errNextNeedsContent = errors.New("credential-use: a ref with a Next must be of a protected kind with Content")
 )
+
+// reasonChainsRefused is the reason credentialuse_degraded_total counts a
+// refused chain under, apart from every other failure: it lasts until the
+// refs change, so nothing but the provider, or the object, clears it.
+const reasonChainsRefused = "ChainsNotSupported"
+
+// refuseChains returns ErrChainsNotSupported, naming the first of refs with a
+// Next, unless the tests have p follow chains. It looks at every ref,
+// Guaranteed ones and second refs to one object included.
+func (p *protocol) refuseChains(refs []Ref) error {
+	if p.followChains {
+		return nil
+	}
+	for _, r := range refs {
+		if r.Next != nil {
+			return chainRefused{r.ID()}
+		}
+	}
+	return nil
+}
+
+// chainRefused is ErrChainsNotSupported for one ref. Its text quotes the ref
+// and cuts it, as an index's error does (quotedLine): a tenant may have named
+// it, and an event's note is of 1,024 bytes at most, or it is lost. The event
+// of a refusal is recorded once, so it would be lost for good; the log line
+// has the ref whole (reportOutcome).
+type chainRefused struct{ id ID }
+
+func (e chainRefused) Error() string {
+	return fmt.Sprintf("%v: ref %s has a Next", ErrChainsNotSupported, quotedLine(e.id))
+}
+
+func (chainRefused) Unwrap() error { return ErrChainsNotSupported }
 
 // resolvedKey keys the objects an Acquire read in a context (WithResolved).
 type resolvedKey struct{}
@@ -85,6 +130,9 @@ func WithResolved(ctx context.Context, a Acquired) context.Context {
 // consent or Disowned, which may be the shared read of up to 10s ago. Each is
 // as its Next saw it, without managedFields and status. The object is the
 // caller's to keep.
+//
+// In this release no ref is followed (ErrChainsNotSupported), so on a pass's
+// context it finds nothing.
 func Resolved(ctx context.Context, ref Ref) (*unstructured.Unstructured, bool) {
 	m, _ := ctx.Value(resolvedKey{}).(map[ID]*unstructured.Unstructured)
 	u, ok := m[ref.ID()]

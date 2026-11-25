@@ -25,6 +25,11 @@ import (
 // secretGroupKind is the core Secret's GroupKind, always protected.
 var secretGroupKind = schema.GroupKind{Kind: "Secret"}
 
+// followChains has AssertCredentialRefsCover follow a Next, which it fails
+// otherwise, as the runtime refuses it in this release. Only this package's
+// tests set it.
+var followChains bool
+
 // A Read is one object a RecordingReader served: one Get, or one item of a
 // List, with the List itself recorded too, with no name.
 type Read struct {
@@ -122,6 +127,12 @@ func (r *RecordingReader) Reset() {
 // a Get or a List, of a Secret or of a protected kind, that the refs, after
 // Next, don't name. Guaranteed refs count as named.
 //
+// In this release it fails t on a ref with a Next, before it reads anything
+// or connects, as the runtime refuses it (credentialuse.ErrChainsNotSupported).
+// So it can't be used for a fixture whose Connect reads a Secret that only
+// another object names: the refs can't name it, and the helper reports that
+// read. Leave such a fixture out, and test its CredentialRefs directly.
+//
 // rec must be the reader the connecter reads Secrets and protected objects
 // with; build the connecter with it. The connecter must implement
 // reconciler.CredentialRefsProvider. It returns the client Connect returned,
@@ -138,6 +149,12 @@ func AssertCredentialRefsCover(t testing.TB, ctx context.Context, c reconciler.E
 	if err != nil {
 		t.Fatalf("CredentialRefs: %v", err)
 		return nil, nil
+	}
+	for _, r := range refs {
+		if r.Next != nil && !followChains {
+			t.Fatalf("%v: ref %s has a Next", credentialuse.ErrChainsNotSupported, r.ID())
+			return nil, nil
+		}
 	}
 	kinds := map[schema.GroupKind]bool{secretGroupKind: true}
 	content := map[schema.GroupKind]bool{}

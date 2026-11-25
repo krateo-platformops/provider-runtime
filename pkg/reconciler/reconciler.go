@@ -971,6 +971,7 @@ func (r *Reconciler) reconcile(ctx, externalCtx context.Context, log logging.Log
 	// and keeps passErr (see ExternalClient, and statusConflict).
 	writeStatus := func(passErr error) error {
 		policySynced(managed, start)
+		refusedSynced(managed, start, cup.refused)
 		started := time.Now()
 		err := r.client.Status().Update(ctx, managed)
 		r.recordStatusUpdate(ctx, started, err)

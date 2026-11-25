@@ -7,6 +7,16 @@
 // follows docs/plan-credential-use-implementation.md. Section numbers (§) in
 // this package's comments are the design's.
 //
+// # Direct refs only, in this release
+//
+// The refs a holder names must name the objects Connect reads themselves. A
+// Ref with a Next, a chain (§9), is refused, with ErrChainsNotSupported,
+// before the pass looks at the list: a new holder must not connect, and an
+// established one is Degraded and keeps the holds it has, but for those whose
+// targets withdrew consent (§11.3). The chain code is here, and its tests run
+// it, for the release that will follow chains; nothing in production reaches
+// it.
+//
 // # What is here so far
 //
 // This is the vocabulary the protocol is built from (plan, PR 1):

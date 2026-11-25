@@ -228,7 +228,20 @@ func (h holderHandler) OnUpdate(oldObj, newObj any) {
 	h.observe(n)
 	at := h.now()
 	if o.UID != n.UID {
+		// Deleted and created again under its name, in a watch's gap: no
+		// deletion comes for the old UID, so it is forgotten here, as
+		// OnDelete forgets a holder that is gone.
 		h.t.ver.holderEvent(o.UID, nil, at)
+		h.t.proto.written.forget(o.UID)
+		h.t.proto.backoff.forget(o.UID)
+		h.t.proto.gateTurns.forget(o.UID)
+		h.t.proto.reported.forget(o.UID)
+		h.t.unrecorded.forget(o.UID)
+		h.t.degradedLogged.forget(o.UID)
+		h.t.refused.forget(o.UID)
+		h.t.noteRefused(o.UID, false)
+		h.t.misplaced.forget(o.UID)
+		h.t.proto.conflicts.forget(o.UID)
 	}
 	h.t.ver.holderEvent(n.UID, n, at)
 	if o.UID != n.UID || o.Annotations[AnnotationRefs] != n.Annotations[AnnotationRefs] ||
@@ -247,12 +260,15 @@ func (h holderHandler) OnDelete(obj any) {
 	h.t.proto.written.forget(m.UID)
 	// A holder gone without a Forget, as one that was never established,
 	// leaves nothing behind either: its UID never comes back, and whoever can
-	// edit one names the refs these are kept for (§11.3).
+	// edit one names the refs these are kept for (§11.3). OnUpdate forgets the
+	// same of a UID that a new one replaced.
 	h.t.proto.backoff.forget(m.UID)
 	h.t.proto.gateTurns.forget(m.UID)
 	h.t.proto.reported.forget(m.UID)
 	h.t.unrecorded.forget(m.UID)
 	h.t.degradedLogged.forget(m.UID)
+	h.t.refused.forget(m.UID)
+	h.t.noteRefused(m.UID, false)
 	h.t.misplaced.forget(m.UID)
 	h.t.proto.conflicts.forget(m.UID)
 	h.enqueue(m, nil)

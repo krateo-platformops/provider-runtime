@@ -31,6 +31,16 @@ func (s *Shared) OnNamespaceAct(f func(n *metav1.PartialObjectMetadata)) { s.hoo
 // list or relist has completed, just before the completion is recorded.
 func (s *Shared) BeforeListRecorded(f func(t *Tracker)) { s.hooks.beforeListRecorded = f }
 
+// FollowChains has every tracker a later Track builds follow chains, which
+// Acquire otherwise refuses (ErrChainsNotSupported): the chain code's own
+// tests, which keep it working for the release that supports it (§9).
+//
+// Every test whose refs have a Next must call it, or set its protocol's
+// followChains. A refused pass looks like a failed one (MustNotConnect, or
+// Degraded with the record kept), so a test of a chain that fails would pass
+// without following it.
+func (s *Shared) FollowChains() { s.hooks.followChains = true }
+
 // SetSyncTimeout bounds each informer's first sync.
 func (s *Shared) SetSyncTimeout(d time.Duration) { s.syncTimeout.Store(int64(d)) }
 

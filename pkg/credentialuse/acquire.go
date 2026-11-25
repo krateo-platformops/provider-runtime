@@ -77,8 +77,12 @@ type Acquired struct {
 
 	// resolved are the objects read for each ref with a Next that was
 	// followed: held, unheld, or Guaranteed (§9.2). WithResolved hands them
-	// on.
+	// on. Production follows none in this release (ErrChainsNotSupported).
 	resolved map[ID]*unstructured.Unstructured
+
+	// gateErr is why the gate of recorded refs failed (§11.3), in a pass whose
+	// chain was refused: Err joins the two.
+	gateErr error
 }
 
 // ErrHolderConflict is a conflict on the holder's own record write (A1). The
@@ -118,6 +122,9 @@ type protocol struct {
 	// response shows being deleted, with the holder namespace.
 	heldDeleting func(id ID, namespace string)
 
+	// followChains has acquire follow a Next, which it refuses otherwise
+	// (refuseChains). Only the tests set it.
+	followChains bool
 	// Chains (§9): maxDepth bounds the levels; contentKinds are the
 	// protected kinds with Content, read from contentCache or, live, through
 	// contents, which also reads Guaranteed refs without a lister in
@@ -374,8 +381,9 @@ func isBuiltin(gk schema.GroupKind) bool { return gk.Group == "" }
 
 // acquire runs A1 and A2 for holder obj, which the caller has just read, and
 // refs, which RefsFunc returned for it (§6.2), and follows their chains
-// (§9.1). It runs on every pass, deletion passes included, before anything
-// reads a protected object.
+// (§9.1). Production refuses a list with a chain in it, whole, before it looks
+// at the list (refuseChains); only tests set followChains. It runs on every
+// pass, deletion passes included, before anything reads a protected object.
 //
 // The chain is followed level by level, and each hop is held before it is
 // read: A1 for the level, A2 for each of its refs, then a read of each held
@@ -415,6 +423,23 @@ func (p *protocol) acquire(ctx context.Context, obj metav1.Object, refs []Ref) (
 	recorded, err := p.gateRecorded(ctx, obj, &a)
 	if errors.Is(err, ErrHolderConflict) {
 		return a, err
+	}
+	// Then chains are refused (§9, "Not in this release"), before the list is
+	// looked at: the pass reads and writes nothing more, so an established
+	// holder's record, and its holds with it, stay as the gate leaves them.
+	// Not before the gate: it looks at no ref, and a holder that could keep it
+	// from running, by gaining a chain, would keep what its record names held
+	// against the owner's withdrawal. Refs are found inside another only by
+	// its Next, so a list that passes is the whole chain: one level, all
+	// direct.
+	//
+	// A gate that failed is counted as well, and kept apart, so that it is
+	// reported though the refusal was already (reportOutcome).
+	if refused := p.refuseChains(refs); refused != nil {
+		if a.gateErr = err; err != nil && established {
+			p.reports.Degraded(p.holder, "Announce")
+		}
+		return fail(errors.Join(refused, err), reasonChainsRefused)
 	}
 	if err != nil {
 		return fail(err, "Announce")
@@ -1072,6 +1097,17 @@ func (p *protocol) wroteDeleting(id ID, namespace string, out *metav1.PartialObj
 // Missing live, and holds any that now exists. On an error, the caller
 // doesn't add its finalizer this pass.
 func (p *protocol) beforeEstablish(ctx context.Context, obj metav1.Object, a Acquired) error {
+	// A pass refused for a chain held nothing, so it never establishes: a
+	// Degraded one gets here if its holder lost its finalizer meanwhile. And
+	// no ref with a Next is held here either, in an Acquired built by hand.
+	if errors.Is(a.Err, ErrChainsNotSupported) {
+		return a.Err
+	}
+	for _, u := range a.Unheld {
+		if err := p.refuseChains([]Ref{u.Ref}); err != nil {
+			return err
+		}
+	}
 	cc := p.detach(ctx)
 	defer cc.stop()
 	liveDisowned := p.liveDisown(ctx)

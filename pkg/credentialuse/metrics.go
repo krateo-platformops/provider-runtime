@@ -29,7 +29,8 @@ type MetricsRecorder interface {
 	// refs skipped though they asked for more than the first ref of the same
 	// object (§9.1), once per holder, object and thing asked for, while the
 	// conflict lasts. asked is "hold" or "next", and a ref that asked for both
-	// counts in both. A hold of a Disowned kind doesn't count.
+	// counts in both. A hold of a Disowned kind doesn't count. "next" can't
+	// occur while chains are refused (ErrChainsNotSupported).
 	RefsConflicting(holderKind, asked string)
 	// RefsReadDenied counts credentialuse_refs_read_denied_total (§11.3).
 	RefsReadDenied(holderKind string)
@@ -49,6 +50,10 @@ type MetricsRecorder interface {
 	// the index or a record that Disown's last pass couldn't read, which
 	// keep its count "unknown" (§7.4).
 	DisownUnreadable(holderKind string, n int)
+	// RefusedHolders sets credentialuse_refused_holders: the holders whose
+	// last pass in this process was refused for a chain (ErrChainsNotSupported,
+	// §9; decided 2026-11-25).
+	RefusedHolders(holderKind string, n int)
 	// IndexReadDenied counts credentialuse_index_read_denied_total: objects
 	// the index names that a check couldn't read for a 403, once each; their
 	// lines are kept (§10.6.5).
@@ -77,5 +82,6 @@ func (NopMetrics) AdmissionDenied(string)         {}
 func (NopMetrics) ReleaseRejected(string)         {}
 func (NopMetrics) CRDWriteStarved(string)         {}
 func (NopMetrics) DisownUnreadable(string, int)   {}
+func (NopMetrics) RefusedHolders(string, int)     {}
 func (NopMetrics) IndexReadDenied(string)         {}
 func (NopMetrics) DisownRestarts(string)          {}

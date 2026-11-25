@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +44,14 @@ import (
 
 // A CredentialRefsProvider names what Connect reads to reach the external
 // system for mg: the Secrets, and the objects that lead to them (§7.5, §9).
+//
+// In this release no ref it returns may have a Next: name each object as a
+// ref of its own. A list with a Next is refused whole, with
+// credentialuse.ErrChainsNotSupported, which is an error like any other below:
+// a new object doesn't connect, and an established one proceeds and keeps the
+// holds it has, but nothing new is held, its direct refs included (§9, "Not in
+// this release").
+//
 // It is discovered on the connecter given to WithExternalConnecter or
 // WithExternalConnectDisconnecter, as the rate-limit keyers are. It lives on
 // the connecter because refs are needed before Connect, when there is no
@@ -50,9 +59,10 @@ import (
 //
 // It must make no API calls; it may use configuration held in memory. It is
 // called to acquire, never to release, and an error fails the pass closed for
-// a new object and open for an established one (§8). A ref with a Next is
-// followed after the object it names is held; Connect then reads that object
-// with credentialuse.Resolved, not from a cache (§9.2).
+// a new object and open for an established one (§8). (Once chains are
+// supported, a ref with a Next is followed after the object it names is held;
+// Connect then reads that object with credentialuse.Resolved, not from a
+// cache (§9.2).)
 //
 // A connecter that implements it also needs the controller's builder line:
 //
@@ -764,6 +774,41 @@ type credentialUsePass struct {
 	// governor's requeue.
 	retryAfter time.Duration
 	deferred   bool
+	// refused is the refusal of an established holder's chain, which Synced's
+	// message carries while it lasts (refusedSynced), or "".
+	refused string
+}
+
+// refusedPrefix starts Synced's message while an established holder's refs are
+// refused (§9, §12; decided 2026-11-25).
+const refusedPrefix = "credential-use: refs refused, not held: "
+
+// refusedSynced puts a refused chain on Synced, just before each status write:
+// an established holder's pass proceeds, Synced=True/ReconcileSuccess, and the
+// refusal lasts until the provider or the object changes, while its event
+// doesn't (§9, §12; decided 2026-11-25). Only that Synced takes it; any other,
+// a policy report included, is left as it is. It keeps the condition's stored
+// transition time when nothing changed, so it costs no write of its own.
+func refusedSynced(managed resource.Managed, start passConditions, refused string) {
+	if refused == "" {
+		return
+	}
+	c := managed.GetCondition(prv1.TypeSynced)
+	if c.Status != metav1.ConditionTrue || c.Reason != prv1.ReasonReconcileSuccess {
+		return
+	}
+	managed.SetConditions(start.keep(c.WithMessage(refusedPrefix + refused + " (§9)")))
+}
+
+// refusalOf is the refusal of an established holder's pass, on one line, or "":
+// the first line of its error, which errors.Join puts first, before a failed
+// gate's (credentialuse.ErrChainsNotSupported).
+func refusalOf(a credentialuse.Acquired) string {
+	if !a.Degraded || !errors.Is(a.Err, credentialuse.ErrChainsNotSupported) {
+		return ""
+	}
+	line, _, _ := strings.Cut(a.Err.Error(), "\n")
+	return line
 }
 
 // requeue applies retryAfter to the pass's result: a pass that ends without
@@ -847,6 +892,7 @@ func (r *Reconciler) acquireCredentials(ctx, externalCtx context.Context, log lo
 	}
 	cup.acquired = a
 	cup.retryAfter = a.RetryAfter
+	cup.refused = refusalOf(a)
 	externalCtx = credentialuse.WithResolved(externalCtx, a)
 	externalCtx = withCredentialUseHolder(externalCtx, r.cu.tracker, managed)
 	return managed, externalCtx, reconcile.Result{}, false, nil

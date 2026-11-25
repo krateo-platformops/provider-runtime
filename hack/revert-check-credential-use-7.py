@@ -82,7 +82,7 @@ MUTANTS = [
     ("Enqueue doesn't reach the queue", RC,
      [("\t\t(*q).Add(reconcile.Request{NamespacedName: nn})", "\t\t_ = q")]),
     ("HasSynced is always true", CA,
-     [("\tif !t.holders.HasSynced() || !t.crd.HasSynced() {\n\t\treturn false\n\t}\n\tfor _, reg := range t.regs {\n\t\tif !reg.HasSynced() {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true",
+     [("\tif !t.holders.HasSynced() || !t.crd.HasSynced() {\n\t\treturn false\n\t}\n\tif t.idx != nil && !t.idx.inf.HasSynced() {\n\t\treturn false\n\t}\n\tfor _, reg := range t.regs {\n\t\tif !reg.HasSynced() {\n\t\t\treturn false\n\t\t}\n\t}\n\treturn true",
        "\treturn true")]),
     # §8 steps 4 and 7: Forget in the finalizer's write, or on its own.
     ("no Forget on the orphan path", RR,
@@ -165,7 +165,7 @@ MUTANTS = [
      [("\tcase a.MustNotConnect:\n\t\toutcome = tracing.CredentialUseMustNotConnect\n", "")]),
     # §8: a degraded pass is logged once per object.
     ("a degraded pass logs every time", C + "tracker.go",
-     [("\tif !t.degradedLogged.first(key) {\n\t\treturn\n\t}\n", "")]),
+     [("\tif !refused && !t.degradedLogged.first(key) {\n\t\treturn\n\t}\n", "")]),
     ("a pass that isn't degraded doesn't clear the log", C + "tracker.go",
      [("\t\tt.degradedLogged.clear(key)\n", "")]),
     ("Forget doesn't clear the log", C + "tracker.go",
@@ -221,7 +221,7 @@ KILLERS = {
     "a new holder that must not connect connects": {R: "TestStatusConflictOnEveryPath", E: "TestNewHolderOnADeletingSecretDeletesFreely"},
     "no re-read after a webhook changed A1": {R: "TestCredentialUseRereadsAfterAWebhookChangedTheRecordWrite"},
     "the re-read ignores the live reader": {R: "TestCredentialUseRereadsAfterAWebhookChangedTheRecordWrite"},
-    "no resolved chain on Connect's context": {R: "TestCredentialUseResolvedOnConnectsContext"},
+    "no resolved chain on Connect's context": {C: "TestCredentialUseResolvedOnConnectsContext"},
     "no holder on Connect's context": {R: "TestCredentialUseCheckingReader"},
     "no BeforeEstablish": {R: "TestCredentialUseBeforeEstablishHoldsARefThatAppeared|TestStatusConflictOnEveryPath"},
     "RetryAfter is ignored": {R: "TestCredentialUseRetryAfter"},
