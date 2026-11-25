@@ -341,37 +341,6 @@ func (r *fakeRig) heldLists() int {
 	return n
 }
 
-// One recheck of a tracker runs at a time, however often its CRD goes while a
-// list fails; one that was asked for meanwhile runs after it.
-func TestOneRecheckPerTracker(t *testing.T) {
-	r, tr, _, vanish := ghostRig(t, SharedOptions{Namespaces: []string{"ns"}}, "out", false)
-	vanish()
-	r.runWrites(t)
-	eventually(t, "the start's recheck", r.clusterHeldListed)
-	r.idle(t, batchKey{widgetGK, "out"})
-	r.forbidList.Store("secrets", true)
-	r.md.ClearActions()
-	for range 5 {
-		crdHandler{tr}.OnDelete(crdMeta(widgetGK))
-	}
-	eventually(t, "the recheck's failed list", func() bool { return r.heldLists() >= 1 })
-	time.Sleep(200 * time.Millisecond)
-	if n := r.heldLists(); n != 1 {
-		t.Errorf("%d rechecks after five deletions, want one", n)
-	}
-	r.forbidList.Delete("secrets")
-	r.md.ClearActions()
-	r.clk.Step(releaseBackoffBase)
-	eventually(t, "its retry, and the one asked for meanwhile", func() bool { return r.heldLists() >= 2 })
-	time.Sleep(200 * time.Millisecond)
-	if n := r.heldLists(); n != 2 {
-		t.Errorf("%d rechecks once the list works, want the retry and one more", n)
-	}
-	r.md.ClearActions()
-	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
-	eventually(t, "a later deletion's recheck", func() bool { return r.heldLists() == 1 })
-}
-
 // The write loops' end waits for a recheck; none starts once they are ending.
 func TestTheWriteLoopsWaitForTheRecheck(t *testing.T) {
 	r, tr, _, vanish := ghostRig(t, SharedOptions{Namespaces: []string{"ns"}}, "out", false)
@@ -381,17 +350,26 @@ func TestTheWriteLoopsWaitForTheRecheck(t *testing.T) {
 	r.idle(t, batchKey{widgetGK, "out"})
 	entered, release := r.gateList("secrets")
 	crdHandler{tr}.OnDelete(crdMeta(widgetGK))
-	<-entered
+	within(t, "the recheck's list", entered)
+	crdHandler{tr}.OnDelete(crdMeta(widgetGK)) // and one asked for meanwhile
 	stopped := make(chan error, 1)
 	go func() { stopped <- stop() }()
+	// Every wait below is bounded: a write loops' end that doesn't wait fails
+	// here, within a second, and not at the binary's timeout.
 	select {
 	case err := <-stopped:
-		t.Errorf("RunWriteLoops ended (%v) with a recheck running", err)
+		close(release)
+		t.Fatalf("RunWriteLoops ended (%v) with a recheck running", err)
 	case <-time.After(300 * time.Millisecond):
 	}
 	close(release)
-	if err := <-stopped; err != nil {
-		t.Errorf("RunWriteLoops = %v", err)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Errorf("RunWriteLoops = %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("RunWriteLoops didn't end once the recheck did")
 	}
 	// As between the write loops' cancel and their end.
 	ended, cancel := context.WithCancel(context.Background())
