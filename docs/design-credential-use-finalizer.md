@@ -898,7 +898,8 @@ releases wait. So:
   what is counted for it stay as they were.
 - **The queue is first in, first out**, and adding an object again doesn't move it.
   A key has two lines: of what is known to carry K's finalizer for N, as what the
-  protected informers, the rescan, the rechecks, a namespace's list, the batch an A2
+  protected informers, the rescan and the same requeue as a holder kind's CRD goes, the
+  rechecks, a namespace's list, the batch an A2
   asks for (§10.2) and a grace's end queue, a record's names that the caches show
   carrying it, and what a read of a batch showed, do; and of the rest. What is known
   stays so while it waits, is put back, fails, or is held up by a Track. A turn takes 1,024 of

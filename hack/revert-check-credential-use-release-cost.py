@@ -23,8 +23,8 @@ sys.stdout.reconfigure(line_buffering=True)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
-BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC, IX = [C + f for f in ("batchrecords.go", "release.go", "writeloops.go", "queue.go", "server.go", "missedkinds.go", "tracker.go", "informers.go", "answered.go", "shared.go", "uncached.go", "index.go")]
-FILES = [BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC, IX]
+BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC, IX, CG = [C + f for f in ("batchrecords.go", "release.go", "writeloops.go", "queue.go", "server.go", "missedkinds.go", "tracker.go", "informers.go", "answered.go", "shared.go", "uncached.go", "index.go", "crdgone.go")]
+FILES = [BR, RL, WL, QU, SV, MK, TR, IN, AN, SH, UC, IX, CG]
 
 # (name, file, [(old, new), ...]): every old must occur exactly once in file. The
 # last of each is the killing tests, all of pkg/credentialuse.
@@ -63,7 +63,7 @@ LIST = [
     ("a batch is in the order of the names", RL,
      [("\tfor _, id := range pending {\n\t\tif _, again", "\tfor _, id := range SortedIDs(pending) {\n\t\tif _, again")], "TestAKeysTurnIsBounded"),
     ("R0 goes on once the context has ended", RL,
-     [("\t\tif ctx.Err() != nil {\n\t\t\tres.Rest = append(res.Rest, id)\n\t\t\tcontinue\n\t\t}\n\t\tu := ", "\t\tif false && ctx.Err() != nil {\n\t\t\tres.Rest = append(res.Rest, id)\n\t\t\tcontinue\n\t\t}\n\t\tu := ")], "TestAnEndedContextReadsNothingMore"),
+     [("\t\tif ctx.Err() != nil {\n\t\t\tres.Rest = append(res.Rest, id)\n\t\t\tcontinue\n\t\t}\n\t\tvar u cachedUse\n", "\t\tif false && ctx.Err() != nil {\n\t\t\tres.Rest = append(res.Rest, id)\n\t\t\tcontinue\n\t\t}\n\t\tvar u cachedUse\n")], "TestAnEndedContextReadsNothingMore"),
     ("R1 goes on once the context has ended", RL,
      [("\t\t\tif ctx.Err() != nil || round == 0 && !first[id] && window.Err() != nil {\n", "\t\t\tif round == 0 && !first[id] && window.Err() != nil {\n")], "TestAnEndedContextReadsNothingMore"),
     ("R1 goes on once the turn's time is over", RL,
@@ -138,6 +138,10 @@ LIST = [
      [("\t\t\ts.queue.PutBack(k, ids...)\n", "\t\t\ts.queue.Add(k, ids...)\n")], "TestAStoppedBatchsFailuresKeepTheirPlace"),
     ("a parked batch forgets what is known", SH,
      [("\t\t\ts.queue.AddHeld(b.key, b.held...)\n", "\t\t\ts.queue.Add(b.key, b.held...)\n")], "TestAParkedBatchKeepsWhatIsKnown"),
+    ("the start's rescan queues what the caches hold as unknown", WL,
+     [("s.queue.AddHeld(batchKey{t.gk, n}, id)", "s.queue.Add(batchKey{t.gk, n}, id)")], "TestWhatTheCachesShowHeldIsQueuedAsKnown"),
+    ("the CRD's going queues what the caches hold as unknown", CG,
+     [("s.queue.AddHeld(batchKey{t.gk, n}, id)", "s.queue.Add(batchKey{t.gk, n}, id)")], "TestWhatTheCachesShowHeldIsQueuedAsKnown"),
     ("what waits unknown stays so when it is put back known", QU,
      [("\t\t\tif p == again {\n", "\t\t\tif p.at == again.at {\n")], "TestWhatANamespacesListFindsStaysKnown"),
     ("what is put back is in reverse", QU,
