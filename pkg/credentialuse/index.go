@@ -393,6 +393,9 @@ type index struct {
 	onVouchMalformed func(entries []string)
 	onVouchForeign   func(entries []string)
 	onVouchWrong     func(id ID)
+	// drainBetween, in tests, runs in a drain's round between its read of
+	// busy and its count of what is left.
+	drainBetween func()
 
 	snap atomic.Pointer[indexSnapshot]
 
@@ -904,8 +907,16 @@ func (ix *index) removeAndCheck(ctx context.Context, ids []ID, disown bool) erro
 func (ix *index) removeChunk(parent context.Context, ids []ID, disown bool) error {
 	whole, cancel := context.WithTimeout(context.WithoutCancel(parent), ix.bound)
 	defer cancel()
-	ctx, cancelCheck := context.WithTimeout(whole, ix.checkBound)
+	check, cancelCheck := context.WithTimeout(whole, ix.checkBound)
 	defer cancelCheck()
+	// The calls before the re-add don't see the check's deadline, only its
+	// end. A client's rate limiter refuses at once a call whose turn would
+	// come after its context's deadline: behind a backlog, every read of the
+	// check would fail that way, as an unread object's, its line put back,
+	// and the prune would report nothing, so its bare objects weren't
+	// retried. Waiting its turn, a read is cut, and the prune says so
+	// (§10.6.2).
+	ctx := context.Context(noDeadline{check})
 	if ix.keptLive != nil && disown {
 		set, err := ix.keptLive(ctx)
 		if err != nil {
@@ -1645,6 +1656,61 @@ func (ix *index) recheckTick(ctx context.Context, now time.Time) error {
 		err = fmt.Errorf("credential-use: %d live checks of objects dropped from the index %s failed; they are retried", len(failed), ix.ref())
 	}
 	return err
+}
+
+// drain makes, as the write loops stop, the late checks whose margin is over,
+// handing enqueue their batches, and every live check pending, whatever its
+// backoff, in rounds while some fail or busy says more may come, the pause
+// between them doubling while they fail, until none is left and busy says
+// none will come, or ctx ends (§10.6.3). A round's failures don't count
+// towards a check's backoff, which write loops started again keep. It
+// returns how many checks are left undone, how many late holds' margins
+// aren't over, and how many prunes are put off.
+func (ix *index) drain(ctx context.Context, busy func() bool, enqueue func(id ID, n string)) (left, late, deferred int) {
+	counts := func() (int, int, int) {
+		ix.mu.Lock()
+		defer ix.mu.Unlock()
+		return len(ix.pending), len(ix.late), len(ix.deferred)
+	}
+	pause := drainPause
+	for {
+		ix.lateTick(ix.now(), enqueue)
+		ix.mu.Lock()
+		before := make(map[ID]recheck, len(ix.pending))
+		for id, r := range ix.pending {
+			before[id] = recheck{due: r.due, fails: r.fails, queued: r.queued}
+			r.due = time.Time{}
+		}
+		ix.mu.Unlock()
+		_ = ix.recheckTick(ctx, ix.now())
+		ix.mu.Lock()
+		for id, r := range ix.pending {
+			// One queued again during the round is the new one's.
+			if b, ok := before[id]; ok && r.queued == b.queued {
+				r.due, r.fails = b.due, b.fails
+			}
+		}
+		ix.mu.Unlock()
+		// Busy is read before the count: a call that wasn't in flight then
+		// queues nothing after it, and one that was is waited for.
+		b := busy()
+		if ix.drainBetween != nil {
+			ix.drainBetween()
+		}
+		if left, late, deferred = counts(); left == 0 && !b || ctx.Err() != nil {
+			return left, late, deferred
+		}
+		select {
+		case <-ctx.Done():
+			return counts()
+		case <-time.After(pause):
+		}
+		if left > 0 {
+			pause = min(2*pause, drainPauseMax)
+		} else {
+			pause = drainPause
+		}
+	}
 }
 
 // --- the index's informer (§10.6.6) ---

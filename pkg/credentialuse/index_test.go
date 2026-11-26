@@ -24,6 +24,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	testingclock "k8s.io/utils/clock/testing"
 
+	"golang.org/x/time/rate"
+
 	"github.com/krateo-platformops/provider-runtime/pkg/credentialuse/internal/apimodel"
 )
 
@@ -737,6 +739,194 @@ func TestAPruneCutShort(t *testing.T) {
 	ix.maxLines, ix.checkBound = len(many), time.Minute
 	if err := ix.prune(ctx, many); !errors.Is(err, context.Canceled) || len(st.lines) != pruneChunk {
 		t.Errorf("a prune stopped in its first write = %v, with %d lines left, want %d", err, len(st.lines), pruneChunk)
+	}
+}
+
+// limitedServer's reads wait for their turn at lim first, as a client's do at
+// its rate limiter.
+type limitedServer struct {
+	server
+	lim *rate.Limiter
+}
+
+func (s limitedServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if err := s.lim.Wait(ctx); err != nil {
+		// As client-go's request wraps it (rest/request.go,
+		// tryThrottleWithInfo): a refusal isn't the context's error.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("client rate limiter Wait returned an error: %w", err)
+		}
+		return nil, err
+	}
+	return s.server.Get(ctx, gk, ns, name)
+}
+
+// backlogged is a limiter of a call every d, with n calls ahead of the next.
+func backlogged(d time.Duration, n int) *rate.Limiter {
+	lim := rate.NewLimiter(rate.Every(d), 1)
+	for range n {
+		lim.Reserve()
+	}
+	return lim
+}
+
+// healingServer is an objServer whose failures end after its first read.
+type healingServer struct{ *objServer }
+
+func (s healingServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	m, err := s.objServer.Get(ctx, gk, ns, name)
+	clear(s.fail)
+	return m, err
+}
+
+// As the write loops stop, the drain makes the late checks whose margin is
+// over and every pending live check, whatever its backoff, again while they
+// fail, the pause doubling; a round's failures don't count towards a check's
+// backoff; and it says what it leaves (§10.6.3).
+func TestTheDrain(t *testing.T) {
+	held, late, early, putOff := SecretRef("ns", "held").ID(), SecretRef("ns", "late").ID(), SecretRef("ns", "early").ID(), SecretRef("ns", "put-off").ID()
+	inBackoff := func(ix *index, id ID, fails int, due time.Time) {
+		ix.queue([]ID{id}, false)
+		ix.mu.Lock()
+		ix.pending[id].fails, ix.pending[id].due = fails, due
+		ix.mu.Unlock()
+	}
+	drain := func(ix *index, d time.Duration) (left, lateLeft, deferred int, enqueued []ID) {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		left, lateLeft, deferred = ix.drain(ctx, func() bool { return false }, func(id ID, _ string) { enqueued = append(enqueued, id) })
+		return left, lateLeft, deferred, enqueued
+	}
+	t.Run("a check that fails once", func(t *testing.T) {
+		srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}, fail: map[ID]bool{held: true}}
+		st := &memStore{exists: true, rebuilt: true}
+		ix := testIndex(st, healingServer{srv})
+		inBackoff(ix, held, 2, time.Now().Add(time.Hour))
+		if left, _, _, _ := drain(ix, 2*time.Second); left != 0 || !slices.Equal(st.lines, linesOf([]ID{held})) {
+			t.Errorf("%d left, lines %q; want the line written in a second round", left, st.lines)
+		}
+	})
+	t.Run("late holds and prunes put off", func(t *testing.T) {
+		srv := &objServer{objs: map[ID]*metav1.PartialObjectMetadata{late: heldObj("late")}}
+		st := &memStore{exists: true, rebuilt: true}
+		ix := testIndex(st, srv)
+		ix.late[lateHold{late, "ns"}] = time.Now().Add(-time.Second)
+		ix.late[lateHold{early, "ns"}] = time.Now().Add(time.Hour)
+		ix.deferred[putOff] = time.Now().Add(time.Hour)
+		left, lateLeft, deferred, enqueued := drain(ix, 2*time.Second)
+		if left != 0 || lateLeft != 1 || deferred != 1 || !slices.Equal(enqueued, []ID{late}) || !slices.Equal(st.lines, linesOf([]ID{late})) {
+			t.Errorf("left %d, late holds left %d, prunes put off %d, batches %v, lines %q; want the late check made, with its batch, and the rest counted",
+				left, lateLeft, deferred, enqueued, st.lines)
+		}
+	})
+	t.Run("a check that fails for good", func(t *testing.T) {
+		srv := &objServer{fail: map[ID]bool{held: true}}
+		ix := testIndex(&memStore{exists: true, rebuilt: true}, srv)
+		due := time.Now().Add(time.Hour)
+		inBackoff(ix, held, 3, due)
+		left, _, _, _ := drain(ix, time.Second)
+		ix.mu.Lock()
+		r := *ix.pending[held]
+		ix.mu.Unlock()
+		if left != 1 || r.fails != 3 || !r.due.Equal(due) {
+			t.Errorf("%d left, the check's backoff %d failures and due %s; want it left, with its backoff as it was", left, r.fails, r.due)
+		}
+		// Rounds at 0, 200ms and 600ms, the next one past the bound.
+		if n := len(srv.gets); n < 2 || n > 4 {
+			t.Errorf("%d reads within 1s; want the rounds' pauses to double", n)
+		}
+	})
+}
+
+// A drain's round reads whether a call is in flight before it counts what is
+// left: a call that queues its check and ends between the two is waited for,
+// and its check made (§10.6.3).
+func TestTheDrainReadsBusyBeforeItCounts(t *testing.T) {
+	held := SecretRef("ns", "held").ID()
+	st := &memStore{exists: true, rebuilt: true}
+	ix := testIndex(st, &objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}})
+	inFlight := true
+	ix.drainBetween = func() {
+		if inFlight {
+			ix.queue([]ID{held}, false) // its line check failed
+			inFlight = false            // and it ended
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if left, _, _ := ix.drain(ctx, func() bool { return inFlight }, func(ID, string) {}); left != 0 || !slices.Equal(st.lines, linesOf([]ID{held})) {
+		t.Errorf("%d left, lines %q; want the check the call queued made", left, st.lines)
+	}
+}
+
+// requeueServer queues its first read's object again, as a drop delivered
+// while its check reads it.
+type requeueServer struct {
+	*objServer
+	ix   **index
+	done *bool
+}
+
+func (s requeueServer) Get(ctx context.Context, gk schema.GroupKind, ns, name string) (*metav1.PartialObjectMetadata, error) {
+	if !*s.done {
+		*s.done = true
+		(*s.ix).queue([]ID{{Group: gk.Group, Kind: gk.Kind, Namespace: ns, Name: name}}, true)
+	}
+	return s.objServer.Get(ctx, gk, ns, name)
+}
+
+// A check queued again during a drain's round is the new one's: the round
+// doesn't put back the backoff it found (§10.6.3).
+func TestTheDrainKeepsACheckQueuedAgain(t *testing.T) {
+	held := SecretRef("ns", "held").ID()
+	var ix *index
+	done := false
+	ix = testIndex(&memStore{exists: true, rebuilt: true}, requeueServer{&objServer{objs: map[ID]*metav1.PartialObjectMetadata{held: heldObj("held")}}, &ix, &done})
+	ix.queue([]ID{held}, false)
+	ix.mu.Lock()
+	ix.pending[held].fails, ix.pending[held].due = 3, time.Now().Add(time.Hour)
+	ix.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond) // one round
+	defer cancel()
+	ix.drain(ctx, func() bool { return false }, func(ID, string) {})
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if r := ix.pending[held]; r == nil || r.fails != 0 || !r.due.IsZero() {
+		t.Errorf("the check queued again: %+v; want it due now, with no failures", r)
+	}
+}
+
+// A client's rate limiter refuses at once a call whose turn would come after
+// its context's deadline. Behind a backlog longer than a prune's check, the
+// check waits its turn, is cut, puts the line back, and says so, so that its
+// bare object is retried; refused, the read failed as an unread object's, the
+// line went back, and the prune said nothing (§10.6.2). A backlog well
+// shorter than the check is waited for.
+func TestAPruneBehindALimiterBacklog(t *testing.T) {
+	bare := SecretRef("ns", "bare").ID()
+	for name, tc := range map[string]struct {
+		lim  func() *rate.Limiter // made as the case starts
+		cut  bool
+		left []string
+	}{
+		"2s of backlog":    {func() *rate.Limiter { return backlogged(100*time.Millisecond, 20) }, true, linesOf([]ID{bare})},
+		"20ms of backlog":  {func() *rate.Limiter { return backlogged(10*time.Millisecond, 2) }, false, nil},
+		"none, as a check": {func() *rate.Limiter { return rate.NewLimiter(rate.Inf, 1) }, false, nil},
+	} {
+		st := &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{bare}), rv: 1}
+		ix := testIndex(st, limitedServer{&objServer{}, tc.lim()})
+		ix.bound, ix.checkBound = 3*time.Second, 500*time.Millisecond
+		start := time.Now()
+		err := ix.prune(context.Background(), []ID{bare})
+		if errors.Is(err, context.DeadlineExceeded) != tc.cut || !tc.cut && err != nil {
+			t.Errorf("%s: prune = %v, want cut short %v", name, err, tc.cut)
+		}
+		if !slices.Equal(st.lines, tc.left) {
+			t.Errorf("%s: lines %q, want %q", name, st.lines, tc.left)
+		}
+		if took := time.Since(start); tc.cut && took < ix.checkBound {
+			t.Errorf("%s: the prune ended after %s, before its check's bound: its read didn't wait its turn", name, took)
+		}
 	}
 }
 

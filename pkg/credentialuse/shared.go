@@ -234,6 +234,8 @@ type Shared struct {
 	// failures are the informers' lists and watches that fail, for their one
 	// log.
 	failures watchFailures
+	// calls are the acquirer calls in flight, which a drain waits for.
+	calls callsInFlight
 
 	// trackWaiting counts Tracks waiting for another Track of their kind,
 	// for tests.
@@ -305,6 +307,10 @@ type hooks struct {
 	// pruneQuiet replaces how long the prunes are kept back once the write
 	// loops have started.
 	pruneQuiet *time.Duration
+	// drainBound replaces stopDrainBound, and callGrace the grace the drain
+	// gives the calls in flight.
+	drainBound *time.Duration
+	callGrace  *time.Duration
 }
 
 // landingMargin is LandingMargin, or the tests' own.

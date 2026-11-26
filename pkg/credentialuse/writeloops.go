@@ -29,6 +29,17 @@ const (
 	// startup recheck's, and the index's checks', are bounded by them too.
 	releaseBackoffBase = time.Second
 	releaseBackoffMax  = 5 * time.Minute
+	// stopDrainBound bounds the drain, as the write loops stop, of the live
+	// checks an index holds in memory (§10.6.3, decided 2026-11-25): the
+	// 10s an A2 in flight is given after a stop (a2Grace), for what else a
+	// stop owes the index.
+	stopDrainBound = a2Grace
+	// drainPause is the wait after the drain's first round, while some of
+	// its checks fail; it doubles at each round, to drainPauseMax, so that a
+	// failure that won't clear takes few turns from the acquirers still
+	// ending.
+	drainPause    = 200 * time.Millisecond
+	drainPauseMax = 2 * time.Second
 )
 
 // errInformersEnded is RunWriteLoops' error when RunInformers ends first.
@@ -42,7 +53,10 @@ var errWriteLoopsRunning = errors.New("credential-use: RunWriteLoops is already 
 // the missing-ref prober and the label janitor. It needs leader election
 // (§7.5, IP4), and it may start before, with or after RunInformers: it waits
 // for the informers' first sync, then rescans the protected caches and
-// starts. It returns at once when RunInformers ends.
+// starts. When RunInformers ends, the loops end with it, and it returns once
+// they have, and its drain after them, which waits for ctx's end, and for the
+// acquirer calls begun before it, within 25s of the loops' end (§7.2,
+// §10.6.3).
 //
 // The rescan enqueues the batch of every (K, N) finalizer on every cached
 // protected object, and every object whose labels the janitor would clean.
@@ -62,6 +76,15 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		return nil
 	}
 
+	stopping := ctx // its end is the manager's stop of the leader's runnables
+	var stopMu sync.Mutex
+	var stoppedAt, endedAt time.Time // stopping's end, and the loops'
+	unhook := context.AfterFunc(stopping, func() {
+		stopMu.Lock()
+		stoppedAt = time.Now()
+		stopMu.Unlock()
+	})
+	defer unhook()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.mu.Lock()
@@ -86,6 +109,20 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 		cancel()
 		s.mu.Unlock()
 		s.writeWG.Wait()
+		// Nothing of the loops runs any more. What is queued dies with the
+		// process unless it is made now, and the acquirers still ending may
+		// queue more (§10.6.3).
+		stopMu.Lock()
+		if endedAt.IsZero() {
+			endedAt = time.Now()
+		}
+		ended := endedAt
+		stopMu.Unlock()
+		s.drainIndexes(stopping, ended, func() time.Time {
+			stopMu.Lock()
+			defer stopMu.Unlock()
+			return stoppedAt
+		})
 		// What the release loop counted outside the caches is stale once it
 		// stops: only the process that runs the write loops reports it.
 		for _, t := range s.trackerList() {
@@ -136,9 +173,132 @@ func (s *Shared) RunWriteLoops(ctx context.Context) error {
 	case <-s.runDone:
 		err = errInformersEnded
 	}
+	stopMu.Lock()
+	endedAt = time.Now()
+	stopMu.Unlock()
 	cancel()
 	wg.Wait()
 	return err
+}
+
+// drainIndexes makes, as the write loops stop, the live checks every index
+// holds in memory (§10.6.3, decided 2026-11-25): the re-adds a prune couldn't
+// write, the checks an acquirer's line check queued when it failed, the checks
+// of lines someone else dropped, and the late checks of A2s of unknown
+// outcome whose margin is over, whose batches it queues too. Each reads its
+// object live and writes its line back if it carries the kind's prefix, or
+// can't be read, as the write loops would have.
+//
+// The acquirers may still queue some: a manager stops the informers first,
+// whose end ends the loops, and only then the controllers, whose calls go on
+// up to callGrace after that (§7.2). So the drain goes on while stopping
+// lives, or a call begun before it ended (stoppedAt) is in flight, and
+// stopDrainBound after the last moment one of them was so, or after its own
+// start; at most callGrace and stopDrainBound after the loops ended, when
+// stopping did or RunInformers did, whichever was first, so that a prune's
+// write that ran on after that doesn't push the stop past a manager's 30s. A
+// call begun after the stop isn't waited for: its controller wasn't stopped
+// with the loops. What the drain leaves is logged, with how many: the checks
+// left undone, the late holds whose margin isn't over, and the calls still in
+// flight, whose checks may be lost, beside the prunes put off.
+func (s *Shared) drainIndexes(stopping context.Context, ended time.Time, stoppedAt func() time.Time) {
+	d, grace := stopDrainBound, callGrace
+	if b := s.hooks.drainBound; b != nil {
+		d = *b
+	}
+	if g := s.hooks.callGrace; g != nil {
+		grace = *g
+	}
+	capped, cancel := context.WithDeadline(context.WithoutCancel(stopping), ended.Add(grace+d))
+	defer cancel()
+	ctx, quiet := context.WithCancel(capped)
+	defer quiet()
+	// waited are the calls in flight the drain waits for: those begun
+	// before stopping ended, or all while it hasn't.
+	waited := func() int {
+		at := stoppedAt()
+		if at.IsZero() {
+			at = time.Now()
+		}
+		return s.calls.before(at)
+	}
+	busy := func() bool { return stopping.Err() == nil || waited() > 0 }
+	go func() {
+		// Ends the drain d after it was last busy.
+		last := time.Now()
+		for {
+			if busy() {
+				last = time.Now()
+			}
+			if time.Since(last) >= d {
+				quiet()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(min(d/10, 100*time.Millisecond)):
+			}
+		}
+	}()
+	var wg sync.WaitGroup
+	for _, t := range s.trackerList() {
+		if t.idx == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			left, late, deferred := t.idx.drain(ctx, busy, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
+			if calls := waited(); left+late+calls > 0 {
+				t.warn("credential-use: the write loops stopped with live checks of the index left undone: their lines may be missing until their holders' next passes (§10.6.3)",
+					"kind", t.gk.String(), "index", t.idx.ref(), "left", left, "lateHoldsNotDue", late, "callsInFlight", calls, "prunesPutOff", deferred, "bound", d.String())
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// callsInFlight are the acquirer calls of a Shared that are running, an
+// Acquire or a BeforeEstablish, from its detach to its stop (§7.2), by when
+// each began: a drain waits for those begun before the stop.
+type callsInFlight struct {
+	mu    sync.Mutex
+	next  int
+	began map[int]time.Time
+}
+
+// begin counts one call, until end, which may be called more than once.
+func (c *callsInFlight) begin() (end func()) {
+	c.mu.Lock()
+	if c.began == nil {
+		c.began = map[int]time.Time{}
+	}
+	id := c.next
+	c.next++
+	c.began[id] = time.Now()
+	c.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			delete(c.began, id)
+			c.mu.Unlock()
+		})
+	}
+}
+
+// before counts the calls in flight that began before t.
+func (c *callsInFlight) before(t time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, at := range c.began {
+		if at.Before(t) {
+			n++
+		}
+	}
+	return n
 }
 
 // rescan enqueues, from every protected cache, the batch of each (K, N)

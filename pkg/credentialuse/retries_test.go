@@ -19,6 +19,8 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/utils/clock"
 	testingclock "k8s.io/utils/clock/testing"
+
+	"golang.org/x/time/rate"
 )
 
 // Retries: what fails is retried, with backoff, and nothing else is, nor
@@ -811,6 +813,319 @@ func TestAFailedPruneIsRetriedAlone(t *testing.T) {
 	r.s.releaseBatch(context.Background(), k, []ID{secretID("ns", "s"), secretID("ns", "kept")})
 	if retry, _ := timersOf(r.s.queue, k); !slices.Equal(retry, []ID{secretID("ns", "s")}) {
 		t.Errorf("the retry covers %v, want the released Secret, whose line wasn't pruned", retry)
+	}
+}
+
+// A prune behind a backlog of its client's rate limiter is cut, and its bare
+// object retried with backoff, its line kept meanwhile; refused at once, the
+// object was settled with its line back, and nothing pruned it (§10.6.2).
+func TestAPruneBehindALimiterBacklogIsRetried(t *testing.T) {
+	s := secretID("ns", "s")
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	r.drain()
+	st := &memStore{exists: true, lines: linesOf([]ID{s})}
+	tr.idx = testIndex(st, limitedServer{r.s.newServer(tr.o.Holder), backlogged(100*time.Millisecond, 20)})
+	tr.idx.bound, tr.idx.checkBound = 2*time.Second, 200*time.Millisecond
+	k := batchKey{widgetGK, "ns"}
+	r.s.releaseBatch(context.Background(), k, []ID{s})
+	if retry, _ := timersOf(r.s.queue, k); !slices.Equal(retry, []ID{s}) {
+		t.Errorf("the retry covers %v, want the released Secret, whose line the cut check put back", retry)
+	}
+	if !slices.Equal(st.lines, linesOf([]ID{s})) {
+		t.Errorf("lines %q, want the Secret's, until its retry", st.lines)
+	}
+}
+
+// As the write loops stop they make the live checks the index holds in
+// memory, a re-add a prune couldn't write among them, whatever their
+// backoff, waiting their turn at the client's limiter, within their bound;
+// what the bound leaves is logged, with how many (§10.6.3, decided
+// 2026-11-25).
+func TestAStopDrainsTheIndexsChecks(t *testing.T) {
+	s := secretID("ns", "s")
+	for name, tc := range map[string]struct {
+		backlog int // calls ahead, of 100ms each
+		written bool
+	}{
+		"behind a backlog shorter than the bound": {3, true},
+		"behind one longer than the bound":        {40, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "h", s))
+			w := &warnings{}
+			o := r.options(widgetGK)
+			o.Logger = w
+			tr, err := r.s.Track(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.run(t)
+			r.drain()
+			st := &memStore{exists: true, rebuilt: true} // marked: the startup recheck rebuilds nothing
+			lim := rate.NewLimiter(rate.Every(100*time.Millisecond), 1)
+			tr.idx = testIndex(st, limitedServer{r.s.newServer(tr.o.Holder), lim})
+			bound := 2 * time.Second
+			r.s.hooks.drainBound = &bound
+			stop := r.runWritesStarted(t)
+			tr.idx.queue([]ID{s}, false)
+			tr.idx.mu.Lock()
+			tr.idx.pending[s].due = time.Now().Add(time.Hour) // its backoff
+			tr.idx.mu.Unlock()
+			for range tc.backlog {
+				lim.Reserve()
+			}
+			start := time.Now()
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+			took := time.Since(start)
+			if got := slices.Equal(st.lines, linesOf([]ID{s})); got != tc.written {
+				t.Errorf("lines %q after the stop; want the Secret's written %v", st.lines, tc.written)
+			}
+			w.mu.Lock()
+			said := slices.ContainsFunc(w.got, func(g string) bool { return strings.Contains(g, "left undone") && strings.Contains(g, "left 1 ") })
+			w.mu.Unlock()
+			if said == tc.written {
+				t.Errorf("warnings %q; want one of the check left undone %v", w.got, !tc.written)
+			}
+			if took > bound+time.Second {
+				t.Errorf("the stop took %s, past its bound of %s", took, bound)
+			}
+		})
+	}
+}
+
+// runWritesStarted is runWrites, once the loops have started. A stop before
+// then can end RunWriteLoops at its first select, which runs no loop and so
+// drains nothing: a select with its context ended and the informers synced
+// takes either.
+func (r *fakeRig) runWritesStarted(t *testing.T) (stop func() error) {
+	t.Helper()
+	stop = r.runWrites(t)
+	eventually(t, "the write loops to start", func() bool {
+		r.s.mu.Lock()
+		defer r.s.mu.Unlock()
+		return r.s.writeCtx != nil
+	})
+	return stop
+}
+
+// drainRig is a rig whose Widgets hold Secret ns/s, recorded, with an index of
+// the test's own, whose drain on a stop has bound.
+func drainRig(t *testing.T, bound time.Duration) (*fakeRig, *Tracker, *memStore, *warnings) {
+	t.Helper()
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "h", secretID("ns", "s")))
+	w := &warnings{}
+	o := r.options(widgetGK)
+	o.Logger = w
+	tr, err := r.s.Track(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	r.drain()
+	st := &memStore{exists: true, rebuilt: true} // marked: the startup recheck rebuilds nothing
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	r.s.hooks.drainBound = &bound
+	return r, tr, st, w
+}
+
+// drainWarned reports whether w has the drain's warning, with what.
+func drainWarned(w *warnings, what string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.ContainsFunc(w.got, func(g string) bool { return strings.Contains(g, "left undone") && strings.Contains(g, what) })
+}
+
+// An acquirer call begun before the stop goes on after the write loops end,
+// up to callGrace, and may queue a check: the drain waits for it, and makes
+// that check, its bound from when the call ended; one that outlives the
+// drain's cap is said (§10.6.3, §7.2).
+func TestAStopWaitsForTheCallsInFlight(t *testing.T) {
+	s := secretID("ns", "s")
+	t.Run("a call that queues a check after the loops ended", func(t *testing.T) {
+		r, tr, st, w := drainRig(t, 500*time.Millisecond)
+		stop := r.runWritesStarted(t)
+		end := r.s.calls.begin()
+		go func() {
+			time.Sleep(800 * time.Millisecond) // past the bound from the loops' end
+			tr.idx.queue([]ID{s}, false)       // its line check failed
+			end()
+		}()
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(st.lines, linesOf([]ID{s})) || drainWarned(w, "") {
+			t.Errorf("lines %q, warnings %q; want the line written before the loops returned, and nothing left", st.lines, w.got)
+		}
+	})
+	t.Run("a call that outlives the cap", func(t *testing.T) {
+		r, _, _, w := drainRig(t, 300*time.Millisecond)
+		grace := 300 * time.Millisecond
+		r.s.hooks.callGrace = &grace
+		stop := r.runWritesStarted(t)
+		end := r.s.calls.begin()
+		defer end()
+		start := time.Now()
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+		if took := time.Since(start); took < grace || took > 2*time.Second {
+			t.Errorf("the stop took %s; want it to end at the cap of 600ms", took)
+		}
+		if !drainWarned(w, "callsInFlight 1 ") {
+			t.Errorf("warnings %q; want one naming the call in flight", w.got)
+		}
+	})
+	t.Run("a call begun after the stop", func(t *testing.T) {
+		r, tr, _, w := drainRig(t, 300*time.Millisecond)
+		grace := 2 * time.Second
+		r.s.hooks.callGrace = &grace
+		tr.idx.srv = &objServer{fail: map[ID]bool{s: true}} // the drain goes on
+		stop := r.runWritesStarted(t)
+		tr.idx.queue([]ID{s}, false)
+		var mu sync.Mutex
+		var end func()
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			mu.Lock()
+			end = r.s.calls.begin() // its controller wasn't stopped
+			mu.Unlock()
+		}()
+		start := time.Now()
+		if err := stop(); err != nil {
+			t.Fatal(err)
+		}
+		took := time.Since(start)
+		mu.Lock()
+		if end != nil {
+			end()
+		}
+		mu.Unlock()
+		if took > time.Second || !drainWarned(w, "left 1 ") || !drainWarned(w, "callsInFlight 0 ") {
+			t.Errorf("the stop took %s, warnings %q; want it to end at its bound, with the check left and no call waited for", took, w.got)
+		}
+	})
+}
+
+// blockingStore is a memStore whose first update blocks until its context
+// ends, as a write stuck in the API server's queue would.
+type blockingStore struct {
+	*memStore
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingStore) update(ctx context.Context, cur indexVersion, lines []string, mark kindSet) (indexVersion, error) {
+	first := false
+	s.once.Do(func() { first = true })
+	if first {
+		s.entered <- struct{}{}
+		<-ctx.Done()
+		return indexVersion{}, ctx.Err()
+	}
+	return s.memStore.update(ctx, cur, lines, mark)
+}
+
+// The drain's cap counts from the loops' end, and not from its own start: a
+// prune's write still running at the stop doesn't push the stop past the cap
+// (§7.2).
+func TestADrainsCapCountsFromTheLoopsEnd(t *testing.T) {
+	s := secretID("ns", "s")
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"))
+	tr := r.track(t, widgetGK)
+	r.run(t)
+	st := &blockingStore{memStore: &memStore{exists: true, rebuilt: true, lines: linesOf([]ID{s})}, entered: make(chan struct{}, 1)}
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	tr.idx.bound, tr.idx.checkBound = time.Second, 500*time.Millisecond
+	quiet, d, grace := time.Duration(0), 300*time.Millisecond, 300*time.Millisecond
+	r.s.hooks.pruneQuiet, r.s.hooks.drainBound, r.s.hooks.callGrace = &quiet, &d, &grace
+	stop := r.runWrites(t)
+	select {
+	case <-st.entered: // the batch's prune of the released Secret is in its write
+	case <-time.After(10 * time.Second):
+		t.Fatal("no prune began")
+	}
+	end := r.s.calls.begin() // a call that outlives the cap
+	defer end()
+	start := time.Now()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	// The prune's write runs on to its 500ms; the cap is at 600ms from the
+	// stop, where one from the drain's start would be at about 1.1s.
+	if took := time.Since(start); took < 400*time.Millisecond || took > 850*time.Millisecond {
+		t.Errorf("the stop took %s; want it to end at the cap, 600ms after the loops ended", took)
+	}
+}
+
+// The loops end with the informers, which a manager stops first, before the
+// controllers: the drain waits for the loops' own stop, and makes what was
+// queued meanwhile (§7.2).
+func TestADrainAfterTheInformersEndedWaitsForTheStop(t *testing.T) {
+	s := secretID("ns", "s")
+	r := newFakeRig(t, namespaceObject("ns"), heldObject(secretGVK, "ns", "s", "u1", widgetGK, "ns"), holderObject("ns", "h", secretID("ns", "s")))
+	tr := r.track(t, widgetGK)
+	stopInformers := r.run(t)
+	r.drain()
+	st := &memStore{exists: true, rebuilt: true} // marked: the startup recheck rebuilds nothing
+	tr.idx = testIndex(st, r.s.newServer(tr.o.Holder))
+	bound := 300 * time.Millisecond
+	r.s.hooks.drainBound = &bound
+	stopWrites := r.runWritesStarted(t)
+	if err := stopInformers(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * bound) // the loops have ended, and the controllers still run
+	tr.idx.queue([]ID{s}, false)
+	if err := stopWrites(); err != nil && !errors.Is(err, errInformersEnded) {
+		t.Fatal(err)
+	}
+	if !slices.Equal(st.lines, linesOf([]ID{s})) {
+		t.Errorf("lines %q; want the check queued before the stop made", st.lines)
+	}
+}
+
+// panicking is a server whose writes panic.
+type panicking struct{ server }
+
+func (panicking) Patch(context.Context, schema.GroupKind, string, string, types.PatchType, []byte) (*metav1.PartialObjectMetadata, error) {
+	panic("the server is gone")
+}
+
+// A call is counted from its detach to its stop, however it ends: a panic and
+// an early return included (§7.2).
+func TestACallIsCountedWhileInFlight(t *testing.T) {
+	r := newFakeRig(t, namespaceObject("ns"))
+	tr := r.track(t, widgetGK)
+	inFlight := func() int { return r.s.calls.before(time.Now().Add(time.Second)) }
+	cc := tr.proto.detach(context.Background())
+	if n := inFlight(); n != 1 {
+		t.Errorf("%d calls in flight during one, want 1", n)
+	}
+	cc.stop()
+	cc.stop()
+	if n := inFlight(); n != 0 {
+		t.Errorf("%d calls in flight after it, stopped twice, want 0", n)
+	}
+	srv := tr.proto.srv
+	tr.proto.srv = panicking{srv}
+	panicked := func() (p bool) {
+		defer func() { p = recover() != nil }()
+		_, _ = tr.proto.acquire(context.Background(), holderObject("ns", "h"), []Ref{SecretRef("ns", "s")})
+		return false
+	}()
+	tr.proto.srv = srv
+	if !panicked || inFlight() != 0 {
+		t.Errorf("a call that panicked (%v) leaves %d in flight, want 0", panicked, inFlight())
+	}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = tr.proto.acquire(ended, holderObject("ns", "h"), []Ref{SecretRef("ns", "s")})
+	if n := inFlight(); n != 0 {
+		t.Errorf("a call under an ended context leaves %d in flight, want 0", n)
 	}
 }
 
