@@ -68,6 +68,8 @@ LINE_HELD_CHECK = "\t\tif err != nil || held {\n\t\t\treturn held, err\n\t\t}\n"
 LINES_LOOP = LINES + ACCEPT_LINE + LINE_HELD + LINE_HELD_CHECK + "\t}\n\treturn false, nil\n"
 SEGMENT_NAME = "len(rest.IsValidPathSegmentName(name)) == 0 &&"
 SEGMENT_NS = "\t\tlen(rest.IsValidPathSegmentName(namespace)) == 0\n"
+HELD_RET = "\treturn o.heldExists(ctx, r, gvk)\n"
+HELD_NONE = "\t\treturn false, errors.New(\"scaletozero: HeldWithOptions needs WithHeld or WithHeldIndex\")\n"
 LINE_MAP_ERR = "\t\treturn false, fmt.Errorf(\"scaletozero: mapping %s, of the index line %q: %w\", id.GroupKind(), id, err)\n"
 LINE_GONE = "\tif apierrors.IsNotFound(err) {\n\t\treturn false, nil\n\t}\n"
 LINE_GET_ERR = "\t\treturn false, fmt.Errorf(\"scaletozero: reading %q, of the index: %w\", id, err)\n"
@@ -209,6 +211,12 @@ MUTANTS = [
     ("a cluster-scoped line isn't read", [("\treturn (namespace != \"\") == namespaced && ", "\treturn namespace != \"\" && namespaced && ")], HELD),
     ("a name that is no path segment is read", [(SEGMENT_NAME, "true &&")], HELD),
     ("a namespace that is no path segment is read", [(SEGMENT_NS, "\t\ttrue\n")], HELD),
+    # HeldWithOptions (decided 2026-11-26).
+    ("HeldWithOptions counts the instances", [(HELD_RET, "\treturn ExistsWithOptions(ctx, r, gvk, labels.Everything(), opts...)\n")], HELD),
+    ("HeldWithOptions without a held option is false", [(HELD_NONE, "\t\treturn false, nil\n")], HELD),
+    ("HeldWithOptions skips the options' check", [(CHECK_OPTS, "\to := collect(opts)\n")], HELD),
+    ("HeldWithOptions accepts a nil reader", [("\tif r == nil {\n\t\treturn false, errors.New(\"scaletozero: HeldWithOptions needs a reader\")\n", "\tif false && r == nil {\n\t\treturn false, errors.New(\"scaletozero: HeldWithOptions needs a reader\")\n")], HELD),
+    ("HeldWithOptions accepts a kind without a version", [("\tif gvk.Version == \"\" || gvk.Kind == \"\" {\n\t\treturn false, errors.Errorf(\"scaletozero: HeldWithOptions", "\tif false && (gvk.Version == \"\" || gvk.Kind == \"\") {\n\t\treturn false, errors.Errorf(\"scaletozero: HeldWithOptions")], HELD),
 ]
 
 

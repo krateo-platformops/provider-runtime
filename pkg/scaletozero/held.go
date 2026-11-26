@@ -71,6 +71,11 @@ func WithHeldIndex(index types.NamespacedName) Option {
 // prefix but that accept refuses is passed over as a collision is, and a line
 // it refuses isn't read at all, so its object needs no grant.
 //
+// So accept is asked about different things on the two paths. On the lists,
+// only about holds: objects that carry the prefix. On the index, about every
+// line before its GET, so also about objects that are gone or carry no prefix.
+// A filter with a cost or a side effect sees more calls on the index path.
+//
 // A call checks the holds of one holder kind, the gvk it is given, so accept
 // may capture that kind. core-provider's Undeploy, for one, counts only the
 // holds that no other live definition's RBAC covers (§16.3):
@@ -81,8 +86,8 @@ func WithHeldIndex(index types.NamespacedName) Option {
 //
 // The filter doesn't apply to the Disown switch: a switch that hasn't settled
 // counts whatever the filter, since it isn't the hold of a name. With
-// several filters a hold counts only if each accepts it; a nil one is
-// ignored. A filter needs WithHeld or WithHeldIndex: alone it is an error.
+// several filters a hold counts only if each accepts it. A nil filter is
+// ignored, and a non-nil one without WithHeld or WithHeldIndex is an error.
 func WithHeldFilter(accept func(credentialuse.ID) bool) Option {
 	return func(o *options) {
 		if accept != nil {
@@ -150,6 +155,34 @@ var crdGVK = schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1
 
 // configMapGVK is the ConfigMap kind.
 var configMapGVK = schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+
+// HeldWithOptions reports whether holder kind gvk holds anything: it checks
+// only what ExistsWithOptions checks after the instances, the holds and the
+// Disown switch, with the same options, filter and errors, and never lists
+// the instances (decided 2026-11-26). It is for an owner whose instances may
+// rightly remain, as core-provider's Undeploy on its SkipCRD path, where a
+// surviving definition keeps the kind's instances (§16.3). labels.Nothing()
+// can't stand in for it: controller-runtime sends it as an empty selector,
+// which matches every instance.
+//
+// It needs WithHeld or WithHeldIndex, without which it would have nothing to
+// check, and WithRESTMapper. Every failed read is an error, never false.
+func HeldWithOptions(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, opts ...Option) (bool, error) {
+	if r == nil {
+		return false, errors.New("scaletozero: HeldWithOptions needs a reader")
+	}
+	if gvk.Version == "" || gvk.Kind == "" {
+		return false, errors.Errorf("scaletozero: HeldWithOptions needs a version and a kind, got %q", gvk)
+	}
+	o, err := newOptions(opts)
+	if err != nil {
+		return false, err
+	}
+	if !o.held() {
+		return false, errors.New("scaletozero: HeldWithOptions needs WithHeld or WithHeldIndex")
+	}
+	return o.heldExists(ctx, r, gvk)
+}
 
 // heldExists reports whether holder kind gvk's Disown switch hasn't settled,
 // or an object still carries one of its finalizers: of WithHeld's kinds, by

@@ -97,6 +97,12 @@
 // covers. It doesn't apply to the Disown switch, which isn't the hold of a
 // name: a switch that hasn't settled counts whatever the filter.
 //
+// HeldWithOptions checks only the holds and the switch, never the instances,
+// with the same options, filter and errors (decided 2026-11-26), for an owner
+// whose instances may rightly remain: core-provider's Undeploy uses it on its
+// SkipCRD path, where a surviving definition keeps the kind's instances, and
+// ExistsWithOptions on the other.
+//
 // A protected kind taken out of PerName, or uninstalled, keeps its lines in
 // the index: the tracker prunes only its PerName kinds' lines (decided
 // 2026-11-26: the behaviour stays). WithHeldIndex still GETs their objects,

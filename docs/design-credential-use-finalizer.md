@@ -6066,9 +6066,14 @@ instance goes. Two cases matter:
 
 - `Undeploy` treats held objects as instances, in both the `!SkipCRD` and
   the `SkipCRD` paths. It refuses with `ErrCompositionStillExist`, or a new
-  error, while `scaletozero.ExistsWithOptions(... WithHeld(...))` (or `WithHeldIndex`
-  in PerName mode) finds a hold under the kind's prefix that this
-  definition's RBAC is the only grant for. It passes
+  error, while a check with `WithHeld(...)` (or `WithHeldIndex` in PerName
+  mode) finds a hold under the kind's prefix that this definition's RBAC is
+  the only grant for. The `!SkipCRD` path checks with
+  `scaletozero.ExistsWithOptions`, which counts the instances first. The
+  `SkipCRD` path, which skips the instance guard because a surviving
+  definition keeps the kind's instances, checks with
+  `scaletozero.HeldWithOptions`, which counts only the holds and the switch
+  (decided 2026-11-26). Both pass
   `WithHeldFilter(func(id credentialuse.ID) bool { return !coveredBySurvivorOf(holderGVK.GroupKind(), id) })`
   (decided 2026-11-26), so that only those holds count; the check still stops
   at the first that does. A call checks one holder kind, so the filter

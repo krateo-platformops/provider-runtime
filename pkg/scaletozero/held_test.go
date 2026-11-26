@@ -913,16 +913,36 @@ func TestReconcileTakesTheClientsMapperOnlyWhenNeeded(t *testing.T) {
 		}
 	})
 	t.Run("a client without a mapper is an error", func(t *testing.T) {
-		res, _, err := run(t, nil, false, WithHeld(secretGVK))
-		if err == nil || res.Replicas != 1 || res.Reason != ReasonUnknown || res.Patched {
-			t.Errorf("ReconcileWithOptions = (%+v, %v), want an error that changes nothing", res, err)
-		}
+		recovered(t, "ReconcileWithOptions with no mapper", func() {
+			res, _, err := run(t, nil, false, WithHeld(secretGVK))
+			if err == nil || res.Replicas != 1 || res.Reason != ReasonUnknown || res.Patched {
+				t.Errorf("ReconcileWithOptions = (%+v, %v), want an error that changes nothing", res, err)
+			}
+		})
 	})
+}
+
+// recovered runs f, and fails the test if f panics. A rule whose absence
+// makes the code call a nil mapper, as the options' check, then fails a test
+// as an assertion would, and not as a panic, which the revert check doesn't
+// count as caught.
+func recovered(t *testing.T, what string, f func()) {
+	t.Helper()
+	defer func() {
+		if p := recover(); p != nil {
+			t.Errorf("%s: want an error, got a call that failed: %v", what, p)
+		}
+	}()
+	f()
 }
 
 // An index line whose name, or namespace, isn't a single path segment, as a
 // hand edit may leave, names an object that can't exist, and holds nothing:
-// it isn't read, which client-go would refuse.
+// it isn't read. Were it read, nothing on the client side would stop the GET.
+// The API server refuses a name that isn't a path segment (a 400, so an
+// error), but nothing refuses "..", which the client's path join cleans into
+// a GET of the Namespace (so false), nor a namespace that isn't one (a 404,
+// so false). So the test asserts that no Secret is read at all.
 func TestExistsWithHeldIndexSkipsWhatIsNoPathSegment(t *testing.T) {
 	requireAPIServer(t)
 	ctx := context.Background()
@@ -935,8 +955,84 @@ func TestExistsWithHeldIndexSkipsWhatIsNoPathSegment(t *testing.T) {
 		"a namespace with %": line(secretGVK, "a%2Fb", "x"),
 	} {
 		index := newIndex(t, l)
-		if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeldIndex(index), withMapper()); err != nil || ok {
+		r, gets := getRecorder(t, "Secret", nil)
+		if ok, err := ExistsWithOptions(ctx, r, holder, labels.Everything(), WithHeldIndex(index), withMapper()); err != nil || ok {
 			t.Errorf("%s (%q) = (%v, %v), want (false, nil)", name, l, ok, err)
 		}
+		if got := gets(); len(got) != 0 {
+			t.Errorf("%s (%q): GETs of secrets %v, want none", name, l, got)
+		}
+	}
+}
+
+// HeldWithOptions checks only the holds and the Disown switch: it never lists
+// the instances (decided 2026-11-26), and takes the same options and errors.
+func TestHeldWithOptionsIgnoresInstances(t *testing.T) {
+	requireAPIServer(t)
+	ctx := context.Background()
+	holder := newHolderKind(t)
+	ns := newNamespace(t)
+	newInstance(t, holder, ns, "instance", nil)
+	plural := strings.ToLower(holder.Kind) + "s"
+
+	c, requests := recordingClient(t, plural)
+	ok, err := HeldWithOptions(ctx, c, holder, WithHeld(secretGVK), WithRESTMapper(c.RESTMapper()))
+	if err != nil || ok {
+		t.Errorf("HeldWithOptions with an instance and no hold = (%v, %v), want (false, nil)", ok, err)
+	}
+	if n := len(requests()); n != 0 {
+		t.Errorf("HeldWithOptions listed the instances %d times, want never", n)
+	}
+	if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeld(secretGVK), withMapper()); err != nil || !ok {
+		t.Errorf("ExistsWithOptions with the instance = (%v, %v), want (true, nil): it is unchanged", ok, err)
+	}
+
+	// The switch counts.
+	setCRDAnnotations(t, holder, map[string]string{credentialuse.AnnotationDisown: "all"})
+	if ok, err := HeldWithOptions(ctx, k8s, holder, WithHeld(secretGVK), withMapper()); err != nil || !ok {
+		t.Errorf("HeldWithOptions with an unsettled switch = (%v, %v), want (true, nil)", ok, err)
+	}
+	setCRDAnnotations(t, holder, nil)
+
+	// Holds count, of the lists and of the index, and the filter applies.
+	held(t, holder, ns, "listed")
+	newSecret(t, ns, "indexed", nil, finalizer(t, holder.GroupKind(), ns))
+	index := newIndex(t, line(secretGVK, ns, "indexed"))
+	for name, opts := range map[string][]Option{
+		"WithHeld":      {WithHeld(secretGVK)},
+		"WithHeldIndex": {WithHeldIndex(index)},
+	} {
+		if ok, err := HeldWithOptions(ctx, k8s, holder, append(opts, withMapper())...); err != nil || !ok {
+			t.Errorf("HeldWithOptions(%s) with a hold = (%v, %v), want (true, nil)", name, ok, err)
+		}
+		none, _ := filterOf()
+		if ok, err := HeldWithOptions(ctx, k8s, holder, append(opts, WithHeldFilter(none), withMapper())...); err != nil || ok {
+			t.Errorf("HeldWithOptions(%s) with a filter that accepts none = (%v, %v), want (false, nil)", name, ok, err)
+		}
+	}
+
+	// Errors are errors: a missing index, and options that are wrong.
+	missing := types.NamespacedName{Namespace: index.Namespace, Name: "absent"}
+	if ok, err := HeldWithOptions(ctx, k8s, holder, WithHeldIndex(missing), withMapper()); err == nil || ok {
+		t.Errorf("HeldWithOptions with a missing index = (%v, %v), want an error", ok, err)
+	}
+	for name, opts := range map[string][]Option{
+		"no option":                   nil,
+		"WithHeld without a mapper":   {WithHeld(secretGVK)},
+		"a mapper and no held option": {withMapper()},
+	} {
+		recovered(t, "HeldWithOptions with "+name, func() {
+			if ok, err := HeldWithOptions(ctx, k8s, holder, opts...); err == nil || ok {
+				t.Errorf("HeldWithOptions with %s = (%v, %v), want an error", name, ok, err)
+			}
+		})
+	}
+	recovered(t, "HeldWithOptions with a nil reader", func() {
+		if _, err := HeldWithOptions(ctx, nil, holder, WithHeld(secretGVK), withMapper()); err == nil {
+			t.Error("HeldWithOptions with a nil reader: want an error")
+		}
+	})
+	if _, err := HeldWithOptions(ctx, k8s, schema.GroupVersionKind{Group: testGroup, Kind: holder.Kind}, WithHeld(secretGVK), withMapper()); err == nil {
+		t.Error("HeldWithOptions without a version: want an error")
 	}
 }

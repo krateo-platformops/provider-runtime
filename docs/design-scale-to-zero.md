@@ -53,6 +53,7 @@ func ExistsWithOptions(ctx context.Context, r client.Reader, gvk schema.GroupVer
 	opts ...Option) (bool, error)
 func ReconcileWithOptions(ctx context.Context, c client.Client, deploy types.NamespacedName, gvk schema.GroupVersionKind,
 	sel labels.Selector, lastSeen time.Time, holdDown time.Duration, active int32, opts ...Option) (Result, error)
+func HeldWithOptions(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, opts ...Option) (bool, error)
 func WithHeld(protected ...schema.GroupVersionKind) Option
 func WithHeldIndex(index types.NamespacedName) Option
 func WithHeldFilter(accept func(credentialuse.ID) bool) Option
@@ -244,10 +245,24 @@ held, err := scaletozero.ExistsWithOptions(ctx, r, holderGVK, sel,
 	scaletozero.WithRESTMapper(mapper))
 ```
 
-The filter doesn't apply to the Disown switch, which isn't the hold of a
-name: a switch that hasn't settled counts whatever the filter. Several
-filters must all accept a hold; a filter without `WithHeld` or
-`WithHeldIndex` is an error.
+The filter is asked about different things on the two paths: on the lists,
+only about objects that carry the prefix; on the index, about every line
+before its GET, gone objects and objects without the prefix included. A
+filter with a cost or a side effect sees more calls on the index path. The
+filter doesn't apply to the Disown switch, which isn't the hold of a name: a
+switch that hasn't settled counts whatever the filter. Several filters must
+all accept a hold. A nil filter is ignored, and a non-nil one without
+`WithHeld` or `WithHeldIndex` is an error.
+
+**`HeldWithOptions(ctx, r, gvk, opts...)` checks only the holds and the
+switch**, never the instances, with the same options, filter and errors
+(decided 2026-11-26). `ExistsWithOptions` is unchanged. core-provider's
+`Undeploy` uses `ExistsWithOptions` on its `!SkipCRD` path, where the
+instances count too, and `HeldWithOptions` on its `SkipCRD` path, where a
+surviving definition keeps the kind's instances. `labels.Nothing()` can't
+stand in: controller-runtime sends it as an empty selector, which matches
+every instance. `HeldWithOptions` without `WithHeld` or `WithHeldIndex` is an
+error.
 
 **A protected kind taken out of PerName, or uninstalled, keeps its index
 lines** (decided 2026-11-26: the behaviour stays). The tracker prunes only
