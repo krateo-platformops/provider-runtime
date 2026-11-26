@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -247,9 +248,13 @@ func TestExistsWithHeldListsEachProtectedKind(t *testing.T) {
 	if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeld(secretGVK, shieldGVK), withMapper()); err != nil || !ok {
 		t.Errorf("WithHeld(Secret, Shield) = (%v, %v), want (true, nil)", ok, err)
 	}
-	// Given in two options, the kinds add up.
+	// Given in two options, the kinds add up, in either order: the hold is on
+	// the first option's kind in one, and on the second's in the other.
 	if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeld(secretGVK), WithHeld(shieldGVK), withMapper()); err != nil || !ok {
 		t.Errorf("WithHeld(Secret), WithHeld(Shield) = (%v, %v), want (true, nil)", ok, err)
+	}
+	if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeld(shieldGVK), WithHeld(secretGVK), withMapper()); err != nil || !ok {
+		t.Errorf("WithHeld(Shield), WithHeld(Secret) = (%v, %v), want (true, nil)", ok, err)
 	}
 }
 
@@ -574,25 +579,39 @@ func TestExistsWithHeldReadErrorsAreErrors(t *testing.T) {
 		holder schema.GroupVersionKind
 		opts   []Option
 		wantIs error
+		// check pins the reason: the error is of that kind, and no CRD was
+		// read before it.
+		check func(error) bool
 	}{
 		"a failed LIST of a protected kind": {r: failList, holder: holder, opts: []Option{WithHeld(secretGVK), withMapper()}, wantIs: injected},
 		"a failed GET of the CRD":           {r: failCRD, holder: holder, opts: []Option{WithHeld(secretGVK), withMapper()}, wantIs: injected},
-		"a mapper without the holder kind": {r: k8s, holder: holder,
-			opts: []Option{WithHeld(secretGVK), WithRESTMapper(meta.NewDefaultRESTMapper(nil))}},
-		"a holder kind without a group": {r: k8s, holder: schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
-			opts: []Option{WithHeld(secretGVK), withMapper()}},
+		"a mapper without the holder kind": {holder: holder,
+			opts: []Option{WithHeld(secretGVK), WithRESTMapper(meta.NewDefaultRESTMapper(nil))}, check: meta.IsNoMatchError},
+		"a holder kind without a group": {holder: schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+			opts:  []Option{WithHeld(secretGVK), withMapper()},
+			check: func(err error) bool { return strings.Contains(err.Error(), "a holder kind needs a kind and a group") }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			sel := labels.Everything()
 			if tc.holder.Kind == "ConfigMap" {
 				sel = labels.SelectorFromSet(map[string]string{"scaletozero-test": "none"})
 			}
-			ok, err := ExistsWithOptions(ctx, tc.r, tc.holder, sel, tc.opts...)
+			r, crdGets := tc.r, func() []client.ObjectKey { return nil }
+			if r == nil {
+				r, crdGets = getRecorder(t, "CustomResourceDefinition", nil)
+			}
+			ok, err := ExistsWithOptions(ctx, r, tc.holder, sel, tc.opts...)
 			if err == nil || ok {
 				t.Fatalf("ExistsWithOptions = (%v, %v), want an error", ok, err)
 			}
 			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
 				t.Errorf("error %v, want it to wrap %v", err, tc.wantIs)
+			}
+			if tc.check != nil && !tc.check(err) {
+				t.Errorf("error %v isn't for the reason this case sets up", err)
+			}
+			if gets := crdGets(); len(gets) != 0 {
+				t.Errorf("the CRD was read (%v) before the error, which must come first", gets)
 			}
 		})
 	}
@@ -615,6 +634,7 @@ func TestExistsWithOptionsRejectsBadOptions(t *testing.T) {
 		"WithHeld of a kind with no version": {WithHeld(schema.GroupVersionKind{Kind: "Secret"}), m},
 		"WithHeldIndex without a name":       {WithHeldIndex(types.NamespacedName{Namespace: "a"}), m},
 		"WithHeldIndex without a namespace":  {WithHeldIndex(types.NamespacedName{Name: "b"}), m},
+		"WithHeldFilter alone":               {WithHeldFilter(func(credentialuse.ID) bool { return true }), m},
 	} {
 		if ok, err := ExistsWithOptions(context.Background(), r, widgetGVK, labels.Everything(), opts...); err == nil || ok {
 			t.Errorf("%s: ExistsWithOptions = (%v, %v), want an error", name, ok, err)
@@ -702,5 +722,221 @@ func TestExistsWithHeldNeedsOnlyTheDocumentedGrants(t *testing.T) {
 	// The grant is narrow enough to mean something: it can't list Secrets.
 	if _, err := ExistsWithOptions(ctx, getter, holder, labels.Everything(), WithHeld(secretGVK), WithRESTMapper(getter.RESTMapper())); err == nil {
 		t.Error("WithHeld as the getter, who can't list Secrets: want an error")
+	}
+}
+
+// filterOf returns a filter that accepts the names in accept, and records
+// every ID it is asked about.
+func filterOf(accept ...string) (func(credentialuse.ID) bool, func() []credentialuse.ID) {
+	var mu sync.Mutex
+	var asked []credentialuse.ID
+	return func(id credentialuse.ID) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			asked = append(asked, id)
+			return slices.Contains(accept, id.Name)
+		}, func() []credentialuse.ID {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(asked)
+		}
+}
+
+// WithHeldFilter counts, of WithHeld's lists, only the holds it accepts, and
+// the check still stops at the first one accepted (decided 2026-11-26). It is
+// asked only about holds, with the protected kind's group and kind, and
+// passes over a refused one as over a collision.
+func TestExistsWithHeldFilterOnTheLists(t *testing.T) {
+	requireAPIServer(t)
+	ctx := context.Background()
+	holder := newHolderKind(t)
+	ns := newNamespace(t)
+	collision(t, holder, ns, "a-collision")
+	held(t, holder, ns, "b-refused")
+	held(t, holder, ns, "c-accepted")
+	held(t, holder, ns, "d-accepted")
+
+	accept, asked := filterOf("c-accepted", "d-accepted")
+	c, requests := recordingClient(t, "secrets")
+	ok, err := ExistsWithOptions(ctx, c, holder, labels.Everything(), WithHeld(secretGVK), WithHeldFilter(accept), WithRESTMapper(c.RESTMapper()))
+	if err != nil || !ok {
+		t.Fatalf("ExistsWithOptions = (%v, %v), want (true, nil)", ok, err)
+	}
+	want := []credentialuse.ID{{Kind: "Secret", Namespace: ns, Name: "b-refused"}, {Kind: "Secret", Namespace: ns, Name: "c-accepted"}}
+	if got := asked(); !slices.Equal(got, want) {
+		t.Errorf("the filter was asked about %v, want %v: the holds only, up to the first accepted", got, want)
+	}
+	if n := len(requests()); n != 3 {
+		t.Errorf("%d LIST requests of secrets, want 3: past the collision and the refused hold, then the first accepted", n)
+	}
+
+	none, _ := filterOf()
+	if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeld(secretGVK), WithHeldFilter(none), withMapper()); err != nil || ok {
+		t.Errorf("a filter that accepts none = (%v, %v), want (false, nil)", ok, err)
+	}
+	// Several filters must all accept: b by one, c and d by the other.
+	onlyB, _ := filterOf("b-refused")
+	if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeld(secretGVK), WithHeldFilter(accept), WithHeldFilter(onlyB), withMapper()); err != nil || ok {
+		t.Errorf("two filters that accept no hold together = (%v, %v), want (false, nil)", ok, err)
+	}
+	if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeld(secretGVK), WithHeldFilter(nil), withMapper()); err != nil || !ok {
+		t.Errorf("a nil filter = (%v, %v), want (true, nil): it is ignored", ok, err)
+	}
+}
+
+// WithHeldFilter counts, of WithHeldIndex's lines, only the holds it accepts,
+// and a line it refuses isn't read.
+func TestExistsWithHeldFilterOnTheIndex(t *testing.T) {
+	requireAPIServer(t)
+	ctx := context.Background()
+	holder := newHolderKind(t)
+	ns := newNamespace(t)
+	held(t, holder, ns, "a-refused")
+	held(t, holder, ns, "b-accepted")
+	held(t, holder, ns, "c-accepted")
+	index := newIndex(t, line(secretGVK, ns, "a-refused"), line(secretGVK, ns, "b-accepted"), line(secretGVK, ns, "c-accepted"))
+
+	accept, asked := filterOf("b-accepted", "c-accepted")
+	c, gets := getRecorder(t, "Secret", nil)
+	ok, err := ExistsWithOptions(ctx, c, holder, labels.Everything(), WithHeldIndex(index), WithHeldFilter(accept), withMapper())
+	if err != nil || !ok {
+		t.Fatalf("ExistsWithOptions = (%v, %v), want (true, nil)", ok, err)
+	}
+	if got := gets(); len(got) != 1 || got[0].Name != "b-accepted" {
+		t.Errorf("GETs of secrets = %v, want b-accepted only: the refused line isn't read", got)
+	}
+	want := []credentialuse.ID{{Kind: "Secret", Namespace: ns, Name: "a-refused"}, {Kind: "Secret", Namespace: ns, Name: "b-accepted"}}
+	if got := asked(); !slices.Equal(got, want) {
+		t.Errorf("the filter was asked about %v, want %v", got, want)
+	}
+
+	none, _ := filterOf()
+	c, gets = getRecorder(t, "Secret", nil)
+	if ok, err := ExistsWithOptions(ctx, c, holder, labels.Everything(), WithHeldIndex(index), WithHeldFilter(none), withMapper()); err != nil || ok {
+		t.Errorf("a filter that accepts none = (%v, %v), want (false, nil)", ok, err)
+	}
+	if got := gets(); len(got) != 0 {
+		t.Errorf("GETs of secrets = %v, want none", got)
+	}
+}
+
+// The filter doesn't apply to the Disown switch, which isn't the hold of a
+// name: a switch that hasn't settled counts whatever the filter.
+func TestExistsWithHeldFilterLeavesTheSwitch(t *testing.T) {
+	requireAPIServer(t)
+	ctx := context.Background()
+	holder := newHolderKind(t)
+	index := newIndex(t)
+	none, asked := filterOf()
+	setCRDAnnotations(t, holder, map[string]string{credentialuse.AnnotationDisown: "all"})
+	for name, opt := range map[string]Option{"WithHeld": WithHeld(secretGVK), "WithHeldIndex": WithHeldIndex(index)} {
+		if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), opt, WithHeldFilter(none), withMapper()); err != nil || !ok {
+			t.Errorf("%s with an unsettled switch = (%v, %v), want (true, nil)", name, ok, err)
+		}
+	}
+	if got := asked(); len(got) != 0 {
+		t.Errorf("the filter was asked about %v, want nothing", got)
+	}
+}
+
+// mapperClient is a client whose RESTMapper is mapper, and counts the calls
+// to it.
+type mapperClient struct {
+	client.Client
+	mapper meta.RESTMapper
+	calls  *int
+}
+
+func (c mapperClient) RESTMapper() meta.RESTMapper {
+	*c.calls++
+	return c.mapper
+}
+
+// ReconcileWithOptions takes c.RESTMapper() only when a held option is set
+// and no WithRESTMapper is given, which takes its place. Without options it
+// never calls it, as Reconcile never did.
+func TestReconcileTakesTheClientsMapperOnlyWhenNeeded(t *testing.T) {
+	requireAPIServer(t)
+	ctx := context.Background()
+	holder := newHolderKind(t)
+	held(t, holder, newNamespace(t), "held")
+	lastSeen := time.Now().Add(-2 * hour).Truncate(time.Second)
+	run := func(t *testing.T, mapper meta.RESTMapper, wake bool, opts ...Option) (Result, int, error) {
+		t.Helper()
+		ns := newNamespace(t)
+		newDeployment(t, ns, "controller", 0)
+		gvk := holder
+		if wake {
+			// An instance, for the runs without held options.
+			gvk = widgetGVK
+			newInstance(t, widgetGVK, ns, "w", runLabel(ns))
+		}
+		calls := 0
+		c := mapperClient{Client: newCountingClient(t, nil, nil).Client, mapper: mapper, calls: &calls}
+		sel := labels.Everything()
+		if wake {
+			sel = runSelector(ns)
+		}
+		res, err := ReconcileWithOptions(ctx, c, types.NamespacedName{Namespace: ns, Name: "controller"}, gvk, sel, lastSeen, hour, 1, opts...)
+		return res, calls, err
+	}
+
+	t.Run("Reconcile never calls it", func(t *testing.T) {
+		ns := newNamespace(t)
+		newDeployment(t, ns, "controller", 0)
+		newInstance(t, widgetGVK, ns, "w", runLabel(ns))
+		calls := 0
+		c := mapperClient{Client: newCountingClient(t, nil, nil).Client, calls: &calls}
+		res, err := Reconcile(ctx, c, types.NamespacedName{Namespace: ns, Name: "controller"}, widgetGVK, runSelector(ns), lastSeen, hour, 1)
+		if err != nil || res.Replicas != 1 || calls != 0 {
+			t.Errorf("Reconcile = (%+v, %v) after %d RESTMapper calls, want woken to 1 after none", res, err, calls)
+		}
+	})
+	t.Run("no options", func(t *testing.T) {
+		res, calls, err := run(t, nil, true)
+		if err != nil || res.Replicas != 1 || calls != 0 {
+			t.Errorf("ReconcileWithOptions = (%+v, %v) after %d RESTMapper calls, want woken to 1 after none", res, err, calls)
+		}
+	})
+	t.Run("a WithRESTMapper takes its place", func(t *testing.T) {
+		// The client's mapper knows nothing: were it taken, the CRD's name
+		// couldn't be found.
+		res, calls, err := run(t, meta.NewDefaultRESTMapper(nil), false, WithHeld(secretGVK), withMapper())
+		if err != nil || res.Replicas != 1 || !res.Exists || calls != 0 {
+			t.Errorf("ReconcileWithOptions = (%+v, %v) after %d RESTMapper calls, want woken by the hold after none", res, err, calls)
+		}
+	})
+	t.Run("a held option takes the client's", func(t *testing.T) {
+		res, calls, err := run(t, k8s.RESTMapper(), false, WithHeld(secretGVK))
+		if err != nil || res.Replicas != 1 || !res.Exists || calls != 1 {
+			t.Errorf("ReconcileWithOptions = (%+v, %v) after %d RESTMapper calls, want woken by the hold after 1", res, err, calls)
+		}
+	})
+	t.Run("a client without a mapper is an error", func(t *testing.T) {
+		res, _, err := run(t, nil, false, WithHeld(secretGVK))
+		if err == nil || res.Replicas != 1 || res.Reason != ReasonUnknown || res.Patched {
+			t.Errorf("ReconcileWithOptions = (%+v, %v), want an error that changes nothing", res, err)
+		}
+	})
+}
+
+// An index line whose name, or namespace, isn't a single path segment, as a
+// hand edit may leave, names an object that can't exist, and holds nothing:
+// it isn't read, which client-go would refuse.
+func TestExistsWithHeldIndexSkipsWhatIsNoPathSegment(t *testing.T) {
+	requireAPIServer(t)
+	ctx := context.Background()
+	holder := newHolderKind(t)
+	ns := newNamespace(t)
+	for name, l := range map[string]string{
+		"a name of ..":       line(secretGVK, ns, ".."),
+		"a name with %":      line(secretGVK, ns, "a%2Fb"),
+		"a namespace of ..":  line(secretGVK, "..", "x"),
+		"a namespace with %": line(secretGVK, "a%2Fb", "x"),
+	} {
+		index := newIndex(t, l)
+		if ok, err := ExistsWithOptions(ctx, k8s, holder, labels.Everything(), WithHeldIndex(index), withMapper()); err != nil || ok {
+			t.Errorf("%s (%q) = (%v, %v), want (false, nil)", name, l, ok, err)
+		}
 	}
 }

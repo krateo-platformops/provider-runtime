@@ -37,6 +37,8 @@ type options struct {
 	protected []schema.GroupVersionKind
 	// index is WithHeldIndex's ConfigMap, nil without it.
 	index *types.NamespacedName
+	// filters are WithHeldFilter's: a hold counts only if each accepts it.
+	filters []func(credentialuse.ID) bool
 }
 
 // WithHeld counts as an instance every object of the protected kinds that
@@ -63,20 +65,55 @@ func WithHeldIndex(index types.NamespacedName) Option {
 	return func(o *options) { o.index = &index }
 }
 
+// WithHeldFilter counts only the holds that accept accepts, of WithHeld's
+// lists and of WithHeldIndex's lines alike, and the check still stops at the
+// first hold it accepts (decided 2026-11-26). An object that carries the
+// prefix but that accept refuses is passed over as a collision is, and a line
+// it refuses isn't read at all, so its object needs no grant.
+//
+// A call checks the holds of one holder kind, the gvk it is given, so accept
+// may capture that kind. core-provider's Undeploy, for one, counts only the
+// holds that no other live definition's RBAC covers (§16.3):
+//
+//	scaletozero.WithHeldFilter(func(id credentialuse.ID) bool {
+//		return !coveredBySurvivorOf(holderGVK.GroupKind(), id)
+//	})
+//
+// The filter doesn't apply to the Disown switch: a switch that hasn't settled
+// counts whatever the filter, since it isn't the hold of a name. With
+// several filters a hold counts only if each accepts it; a nil one is
+// ignored. A filter needs WithHeld or WithHeldIndex: alone it is an error.
+func WithHeldFilter(accept func(credentialuse.ID) bool) Option {
+	return func(o *options) {
+		if accept != nil {
+			o.filters = append(o.filters, accept)
+		}
+	}
+}
+
 // WithRESTMapper gives ExistsWithOptions the RESTMapper that WithHeld and
 // WithHeldIndex need: a client.Reader carries none. ReconcileWithOptions
-// takes its client's, and one given here takes its place.
+// takes its client's only when none is given here.
 func WithRESTMapper(m meta.RESTMapper) Option {
 	return func(o *options) { o.mapper = m }
 }
 
-// newOptions applies opts and checks them.
-func newOptions(opts []Option) (options, error) {
+// collect applies opts, without checking them.
+func collect(opts []Option) options {
 	var o options
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&o)
 		}
+	}
+	return o
+}
+
+// newOptions applies opts and checks them.
+func newOptions(opts []Option) (options, error) {
+	o := collect(opts)
+	if len(o.filters) > 0 && !o.held() {
+		return o, errors.New("scaletozero: WithHeldFilter needs WithHeld or WithHeldIndex")
 	}
 	if o.withHeld && len(o.protected) == 0 {
 		return o, errors.New("scaletozero: WithHeld needs at least one protected kind")
@@ -90,13 +127,23 @@ func newOptions(opts []Option) (options, error) {
 		return o, errors.Errorf("scaletozero: WithHeldIndex needs a namespace and a name, got %q", o.index.String())
 	}
 	if o.held() && o.mapper == nil {
-		return o, errors.New("scaletozero: WithHeld and WithHeldIndex need WithRESTMapper, since a client.Reader carries no RESTMapper")
+		return o, errors.New("scaletozero: WithHeld and WithHeldIndex need a RESTMapper: pass WithRESTMapper, since a client.Reader carries none (ReconcileWithOptions takes its client's)")
 	}
 	return o, nil
 }
 
 // held reports whether held objects count.
 func (o options) held() bool { return o.withHeld || o.index != nil }
+
+// accepts reports whether every WithHeldFilter accepts the hold of id.
+func (o options) accepts(id credentialuse.ID) bool {
+	for _, f := range o.filters {
+		if !f(id) {
+			return false
+		}
+	}
+	return true
+}
 
 // crdGVK is the CustomResourceDefinition kind.
 var crdGVK = schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"}
@@ -122,15 +169,18 @@ func (o options) heldExists(ctx context.Context, r client.Reader, gvk schema.Gro
 		return false, fmt.Errorf("scaletozero: selecting by the marker label of %s: %w", holder, err)
 	}
 	sel := labels.NewSelector().Add(*marked)
-	carries := func(m *metav1.PartialObjectMetadata) bool { return hasPrefix(m.Finalizers, prefix) }
 	for _, p := range o.protected {
+		gk := p.GroupKind()
+		carries := func(m *metav1.PartialObjectMetadata) bool {
+			return hasPrefix(m.Finalizers, prefix) && o.accepts(credentialuse.ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name})
+		}
 		found, err := first(ctx, r, p, sel, carries)
 		if err != nil || found {
 			return found, err
 		}
 	}
 	if o.index != nil {
-		return indexHeld(ctx, r, o.mapper, *o.index, prefix)
+		return o.indexHeld(ctx, r, prefix)
 	}
 	return false, nil
 }
@@ -154,11 +204,13 @@ func disownUnsettled(ctx context.Context, r client.Reader, mapper meta.RESTMappe
 	return ann[credentialuse.AnnotationDisown] != "" && !credentialuse.DisownSettled(ann), nil
 }
 
-// indexHeld reports whether an object that the index ConfigMap at index names
-// still carries a finalizer with prefix. It GETs the objects one by one and
-// stops at the first that does. A missing or unreadable index is an error
-// (§10.6.5, L4), and so is any failed GET but a NotFound.
-func indexHeld(ctx context.Context, r client.Reader, mapper meta.RESTMapper, index types.NamespacedName, prefix string) (bool, error) {
+// indexHeld reports whether an object that WithHeldIndex's ConfigMap names,
+// and the filters accept, still carries a finalizer with prefix. It GETs the
+// objects one by one and stops at the first that does; a line the filters
+// refuse isn't read. A missing or unreadable index is an error (§10.6.5, L4),
+// and so is any failed GET but a NotFound.
+func (o options) indexHeld(ctx context.Context, r client.Reader, prefix string) (bool, error) {
+	index := *o.index
 	cm := &unstructured.Unstructured{}
 	cm.SetGroupVersionKind(configMapGVK)
 	if err := r.Get(ctx, client.ObjectKey(index), cm); err != nil {
@@ -169,7 +221,10 @@ func indexHeld(ctx context.Context, r client.Reader, mapper meta.RESTMapper, ind
 		return false, fmt.Errorf("scaletozero: reading the index %s: %w", index, err)
 	}
 	for _, id := range credentialuse.IndexIDs(data) {
-		held, err := lineHeld(ctx, r, mapper, id, prefix)
+		if !o.accepts(id) {
+			continue
+		}
+		held, err := lineHeld(ctx, r, o.mapper, id, prefix)
 		if err != nil || held {
 			return held, err
 		}

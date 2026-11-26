@@ -90,15 +90,34 @@
 // WithHeldIndex for the others. WithHeld with no kind is an error (decided
 // 2026-11-25).
 //
+// WithHeldFilter counts only the holds its function accepts, of the lists and
+// of the lines alike, and the check still stops at the first one accepted
+// (decided 2026-11-26). It is for an owner that must refuse only on some
+// holds, such as core-provider's Undeploy on those no other definition's RBAC
+// covers. It doesn't apply to the Disown switch, which isn't the hold of a
+// name: a switch that hasn't settled counts whatever the filter.
+//
+// A protected kind taken out of PerName, or uninstalled, keeps its lines in
+// the index: the tracker prunes only its PerName kinds' lines (decided
+// 2026-11-26: the behaviour stays). WithHeldIndex still GETs their objects,
+// and fails once their grant is revoked, or their kind isn't served, which
+// keeps the controller up. The remedy, once that kind's holds are found
+// another way (WithHeld, for a kind now LabelScoped) or are gone with its
+// CRD, is to remove its lines by hand:
+//
+//	kubectl -n <IndexNamespace> edit configmap cu-index-<lowercase holder kind>.<holder group>
+//	# in data.entries, delete every line that starts with <group>/<Kind>/
+//
 // Every failed read is an error, never "nothing held", so the controller stays
 // up: a failed LIST, a missing or unreadable CRD, a missing or unreadable
 // index, a failed GET of an object a line names, and a line whose kind the
 // RESTMapper can't map (decided 2026-11-25).
 //
 // Both options need a RESTMapper, for the CRD's name and for the kinds of the
-// index's lines. ReconcileWithOptions takes c.RESTMapper(). ExistsWithOptions
-// takes a client.Reader, which carries none, so it needs WithRESTMapper(m)
-// alongside either option, and fails without it (decided 2026-11-25).
+// index's lines. ReconcileWithOptions takes c.RESTMapper() when no
+// WithRESTMapper is given. ExistsWithOptions takes a client.Reader, which
+// carries none, so it needs WithRESTMapper(m) alongside either option, and
+// fails without it (decided 2026-11-25).
 //
 // With them, a call on an empty Kind reads more: a GET of the CRD, then a
 // LIST page for each protected kind and for each collision on it, or a GET of
@@ -120,6 +139,7 @@ package scaletozero
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -371,10 +391,11 @@ func Reconcile(ctx context.Context, c client.Client, deploy types.NamespacedName
 // ReconcileWithOptions is Reconcile, with options. It decides on
 // ExistsWithOptions(ctx, c, gvk, sel, opts...), so that with WithHeld or
 // WithHeldIndex a held object, or a Disown switch that hasn't settled, keeps
-// the controller running as an instance does, and wakes it from 0. It takes
-// the RESTMapper those need from c.RESTMapper(); a WithRESTMapper among opts
-// takes its place. Every error behaves as Reconcile's: nothing changes, and
-// Result.Replicas is never 0.
+// the controller running as an instance does, and wakes it from 0. Those
+// need a RESTMapper: it takes c.RESTMapper() only when one of them is set and
+// opts has no WithRESTMapper, which takes its place. Without them it never
+// calls c.RESTMapper(), as Reconcile never did. Every error behaves as
+// Reconcile's: nothing changes, and Result.Replicas is never 0.
 func ReconcileWithOptions(ctx context.Context, c client.Client, deploy types.NamespacedName, gvk schema.GroupVersionKind, sel labels.Selector, lastSeen time.Time, holdDown time.Duration, active int32, opts ...Option) (Result, error) {
 	// fail keeps everything as it was, and reports replicas that never read
 	// as 0: the current ones when they were read and are non-zero, else active.
@@ -410,7 +431,10 @@ func ReconcileWithOptions(ctx context.Context, c client.Client, deploy types.Nam
 	if active < 1 {
 		return fail(errors.Errorf("scaletozero: active must be at least 1, got %d", active))
 	}
-	exists, err := ExistsWithOptions(ctx, c, gvk, sel, append([]Option{WithRESTMapper(c.RESTMapper())}, opts...)...)
+	if o := collect(opts); o.held() && o.mapper == nil {
+		opts = append(slices.Clip(opts), WithRESTMapper(c.RESTMapper()))
+	}
+	exists, err := ExistsWithOptions(ctx, c, gvk, sel, opts...)
 	if err != nil {
 		return fail(err)
 	}

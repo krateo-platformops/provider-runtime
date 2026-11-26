@@ -55,6 +55,7 @@ func ReconcileWithOptions(ctx context.Context, c client.Client, deploy types.Nam
 	sel labels.Selector, lastSeen time.Time, holdDown time.Duration, active int32, opts ...Option) (Result, error)
 func WithHeld(protected ...schema.GroupVersionKind) Option
 func WithHeldIndex(index types.NamespacedName) Option
+func WithHeldFilter(accept func(credentialuse.ID) bool) Option
 func WithRESTMapper(m meta.RESTMapper) Option
 ```
 
@@ -225,16 +226,58 @@ holder kind that mixes watch modes passes `WithHeld` with its LabelScoped
 kinds and `WithHeldIndex` for the rest. `WithHeld` with no kind is an error
 (decided 2026-11-25).
 
+**`WithHeldFilter(accept)` counts only the holds `accept` accepts**, of
+`WithHeld`'s lists and `WithHeldIndex`'s lines alike, and the check still
+stops at the first one accepted (decided 2026-11-26). An object with the
+prefix that `accept` refuses is passed over as a collision is, and a line it
+refuses isn't read, so its object needs no grant. A call checks the holds of
+one holder kind, the `gvk` it is given, so `accept` may capture that kind.
+core-provider's `Undeploy` refuses only on a hold that no other live
+definition's RBAC covers (design-credential-use-finalizer.md §16.3):
+
+```go
+held, err := scaletozero.ExistsWithOptions(ctx, r, holderGVK, sel,
+	scaletozero.WithHeld(protected...),
+	scaletozero.WithHeldFilter(func(id credentialuse.ID) bool {
+		return !coveredBySurvivorOf(holderGVK.GroupKind(), id)
+	}),
+	scaletozero.WithRESTMapper(mapper))
+```
+
+The filter doesn't apply to the Disown switch, which isn't the hold of a
+name: a switch that hasn't settled counts whatever the filter. Several
+filters must all accept a hold; a filter without `WithHeld` or
+`WithHeldIndex` is an error.
+
+**A protected kind taken out of PerName, or uninstalled, keeps its index
+lines** (decided 2026-11-26: the behaviour stays). The tracker prunes only
+its PerName kinds' lines, so `WithHeldIndex` still GETs those objects. It
+fails once their grant is revoked (a 403) or their kind isn't served (no
+match), and the error keeps the controller up. *The remedy:* once that
+kind's holds are found another way, with `WithHeld` for a kind now
+LabelScoped, or are gone with its CRD, remove its lines by hand:
+
+```
+kubectl -n <IndexNamespace> edit configmap cu-index-<lowercase holder kind>.<holder group>
+# in data.entries, delete every line that starts with <group>/<Kind>/,
+# the moved or uninstalled protected kind; keep every other line
+```
+
+The tracker doesn't take that drop for tampering, since the lines aren't of
+a PerName kind, and doesn't add them back
+(design-credential-use-finalizer.md §10.6.5).
+
 **Every failed read is an error, never "nothing held"**, so §4.3 keeps the
 controller as it is: a failed LIST, a missing or unreadable CRD, a missing or
 unreadable index, a failed GET of a line's object, and a line whose kind the
 RESTMapper can't map (decided 2026-11-25).
 
 **A RESTMapper** names the CRD (its plural) and maps the lines' kinds.
-`ReconcileWithOptions` takes `c.RESTMapper()`. `ExistsWithOptions` takes a
-`client.Reader`, which has none, so either option needs `WithRESTMapper(m)`
-beside it, and fails without it (decided 2026-11-25). The options are checked
-before anything is listed.
+`ReconcileWithOptions` takes `c.RESTMapper()`, only when a held option is
+set and no `WithRESTMapper` is given: without options it never calls it, as
+`Reconcile` never did. `ExistsWithOptions` takes a `client.Reader`, which has
+none, so either option needs `WithRESTMapper(m)` beside it, and fails without
+it (decided 2026-11-25). The options are checked before anything is listed.
 
 **RBAC**, beyond §4's: `get` on the holder kind's CRD (scoped by
 `resourceNames` to it); with `WithHeld`, `list` on each protected kind in
