@@ -150,6 +150,26 @@ func TestAParkedBatchKeepsWhatIsKnown(t *testing.T) {
 	}
 }
 
+// What the caches show held is queued as known to be held: at the write loops' start,
+// and when the holder kind's CRD goes, which queues it as the start does.
+func TestWhatTheCachesShowHeldIsQueuedAsKnown(t *testing.T) {
+	for name, queue := range map[string]func(r *fakeRig, tr *Tracker){
+		"the write loops' start": func(r *fakeRig, _ *Tracker) { r.s.rescan() },
+		"the CRD's deletion":     func(_ *fakeRig, tr *Tracker) { crdHandler{tr}.OnDelete(crdMeta(widgetGK)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, tr, _, _ := ghostRig(t, SharedOptions{}, "ns", false)
+			s := secretID("ns", "s")
+			eventually(t, "the Secret's cache", func() bool { _, ok := (trackerViews{tr}).Protected(s); return ok })
+			r.drain()
+			queue(r, tr)
+			if waits, held := r.waitsHeld(batchKey{widgetGK, "ns"}, s); !waits || !held {
+				t.Errorf("the Secret waits %v, known %v; want both", waits, held)
+			}
+		})
+	}
+}
+
 // What failed as the write loops ended goes back with what was known of it, where it
 // was: before what was added since.
 func TestAStoppedBatchsFailuresKeepTheirPlace(t *testing.T) {
