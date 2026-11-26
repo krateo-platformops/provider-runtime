@@ -922,15 +922,14 @@ func TestReconcileTakesTheClientsMapperOnlyWhenNeeded(t *testing.T) {
 	})
 }
 
-// recovered runs f, and fails the test if f panics. A rule whose absence
-// makes the code call a nil mapper, as the options' check, then fails a test
-// as an assertion would, and not as a panic, which the revert check doesn't
-// count as caught.
+// recovered runs f, and turns a panic in it into a failure of this
+// assertion: the test binary stays alive, so the other tests still run, and
+// the panic is attributed to the call that should have returned an error.
 func recovered(t *testing.T, what string, f func()) {
 	t.Helper()
 	defer func() {
 		if p := recover(); p != nil {
-			t.Errorf("%s: want an error, got a call that failed: %v", what, p)
+			t.Errorf("%s panicked, want an error: %v", what, p)
 		}
 	}()
 	f()
@@ -1019,6 +1018,7 @@ func TestHeldWithOptionsIgnoresInstances(t *testing.T) {
 	for name, opts := range map[string][]Option{
 		"no option":                   nil,
 		"WithHeld without a mapper":   {WithHeld(secretGVK)},
+		"WithHeld with no kind":       {WithHeld(), withMapper()},
 		"a mapper and no held option": {withMapper()},
 	} {
 		recovered(t, "HeldWithOptions with "+name, func() {

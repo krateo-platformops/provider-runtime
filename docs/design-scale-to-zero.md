@@ -262,7 +262,8 @@ instances count too, and `HeldWithOptions` on its `SkipCRD` path, where a
 surviving definition keeps the kind's instances. `labels.Nothing()` can't
 stand in: controller-runtime sends it as an empty selector, which matches
 every instance. `HeldWithOptions` without `WithHeld` or `WithHeldIndex` is an
-error.
+error. It needs only the held options' grants below, and not `list` on the
+instances, which it never reads.
 
 **A protected kind taken out of PerName, or uninstalled, keeps its index
 lines** (decided 2026-11-26: the behaviour stays). The tracker prunes only
