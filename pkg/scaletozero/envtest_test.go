@@ -40,8 +40,6 @@ var (
 	// Sprocket is populated by one test only, so labels.Everything() can be
 	// checked on it exactly.
 	sprocketGVK = schema.GroupVersionKind{Group: testGroup, Version: "v1", Kind: "Sprocket"}
-	// Gadget's CRD is deleted by a test.
-	gadgetGVK = schema.GroupVersionKind{Group: testGroup, Version: "v1", Kind: "Gadget"}
 	// Missing has no CRD.
 	missingGVK = schema.GroupVersionKind{Group: testGroup, Version: "v1", Kind: "Missing"}
 )
@@ -68,7 +66,6 @@ func TestMain(m *testing.M) {
 		CRDs: []*apiextensionsv1.CustomResourceDefinition{
 			testCRD("Widget", "widgets", "v1", "v1alpha1"),
 			testCRD("Sprocket", "sprockets", "v1"),
-			testCRD("Gadget", "gadgets", "v1"),
 			// Shield is a protected kind of the held tests.
 			testCRD("Shield", "shields", "v1"),
 		},
@@ -130,6 +127,34 @@ func testCRD(kind, plural string, versions ...string) *apiextensionsv1.CustomRes
 		})
 	}
 	return crd
+}
+
+var kindCounter atomic.Int64
+
+// newKind creates a namespaced kind of the test's own, <base><n> served at v1,
+// and waits until the admin client's mapper serves it. A test that deletes or
+// changes its CRD uses one, so that it can run again under -count.
+func newKind(t *testing.T, base string) schema.GroupVersionKind {
+	t.Helper()
+	kind := fmt.Sprintf("%s%d", base, kindCounter.Add(1))
+	if err := k8s.Create(context.Background(), testCRD(kind, strings.ToLower(kind)+"s", "v1")); err != nil {
+		t.Fatalf("creating the CRD of %s: %v", kind, err)
+	}
+	gvk := schema.GroupVersionKind{Group: testGroup, Version: "v1", Kind: kind}
+	eventually(t, "the CRD of "+kind+" to be served", func() bool {
+		if _, err := k8s.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			return false
+		}
+		l := &metav1.PartialObjectMetadataList{}
+		l.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
+		return k8s.List(context.Background(), l) == nil
+	})
+	return gvk
+}
+
+// crdName is the name of the CRD of a kind newKind created.
+func crdName(gvk schema.GroupVersionKind) string {
+	return strings.ToLower(gvk.Kind) + "s." + gvk.Group
 }
 
 var nsCounter atomic.Int64

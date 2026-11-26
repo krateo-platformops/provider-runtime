@@ -7,7 +7,6 @@ import (
 	"maps"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,31 +40,11 @@ var (
 	otherHolder = schema.GroupKind{Group: testGroup, Kind: "Other"}
 )
 
-var holderCounter atomic.Int64
-
 // newHolderKind creates a holder kind of the test's own and waits until the
 // admin client's mapper serves it.
 func newHolderKind(t *testing.T) schema.GroupVersionKind {
 	t.Helper()
-	n := holderCounter.Add(1)
-	kind, plural := fmt.Sprintf("Keeper%d", n), fmt.Sprintf("keeper%ds", n)
-	if err := k8s.Create(context.Background(), testCRD(kind, plural, "v1")); err != nil {
-		t.Fatalf("creating the CRD of %s: %v", kind, err)
-	}
-	gvk := schema.GroupVersionKind{Group: testGroup, Version: "v1", Kind: kind}
-	eventually(t, "the CRD of "+kind+" to be served", func() bool {
-		if _, err := k8s.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
-			return false
-		}
-		l := &metav1.PartialObjectMetadataList{}
-		l.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
-		return k8s.List(context.Background(), l) == nil
-	})
-	return gvk
-}
-
-func crdName(holder schema.GroupVersionKind) string {
-	return strings.ToLower(holder.Kind) + "s." + holder.Group
+	return newKind(t, "Keeper")
 }
 
 // setCRDAnnotations makes the holder kind's CRD carry exactly ann.
