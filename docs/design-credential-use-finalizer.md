@@ -4033,13 +4033,16 @@ reads only the lines there are. The holder's next pass does, since even a
 skip ensures the line. **A stop drains** what is queued (decided 2026-11-25):
 as the write loops end, after their last prune, they make every live check
 the index holds in memory, whatever its backoff, again while some fail, the
-pause between rounds doubling from 200ms, within 10s, the bound an A2 in
-flight is given after a stop (§7.2). Those are the re-adds a prune couldn't
+pause between rounds doubling from 200ms. It ends 10s (the bound an A2 in
+flight is given after a stop, §7.2) from the last moment the loops or a call
+begun before the stop was busy, and at most 25s after the loops end, that 10s
+plus the 15s an acquirer call is given (`drainIndexes`, `writeloops.go:208-264`).
+Those are the re-adds a prune couldn't
 write, the checks an acquirer queued when its line check failed, the checks
 of lines someone else dropped, and the late checks of A2s whose margin is
 over, their batches queued too. The drain waits for the stop of the write
 loops' own context, and for the acquirer calls begun before it, which may
-queue more, and its 10s count from then (§7.2). A round's failures don't
+queue more, and its 10s count from the last of them (§7.2). A round's failures don't
 count towards a check's backoff. What the drain leaves is logged, with how
 many, and is the killed case: the checks left undone, the calls still in
 flight at its cap, and the late holds whose margin isn't over, which aren't
