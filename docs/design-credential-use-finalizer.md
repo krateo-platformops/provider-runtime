@@ -867,9 +867,9 @@ event runs the batch again, that of one whose record can't be parsed included,
 which queues all that the caches show as held for its namespace (§10.2), and so
 every hold R0 keeps for it. What isn't held isn't queued: a PerName object whose
 index prune failed, live and watched, and bare, keeps its line until the write
-loops' next start, or the next batch that names it. One user has no such event
-yet, and its fix is its own: a ghost of a kind whose CRD is gone, which the
-cache keeps. The protocol's
+loops' next start, or the next batch that names it. A ghost of a kind whose CRD
+is gone, which the cache keeps, had no such event: the CRD's deletion now runs
+those batches (§10.2), and R0 doesn't take the cache's word then (§6.4). The protocol's
 model decides one batch (`RequeueAt` is all it reads of a schedule), and has
 none for what failed, what asked, or the backoff: those are the release loop's,
 tested on the queue by enumeration and on the loop. A time a batch asks for, a
@@ -1542,13 +1542,18 @@ the evidence: the GET is.
   each round (`discoveryTimeout`).
 - *The cost* is one GET and one for each of the group's versions, one after
   another, for a round that found the CRD gone, and nothing otherwise. It is per
-  batch, so at least per (K, N), and objects of one key that are at different
-  backoffs are retried in batches of their own, each with its reads: with 30
-  versions and holders in 50 namespaces, one CRD's deletion is about 1,600 GETs
-(each batch's GET of the CRD, of the group, and of its 30 versions),
-  and more for keys whose objects had failed at different times. A client with a rate limit may not finish a
-  large group within the 10s; the batch is then retried. And a discovery that
-  hangs holds one of the two release workers for 10s for each key of K, so that
+  turn (§6.2) and per round of it that reaches R2, so at least per turn of 64
+  objects of a key (K, N), and a key takes ceil(n/64) turns for n objects. While
+  the CRD is absent R0 keeps nothing, so every held object goes through R1 and
+  its turn. Objects of one key that are at different backoffs are retried in
+  batches of their own, each with its reads. With 30 versions (32 GETs a turn:
+  the CRD, the group, and its 30 versions) and holders in 50 namespaces that
+  hold 1,000 objects each, one CRD's deletion is 50 x 16 turns x 32 = about
+  25,600 GETs, and more for keys whose objects had failed at different times.
+  The CRD's going queues every hold the caches show (§10.2), so a flood of them
+  multiplies these figures. A client with a rate limit may not finish a
+  large group within the 10s; the turn is then retried. And a discovery that
+  hangs holds one of the two release workers for 10s for each turn of a key of K, so that
   every kind's releases wait. The answer isn't shared between batches: that
   would be state in a path that decides a release, to save reads on a rare
   event.
