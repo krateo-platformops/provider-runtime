@@ -14,6 +14,7 @@ with both owners, core-provider and oasgen-provider, in
 [#39](https://github.com/krateo-platformops/provider-runtime/issues/39).
 Three later decisions changed it and are recorded below: `Exists` instead of
 `Count` (§4.1), what an error reports (§4.3), and the `active` count (§4.4).
+Credential-use added two options, additively (§4.7).
 
 ## 1. The problem
 
@@ -46,6 +47,17 @@ func Exists(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, s
 func Decide(exists bool, lastSeen, now time.Time, holdDown time.Duration) (replicas int32, requeueAfter time.Duration)
 func Reconcile(ctx context.Context, c client.Client, deploy types.NamespacedName, gvk schema.GroupVersionKind,
 	sel labels.Selector, lastSeen time.Time, holdDown time.Duration, active int32) (Result, error)
+
+// Held objects (§4.7).
+func ExistsWithOptions(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, sel labels.Selector,
+	opts ...Option) (bool, error)
+func ReconcileWithOptions(ctx context.Context, c client.Client, deploy types.NamespacedName, gvk schema.GroupVersionKind,
+	sel labels.Selector, lastSeen time.Time, holdDown time.Duration, active int32, opts ...Option) (Result, error)
+func HeldWithOptions(ctx context.Context, r client.Reader, gvk schema.GroupVersionKind, opts ...Option) (bool, error)
+func WithHeld(protected ...schema.GroupVersionKind) Option
+func WithHeldIndex(index types.NamespacedName) Option
+func WithHeldFilter(accept func(credentialuse.ID) bool) Option
+func WithRESTMapper(m meta.RESTMapper) Option
 ```
 
 - `Exists` reports whether at least one instance matching `sel` exists, in
@@ -183,6 +195,111 @@ zeroed controller back up and fight the helper. core-provider's `Deploy`
 does a full-object Update, so it renders `replicas` from the last
 `Result.Replicas`.
 
+### 4.7 Held objects (credential-use)
+
+A Kind whose controller holds credentials through `pkg/credentialuse` must
+not sit at 0 while it holds any: at 0 nothing releases them
+([design-credential-use-finalizer.md](design-credential-use-finalizer.md)
+§11.6). **The change is additive** (the user's decision, IP5): `Exists` and
+`Reconcile` keep their signatures and behaviour, and call
+`ExistsWithOptions` and `ReconcileWithOptions` with no options. When the
+instance list finds nothing:
+
+- **`WithHeld(protected...)`** lists each protected kind metadata-only, in
+  every namespace, by the Kind's marker label (`credentialuse.MarkerLabel`),
+  with `Limit: 1`. It stops at the first object whose finalizers carry the
+  Kind's prefix (`credentialuse.FinalizerPrefix`), and pages on past an
+  object with the label and without the prefix, as a hash collision leaves.
+- **`WithHeldIndex(index)`** reads the Kind's index ConfigMap, which names
+  the holds of its PerName and PerNamePoll kinds, and GETs the objects its
+  lines name until one still carries the prefix (§10.6.5). An index without
+  its rebuilt marker is read like any other (decided 2026-11-25); an object
+  that is gone holds nothing.
+- **Either one alone** also reads the Kind's CRD: a Disown switch that is set
+  and hasn't settled counts as an instance, by `credentialuse.DisownSettled`'s
+  three checks (decided 2026-11-23). A `disown-settled` of another value of the
+  switch, or `"true"`, hasn't settled it. A switch that is set but names
+  nothing, as `","`, never settles, and keeps the controller up until it is
+  removed (decided 2026-11-25).
+
+**The two add up** (decided 2026-11-25): a hold found by either counts. A
+holder kind that mixes watch modes passes `WithHeld` with its LabelScoped
+kinds and `WithHeldIndex` for the rest. `WithHeld` with no kind is an error
+(decided 2026-11-25).
+
+**`WithHeldFilter(accept)` counts only the holds `accept` accepts**, of
+`WithHeld`'s lists and `WithHeldIndex`'s lines alike, and the check still
+stops at the first one accepted (decided 2026-11-26). An object with the
+prefix that `accept` refuses is passed over as a collision is, and a line it
+refuses isn't read, so its object needs no grant. A call checks the holds of
+one holder kind, the `gvk` it is given, so `accept` may capture that kind.
+core-provider's `Undeploy` refuses only on a hold that no other live
+definition's RBAC covers (design-credential-use-finalizer.md §16.3):
+
+```go
+held, err := scaletozero.ExistsWithOptions(ctx, r, holderGVK, sel,
+	scaletozero.WithHeld(protected...),
+	scaletozero.WithHeldFilter(func(id credentialuse.ID) bool {
+		return !coveredBySurvivorOf(holderGVK.GroupKind(), id)
+	}),
+	scaletozero.WithRESTMapper(mapper))
+```
+
+The filter is asked about different things on the two paths: on the lists,
+only about objects that carry the prefix; on the index, about every line
+before its GET, gone objects and objects without the prefix included. A
+filter with a cost or a side effect sees more calls on the index path. The
+filter doesn't apply to the Disown switch, which isn't the hold of a name: a
+switch that hasn't settled counts whatever the filter. Several filters must
+all accept a hold. A nil filter is ignored, and a non-nil one without
+`WithHeld` or `WithHeldIndex` is an error.
+
+**`HeldWithOptions(ctx, r, gvk, opts...)` checks only the holds and the
+switch**, never the instances, with the same options, filter and errors
+(decided 2026-11-26). `ExistsWithOptions` is unchanged. core-provider's
+`Undeploy` uses `ExistsWithOptions` on its `!SkipCRD` path, where the
+instances count too, and `HeldWithOptions` on its `SkipCRD` path, where a
+surviving definition keeps the kind's instances. `labels.Nothing()` can't
+stand in: controller-runtime sends it as an empty selector, which matches
+every instance. `HeldWithOptions` without `WithHeld` or `WithHeldIndex` is an
+error. It needs only the held options' grants below, and not `list` on the
+instances, which it never reads.
+
+**A protected kind taken out of PerName, or uninstalled, keeps its index
+lines** (decided 2026-11-26: the behaviour stays). The tracker prunes only
+its PerName kinds' lines, so `WithHeldIndex` still GETs those objects. It
+fails once their grant is revoked (a 403) or their kind isn't served (no
+match), and the error keeps the controller up. *The remedy:* once that
+kind's holds are found another way, with `WithHeld` for a kind now
+LabelScoped, or are gone with its CRD, remove its lines by hand:
+
+```
+kubectl -n <IndexNamespace> edit configmap cu-index-<lowercase holder kind>.<holder group>
+# in data.entries, delete every line that starts with <group>/<Kind>/,
+# the moved or uninstalled protected kind; keep every other line
+```
+
+The tracker doesn't take that drop for tampering, since the lines aren't of
+a PerName kind, and doesn't add them back
+(design-credential-use-finalizer.md §10.6.5).
+
+**Every failed read is an error, never "nothing held"**, so §4.3 keeps the
+controller as it is: a failed LIST, a missing or unreadable CRD, a missing or
+unreadable index, a failed GET of a line's object, and a line whose kind the
+RESTMapper can't map (decided 2026-11-25).
+
+**A RESTMapper** names the CRD (its plural) and maps the lines' kinds.
+`ReconcileWithOptions` takes `c.RESTMapper()`, only when a held option is
+set and no `WithRESTMapper` is given: without options it never calls it, as
+`Reconcile` never did. `ExistsWithOptions` takes a `client.Reader`, which has
+none, so either option needs `WithRESTMapper(m)` beside it, and fails without
+it (decided 2026-11-25). The options are checked before anything is listed.
+
+**RBAC**, beyond §4's: `get` on the holder kind's CRD (scoped by
+`resourceNames` to it); with `WithHeld`, `list` on each protected kind in
+every namespace; with `WithHeldIndex`, `get` on the index ConfigMap and on
+each object its lines name, which `resourceNames` can grant.
+
 ## 5. What stays with the owners
 
 - **Ready at 0 replicas.** Both owners' readiness reads
@@ -203,5 +320,7 @@ kube-apiserver and etcd, because controller-runtime v0.23.3's fake client
 can't stand in: its List ignores `Limit` and `Continue`, it lists a missing
 CRD as empty instead of failing, and its scale Patch patches the Scale body
 as an object of its own. In CI the envtest tests fail, rather than skip, when
-`KUBEBUILDER_ASSETS` is unset. Each rule was broken in turn to check that a
-test notices: [`hack/revert-check-scale-to-zero.txt`](../hack/revert-check-scale-to-zero.txt).
+`KUBEBUILDER_ASSETS` is unset. The held-object tests give each test a holder
+kind of its own, so that its holds, marker label and Disown switch are its
+alone; one checks, as an impersonated user, that §4.7's grants are enough.
+Each rule was broken in turn to check that a test notices: [`hack/revert-check-scale-to-zero.txt`](../hack/revert-check-scale-to-zero.txt).

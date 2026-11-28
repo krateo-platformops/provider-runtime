@@ -118,6 +118,23 @@ func parseIndexLine(line string) (ID, bool) {
 	return ID{Group: parts[0], Kind: parts[1], Namespace: parts[2], Name: parts[3]}, true
 }
 
+// IndexIDs returns the objects that an index ConfigMap's data names: one for
+// each line that parses, in the order of the sorted lines, without repeats
+// (§10.6). A line that doesn't parse, such as one left by a hand edit, names
+// nothing. It only reads, for a reader outside the tracker, such as
+// scaletozero.WithHeldIndex (§10.6.5). Data without the index's key names
+// nothing either: telling a missing index from an empty one is the caller's
+// job.
+func IndexIDs(data map[string]string) []ID {
+	var out []ID
+	for _, l := range decodeIndex(data[indexDataKey]) {
+		if id, ok := parseIndexLine(l); ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // decodeIndex returns the lines of an index's data, sorted and without
 // blanks or repeats.
 func decodeIndex(data string) []string {

@@ -271,29 +271,30 @@ func TestExistsNoMatchIsAnError(t *testing.T) {
 }
 
 // A CRD deleted after the client mapped it fails the LIST: an error, never
-// false.
+// false. The kind is the test's own, so that it runs again under -count.
 func TestExistsDeletedCRDIsAnError(t *testing.T) {
 	requireAPIServer(t)
+	gadget := newKind(t, "Gadget")
 	ns := newNamespace(t)
-	newInstance(t, gadgetGVK, ns, "g", nil)
+	newInstance(t, gadget, ns, "g", nil)
 	c, err := client.New(testCfg, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := Exists(context.Background(), c, gadgetGVK, labels.Everything()); err != nil || !ok {
+	if ok, err := Exists(context.Background(), c, gadget, labels.Everything()); err != nil || !ok {
 		t.Fatalf("Exists before the delete = (%v, %v), want (true, nil)", ok, err)
 	}
 
 	crd := &apiextensionsv1.CustomResourceDefinition{}
-	crd.Name = "gadgets." + testGroup
+	crd.Name = crdName(gadget)
 	if err := k8s.Delete(context.Background(), crd); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the Gadget CRD to be gone", func() bool {
+	eventually(t, "the "+gadget.Kind+" CRD to be gone", func() bool {
 		return apierrors.IsNotFound(k8s.Get(context.Background(), client.ObjectKeyFromObject(crd), &apiextensionsv1.CustomResourceDefinition{}))
 	})
 
-	ok, err := Exists(context.Background(), c, gadgetGVK, labels.Everything())
+	ok, err := Exists(context.Background(), c, gadget, labels.Everything())
 	if err == nil {
 		t.Fatalf("Exists after the CRD was deleted = (%v, nil), want an error", ok)
 	}

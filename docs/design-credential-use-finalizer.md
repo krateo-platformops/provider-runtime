@@ -4035,6 +4035,26 @@ object created again carries none until an A2, which adds its line first.
 - **`WithHeld`** reads it, and stops at the first line whose object still
   carries K's prefix (§11.6).
 
+**A kind taken out of PerName, or uninstalled, keeps its lines** (decided
+2026-11-26: the behaviour stays). The tracker prunes only the lines of its
+PerName kinds (`prunable`), so the lines of a kind moved to LabelScoped, or
+of one whose CRD is gone, stay. `scaletozero.WithHeldIndex` still GETs them:
+once the RBAC for those names is revoked (a 403), or the kind is no longer
+served (no match), the GET fails, and `WithHeldIndex` returns the error,
+which keeps the controller up. *The remedy* is a hand edit of the index.
+First make sure that kind's holds are found another way, by passing it to
+`WithHeld` once it is LabelScoped, or that its objects are gone with its CRD.
+Then remove its lines:
+
+```
+kubectl -n <IndexNamespace> edit configmap cu-index-<lowercase holder kind>.<holder group>
+# in data.entries, delete every line that starts with <group>/<Kind>/,
+# the moved or uninstalled protected kind; keep every other line
+```
+
+The tracker doesn't treat the drop as tampering, since the lines aren't of a
+PerName kind, and doesn't add them back.
+
 **A missing or unreadable index is an error, never "no holds"** (L4).
 `WithHeld` returns the error, so `scaletozero` keeps the controller up.
 Disown writes `held-count: "unknown"`, which is not `"0"`, so it never
@@ -6046,9 +6066,19 @@ instance goes. Two cases matter:
 
 - `Undeploy` treats held objects as instances, in both the `!SkipCRD` and
   the `SkipCRD` paths. It refuses with `ErrCompositionStillExist`, or a new
-  error, while `scaletozero.ExistsWithOptions(... WithHeld(...))` (or `WithHeldIndex`
-  in PerName mode) finds a hold under the kind's prefix that this
-  definition's RBAC is the only grant for.
+  error, while a check with `WithHeld(...)` (or `WithHeldIndex` in PerName
+  mode) finds a hold under the kind's prefix that this definition's RBAC is
+  the only grant for. The `!SkipCRD` path checks with
+  `scaletozero.ExistsWithOptions`, which counts the instances first. The
+  `SkipCRD` path, which skips the instance guard because a surviving
+  definition keeps the kind's instances, checks with
+  `scaletozero.HeldWithOptions`, which counts only the holds and the switch
+  (decided 2026-11-26). Both pass
+  `WithHeldFilter(func(id credentialuse.ID) bool { return !coveredBySurvivorOf(holderGVK.GroupKind(), id) })`
+  (decided 2026-11-26), so that only those holds count; the check still stops
+  at the first that does. A call checks one holder kind, so the filter
+  captures it. The filter doesn't apply to the Disown switch, which isn't the
+  hold of a name: while it hasn't settled, `Undeploy` refuses.
 - **"The only grant" is computed, not read** (CP3b). It is the name's
   absence from the union of the `resourceNames` that core-provider would
   generate for every *other* live definition of the GroupKind, computed

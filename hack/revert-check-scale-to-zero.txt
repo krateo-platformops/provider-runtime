@@ -7,17 +7,17 @@ KILLED    the selector isn't applied
 KILLED    one namespace is listed, not all
           TestExistsDeletedCRDIsAnError,TestExistsEverything,TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/an_instance_behind_two_empty_pages,TestExistsIncludesTerminatingInstances,Tes
 KILLED    no Limit
-          TestExistsListsMetadataOnlyAcrossNamespaces
+          TestExistsListsMetadataOnlyAcrossNamespaces,TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldPagesPastACollision,TestExistsWithHeldStopsAtTheFirstHeldObject
 KILLED    full objects, not metadata-only
-          TestExistsListsMetadataOnlyAcrossNamespaces
+          TestExistsListsMetadataOnlyAcrossNamespaces,TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldListsEachProtectedKind,TestExistsWithHeldPagesPastACollision,TestExistsWithHeldStopsAtTheFirstHeldObject,TestHeldWithOption
 KILLED    an empty page with a continue token is taken as the end
           TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/an_instance_behind_two_empty_pages,TestExistsFollowsEmptyPagesWithAContinueToken/no_instance_behind_two_empty_pages,TestExistsLi
 KILLED    the continue token isn't sent
-          TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/an_instance_behind_two_empty_pages,TestExistsFollowsEmptyPagesWithAContinueToken/no_instance_behind_two_empty_pages
+          TestExistsFollowsEmptyPagesWithAContinueToken,TestExistsFollowsEmptyPagesWithAContinueToken/an_instance_behind_two_empty_pages,TestExistsFollowsEmptyPagesWithAContinueToken/no_instance_behind_two_empty_pages,TestExistsWi
 KILLED    a repeated continue token isn't caught
           TestExistsRepeatedContinueTokenIsAnError
-KILLED    terminating instances are skipped
-          TestExistsIncludesTerminatingInstances
+KILLED    terminating objects are skipped
+          TestExistsIncludesTerminatingInstances,TestExistsWithHeldCountsATerminatingHold
 KILLED    a no-match (missing CRD, unserved version) is false
           TestExistsNoMatchIsAnError,TestExistsNoMatchIsAnError/a_missing_CRD,TestExistsNoMatchIsAnError/a_missing_group,TestExistsNoMatchIsAnError/an_unserved_version,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNoth
 KILLED    a NotFound LIST (CRD deleted) is false
@@ -47,27 +47,27 @@ KILLED    Reconcile accepts a holdDown <= 0
 KILLED    Reconcile accepts an active < 1
           TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_negative_active_at_0,TestReconcileErrorChangesNothing/a_negative_active_at_1,TestReconcileErrorChangesNothing/a_negative_active_at_3,TestReconcileErrorC
 KILLED    a failed LIST is taken as empty
-          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+          TestExistsWithHeldIndexErrorsAreErrors,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_
 KILLED    a failed LIST is taken as active
-          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+          TestExistsWithHeldIndexErrorsAreErrors,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_
 KILLED    an error passes back lastSeen = now
           TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
 KILLED    an error reads as 0 replicas
-          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+          TestExistsWithHeldIndexErrorsAreErrors,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_
 KILLED    an error reports the current replicas even at 0
-          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_failed_scale_patch_at_0,TestReconcileErrorChangesNothing/a_missing_CRD_at_0,TestReconcileErrorChanges
+          TestExistsWithHeldIndexErrorsAreErrors,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_failed_scale_patch_at_0,TestReconcileErrorChangesNothing/a_mis
 KILLED    an error ignores the current replicas
           TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a_failed_scale_patch_at_1,TestReconcileErrorChangesN
 KILLED    an error with active < 1 reports it
           TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_negative_active_at_0,TestReconcileErrorChangesNothing/a_zero_active_at_0,TestReconcileRejectsBadArguments
 KILLED    an error has no Unknown reason
-          TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_at_3,TestReconcileErrorChangesNothing/a
+          TestExistsWithHeldIndexErrorsAreErrors,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_LIST_error_at_0,TestReconcileErrorChangesNothing/a_LIST_error_at_1,TestReconcileErrorChangesNothing/a_LIST_error_
 KILLED    it patches on every call
           TestReconcile,TestReconcile/a_future_lastSeen_stays_up_and_is_kept,TestReconcile/a_running_count_above_active_is_left_alone,TestReconcile/a_running_count_below_active_is_left_alone,TestReconcile/an_instance_keeps_it_up_w
 KILLED    a running controller is patched to active
-          TestReconcile,TestReconcile/a_running_count_above_active_is_left_alone,TestReconcile/a_running_count_below_active_is_left_alone,TestReconcile/empty_within_the_hold-down_leaves_3_alone
+          TestReconcile,TestReconcile/a_running_count_above_active_is_left_alone,TestReconcile/a_running_count_below_active_is_left_alone,TestReconcile/empty_within_the_hold-down_leaves_3_alone,TestReconcileWithHeldKeepsAHoldUp
 KILLED    waking goes to 1, not active
-          TestReconcile,TestReconcile/an_instance_wakes_it_from_zero_to_active,TestReconcile/empty_on_first_sight_at_zero_wakes_it_for_the_hold-down
+          TestReconcile,TestReconcile/an_instance_wakes_it_from_zero_to_active,TestReconcile/empty_on_first_sight_at_zero_wakes_it_for_the_hold-down,TestReconcileWithHeldKeepsAHoldUp,TestReconcileWithHeldWakesForTheSwitch,TestReco
 KILLED    idle isn't scaled to 0
           TestReconcile,TestReconcile/empty_past_the_hold-down_scales_3_down_to_0,TestReconcile/empty_past_the_hold-down_scales_down,TestReconcileErrorChangesNothing,TestReconcileErrorChangesNothing/a_failed_scale_patch_at_1,TestR
 KILLED    replicas are read from the Deployment's spec
@@ -76,6 +76,114 @@ KILLED    the Deployment is patched, not its scale
           TestReconcile,TestReconcile/an_instance_wakes_it_from_zero_to_active,TestReconcile/an_instance_wakes_it_from_zero_to_an_active_of_1,TestReconcile/empty_on_first_sight_at_zero_wakes_it_for_the_hold-down,TestReconcile/empt
 SURVIVED  the patch is computed from the Scale (omitempty claim)
           
+KILLED    held options are ignored
+          TestExistsWithHeldAndWithHeldIndexAddUp,TestExistsWithHeldCountsATerminatingHold,TestExistsWithHeldFilterLeavesTheSwitch,TestExistsWithHeldFilterOnTheIndex,TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldIndexErrors
+KILLED    WithHeldIndex alone doesn't count
+          TestExistsWithHeldFilterLeavesTheSwitch,TestExistsWithHeldFilterOnTheIndex,TestExistsWithHeldIndexErrorsAreErrors,TestExistsWithHeldIndexErrorsAreErrors/a_failed_GET_of_a_line,TestExistsWithHeldIndexErrorsAreErrors/a_lin
+KILLED    the options are checked only on an empty Kind
+          TestExistsWithOptionsRejectsBadOptions
+KILLED    ReconcileWithOptions drops its options
+          TestExistsWithHeldIndexErrorsAreErrors,TestReconcileTakesTheClientsMapperOnlyWhenNeeded,TestReconcileTakesTheClientsMapperOnlyWhenNeeded/a_WithRESTMapper_takes_its_place,TestReconcileTakesTheClientsMapperOnlyWhenNeeded/a
+KILLED    ReconcileWithOptions doesn't take the client's mapper
+          TestReconcileTakesTheClientsMapperOnlyWhenNeeded,TestReconcileTakesTheClientsMapperOnlyWhenNeeded/a_held_option_takes_the_client's,TestReconcileWithHeldKeepsAHoldUp,TestReconcileWithHeldWakesForTheSwitch,TestReconcileWit
+KILLED    ReconcileWithOptions always calls c.RESTMapper()
+          TestReconcileTakesTheClientsMapperOnlyWhenNeeded,TestReconcileTakesTheClientsMapperOnlyWhenNeeded/Reconcile_never_calls_it,TestReconcileTakesTheClientsMapperOnlyWhenNeeded/a_WithRESTMapper_takes_its_place,TestReconcileTa
+KILLED    a WithRESTMapper doesn't take the client's place
+          TestReconcileTakesTheClientsMapperOnlyWhenNeeded,TestReconcileTakesTheClientsMapperOnlyWhenNeeded/a_WithRESTMapper_takes_its_place
+KILLED    a held option without a mapper is accepted
+          TestExistsWithOptionsRejectsBadOptions,TestHeldWithOptionsIgnoresInstances,TestReconcileTakesTheClientsMapperOnlyWhenNeeded,TestReconcileTakesTheClientsMapperOnlyWhenNeeded/a_client_without_a_mapper_is_an_error
+KILLED    WithHeld with no kind is accepted
+          TestExistsWithOptionsRejectsBadOptions,TestHeldWithOptionsIgnoresInstances
+KILLED    a protected kind without a version is accepted
+          TestExistsWithOptionsRejectsBadOptions
+KILLED    an index without a namespace or a name is accepted
+          TestExistsWithOptionsRejectsBadOptions
+KILLED    a second WithHeld replaces the first's kinds
+          TestExistsWithHeldListsEachProtectedKind
+KILLED    the switch isn't read
+          TestExistsWithHeldFilterLeavesTheSwitch,TestExistsWithHeldReadErrorsAreErrors,TestExistsWithHeldReadErrorsAreErrors/a_failed_GET_of_the_CRD,TestExistsWithHeldReadErrorsAreErrors/a_mapper_without_the_holder_kind,TestExist
+KILLED    a failed GET of the CRD is taken as settled
+          TestExistsWithHeldReadErrorsAreErrors,TestExistsWithHeldReadErrorsAreErrors/a_failed_GET_of_the_CRD
+KILLED    a holder kind the mapper can't map is taken as settled
+          TestExistsWithHeldReadErrorsAreErrors,TestExistsWithHeldReadErrorsAreErrors/a_mapper_without_the_holder_kind
+KILLED    the CRD is named by the kind, not the plural
+          TestExistsWithHeldAndWithHeldIndexAddUp,TestExistsWithHeldCountsATerminatingHold,TestExistsWithHeldFilterLeavesTheSwitch,TestExistsWithHeldFilterOnTheIndex,TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldIndexErrors
+KILLED    an empty switch counts
+          TestExistsWithHeldAndWithHeldIndexAddUp,TestExistsWithHeldFilterOnTheIndex,TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldIndexErrorsAreErrors,TestExistsWithHeldIndexErrorsAreErrors/a_failed_GET_of_a_line,TestExist
+KILLED    held-count isn't checked
+          TestExistsWithHeldReadsTheDisownSwitch,TestExistsWithHeldReadsTheDisownSwitch/held-count_1,TestExistsWithHeldReadsTheDisownSwitch/held-count_unknown,TestReconcileWithHeldWakesForTheSwitch,TestReconcileWithHeldWakesForThe
+KILLED    any flag settles it, of whatever value
+          TestExistsWithHeldReadsTheDisownSwitch,TestExistsWithHeldReadsTheDisownSwitch/a_flag_left_by_another_value,TestExistsWithHeldReadsTheDisownSwitch/a_flag_of_true,TestReconcileWithHeldWakesForTheSwitch,TestReconcileWithHel
+KILLED    a flag of true settles it
+          TestExistsWithHeldReadsTheDisownSwitch,TestExistsWithHeldReadsTheDisownSwitch/a_flag_of_true,TestReconcileWithHeldWakesForTheSwitch,TestReconcileWithHeldWakesForTheSwitch/a_flag_of_true
+KILLED    a switch that names nothing doesn't count
+          TestExistsWithHeldReadsTheDisownSwitch,TestExistsWithHeldReadsTheDisownSwitch/a_switch_that_names_nothing,TestReconcileWithHeldWakesForTheSwitch,TestReconcileWithHeldWakesForTheSwitch/a_switch_that_names_nothing
+KILLED    the marker label isn't selected
+          TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldPagesPastACollision,TestExistsWithHeldStopsAtTheFirstHeldObject
+KILLED    the prefix isn't checked: a collision counts
+          TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldListsEachProtectedKind,TestExistsWithHeldPagesPastACollision,TestExistsWithHeldStopsAtTheFirstHeldObject,TestHeldWithOptionsIgnoresInstances
+KILLED    a collision ends the search: no paging past it
+          TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldPagesPastACollision,TestExistsWithHeldStopsAtTheFirstHeldObject
+KILLED    the list doesn't stop at the first hold
+          TestExistsWithHeldFilterOnTheLists,TestExistsWithHeldStopsAtTheFirstHeldObject
+KILLED    a failed LIST of a protected kind is false
+          TestExistsWithHeldNeedsOnlyTheDocumentedGrants,TestExistsWithHeldReadErrorsAreErrors,TestExistsWithHeldReadErrorsAreErrors/a_failed_LIST_of_a_protected_kind
+KILLED    only the first protected kind is listed
+          TestExistsWithHeldListsEachProtectedKind
+KILLED    WithHeldIndex replaces the lists
+          TestExistsWithHeldAndWithHeldIndexAddUp
+KILLED    WithHeld replaces the index
+          TestExistsWithHeldAndWithHeldIndexAddUp
+KILLED    the filter isn't applied to the lists
+          TestExistsWithHeldFilterOnTheLists,TestHeldWithOptionsIgnoresInstances
+KILLED    the filter is asked before the prefix
+          TestExistsWithHeldFilterOnTheLists
+KILLED    the filter isn't applied to the lines
+          TestExistsWithHeldFilterOnTheIndex,TestHeldWithOptionsIgnoresInstances
+KILLED    a line the filter refuses is read
+          TestExistsWithHeldFilterOnTheIndex
+KILLED    only the first filter counts
+          TestExistsWithHeldFilterOnTheLists
+KILLED    a second filter replaces the first
+          TestExistsWithHeldFilterOnTheLists
+KILLED    a filter alone is accepted
+          TestExistsWithOptionsRejectsBadOptions
+KILLED    the filter applies to the switch
+          TestExistsWithHeldFilterLeavesTheSwitch
+KILLED    a missing index is false
+          TestExistsWithHeldIndexErrorsAreErrors,TestExistsWithHeldIndexErrorsAreErrors/a_missing_index,TestHeldWithOptionsIgnoresInstances
+KILLED    an unreadable index is false
+          TestExistsWithHeldIndexErrorsAreErrors,TestExistsWithHeldIndexErrorsAreErrors/a_missing_index,TestExistsWithHeldIndexErrorsAreErrors/an_unreadable_index,TestHeldWithOptionsIgnoresInstances
+KILLED    only the first line is read
+          TestExistsWithHeldFilterOnTheIndex,TestExistsWithHeldIndexStopsAtTheFirstHeldLine
+KILLED    the lines don't stop at the first hold
+          TestExistsWithHeldFilterOnTheIndex,TestExistsWithHeldIndexStopsAtTheFirstHeldLine
+KILLED    a line of a kind the mapper can't map is skipped
+          TestExistsWithHeldIndexErrorsAreErrors,TestExistsWithHeldIndexErrorsAreErrors/a_line_of_a_kind_that_isn't_known
+KILLED    a line that is gone is an error
+          TestExistsWithHeldIndexStopsAtTheFirstHeldLine
+KILLED    a failed GET of a line is false
+          TestExistsWithHeldIndexErrorsAreErrors,TestExistsWithHeldIndexErrorsAreErrors/a_failed_GET_of_a_line
+KILLED    a line's prefix isn't checked
+          TestExistsWithHeldIndexStopsAtTheFirstHeldLine
+KILLED    a line that can't exist is read
+          TestExistsWithHeldIndexReadsClusterScopedLines,TestExistsWithHeldIndexSkipsWhatIsNoPathSegment
+KILLED    a cluster-scoped line isn't read
+          TestExistsWithHeldIndexReadsClusterScopedLines
+KILLED    a name that is no path segment is read
+          TestExistsWithHeldIndexSkipsWhatIsNoPathSegment
+KILLED    a namespace that is no path segment is read
+          TestExistsWithHeldIndexSkipsWhatIsNoPathSegment
+KILLED    HeldWithOptions counts the instances
+          TestHeldWithOptionsIgnoresInstances
+KILLED    HeldWithOptions without a held option is false
+          TestHeldWithOptionsIgnoresInstances
+KILLED    HeldWithOptions skips the options' check
+          TestHeldWithOptionsIgnoresInstances
+KILLED    HeldWithOptions accepts a nil reader
+          TestHeldWithOptionsIgnoresInstances
+KILLED    HeldWithOptions accepts a kind without a version
+          TestHeldWithOptionsIgnoresInstances
 
-KILLED=37 SURVIVED=1 of 38
+KILLED=91 SURVIVED=1 of 92
 tree restored
