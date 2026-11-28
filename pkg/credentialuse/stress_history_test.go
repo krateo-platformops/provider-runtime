@@ -647,9 +647,9 @@ type stHistory struct {
 	stopped  time.Time
 	frozen   time.Duration
 	outside  bool
-	// began is the revision of the recording's start lists: what has a first
+	// startRev is the revision of the recording's start lists: what has a first
 	// version after it was made in the run (ownNamespace).
-	began uint64
+	startRev uint64
 	// explained are the releases of unknown outcome that explain a loss
 	// already, by index in calls.
 	explained map[int]bool
@@ -678,15 +678,15 @@ type stRecording struct {
 	// outside: every hold is outside the caches (§10.5), so no pass skips, and
 	// no informer delivers a protected object.
 	outside bool
-	// began is the highest revision of the lists that the recording starts from:
+	// startRev is the highest revision of the lists that the recording starts from:
 	// none, in a made-up history, is before it.
-	began uint64
+	startRev uint64
 }
 
 func newStHistory(rec stRecording) *stHistory {
 	h := &stHistory{mode: rec.mode, grace: rec.grace, objs: map[stObj][]stVersion{}, holders: map[string][]stObj{}, byObj: map[stObj][]int{},
 		byPass: map[int64][]int{}, passes: map[int64]*stPass{}, reads: rec.reads, writes: map[stObj][]stWrite{},
-		events: map[stFeed][]stEvent{}, eventsOn: map[stFeedObj][]stEvent{}, gaps: rec.gaps, synced: rec.synced, stopped: rec.stopped, frozen: rec.frozen, outside: rec.outside, began: rec.began, explained: map[int]bool{}}
+		events: map[stFeed][]stEvent{}, eventsOn: map[stFeedObj][]stEvent{}, gaps: rec.gaps, synced: rec.synced, stopped: rec.stopped, frozen: rec.frozen, outside: rec.outside, startRev: rec.startRev, explained: map[int]bool{}}
 	for _, v := range rec.versions {
 		if _, ok := h.objs[v.stObj]; !ok && h.holderKind(v.kind) {
 			k := holderKey(v.kind, v.ns)
@@ -1517,7 +1517,7 @@ func (h *stHistory) auditStuck(r *stReport) {
 // one after its start lists.
 func (h *stHistory) ownNamespace(n string) bool {
 	vs := h.objs[nsObj(n)]
-	return len(vs) > 0 && vs[0].rv > h.began
+	return len(vs) > 0 && vs[0].rv > h.startRev
 }
 
 // usedBy: a holder of kind in n is, at the end, a user of o.

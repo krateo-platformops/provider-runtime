@@ -326,7 +326,7 @@ func TestAuditGapStuckHold(t *testing.T) {
 		}, []string{"STUCK-HOLD"}},
 		{"a hold of a namespace that the run didn't make", func() *auditRun {
 			b := held(plain())
-			b.began = b.rv + 1000
+			b.startRev = b.rv + 1000
 			return b
 		}, nil},
 		{"a hold for a holder kind that the run doesn't track", func() *auditRun {
