@@ -204,10 +204,11 @@ func TestAuditGapConsent(t *testing.T) {
 // A pass reads a Namespace's consent for each gate it makes, and the object's
 // after it (liveConsentIn): the pair that a ref was judged on is an object's read
 // and the last read of its Namespace that ended before it began, whatever the pass
-// read of that Namespace since. Pass 929 of a cross run had two gates in one
-// Namespace, a recorded ref that was refused and a new ref that was granted, and
-// the second gate's read of the Namespace, which consented, was taken for the
-// first's.
+// read of that Namespace since, and not the first it read. Pass 929 of a cross run
+// had two gates in one Namespace, a recorded ref that was refused and a new ref
+// that was granted, and the second gate's read of the Namespace, which consented,
+// was taken for the first's. These histories have the one Secret, auditC, and the
+// Namespace reads that such gates make around its read.
 func TestAuditGapConsentPairs(t *testing.T) {
 	// nsRead is a live read of the Namespace by p, of its latest version.
 	nsRead := func(b *auditRun, p *stPass) {
@@ -246,12 +247,21 @@ func TestAuditGapConsentPairs(t *testing.T) {
 		}, []string{"REF-UNACCOUNTED"}},
 		{"the Namespace read after the object's is no pair of it", func(b *auditRun, p *stPass) {
 			objRead(b, p)
-			grant(b, "ns")
-			nsRead(b, p)
+			nsRead(b, p) // refuses too, and is read after the object: no pair
 			b.a1(p)
 			p.unheld[auditC] = string(cu.ReasonNotConsented)
 			b.end(p)
 		}, []string{"REF-UNACCOUNTED"}},
+		{"the last read of the Namespace before the object's is its pair, not the first", func(b *auditRun, p *stPass) {
+			grant(b, "ns")
+			nsRead(b, p)
+			grant(b, "")
+			nsRead(b, p)
+			objRead(b, p) // refused: the Namespace's second read, the last before it, refuses
+			b.a1(p)
+			p.unheld[auditC] = string(cu.ReasonNotConsented)
+			b.end(p)
+		}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := newCrossRun("")
