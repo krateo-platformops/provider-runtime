@@ -2257,10 +2257,11 @@ the line.
   deleting, finds it gone. The three subtests of `TestRolloutWithTwoRefsFuncs`
   show it, failing, at `a2967a3` on the branch
   `proof/credentialuse-stale-chain`; they aren't on main. It applies to direct
-  refs, so to this release. **What an adopter does:** don't delete Secrets or
-  namespaces of the kind's holders while a rollout changes which refs `RefsFunc`
-  names, or, if a rollout adds a ref, have the version that names fewer stopped
-  before such a deletion. The same shape with a chain, a pass following one
+  refs, so to this release. It is a documented limit of this release, not a
+  decided design; recording a `RefsFunc` version with the refs was set aside.
+  **The rule the test shows:** finish the rollout, so that no process of a version
+  that names fewer refs still runs passes, before deleting Secrets or namespaces of
+  the kind's holders. The same shape with a chain, a pass following one
   through something older than another pass did, is refused with the chains
   (§9).
 - **Writing the CRD** (revision 16). Every CRD write (this config, the index
@@ -6725,11 +6726,10 @@ stay, and nothing in production reaches them.
   to a runtime that keeps a metadata response.
 - *"Safe per pass" for two `RefsFunc` versions*: wrong when they name different
   refs, §7.3. It applies to this release.
-- *A2 through the dynamic client only for a ref with a `Next` of a `Content`
-  kind*: in this release no A2, R1 or R3 goes through the dynamic client. The
-  protocol's server is the metadata client alone (`server.go:19-24`, `:76-80`);
-  the dynamic client reads a chain's content (`chain.go:45-62`), which a refused
-  list never reaches. The limit is for the chains release to keep.
+- *Which client writes*: in this release no A2, R1 or R3 goes through the dynamic
+  client. The protocol's server is the metadata client alone (`server.go:19-24`,
+  `:76-80`); the dynamic client reads a chain's content (`chain.go:45-62`), which
+  a refused list never reaches.
 - *The first adopter's process model*: §16.3.
 - *A protected kind's CRD recreated with another scope* (decided 2026-11-24):
   restart the providers that track it, §6.2, §13, usage.

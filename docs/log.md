@@ -78,7 +78,7 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   A graceful stop drains the index's queued checks, bounded: 10s from the last
   busy moment, at most 25s after the loops end (decided 2026-11-25, #146), so a
   `GracefulShutdownTimeout` under about 25s cuts it short; a kill stays the
-  accepted case. After a protected kind's CRD is recreated with another scope,
+  accepted case (accepted 2026-11-24). After a protected kind's CRD is recreated with another scope,
   restart the providers that track it (decided 2026-11-24). The limits that stay,
   each decided: the Disown kill path in PerName, a paused holder, conflicting refs
   (the first wins, with a log and a metric), the standby cap and the cost of a

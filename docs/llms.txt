@@ -1,4 +1,4 @@
-# provider-runtime — LLM doc index (pinned: v1.3.0)
+# provider-runtime — LLM doc index (pinned: the tag; set when a release is cut)
 # One line per file; regenerate the pin on release.
 docs/index.md: the map of this bundle
 docs/overview.md: package design and the managed-resource reconcile flow

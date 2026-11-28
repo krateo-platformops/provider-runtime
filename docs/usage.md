@@ -656,7 +656,7 @@ bounded: it ends 10s after the last moment the loops or a call begun before the
 stop was busy, and at most 25s after the loops end (that 10s plus the 15s an
 acquirer call is given). Set the manager's `GracefulShutdownTimeout` to **25s or
 more**: under about 25s the drain is cut short (#146). A **kill stays the
-accepted case** (§10.6.3): a check the process owed is lost, and the object may
+accepted case** (accepted 2026-11-24, §10.6.3): a check the process owed is lost, and the object may
 be held without its line until the holder's next pass adds it. The startup
 recheck doesn't find it. What the drain leaves undone is logged with how many.
 
@@ -689,8 +689,10 @@ recheck doesn't find it. What the drain leaves undone is logged with how many.
 - **A rollout that changes which refs `RefsFunc` names.** Two versions that name
   different refs aren't "safe per pass": the version that names fewer rewrites the
   record without what only the other names, and that object is released if its
-  Secret or namespace is being deleted just then (design §7.3). Don't delete
-  Secrets or namespaces of the kind's holders during such a rollout.
+  Secret or namespace is being deleted just then (design §7.3). The rule: finish
+  the rollout, so that no process of the version that names fewer refs still runs
+  passes, before deleting Secrets or namespaces of the kind's holders. It is a
+  documented limit of this release.
 - **Conflicting refs.** When refs of one holder name one object more than once,
   the first wins, and a later one that asks for more (to hold an object whose
   first ref was Guaranteed) isn't done. It is logged once per holder, object
