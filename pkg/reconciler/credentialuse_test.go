@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -1443,6 +1444,37 @@ func TestTracingCredentialUseAcquireEvent(t *testing.T) {
 				t.Errorf("attributes = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Contract, relied on downstream: a reconcile pass whose credential-use outcome
+// is must_not_connect ends its reconcile root span with status Error. The
+// downstream tail-sampling rule leaves that outcome to its error-status rule, so
+// a pass that ended OK would have its trace sampled away silently.
+func TestTracingCredentialUseMustNotConnectEndsRootWithError(t *testing.T) {
+	w := newCUWorld(t, newWidget("w", nil))
+	tp, rec := tracer(t)
+	boom := func(resource.Managed) ([]credentialuse.Ref, error) { return nil, errors.New("boom") }
+	r := w.reconciler(nil, &widgetProvider{ops: w.srv.ops}, boom, WithTracerProvider(tp))
+	startSource(t, r)
+	_, _ = r.Reconcile(context.Background(), reqFor("w"))
+	root := lastRoot(t, rec)
+	var outcome string
+	for _, e := range root.Events() {
+		if e.Name != tracing.EventCredentialUseAcquire {
+			continue
+		}
+		for _, kv := range e.Attributes {
+			if string(kv.Key) == "provider_runtime.credentialuse.outcome" {
+				outcome = kv.Value.String()
+			}
+		}
+	}
+	if outcome != "must_not_connect" {
+		t.Fatalf("credentialuse.acquire outcome on the root = %q, want must_not_connect; events %v", outcome, events(root))
+	}
+	if got := root.Status().Code; got != codes.Error {
+		t.Errorf("root span status = %v (%q), want Error", got, root.Status().Description)
 	}
 }
 
