@@ -1881,21 +1881,28 @@ func (h *stHistory) auditPasses(r *stReport) {
 }
 
 // consentRead reports whether p read, live, the Namespace's and the object's
-// consent of o before t, and whether the last answers to it consent.
+// consent of o before t, and whether the last pair of them consents. A pair is a
+// read of the object and the last read of its Namespace, in the same pass, that
+// ended before it began: the order of the gate (liveConsentIn), which reads the
+// Namespace, and the object after it. A pass reads the Namespace again for each
+// gate, and its later read isn't the pair of an object that an earlier gate read.
 func (h *stHistory) consentRead(p *stPass, o stObj, t time.Time) (read, consents bool) {
-	var ns, obj stCall
-	for _, c := range h.callsOf(p, func(c stCall) bool { return c.op == "get" && c.ok() && !c.end.After(t) }) {
-		switch c.obj {
-		case nsObj(o.ns):
-			ns = c
-		case o:
-			obj = c
+	gets := h.callsOf(p, func(c stCall) bool { return c.op == "get" && c.ok() && !c.end.After(t) })
+	for _, obj := range gets { // by end: the last pair wins
+		if obj.obj != o {
+			continue
+		}
+		var ns stCall
+		for _, c := range gets {
+			if c.obj == nsObj(o.ns) && !c.end.After(obj.start) && !c.end.Before(ns.end) {
+				ns = c
+			}
+		}
+		if ns.op != "" {
+			read, consents = true, consented(obj.consent, ns.consent, p.holder.ns)
 		}
 	}
-	if ns.op == "" || obj.op == "" {
-		return false, false
-	}
-	return true, consented(obj.consent, ns.consent, p.holder.ns)
+	return read, consents
 }
 
 // unreadable: a read of o's consent by p failed, and not with a NotFound.
