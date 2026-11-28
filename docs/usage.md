@@ -423,6 +423,8 @@ For Krateo, that's core-provider#310.
     0 on an error.
   - *RBAC.* list on the watched resource cluster-wide; get and patch on
     `deployments/scale`.
+  - *A Kind that holds credentials* must not sit at 0: nothing releases its
+    holds then. See [Credential use](#credential-use-and-scale-to-zero).
 - **A name that comes from data**, as a `secretRef` in a spec. Check it, and the
   namespace, where the API's schema doesn't: with
   `rest.IsValidPathSegmentName`, or as the DNS names they are. A typed or a
@@ -433,6 +435,341 @@ For Krateo, that's core-provider#310.
   you restrict the namespace and not the name. An object of a cluster-scoped kind
   is named without a namespace: a `credentialuse` ref that fills one in names no
   object, and is Missing.
+
+## Credential use
+
+`pkg/credentialuse` and the reconciler's adapter hold the Secrets, and the
+objects that lead to them, that a managed resource reads in `Connect`, for as
+long as losing them would be unrecoverable. A namespace deletion then can't
+wedge on a managed resource whose credentials were deleted first. Each held
+object carries a finalizer `credential-use.<lowercase kind>.<group>/<namespace>` of the
+holder's kind, added before the holder connects and removed once no holder of
+that namespace uses the object. The design is
+[design-credential-use-finalizer](./design-credential-use-finalizer.md); section
+numbers (§) below are its.
+
+### The limit: direct refs only
+
+**This release holds direct refs only** (decided 2026-11-24). Every ref that
+`CredentialRefs` returns must have a nil `Next`: name each Secret, and each
+other object `Connect` reads, as a ref of its own. A chain, a ref with a `Next`,
+is **refused in this release**, and the whole list with it, direct refs
+included (`credentialuse.ErrChainsNotSupported`, §9):
+
+- a **new** object doesn't connect: `Synced=False/ReconcileError`, with the error
+  naming the ref, and `Ready=NotObserved`;
+- an **established** object keeps working, with `Synced=True/ReconcileSuccess`
+  whose message is `credential-use: refs refused, not held: <the error, cut>
+  (§9)` for as long as it is refused. It keeps what it already holds, except
+  the holds whose target withdrew consent, which the pass still drops
+  (`acquire.go:452-474`). Nothing new is held, its direct refs included. The pass that isn't refused
+  takes the message off, a failed one included (decided 2026-11-25). Any other
+  Synced (an `Observe` or `Connect` error, a policy report, a deferral, a paused
+  holder) says its own outcome instead. The message is set in every status write
+  the pass makes, so it costs no write of its own;
+- the `CredentialUseDegraded` Warning event is recorded **once** per holder, with
+  a log line, until a pass of it isn't degraded or it is forgotten
+  (`tracker.go:542-545`), and a restart records it again. The event expires with
+  the API server's `--event-ttl`, so the message is what lasts. The gauge is
+  `credentialuse_refused_holders{holder_kind}` (decided 2026-11-25): the
+  holders, new ones included (`tracker.go:540`), whose last pass in this
+  process was refused. It drops one at a pass
+  that isn't refused, at `Forget` and at the holder's deletion. The counter
+  `credentialuse_degraded_total{reason="ChainsNotSupported"}` counts every
+  pass.
+
+A Secret whose name is only inside another object can't be named, so leave it
+out: it isn't protected, as before. Read that other object in `Connect` as you
+do today: `credentialuse.Resolved` returns nothing. A later release follows
+`Next`. On an upgrade to credential-use an existing object has no record yet,
+so it holds nothing until a pass writes one. Disown doesn't let a refused new
+object connect.
+
+### Adopting it
+
+Implement `reconciler.CredentialRefsProvider` on the connecter, give the
+reconciler a finalizer that implements `resource.NamedFinalizer`, and add two
+lines to the controller's builder. The refs come from memory, never from an API
+call, and are used to acquire, never to release:
+
+```go
+func (c *connector) CredentialRefs(mg resource.Managed) ([]credentialuse.Ref, error) {
+    cr := mg.(*v1alpha1.MyResource)
+    return []credentialuse.Ref{credentialuse.SecretRef(cr.Namespace, cr.Spec.SecretRef.Name)}, nil
+}
+
+r := reconciler.NewReconciler(mgr, kind,
+    reconciler.WithExternalConnecter(c),
+    reconciler.WithFinalizer(finalizer), // implements resource.NamedFinalizer
+    reconciler.WithCredentialUse(credentialuse.KindOptions{ /* optional */ }),
+)
+return ctrl.NewControllerManagedBy(mgr).
+    Named("myresource").
+    For(&v1alpha1.MyResource{}, builder.WithPredicates(r.IgnoreCredentialUseRecord())).
+    WatchesRawSource(r.CredentialUseSource()).
+    WithOptions(o.ForControllerRuntime()).
+    Complete(r)
+```
+
+- Without `WatchesRawSource(r.CredentialUseSource())` the manager fails: at the
+  kind's first reconcile, or within 2 minutes of election, whichever comes first
+  (`credentialuse.go:164-190`, `:653-682`). A connecter that doesn't implement the interface changes nothing: no
+  informer, no annotation, no write.
+- `IgnoreCredentialUseRecord` drops the update event that only the record's own
+  write causes, so it costs no extra pass.
+- `KindOptions` defaults to Secrets, `LabelScoped`. Name the protected kinds in
+  `Protected`, and set `Watch: credentialuse.PerName` for `resourceNames` RBAC
+  (it needs `SharedOptions.IndexNamespace`, given through
+  `WithCredentialUseShared`). `PerNamePoll` isn't supported: `Track` refuses it.
+  Don't set `Content`, which is for chains.
+- Run `reconcilertest.AssertCredentialRefsCover` in your tests: it fails on a
+  Secret that `Connect` reads and the refs don't name, on a `Next`, on a ref whose
+  object isn't in the fixture, and on conflicting refs
+  (`reconcilertest/credentialuse.go:115-126`). Build the connecter under test with
+  `reconcilertest.NewRecordingReader`, and pass that reader to the assertion. It
+  can't be used, in this release, for a fixture whose `Connect` reads a Secret
+  through another object. In production, wrap the reader with
+  `reconciler.CredentialUseCheckingReader`: a read of a protected kind the refs
+  don't name is logged once and counted in `credentialuse_unrecorded_reads_total`.
+- Before adopting, check the conversions of each custom resource the refs name,
+  and of your own kind: a CRD that serves several versions must convert without
+  losing a field, a label or an annotation, or a hold drops fields or is never
+  released (§6.2). With the conversion strategy `None` that means equal schemas.
+- **An outside `MetricsRecorder` must embed `credentialuse.NopMetrics` or
+  `*telemetry.Metrics`, not both** (`credentialuse/metrics.go:7-10`). The
+  interface grows with the metrics, so one that embeds neither stops compiling at
+  the next method. See the [log](./log.md) for what the first release added.
+
+### What the runtime writes where readers look
+
+- **The `krateo.io/external-create-*` annotations are history, not state.**
+  `pending`, `succeeded` and `failed` are the times of the last attempts of a
+  create, kept for the create-tracking guard. Don't read one as the object's
+  current condition: judge an object by its `Ready` and `Synced` conditions,
+  which is what the first adopter asked for.
+- **The holder's annotations.** `credential-use.krateo.io/refs.v1` is the
+  record of what the holder names, and `credential-use.krateo.io/unheld` lists
+  the refs that aren't held, with a reason and a time (`NotConsented`,
+  `ConsentWithdrawn`). Both are the runtime's: don't edit them.
+- **A failure that points to the list.** When a pass fails in `Connect` or
+  `Observe` and the list isn't empty, the message ends
+  `; credential-use: <n> ref(s) not held (<reason> since <time>), see annotation
+  credential-use.krateo.io/unheld`. It is at most 160 characters and is never
+  added to a successful pass.
+
+### Grants
+
+Bind a **ClusterRole with a ClusterRoleBinding**. Never a namespaced Role: it is
+deleted with its namespace, and the objects there then can't finish deleting
+(§13). For `LabelScoped`, the default:
+
+| Resource | Verbs |
+|---|---|
+| `secrets`, and each other protected kind | `get`, `list`, `watch`, `patch` |
+| `namespaces` | `get`, `list`, `watch` |
+| your own kinds | `get`, `list`, `watch`, `patch`, `update` |
+| `customresourcedefinitions`, by `resourceNames` (your kinds') | `get`, `list`, `watch`, `patch` |
+| `events` | `create`, `patch` |
+| the non-resource URL `/apis/*` | `get` (granted by `system:discovery`, unless your cluster removed its binding) |
+
+`patch` on your own CRDs is new for providers that ship static CRDs: the writes
+are rare, and nothing else writes them (§13, L6). `list` and `watch` on Secrets
+cluster-wide expose every Secret to the provider: use `LabelScoped` only where
+it already holds that grant.
+
+For `PerName`, where the refs' names are known when the RBAC is generated, grant
+the protected kinds `get` and `patch` (and `list`, `watch` with a `metadata.name`
+field selector) by `resourceNames` instead, and for the index: `configmaps` by
+`resourceNames` (`get`, `update`, `patch`, `watch`), and `create` on `configmaps`
+in the index namespace, which can't be scoped by name. The namespace is
+installer's, providers never create it, and an admission policy limits what is
+written there (§10.6.1). If a write to the index fails with "the namespace's
+admission policy has no parameters", check that the policy's parameter
+ConfigMap `cu-policy-params` exists. Every holder kind of one `Shared` must agree
+on a protected kind's watch mode.
+
+### Across namespaces
+
+A holder holds a Secret in **another** namespace only if that Secret, or its
+Namespace, carries `credential-use.krateo.io/allow-holders-from` listing the
+holder's namespace; `*` is accepted on the Secret only. Without it the
+reference still works as before, isn't protected, and the holder gets a
+`CredentialRefNotHeld` event. Removing a namespace from the annotation
+releases those holds with a `CredentialConsentWithdrawn` event. That needs a pass
+of each holder: **a paused holder keeps its holds** (below).
+
+### If you delete a Secret your objects use
+
+If you delete a Secret your objects use while its namespace is live, recreate it
+before deleting those objects, or delete the objects first. If objects are already
+stuck deleting on a missing Secret in a live namespace, recreate the Secret and
+they finish (§5.2).
+
+### Uninstalling a provider
+
+Before uninstalling, delete its objects and wait for them to go. Or annotate each
+holder CRD with `credential-use.krateo.io/disown=all` (or a comma-separated list
+of protected kinds, such as `Secret,KubernetesTarget.core.krateo.io`), and wait
+until **all three** hold (`credentialuse.DisownSettled` checks them):
+
+1. `credential-use.krateo.io/disown` is set and not empty;
+2. `credential-use.krateo.io/disown-settled` is the same string;
+3. `credential-use.krateo.io/held-count` is `0`.
+
+Then uninstall; take the provider's grants last. After an out-of-order
+uninstall, remove the objects' own finalizers first; then, if the CRD is gone,
+run `credentialuse.DisownPrefix` (`DryRun: true` reports what it would strip)
+or remove by hand the `credential-use.<lowercase kind>.<group>/<namespace>` finalizers,
+the annotation with the same key, the kind's `credential-use.krateo.io/k-<hash>`
+label, and the `credential-use.krateo.io/held` label once no `credential-use.`
+finalizer is left. If the CRDs are deleted while the provider runs and the
+objects are gone, it releases what they held by itself: keep it, and its RBAC,
+until nothing carries the kind's finalizer (§6.4, §11.5). Its metrics don't
+tell: they count what the process caches.
+
+If the count stays `unknown`, or the flag doesn't come, the CRD's Warning events
+say why (§7.4):
+
+- `CredentialUseDisownUnreadable`: an object the index or a record names can't be
+  read. Grant `get` on each object the event names, or, no sooner than the
+  provider's largest timeout plus 60s after the switch was last changed, confirm
+  by hand that it carries no finalizer of the kind and add it to the index's
+  `credential-use.krateo.io/vouched` annotation. Removing the line alone is
+  undone by the tamper check.
+- `CredentialUseIndexLost`: the index was lost while the switch is on. Follow the
+  event's two steps: remove the kind's finalizers from the objects the switch
+  covers, then set `credential-use.krateo.io/vouched-index` on the index
+  ConfigMap to `<uid>/<kinds>`, with `kubectl annotate --overwrite`.
+- `CredentialUseDisownIndexFull`: raise `SharedOptions.IndexMaxLines`, or correct
+  the record of the holder the event names.
+- `CredentialUseDisownRestarted`: something keeps writing the CRD, which starts
+  Disown's run over. Find and stop the writer; the event names the last three.
+
+**Vouches name the kinds** (decided 2026-11-25). An entry of `vouched` is
+`<namespace>/<Kind[.group]>/<name>`, or `<namespace>/<Kind[.group]>/*` for every
+object of a kind in a namespace, once none of its objects of that kind carries
+the holder kind's marker label. A bare `<namespace>/*` is malformed: it is
+ignored, and logged once per value. Write the kind as the index's lines do, `Kind`
+or `Kind.group`, with no version. Remove the vouches again once Disown has
+settled.
+
+**A set `disown` switch that parses to nothing**, such as `,`, never settles: it
+keeps a Kind's controller up (see
+[scale to zero](#credential-use-and-scale-to-zero)) until it is removed (decided
+2026-11-25).
+
+### Stopping
+
+A graceful stop drains the index's queued checks (PerName; decided 2026-11-25),
+bounded: it ends 10s after the last moment the loops or a call begun before the
+stop was busy, and at most 25s after the loops end (that 10s plus the 15s an
+acquirer call is given). Set the manager's `GracefulShutdownTimeout` to **25s or
+more**: under about 25s the drain is cut short (#146). A **kill stays the
+accepted case** (accepted 2026-11-24, §10.6.3): a check the process owed is lost, and the object may
+be held without its line until the holder's next pass adds it. The startup
+recheck doesn't find it. What the drain leaves undone is logged with how many.
+
+### Limits
+
+Each limit that was decided carries its date. The others are documented limits, not decisions.
+
+- **The Disown kill path.** In PerName mode, a process that is pruning an
+  object's line as the switch is set, and is killed between the removal and the
+  re-add, can leave a hold that Disown settles over (decided 2026-11-24, §7.4,
+  §10.6.3). A hold that lands later than Disown's landing margin isn't covered
+  either. Remove the finalizer by hand, `credential-use.<lowercase kind>.<group>/<namespace>`,
+  or run `DisownPrefix` with `Names` once the CRD is gone.
+- **A paused holder** keeps its holds, whatever the target's owner does, and so
+  does a holder no controller reconciles (decided 2026-11-24, §11.3). The way out:
+  unpause it (deleting it isn't enough while it is paused), remove the finalizer
+  from the target by hand, or use the Disown switch.
+- **A protected kind's CRD recreated with another scope** (decided 2026-11-24):
+  restart the providers that track it. Until then a ref with a namespace of a
+  kind a process still maps cluster-scoped is Missing without a call: a new
+  holder connects without its hold, and in PerName a hold may be counted as gone.
+- **Unmappable lines.** An index line whose kind doesn't map keeps the Kind's
+  controller up, as a set switch that parses to nothing does (decided 2026-11-26).
+  The index keeps the lines of a kind taken out of PerName or uninstalled. Once
+  its holds are found another way or are gone with its CRD, remove its lines by
+  hand:
+
+  ```sh
+  kubectl -n <IndexNamespace> edit configmap cu-index-<lowercase holder kind>.<holder group>
+  # in data.entries, delete every line that starts with <group>/<Kind>/
+  ```
+- **A rollout that changes which refs `RefsFunc` names.** Two versions that name
+  different refs aren't "safe per pass": the version that names fewer rewrites the
+  record without what only the other names, and that object is released then,
+  being deleted or not. It is lost if the Secret or its
+  namespace is deleted before the other version's next pass (design §7.3). The rule: finish
+  the rollout, so that no process of the version that names fewer refs still runs
+  passes, before deleting Secrets or namespaces of the kind's holders. It is a
+  documented limit of this release.
+- **Conflicting refs.** When refs of one holder name one object more than once,
+  the first wins, and a later one that asks for more (to hold an object whose
+  first ref was Guaranteed) isn't done. It is logged once per holder, object
+  and thing asked for, and counted in `credentialuse_refs_conflicting_total{asked}`
+  (§9.1).
+- **The standby cap.** A process that waits for leader election runs its
+  informers but not its write loops, so nothing drains its release queue.
+  While no write loops run, what waits is bounded: 65,536 names, 32 MiB of them,
+  and 16,384 keys across all holder kinds. Past it the key whose names take the
+  most is collapsed, and its namespace's list waits instead. When the loops
+  start, whatever collapsed is made up for: every object of each `LabelScoped`
+  protected kind is listed once (metadata only, 500 to a page), so a process with
+  more than 65,536 held objects and recorded names lists at **each** start.
+  Needs `list` on each protected kind. What it doesn't find: a name of a kind that
+  left `Protected` and no record names any more, and a PerName hold without its
+  index line (§6.2, "Without the write loops").
+- **Release cost.** A release batch reads at most 64 objects a turn and the rest
+  waits behind other keys: a teardown of 200 held Secrets makes 4 lists where it
+  made one. It delays, and never loses, a release (§6.2).
+
+### Credential use and scale to zero
+
+A Kind that holds credentials must not sit at 0 replicas: nothing releases then.
+`scaletozero.ReconcileWithOptions` and `ExistsWithOptions` take options, and
+`Reconcile` and `Exists` keep their signatures. `HeldWithOptions` checks only the
+holds and the switch, for an owner whose instances may rightly remain, as
+core-provider's `Undeploy` on its `SkipCRD` path.
+
+- `WithHeld(protected...)` counts a protected object that carries a finalizer of
+  the Kind's, found by the Kind's marker label (for `LabelScoped` kinds), and a
+  `disown` switch that hasn't settled.
+- `WithHeldIndex(index)` reads the index ConfigMap and GETs the objects its
+  lines name (for `PerName`). A missing or unreadable index is an error, never
+  false.
+- `WithHeldFilter(accept)` counts only the holds `accept` takes, and still stops
+  at the first (decided 2026-11-26). It doesn't apply to the Disown switch.
+- The two are independent and add up: a hold found by either counts (decided
+  2026-11-25). A holder kind whose protected kinds are all `LabelScoped` passes
+  `WithHeld` with them, one whose kinds are all `PerName` passes `WithHeldIndex`,
+  and one that mixes the modes passes both: `WithHeld` with its `LabelScoped`
+  kinds, and `WithHeldIndex` for the others. `WithHeld` with no kind is an error.
+- `WithRESTMapper(m)`: `ExistsWithOptions` takes a `client.Reader`, which
+  carries no mapper, so it needs this beside either option.
+  `ReconcileWithOptions` takes its client's.
+
+Every failed read is an error, never "nothing held", so the controller stays up.
+Grants, beyond the plain helper's: `get` on the holder kind's CRD (by
+`resourceNames`); with `WithHeld`, `list` on each protected kind, cluster-wide;
+with `WithHeldIndex`, `get` on the index ConfigMap and `get` on each object its
+lines name (a `resourceNames` rule can grant it).
+
+### Telemetry
+
+With tracing on, each pass that acquires records a `credentialuse.acquire` event
+on the reconcile span (settled 2026-11-22; the
+attributes, and the closed sets of `outcome` and reasons, are in
+[the tracing design](./design-tracing.md#45-events-on-the-root)). Counts describe
+**one pass**: read the latest event per resource. A kept ref that the pass dropped
+is in `.unheld.ConsentWithdrawn`. The metrics are `credentialuse_*`, labelled
+`holder_kind` (`pkg/telemetry` records them; [api](./api.md) lists the
+instruments), and the events are `CredentialUseDegraded`, `CredentialRefNotHeld`,
+`CredentialConsentWithdrawn`, `CredentialConsentWildcardIgnored`,
+`CredentialReleaseRejected`, `WaitingForCredentialUsers`, `CredentialDeleting`,
+`CredentialUseIndexFilling` and `CredentialUseIndexTampered`, besides Disown's
+four.
 
 ## Developing this library
 

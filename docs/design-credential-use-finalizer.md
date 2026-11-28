@@ -1,18 +1,19 @@
 ---
 type: Architecture
 title: provider-runtime — credential-use finalizer
-description: Design, not built, for holding the Secrets (and the objects that lead to them) that a managed resource reads, for as long as losing them would be unrecoverable, so a namespace deletion can't wedge on a managed resource whose credentials were deleted first.
+description: Design, built and unreleased (the first credential-use tag holds direct refs only), for holding the Secrets (and the objects that lead to them) that a managed resource reads, for as long as losing them would be unrecoverable, so a namespace deletion can't wedge on a managed resource whose credentials were deleted first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, finalizer, deletion, credentials, reconciler]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-28T00:00:00Z
 ---
 
 # Credential-use finalizer
 
-**Status:** design, revision 18. Nothing is built yet; the build follows
+**Status:** built, unreleased, revision 18: the first credential-use tag will
+hold direct refs only (below). The build followed
 [the implementation plan](./plan-credential-use-implementation.md), eleven
-stacked PRs that ship as v1.13.0. The
-user chose the approach: a finalizer on each Secret an object uses, the
+stacked PRs. §19 records what the build found, and the user guide is
+[usage](./usage.md#credential-use). The user chose the approach: a finalizer on each Secret an object uses, the
 analog of Crossplane's ProviderConfigUsage. The user's decisions are
 binding here: U1 to U7 on the first review, NQ1 to NQ4 on the second, and
 IP1 to IP5 on the implementation plan. Revision 16 amends the text where
@@ -2244,10 +2245,26 @@ the line.
   every process of the kind.
 - **What isn't published, and why that is safe.** A rollout can run
   processes with different `Protected` kinds or a different `RefsFunc` for
-  a while. That is **safe per pass**: each pass records what it computed,
-  and release reads only records. But it **churns**: two versions keep
-  rewriting a holder's record back and forth, and each rewrite triggers A1
-  and a release batch, until the rollout finishes.
+  a while. Each pass records what it computed, and release reads only records.
+  Nothing is lost while both versions name the same refs. `TestTwoRefsFuncVersions`
+  shows that no `Connect` fails on a ref it held, and it deletes nothing. But it
+  **churns**: two versions keep rewriting a holder's record back and forth, and
+  each rewrite triggers A1 and a release batch, until the rollout finishes.
+  **"Safe per pass" is wrong when the versions name different refs** (found
+  2026-11-24). A pass of the version that names fewer rewrites the record without
+  what only the other names, and the object is released then, being deleted or
+  not. It is lost if the Secret or its namespace is
+  deleted before the other version's next pass, which then finds it gone. Three
+  cases show it, each with v2 naming the extra ref throughout: v1's
+  deletion pass; v1's live pass while the Secrets are being deleted; and v1's
+  live pass just before the namespace's deletion. It applies to direct
+  refs, so to this release. It is a documented limit of this release, not a
+  decided design; recording a `RefsFunc` version with the refs was set aside.
+  **The rule:** finish the rollout, so that no process of a version
+  that names fewer refs still runs passes, before deleting Secrets or namespaces of
+  the kind's holders. The same shape with a chain, a pass following one
+  through something older than another pass did, is refused with the chains
+  (§9).
 - **Writing the CRD** (revision 16). Every CRD write (this config, the index
   pointer of §10.6.1, Disown's count fields of §7.4, and a pass's removal of
   a stale `disown-settled` before its first A2, §7.4) is a GET, then a
@@ -3467,6 +3484,21 @@ its holders (§9.2). Such a ref is an Acquire error that names the fix. A
 `Next` is given the object without `managedFields` and `status`, however it
 was read.
 
+**Two limits found in the build** (for the release that follows chains; this one
+refuses a `Next`, §9, `chain.go:89-100`, so neither applies to it):
+
+- **A `Guaranteed` ref with a `Next` and no Lister is read whole**, live,
+  whatever its kind, through the dynamic client (`readGuaranteed`,
+  `chain.go:178-193`), because there is no cache to read it from. That is a full
+  read of the object, a Secret's data included when the kind is Secrets.
+- **Metadata responses carry `kubectl.kubernetes.io/last-applied-configuration`**,
+  which client-side apply fills with the whole object a user applied, and can hold
+  a Secret's data. The informer caches drop it: their transform keeps only
+  `credential-use.` keys (`informers.go:171-178`). A2's and R1's responses are
+  not transformed (`server.go:97` and `server.go:123`): they are the API server's
+  metadata as read. A runtime that logs or caches one must drop the annotation
+  first.
+
 ### 10.5 Namespace-restricted caches (R10)
 
 The core builds cluster-wide informers. A caller that restricts them to
@@ -4001,13 +4033,16 @@ reads only the lines there are. The holder's next pass does, since even a
 skip ensures the line. **A stop drains** what is queued (decided 2026-11-25):
 as the write loops end, after their last prune, they make every live check
 the index holds in memory, whatever its backoff, again while some fail, the
-pause between rounds doubling from 200ms, within 10s, the bound an A2 in
-flight is given after a stop (§7.2). Those are the re-adds a prune couldn't
+pause between rounds doubling from 200ms. It ends 10s (the bound an A2 in
+flight is given after a stop, §7.2) from the last moment the loops or a call
+begun before the stop was busy, and at most 25s after the loops end, that 10s
+plus the 15s an acquirer call is given (`drainIndexes`, `writeloops.go:208-264`).
+Those are the re-adds a prune couldn't
 write, the checks an acquirer queued when its line check failed, the checks
 of lines someone else dropped, and the late checks of A2s whose margin is
 over, their batches queued too. The drain waits for the stop of the write
 loops' own context, and for the acquirer calls begun before it, which may
-queue more, and its 10s count from then (§7.2). A round's failures don't
+queue more, and its 10s count from the last of them (§7.2). A round's failures don't
 count towards a check's backoff. What the drain leaves is logged, with how
 many, and is the killed case: the checks left undone, the calls still in
 flight at its cap, and the late holds whose margin isn't over, which aren't
@@ -6208,6 +6243,16 @@ follows about them as holders is kept for a later adoption, and isn't planned.
 without it, and its rollouts overlap pods. §6.8 shows the design is safe
 that way, so there is no new unstructured-runtime work for it.
 
+**What the first adopter runs** (core-provider's report, 2026-11-24; not
+checkable from this repository). Leader election is on, with one process. So a
+rollout that replaces that pod has a window, between the old process's stop
+and the new one's start, in which no process runs the release loop: a hold that
+falls due then waits for the new process. That is the accepted limit; the
+rollout's overlap of §6.8 doesn't arise. The CompositionDefinition serves one
+version, `v1alpha1`, with the conversion strategy `None`. A second version needs
+equal schemas, or a webhook that round-trips every field, label and annotation
+(§6.2).
+
 **The index namespace** (CP2, core-provider's blocker). In PerName mode the
 index needs a namespace no holder can live in (§10.6.1). Compositions can be
 in any namespace, because each composition controller watches
@@ -6639,7 +6684,7 @@ user's decisions being named as theirs in those sections:
 | A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |
 | A process whose write loops haven't started refuses its passes | §7.2, §7.5 |
 | An operator's vouch of a kind in a namespace, `team-a/Secret/*` (for a namespace 2026-11-24; of its kind, decided 2026-11-25): a bare `team-a/*` is malformed, and a switch widened to another kind finds it unvouched | §7.4, §10.6.6 |
-| A stop drains the live checks the index holds in memory, within 10s, before the write loops end (decided 2026-11-25); a kill stays the accepted case | §7.2, §10.6.3 |
+| A stop drains the live checks the index holds in memory, as the write loops end: 10s from the last busy moment, at most 25s after the loops end (decided 2026-11-25); a kill stays the accepted case | §7.2, §10.6.3 |
 
 ## 18. Open questions for the user
 
@@ -6661,3 +6706,47 @@ on Synced=True's message, and a gauge counts such holders (§9, §12).
 Nothing is open.
 
 Nothing is open. No question needs the user.
+
+## 19. What the build found
+
+The choices the plan's §5 records, and what the build found that the sections
+above don't say in one place. Each item names where its text is. The user guide
+is [usage](./usage.md#credential-use); the release notes are in the
+[log](./log.md).
+
+**What the first tag is.** Direct refs only: a chain is refused with
+`ErrChainsNotSupported` (§9; decided 2026-11-24). An established holder says so
+on `Synced=True/ReconcileSuccess`, with the message `credential-use: refs
+refused, not held: <the error, cut> (§9)`, records `CredentialUseDegraded` once,
+and the holder is counted, new holders too, by `credentialuse_refused_holders` (decided 2026-11-25; §9, §12;
+`refusalOf` and `refusedSynced`, `pkg/reconciler/credentialuse.go:804-830`;
+`noteRefused`, `pkg/credentialuse/tracker.go:578-594`). Chain code and its tests
+stay, and nothing in production reaches them.
+
+**Open doc items, now closed.**
+
+- *`Guaranteed` with a `Next` and no Lister, and `last-applied-configuration`*:
+  §10.4. Both belong to the release that follows chains, and the second applies
+  to a runtime that keeps a metadata response.
+- *"Safe per pass" for two `RefsFunc` versions*: wrong when they name different
+  refs, §7.3. It applies to this release.
+- *Which client writes*: in this release no A2, R1 or R3 goes through the dynamic
+  client. The protocol's server is the metadata client alone (`server.go:25-33`,
+  `:84-88`); the dynamic client reads a chain's content (`chain.go:45-62`), which
+  a refused list never reaches.
+- *The first adopter's process model*: §16.3.
+- *A protected kind's CRD recreated with another scope* (decided 2026-11-24):
+  restart the providers that track it, §6.2, §13, usage.
+- *The event, its attributes and the closed sets*: design-tracing §4.5.
+
+**Decided since, in the code.** Vouches name the kinds, `<ns>/<Kind[.group]>/*`,
+and a bare `<ns>/*` is malformed (decided 2026-11-25; `parseVouched`,
+`index.go:1107-1127`, §7.4, §10.6.6). A stop drains the index's queued checks,
+10s from the last busy moment and at most 25s after the loops end (decided
+2026-11-25; `drainIndexes`, `writeloops.go:208-264`, §10.6.3), so a graceful
+shutdown timeout under about 25s cuts it short. A set Disown switch that parses
+to nothing, and an index line whose kind doesn't map, keep a Kind's controller up
+until fixed by hand (decided 2026-11-25 and 2026-11-26; the `scaletozero`
+package comment has the edit). `MetricsRecorder` has `RefusedHolders`, and a
+recorder passed to `WithMetrics` that isn't one falls back to `NopMetrics`, with
+a warning (`pkg/reconciler/credentialuse.go:224-231`).

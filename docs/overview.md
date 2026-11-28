@@ -48,6 +48,15 @@ finalizer (`finalizer.managedresource.krateo.io`), records Kubernetes events
 the `Ready`/`Synced` conditions from `apis/common/v1`, and requeues on the
 poll interval (default 1m, jitter/hook configurable).
 
+**Credential use (unreleased: the first tag in which it holds anything).** For a connecter that implements
+`CredentialRefsProvider`, each pass adds one step before `Connect`: it writes the
+holder's record of the objects it reads and holds them with a finalizer, so a
+namespace deletion can't strand the holder. A new object that can't be held
+doesn't connect (`Synced=False`); an established one proceeds and reports
+`CredentialUseDegraded`. On deletion, the record goes in the same write
+that removes the owner finalizer, and the release loop frees what it held. Direct refs only in this release; see
+[usage](./usage.md#credential-use).
+
 **Conflicts are transient, not errors.** A resource-version conflict on any
 write to the managed resource is retried, never reported as
 `Synced=False/ReconcileError`:
@@ -67,7 +76,10 @@ stamps `krateo.io/external-create-pending`. Afterwards it records
 `-succeeded` or `-failed` through a `CriticalAnnotationUpdater` (retrying
 variant in `pkg/reconciler/api.go`), which re-reads the object before writing.
 Every `Create` error is stamped `-failed`, including a resource-version
-conflict, so the next reconcile retries `Create` (since v1.5.2).
+conflict, so the next reconcile retries `Create` (since v1.5.2). The three
+markers are **history, not state**: each is the time of the last attempt of its
+kind. Judge an object by its `Ready` and `Synced` conditions, never by which
+marker is present.
 
 A handshake whose outcome was never recorded (`ExternalCreateIncomplete`:
 `pending` is newer than both terminal markers) is resolved by asking `Observe`
