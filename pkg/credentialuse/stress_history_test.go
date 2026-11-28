@@ -650,6 +650,9 @@ type stHistory struct {
 	// startRev is the revision of the recording's start lists: what has a first
 	// version after it was made in the run (ownNamespace).
 	startRev uint64
+	// ended: the recording is of a run that has ended (stressRecorder.recording).
+	// A made-up history stops where its story does, and has none.
+	ended bool
 	// explained are the releases of unknown outcome that explain a loss
 	// already, by index in calls.
 	explained map[int]bool
@@ -681,12 +684,15 @@ type stRecording struct {
 	// startRev is the highest revision of the lists that the recording starts from:
 	// none, in a made-up history, is before it.
 	startRev uint64
+	// ended: it is of a run that has ended, so that what is left in it is what
+	// the run left (auditStuck).
+	ended bool
 }
 
 func newStHistory(rec stRecording) *stHistory {
 	h := &stHistory{mode: rec.mode, grace: rec.grace, objs: map[stObj][]stVersion{}, holders: map[string][]stObj{}, byObj: map[stObj][]int{},
 		byPass: map[int64][]int{}, passes: map[int64]*stPass{}, reads: rec.reads, writes: map[stObj][]stWrite{},
-		events: map[stFeed][]stEvent{}, eventsOn: map[stFeedObj][]stEvent{}, gaps: rec.gaps, synced: rec.synced, stopped: rec.stopped, frozen: rec.frozen, outside: rec.outside, startRev: rec.startRev, explained: map[int]bool{}}
+		events: map[stFeed][]stEvent{}, eventsOn: map[stFeedObj][]stEvent{}, gaps: rec.gaps, synced: rec.synced, stopped: rec.stopped, frozen: rec.frozen, outside: rec.outside, startRev: rec.startRev, ended: rec.ended, explained: map[int]bool{}}
 	for _, v := range rec.versions {
 		if _, ok := h.objs[v.stObj]; !ok && h.holderKind(v.kind) {
 			k := holderKey(v.kind, v.ns)
@@ -1495,6 +1501,9 @@ func (h *stHistory) countWithdrawn(r *stReport, p stObj, kind, n string, landed 
 // leftover is no stuck hold of this run, and a Target holder's, in a run that
 // tracks Widgets only, can't heal.
 func (h *stHistory) auditStuck(r *stReport) {
+	if !h.ended {
+		return // a made-up history stops where its story does
+	}
 	for o, vs := range h.objs {
 		if !h.protectedKind(o.kind) || len(vs) == 0 || vs[len(vs)-1].gone {
 			continue

@@ -335,7 +335,30 @@ func TestAuditGapStuckHold(t *testing.T) {
 			return b
 		}, nil},
 	} {
-		t.Run(c.name, func(t *testing.T) { c.build().want(t, c.want...) })
+		t.Run(c.name, func(t *testing.T) {
+			b := c.build()
+			b.ended = true
+			b.want(t, c.want...)
+		})
+	}
+	// A history that stops mid-story has no end to judge a hold at.
+	t.Run("a history that hasn't ended", func(t *testing.T) {
+		held(plain()).want(t)
+	})
+}
+
+// The recorder gives its recording as that of a run that has ended: it is what
+// auditStuck rests on, and the only thing that makes a real run's end judged.
+func TestRecorderRecording(t *testing.T) {
+	r := &stressRecorder{mode: stressCross, startRev: 7}
+	r.mu.Lock()
+	rec := r.recording()
+	r.mu.Unlock()
+	if !rec.ended || rec.startRev != 7 || rec.mode != stressCross {
+		t.Errorf("the recording of a run that ended: ended %v, startRev %d, mode %v; want true, 7, %v", rec.ended, rec.startRev, rec.mode, stressCross)
+	}
+	if h := newStHistory(rec); !h.ended || h.startRev != 7 {
+		t.Errorf("its history: ended %v, startRev %d; want true, 7", h.ended, h.startRev)
 	}
 }
 

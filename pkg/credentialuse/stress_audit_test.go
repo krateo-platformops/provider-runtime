@@ -45,6 +45,9 @@ type auditRun struct {
 	outside bool
 	// startRev is the revision of the start lists: none, if zero.
 	startRev uint64
+	// ended: the history is of a run that has ended: what is left in it is what the
+	// run left (auditStuck). One that stops mid-story has no such end.
+	ended bool
 }
 
 // newAuditRun begins a history with a live namespace, the Secret s, and the
@@ -264,7 +267,7 @@ func (b *auditRun) lostRead(p *stPass) {
 
 func (b *auditRun) history() *stHistory {
 	return newStHistory(stRecording{mode: b.mode, grace: testGrace, versions: b.vs, calls: b.calls, passes: b.passes, reads: b.reads, writes: b.writes, events: b.events, gaps: b.gaps,
-		synced: b.synced, stopped: b.stopped, outside: b.outside, startRev: b.startRev})
+		synced: b.synced, stopped: b.stopped, outside: b.outside, startRev: b.startRev, ended: b.ended})
 }
 
 // want checks that the audits find exactly classes, each with a timeline, and

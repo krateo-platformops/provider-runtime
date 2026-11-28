@@ -224,8 +224,15 @@ func (r *stressRecorder) finish(t *testing.T) *stHistory {
 	r.wg.Wait()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return newStHistory(stRecording{mode: r.mode, grace: testGrace, versions: r.versions, calls: r.calls, passes: r.passes, reads: r.reads, writes: r.writes, events: r.events,
-		gaps: r.gaps, synced: r.synced, stopped: r.stopped, frozen: r.frozen, outside: r.outside, startRev: r.startRev})
+	return newStHistory(r.recording())
+}
+
+// recording is what the recorder has, as that of a run that has ended: its
+// processes are stopped, and each watch has delivered the run's last object. r.mu
+// is held.
+func (r *stressRecorder) recording() stRecording {
+	return stRecording{mode: r.mode, grace: testGrace, versions: r.versions, calls: r.calls, passes: r.passes, reads: r.reads, writes: r.writes, events: r.events,
+		gaps: r.gaps, synced: r.synced, stopped: r.stopped, frozen: r.frozen, outside: r.outside, startRev: r.startRev, ended: true}
 }
 
 // running reports whether a pass of holder o has begun and hasn't ended. One
