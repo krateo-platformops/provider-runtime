@@ -534,6 +534,36 @@ release, in this table. `ReadDenied` is a reason of the holder's `unheld`
 annotation (PerNamePoll, which `Track` refuses in this release), not of this
 event, and there is no `pending` outcome.
 
+**Three facts a collector's tail-sampling keep rule depends on are contract**
+(observability, 2026-11-28): a change to any of them must be announced before the
+release that makes it.
+
+1. The span event `credentialuse.acquire` is on the **reconcile root span**:
+   `acquireCredentials` calls `pass.event(tracing.EventCredentialUseAcquire, …)`
+   (`pkg/reconciler/credentialuse.go:873`), and `tracePass.event` adds it to
+   `p.span`, the root (`pkg/reconciler/traces.go:281-286`).
+2. The attribute key `provider_runtime.credentialuse.outcome` takes the value
+   `degraded` for an established holder whose acquire failed, a refused chain
+   included (`acquireAttributes`, `credentialuse.go:940-944`;
+   `tracing.CredentialUseDegraded`, `pkg/tracing/names.go:65`).
+3. A `must_not_connect` pass **ends with the root's status Error.** The sampler
+   leaves that outcome to its error-status rule, so if it ever ended OK those
+   traces would be sampled away silently. It does today: `acquireCredentials`
+   returns the error for a `MustNotConnect` pass (`credentialuse.go:879-890`,
+   `return …, true, passErr`), `Reconcile` returns it through its named result
+   `err` (`pkg/reconciler/reconciler.go:866,1070-1073`), and the deferred
+   `pass.end(err, panicked)` (`reconciler.go:922`) calls `tracing.RecordError` on
+   the root (`traces.go:333-343`), which sets status Error
+   (`pkg/tracing/errors.go:21-30`). Any pass that returns an error ends its root
+   Error the same way.
+
+The names and the outcome strings are pinned by `TestCredentialUseEventNames`
+(`pkg/tracing/names_test.go`), and `TestTracingCredentialUseAcquireEvent`
+(`pkg/reconciler/credentialuse_test.go:1366`) pins that each outcome's event is on
+the root. **No test pins (3) for this outcome**: nothing asserts the root's status
+for a `must_not_connect` pass. `pkg/reconciler/tracing_test.go` asserts Error on
+the root for other failing passes (for example `:523`), which is the same path.
+
 **The counts describe one pass.** Each event carries what that pass's Acquire
 did, so for a resource read its latest event, and never add events up. A hold the
 record kept that the pass dropped, because its target withdrew consent, is not
