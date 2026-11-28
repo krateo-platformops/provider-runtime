@@ -631,4 +631,36 @@ Set by users/operators on each managed CR, honored by the reconcile loop
 | `krateo.io/deletion-policy` | `delete` (default) \| `orphan` | Whether external-resource deletion follows CR deletion. `orphan` always keeps the resource; any other value keeps it too. Whitespace around the value is ignored: `"delete\n"` is `delete`. |
 | `krateo.io/connector-verbose` | `"true"` | Signals the external client to enable verbose behavior (`meta.IsVerbose`). |
 | `krateo.io/external-name` | string | The resource's identity in the external system; set by `Create` implementations, readable via `meta.GetExternalName`. |
-| `krateo.io/external-create-pending` / `-succeeded` / `-failed` | RFC3339Nano, in UTC | Managed by the reconciler's create-tracking guard — not for hand-editing. Compare them as parsed times, never as strings: trailing zeros of the fraction are dropped, so string order isn't time order. Other writers of the same annotation names may use second precision or a zone offset, so a reader should parse with a layout that accepts both. Markers aren't rewritten on upgrade, so one object can carry a marker written with an offset by an earlier release and its clearer written in UTC by a later one. |
+| `krateo.io/external-create-pending` / `-succeeded` / `-failed` | RFC3339Nano, in UTC | Managed by the reconciler's create-tracking guard — not for hand-editing. They are **history, not state**: each is the time of the last attempt of its kind, so a `failed` marker doesn't mean the create is failing now. Judge an object by its `Ready` and `Synced` conditions, not by these. Compare them as parsed times, never as strings: trailing zeros of the fraction are dropped, so string order isn't time order. Other writers of the same annotation names may use second precision or a zone offset, so a reader should parse with a layout that accepts both. Markers aren't rewritten on upgrade, so one object can carry a marker written with an offset by an earlier release and its clearer written in UTC by a later one. |
+
+## Credential use (`credentialuse.KindOptions`, `SharedOptions`)
+
+For a connecter that implements `reconciler.CredentialRefsProvider`; see
+[usage](./usage.md#credential-use) and
+[the design](./design-credential-use-finalizer.md). A zero field takes the default.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `KindOptions.Protected` | `Secret`, `LabelScoped` | The kinds the refs may name, each with a watch mode: `LabelScoped`, `PerName` (`resourceNames` RBAC, needs `SharedOptions.IndexNamespace`). `PerNamePoll` is refused by `Track`. |
+| `ProtectedKind.Content` | off | For refs with a `Next`; this release refuses chains, so leave it off. |
+| `KindOptions.MaxDepth` | 3 | Levels of `Next` followed; none in this release. |
+| `KindOptions.DeletionGrace` | 60s | How long a protected object that is being deleted, in a live namespace, is kept for its users before only those being deleted keep it (§5). |
+| `KindOptions.ProbeInterval` | 15s | The missing-ref prober's tick (§10.3). |
+| `KindOptions.DisownInterval` | derived: `max(60s, ⌈span / (DisownPasses − 1)⌉)` | Disown's pass interval; published on the holder CRD, validated against the provider's reconcile timeout when set. |
+| `KindOptions.DisownPasses` | 5 | Consecutive zero passes before Disown settles. |
+| `SharedOptions.IndexNamespace` | none | Where PerName indexes live (installer's `krateo-credential-use`). |
+| `SharedOptions.IndexMaxLines` | 2000 | Cap of each index, in lines. |
+
+Switches and labels, all under `credential-use.krateo.io/`:
+
+| Key | On | Meaning |
+|---|---|---|
+| `allow-holders-from` | a Secret or a Namespace | The namespaces whose holders may hold it, comma-separated; `*` on a Secret only. |
+| `disown` | a holder CRD | `all`, or a comma-separated list of protected kinds: stop protecting. |
+| `held-count`, `disown-settled` | a holder CRD | Written by the runtime. Disown has settled when `disown` is set and not empty, `disown-settled` equals it and `held-count` is `"0"`. |
+| `vouched`, `vouched-index` | an index ConfigMap | An operator's vouch for what Disown can't read: `<ns>/<Kind[.group]>/<name>` or `<ns>/<Kind[.group]>/*`, and `<uid>/<kinds>`. |
+| `refs.v1`, `unheld` | a holder | The runtime's record and its list of refs not held. Don't edit. |
+| `held`, `k-<hash>` (labels) | a protected object | The marker labels the informers select by. |
+
+The defaults are `credentialuse.DefaultDeletionGrace`, `DefaultProbeInterval`,
+`DefaultDisownInterval`, `DefaultDisownPasses` and `DefaultMaxDepth`.

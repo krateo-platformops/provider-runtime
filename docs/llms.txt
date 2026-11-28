@@ -2,9 +2,9 @@
 # One line per file; regenerate the pin on release.
 docs/index.md: the map of this bundle
 docs/overview.md: package design and the managed-resource reconcile flow
-docs/usage.md: go get + the minimal code to build a provider on this library
-docs/configuration.md: build tags, OTel SDK environment, option structs and runtime annotations
-docs/api.md: the exported Go API surface, package by package, plus metric instruments
+docs/usage.md: go get + the minimal code to build a provider on this library, and the credential-use guide (adopting it, grants, uninstalling, limits, telemetry)
+docs/configuration.md: build tags, OTel SDK environment, option structs and runtime annotations, including the credential-use options and annotations
+docs/api.md: the exported Go API surface, package by package (pkg/credentialuse and the scaletozero held options among them), plus metric instruments
 docs/examples.md: examples index
 docs/release.md: tag-only release runbook (v-prefixed git tags, Go module proxy)
 docs/log.md: curated history
@@ -16,6 +16,11 @@ pkg/ratelimit/signal.go: the rate-limit Signal, Report and the context sink
 pkg/ratelimit/governor.go: the per-key governor and its non-blocking Acquire
 pkg/ratelimit/saturation.go: the cgroup v2 saturation sampler (local capacity)
 pkg/ratelimit/queue.go: the gated queue: the local slot is taken before the pop and given back in Done
+docs/design-credential-use-finalizer.md: design (built, unreleased; direct refs only) for holding the Secrets and objects a managed resource reads, with a finalizer per holder kind and namespace: the protocol, Disown, PerName, RBAC, consumers and what the build found (§19)
+docs/plan-credential-use-implementation.md: the eleven stacked PRs that built credential-use, the tests each lands and the ambiguities resolved
+pkg/credentialuse/doc.go: the package's map: Ref, Acquire, Track, the write loops, PerName, Disown and DisownPrefix, IndexIDs and Clients.Discovery
+pkg/reconciler/credentialuse.go: CredentialRefsProvider, WithCredentialUse, CredentialUseSource, IgnoreCredentialUseRecord, the refused-chain Synced message and the credentialuse.acquire event's attributes
+pkg/telemetry/credentialuse.go: the credentialuse.* metric instruments, including refused_holders
 docs/design-local-slot-before-pop.md: design (implemented) for taking the local slot before the pop
 docs/design-saturation-cost-model.md: design (decided, not built) for sizing local capacity from what reconciles cost against the container's CPU and memory limits
 pkg/ratelimit/httpsignal/httpsignal.go: http.RoundTripper reporting GitHub and Azure DevOps rate-limit headers, and propagating the active span's traceparent

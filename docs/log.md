@@ -4,13 +4,94 @@ title: provider-runtime — log
 description: Curated chronological history of provider-runtime — notable changes and decisions, newest first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [library, history]
-timestamp: 2026-11-21T00:00:00Z
+timestamp: 2026-11-28T00:00:00Z
 ---
 
 # Log
 
 Curated history — notable changes and decisions, newest first. Full release
 notes live in GitHub Releases; the mechanics are in [release](./release.md).
+
+## 2026-11-28 — unreleased: credential-use, the first tag
+- **What it is.** `pkg/credentialuse` and the reconciler's adapter hold the
+  Secrets, and the objects that lead to them, that a managed resource reads in
+  `Connect`, with a finalizer `credential-use.<kind>.<group>/<namespace>`, for as
+  long as losing them would be unrecoverable. A namespace deletion can't wedge on
+  a managed resource whose credentials were deleted first. A connecter opts in by
+  implementing `reconciler.CredentialRefsProvider`; one that doesn't changes
+  nothing. [usage](./usage.md#credential-use) has the guide and
+  [the design](./design-credential-use-finalizer.md) the protocol. This entry is
+  the release notes of the first credential-use tag; its version and date are
+  set when the tag is cut.
+- **Direct refs only** (decided 2026-11-24). A ref with a `Next`, a chain, is
+  refused in this release with `credentialuse.ErrChainsNotSupported` (#142): the
+  whole list, its direct refs included. A new object doesn't connect. An
+  established one keeps working, with `Synced=True/ReconcileSuccess` and the
+  message `credential-use: refs refused, not held: <the error, cut> (§9)` for as
+  long as it lasts (decided 2026-11-25), one `CredentialUseDegraded` event, and
+  the gauge `credentialuse_refused_holders{holder_kind}`.
+- **`MetricsRecorder` gains `RefusedHolders(holderKind string, n int)`.** An
+  implementation outside this module embeds `credentialuse.NopMetrics`, or
+  `*telemetry.Metrics`, not both. A recorder given to `reconciler.WithMetrics`
+  that lacks a method of the interface, or embeds two recorders, **falls back to
+  `NopMetrics`**: the reconciler logs a warning, and no `credentialuse_` metric
+  is recorded. `pkg/telemetry` records `credentialuse.refused_holders` and the
+  others.
+- **New public API.**
+  - `credentialuse.Clients.Discovery` (#144): a REST client for discovery. A
+    holder kind whose CRD is gone is looked up in it, and what it held is released
+    only if no other resource serves the kind. Nil never takes a kind for gone,
+    and `Track` warns.
+  - `credentialuse.IndexIDs(data)`: the objects an index ConfigMap names, for
+    readers outside the tracker.
+  - `scaletozero.ExistsWithOptions`, `ReconcileWithOptions` and
+    `HeldWithOptions`, and their options `WithHeld`, `WithHeldIndex`,
+    `WithHeldFilter` and `WithRESTMapper` (#147): a Kind whose controller holds
+    credentials, or whose Disown switch hasn't settled, counts as having
+    instances. `Exists` and `Reconcile` keep their signatures. A set switch that
+    parses to nothing, and an index line whose kind doesn't map, keep the
+    controller up until fixed by hand (decided 2026-11-25 and 2026-11-26).
+  - The reconciler's `CredentialRefsProvider`, `WithCredentialUse`,
+    `WithCredentialUseShared`, `CredentialUseSource` and
+    `IgnoreCredentialUseRecord`, and `reconcilertest.AssertCredentialRefsCover`.
+- **RBAC, by mode** (a ClusterRole with a ClusterRoleBinding, never a namespaced
+  Role; [usage](./usage.md#grants) has the table):
+  - *LabelScoped* (default): `get`, `list`, `watch`, `patch` on `secrets` and each
+    other protected kind; `get`, `list`, `watch` on `namespaces`; `get`, `list`,
+    `watch`, `patch`, `update` on the holder kind; `get`, `list`, `watch`, `patch`
+    on its CRD, by `resourceNames`; `create`, `patch` on `events`; `get` on the
+    non-resource URL `/apis/*`.
+  - *PerName*: the protected kinds by `resourceNames` instead (`get`, `patch`,
+    and `list`, `watch` with a `metadata.name` field selector); the index:
+    `configmaps` by `resourceNames` (`get`, `update`, `patch`, `watch`), and
+    `create` on `configmaps` in the index namespace.
+  - *PerNamePoll* isn't built: `Track` refuses it.
+  - *`scaletozero` with `WithHeld`*: `get` on the holder kind's CRD (by
+    `resourceNames`) and `list` on each protected kind, cluster-wide. *With
+    `WithHeldIndex`*: `get` on the CRD, on the index ConfigMap and on each object
+    its lines name.
+  - *The standby cap's full list*: `list` on each protected kind, which the
+    label-scoped informer needs already.
+  - A provider with static CRDs now needs `patch` on its own CRDs, by name.
+- **Operator rules decided on the way.** Vouches name the kinds:
+  `<ns>/<Kind[.group]>/*`, and a bare `<ns>/*` is malformed (decided 2026-11-25).
+  A graceful stop drains the index's queued checks, bounded: 10s from the last
+  busy moment, at most 25s after the loops end (decided 2026-11-25, #146), so a
+  `GracefulShutdownTimeout` under about 25s cuts it short; a kill stays the
+  accepted case. After a protected kind's CRD is recreated with another scope,
+  restart the providers that track it (decided 2026-11-24). The limits that stay,
+  each decided: the Disown kill path in PerName, a paused holder, conflicting refs
+  (the first wins, with a log and a metric), the standby cap and the cost of a
+  release batch ([usage](./usage.md#limits-each-decided)).
+- **Observability.** The `credentialuse.acquire` span event and its attribute
+  keys are settled; its `outcome` and reason sets are closed, and the counts
+  describe one pass ([design-tracing](./design-tracing.md#45-events-on-the-root)).
+  The `krateo.io/external-create-*` annotations are history, not state: judge an
+  object by `Ready` and `Synced`.
+- **Also.** A release batch is a turn of its key, reading at most 64 objects, with
+  a time for each call (#148). A process that waits for election bounds its
+  release queue at 65,536 names, 32 MiB and 16,384 keys, and makes up for an
+  overflow with one list of each label-scoped protected kind when its loops start.
 
 ## 2026-11-21 — v1.21.1: Ready=Deleting and Ready=Creating keep their transition time
 - **A patch release, from `release/v1.21`** (the user's decision): #119,

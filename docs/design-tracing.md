@@ -517,6 +517,32 @@ Event names are fixed, and their attributes are under `provider_runtime.`:
 | `credentialuse.acquire` | each credential-use Acquire of the pass (design-credential-use-finalizer §8 step 5, `credentialuse.go`), once per pass that acquires; the user's decision of 2026-11-22 | `provider_runtime.credentialuse.refs` (the refs held plus those not held, chains followed, and a ref that only the record kept, on the pass that drops it as `ConsentWithdrawn`; a Guaranteed ref, which is neither, isn't counted), `.held` (how many it held), `.unheld.<Reason>` (a count per reason not held, only the reasons present: `Missing`, `Deleting`, `NotConsented`, `ConsentWithdrawn`, `ConsentUnreadable`, `Disowned`), and `.outcome` (`ok`, `degraded`, `must_not_connect`, `conflict`). Counts only: never a ref's name or a Secret's data |
 | `credentialuse.release` | reserved: release runs in the credential-use write loops, outside any reconcile span | none yet |
 
+**The `credentialuse.acquire` event is settled** (the user's decision of
+2026-11-22; the first credential-use release). Its name and its four attribute
+keys are `EventCredentialUseAcquire` and `AttrCredentialUseRefs`, `…Held`,
+`…Outcome` and, per reason, `AttrCredentialUseUnheldPrefix` plus the reason
+(`pkg/tracing/names.go:39-56`). Both value sets are closed, and every member
+was added by that first release:
+
+| Attribute | Closed set |
+|---|---|
+| `…outcome` | `ok`, `degraded` (an established holder's acquire failed, or its chain was refused, §9 of the credential-use design), `must_not_connect`, `conflict` (`names.go:62-70`) |
+| `…unheld.<Reason>` | `Missing`, `Deleting`, `NotConsented`, `ConsentWithdrawn`, `ConsentUnreadable`, `Disowned` (`credentialuse.Reason`, `acquire.go:25-42`) |
+
+A reason or an outcome that a later release adds is added to these sets, with the
+release, in this table. `ReadDenied` is a reason of the holder's `unheld`
+annotation (PerNamePoll, which `Track` refuses in this release), not of this
+event, and there is no `pending` outcome.
+
+**The counts describe one pass.** Each event carries what that pass's Acquire
+did, so for a resource read its latest event, and never add events up. A hold the
+record kept that the pass dropped, because its target withdrew consent, is not
+in `.held` and not lost to the count: it is in `.unheld.ConsentWithdrawn`
+(`kept.go:165`, `acquire.go:574`), and in `.refs`. The attributes count what
+Acquire returned (`acquireAttributes`, `pkg/reconciler/credentialuse.go`): a pass
+whose chain was refused holds nothing, so it reports no ref but those its consent
+gate dropped.
+
 A deferral is at most one event per pass, because the pass ends on it. The
 `step` set is every `IsConflict` site in `reconciler.go` at `3ab2917`, and
 `status`, added with #80. A source test (§10) fails if one is added without a
