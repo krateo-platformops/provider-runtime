@@ -48,7 +48,7 @@ finalizer (`finalizer.managedresource.krateo.io`), records Kubernetes events
 the `Ready`/`Synced` conditions from `apis/common/v1`, and requeues on the
 poll interval (default 1m, jitter/hook configurable).
 
-**Credential use (the first tag in which it holds anything).** For a connecter that implements
+**Credential use (unreleased: the first tag in which it holds anything).** For a connecter that implements
 `CredentialRefsProvider`, each pass adds one step before `Connect`: it writes the
 holder's record of the objects it reads and holds them with a finalizer, so a
 namespace deletion can't strand the holder. A new object that can't be held

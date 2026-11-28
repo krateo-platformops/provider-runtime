@@ -2252,15 +2252,15 @@ the line.
   each rewrite triggers A1 and a release batch, until the rollout finishes.
   **"Safe per pass" is wrong when the versions name different refs** (found
   2026-11-24). A pass of the version that names fewer rewrites the record without
-  what only the other names, and the object is released then, if its Secret or
-  its namespace is being deleted. It is lost if the Secret or its namespace is
-  deleted before the other version's next pass, which then finds it gone. The
-  model shows three cases, each with v2 naming the extra ref throughout: v1's
+  what only the other names, and the object is released then, being deleted or
+  not. It is lost if the Secret or its namespace is
+  deleted before the other version's next pass, which then finds it gone. Three
+  cases show it, each with v2 naming the extra ref throughout: v1's
   deletion pass; v1's live pass while the Secrets are being deleted; and v1's
   live pass just before the namespace's deletion. It applies to direct
   refs, so to this release. It is a documented limit of this release, not a
   decided design; recording a `RefsFunc` version with the refs was set aside.
-  **The rule the test shows:** finish the rollout, so that no process of a version
+  **The rule:** finish the rollout, so that no process of a version
   that names fewer refs still runs passes, before deleting Secrets or namespaces of
   the kind's holders. The same shape with a chain, a pass following one
   through something older than another pass did, is refused with the chains

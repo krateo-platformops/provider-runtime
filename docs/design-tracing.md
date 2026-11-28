@@ -517,8 +517,7 @@ Event names are fixed, and their attributes are under `provider_runtime.`:
 | `credentialuse.acquire` | each credential-use Acquire of the pass (design-credential-use-finalizer §8 step 5, `credentialuse.go`), once per pass that acquires; settled 2026-11-22 | `provider_runtime.credentialuse.refs` (the refs held plus those not held, chains followed, and a ref that only the record kept, on the pass that drops it as `ConsentWithdrawn`; a Guaranteed ref, which is neither, isn't counted), `.held` (how many it held), `.unheld.<Reason>` (a count per reason not held, only the reasons present: `Missing`, `Deleting`, `NotConsented`, `ConsentWithdrawn`, `ConsentUnreadable`, `Disowned`), and `.outcome` (`ok`, `degraded`, `must_not_connect`, `conflict`). Counts only: never a ref's name or a Secret's data |
 | `credentialuse.release` | reserved: release runs in the credential-use write loops, outside any reconcile span | none yet |
 
-**The `credentialuse.acquire` event is settled** (settled 2026-11-22 with its
-downstream consumer; the first credential-use release). Its name and its four attribute
+**The `credentialuse.acquire` event is settled** (settled 2026-11-22; the first credential-use release). Its name and its four attribute
 keys are `EventCredentialUseAcquire` and `AttrCredentialUseRefs`, `…Held`,
 `…Outcome` and, per reason, `AttrCredentialUseUnheldPrefix` plus the reason
 (`pkg/tracing/names.go:39-56`). Both value sets are closed, and every member

@@ -671,7 +671,7 @@ recheck doesn't find it. What the drain leaves undone is logged with how many.
 
 ### Limits
 
-Each limit that was decided carries its date. The others are of the design.
+Each limit that was decided carries its date. The others are documented limits, not decisions.
 
 - **The Disown kill path.** In PerName mode, a process that is pruning an
   object's line as the switch is set, and is killed between the removal and the
@@ -700,7 +700,7 @@ Each limit that was decided carries its date. The others are of the design.
 - **A rollout that changes which refs `RefsFunc` names.** Two versions that name
   different refs aren't "safe per pass": the version that names fewer rewrites the
   record without what only the other names, and that object is released then,
-  if its Secret or namespace is being deleted. It is lost if the Secret or its
+  being deleted or not. It is lost if the Secret or its
   namespace is deleted before the other version's next pass (design §7.3). The rule: finish
   the rollout, so that no process of the version that names fewer refs still runs
   passes, before deleting Secrets or namespaces of the kind's holders. It is a

@@ -112,7 +112,7 @@ Called by an owner (core-provider, oasgen-provider) from its own reconcile to ru
 
 ## `pkg/credentialuse`
 
-The first tag in which it holds anything; its vocabulary has shipped since v1.13.0. Holds the Secrets, and the objects that lead to them, that a managed resource reads, for as long as losing them would be unrecoverable. Direct refs only in this release (`ErrChainsNotSupported`). Design: [design-credential-use-finalizer](./design-credential-use-finalizer.md); user guide: [usage](./usage.md#credential-use). It depends on client-go and apimachinery only, never controller-runtime.
+Unreleased: the first tag in which it holds anything; its vocabulary has shipped since v1.13.0. Holds the Secrets, and the objects that lead to them, that a managed resource reads, for as long as losing them would be unrecoverable. Direct refs only in this release (`ErrChainsNotSupported`). Design: [design-credential-use-finalizer](./design-credential-use-finalizer.md); user guide: [usage](./usage.md#credential-use). It depends on client-go and apimachinery only, never controller-runtime.
 
 - **Refs.** `Ref` (`GroupKind`, `Namespace`, `Name`, `Next` (must be nil), `Guaranteed`), `SecretRef(namespace, name)`, `ID`, `RefsFunc`, `ErrChainsNotSupported`, `Resolved` and `WithResolved` (find nothing in this release).
 - **The runtime.** `NewShared`, `Shared.Track`, `Shared.Run`, `RunInformers`, `RunWriteLoops`, `Tracker` (`Acquire`, `BeforeEstablish`, `Forget`, `HasSynced`, `IsOwnRecordWrite`), `Options`, `KindOptions`, `SharedOptions` (`Namespaces`, `IndexNamespace`, `IndexMaxLines`), `ProtectedKind`, `WatchMode` (`LabelScoped`, `PerName`; `PerNamePoll` is refused), `Acquired`, `Reason` and `Unheld`.
