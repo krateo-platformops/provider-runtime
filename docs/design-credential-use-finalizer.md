@@ -5988,9 +5988,227 @@ remain, the finalizer is removed within a bounded number of steps.
 Widgets over a small pool of Secrets and Targets, in several namespaces
 with cross-namespace refs. Others delete Secrets, recreate them, and delete
 namespaces. Two holder kinds and two `Shared` instances run, as two
-processes would. The §6 invariant is checked on every observed read. At the
+processes would. The run is recorded, and audited at its end (below). At the
 end, every namespace tears down, and no object is left with a
 `credential-use.` finalizer and no users.
+
+**What the stress test shows.** `TestStress` runs direct refs in four of its
+five sub-tests (Secrets in the holder's namespace, with two and with three
+processes and with every hold outside the caches; and Secrets in another
+namespace whose consent toggles), and chains in the fifth, through the test
+hook that has its trackers follow them (`FollowChains`): production refuses
+chains in the first tag (§9), and the chain code stays under the audits for
+the release that follows them. It used to fail
+only when a deleting holder's read failed, and it counted every such failure.
+That could tell neither of two things: a wrong release of an object that
+nobody was reading then, which the test's own DELETE finished off; nor a
+failure that the API server had caused (H3 below). Now:
+
+- **What it has.** Its own watches have every version of every Widget, Target,
+  Secret and Namespace, from a list at the start to an object made after the
+  last write, so a watch that missed something fails the run. resourceVersions
+  order them all, since envtest has one etcd. It sees every call the processes
+  make through their metadata clients, with its answer: for R2's list, the
+  revision of what it answered. It has the answer to each of its own DELETEs.
+  It knows which pass a call belongs to, and for a release, which goroutine,
+  since a batch runs on one. It has its own reading of records, users and
+  consent.
+- **Every release is judged at the moment it lands**, whether the object is
+  being deleted or not, and whatever becomes of it. R1 is the batch's last read
+  of the object before the patch, and R2's whole list, and the Namespace's read,
+  must come between the two. The patch must apply to exactly what R1 read: the
+  same incarnation, no A2 since. And §5's table
+  must allow it, for the users (§6.1) the watch had at R2's revision, or whose
+  A2 on that incarnation had landed when the release did: §6.4 says the second
+  are among the first, so a list read too early is caught. A user that had
+  announced, and whose A2 hadn't landed, isn't one: §6.4's third case. A
+  deletion of a holder or of the namespace after R2's reads is §6.4's accepted
+  window. The grace is measured from when the test began the DELETE, so one
+  shortened by less than the DELETE, the informer and the queue take isn't
+  seen.
+- **Every finalizer that goes, goes by a release, and every object that goes,
+  by a release of that incarnation or by a DELETE that named it.**
+- **No hold is left without a user** (`STUCK-HOLD`). The audits above judge a
+  release that came, and a hold that nothing releases has none. At the run's end,
+  which waits for the last version of each kind the test's watches carry, no
+  protected object that is still there keeps a credential-use finalizer that no
+  holder of its kind and namespace uses: every object in this run's namespaces,
+  and not only those that the end of the run waits for, or the canaries'. What
+  another test left in the cluster's one API server isn't judged, nor is a holder
+  kind that the run doesn't track. A hold that a late release took by then isn't
+  one. The end of the run looks twice, a quiet second apart, so that an A2 in
+  flight when its holder went has landed, and been released, before the processes
+  stop.
+- **What a pass reports is checked:** a deletion pass holds each ref with an
+  A2 of its own. A live one may skip, by §6.3 and by what its own informers had
+  delivered, which the test's hooks see: the holder's version it works from,
+  last; an A2 of its process that began after the first delivery of a record
+  that names the ref; and nothing since that drops it, delivered before the
+  pass began. That the informers deliver, within 5s of the test's watch, is an
+  audit of its own (`LAG`), which may also say that the machine is starved: it
+  prints the longest that the test itself stood still. No A2 comes before the
+  record names its object. Each reason why a ref isn't held, and each acquire
+  that stops or leaves the holder Degraded, has an answer of the API server's
+  behind it, the last one the pass had: a call that its own context ended has
+  none.
+- **Reads that must be live are:** a GET with a resourceVersion is no R1, and
+  no read of a Namespace or a consent. And none answers less than the watch
+  had delivered before it began. A NotFound of what the watch had delivered is
+  right if the incarnation went, and nothing that began after the answer was
+  made at a revision below its removal's: the watch may deliver the removal, and
+  an A2 before it, after the answer.
+- **Consent** (§11.3): an A2 of another namespace's object follows, in its
+  pass, live reads of the Namespace and of the object, the last of which
+  consent; and a skip, a consent its caches may have had.
+- **One worker a key** (§10.2), **and the labels** that go with the finalizers
+  (§3).
+- **Each A2 writes an epoch its finalizer never had on that object**
+  (`EPOCH-REUSED`), so that R3's test tells the holds apart. One that wrote
+  nothing, answered with a version another write made, is no bound of anything,
+  since its revision is older than it; and its hold counts from its answer on, so
+  that a release that takes it from under its user is judged as one over an A2
+  that landed.
+- **A record write drops no ref the holder still names,** except one in
+  another namespace whose consent that pass read, live, as refused. And a pass
+  that went through every ref leaves exactly the refs of the version it read,
+  less those without consent.
+- **The owner finalizer** (§6.7): it is added by a pass that held each ref of
+  the record, or read it absent after its last A2.
+- **What must happen in every run does.** Canaries make it, beside the
+  goroutines and within the run's 8s. An object with one live user is deleted,
+  and goes after its grace. One in a namespace that was deleted first is kept
+  past it, until its user goes; and so is another namespace's. One whose user
+  begins to be deleted just before R2's list, after the grace, with R0 past, is
+  kept until the user goes; and that a batch did list that user after the grace,
+  by its own process's first sight of the deletion, is a floor. A hold goes when
+  its holder names another object. And a hold of another namespace's object goes
+  with its consent, though its holder still names it. And a run with too few
+  releases, holds, skips, establishments, or consenting reads, fails. Those
+  that go by the number of passes fall with it, so a defect that makes fewer
+  passes lowers them too.
+- **A deletion pass reads what it has just held** (I1). It is a deletion pass
+  if the holder was being deleted when the pass read it. One that began live
+  isn't counted there, and is in every other audit. A failed read is exempt
+  only as H3, on proof: a DELETE of the test's was answered with a Status that
+  names the very incarnation this pass's A2 held; that incarnation carried the
+  finalizer when it went, and was never marked as being deleted; the DELETE
+  began before the hold it went with could be seen; no release of that name
+  that succeeded overlaps that hold, and none has an unknown outcome. Nothing is
+  exempt by the error's text, or by how the holder is when it is read again.
+  A DELETE whose answer is lost names no incarnation, so it exempts nothing,
+  and fails the run by itself.
+- **On a failure it prints** what it found, and the timeline around it, by
+  revision: versions, calls, with what each list had, passes, releases and
+  DELETEs. Each lost A2 that it counts and doesn't fail on (H1, below) is logged
+  the same way, as a `NOTE`, to be read by hand.
+
+Each audit is tested on made-up histories, without an API server, and against
+mutants of the protocol by `hack/revert-check-credential-use-stress.py`, which
+counts the iterations each takes to be found, by the classes it names. Before
+the canaries, at 79c6868, in the plain sub-test of 8s on 4 CPUs, 13 of 16
+mutants were found in the first or second iteration every time (R3 without the
+epoch test, for one, in 3 of 4 iterations). The three others: after the grace,
+deleting users not counted, 3 reds in 9 iterations; the same in R2 alone, 2 in
+21; and **a release that ignores a terminating namespace, §1's own teardown, 0
+in 30.** Two canaries make the three happen in every run. The mutants of today
+are to run in the plain sub-test, in the cross one, and once each
+(`REVERT_REPEATS=1`) with every hold outside the caches; no output of theirs is
+on file yet.
+
+**What a green run of 300 iterations says**, as
+`hack/count-credential-use-stress.py` counts one: a defect that these audits
+can see, at envtest's timings, shows in under about 1% of iterations (95%). It
+says no more. It says nothing about stale holders (the driver reads them live);
+more than one ref per holder; lost responses, 5xx, restarts, failover, clock
+skew, or two API servers; a holder recreated under its name; liveness beyond the
+canaries; chains but through the test hook, PerName, Disown, or cluster-scoped
+kinds; events, or the unheld annotation; or a real cluster's rates of H1 and H3.
+Nor of what a release batch does when its key holds more than a turn covers (64
+objects, §6.2): a stress key holds seven at most, so every turn covers it whole,
+and no audit has seen a turn that leaves some for the next. Nor of a holder kind
+whose CRD is gone (§6.4), or of the drain of the index's checks at a stop (§10.6.3):
+no CRD is deleted and no kind is PerName here, so that drain has nothing to do. Of the target's
+namespaces of cross-namespace holds, only the canary's is deleted.
+
+An iteration is excused only if every error line of it is an audit's of the API
+server's own H1, two findings at most, of a class whose rate is **stated** for
+its sub-test, with the commit it was measured at, which nothing compares with
+the one that ran. **None is stated now, so an iteration with H1 is red.** H1's wait changes the rates: one measured before
+it would hide a defect that loses the wait, which brings the old rate back. They
+are to be measured on top of it, every one read by hand, and again when the wait,
+the audits or the machine change. A stated rate is itself a count, and is
+compared as one: a run is over it if, were the rates the same, so many of the two
+runs' total would fall in it with a probability under 2.5%. Short runs of one
+sub-test are added up first. What that can't see is a defect of H1's shape that
+adds less: were 5 in 207 stated, up to 19 in 300 would pass, and were 0 in 207,
+up to 7; and one that loses the wait is seen only if it raises the rate by more.
+
+Before the wait, at 79c6868, in the plain sub-test on 4 CPUs, unloaded, the
+recreate was seen in 5 of 207 iterations, 2.4% [0.8, 5.6], and the lost A2 in
+none, under 1.5%. The audits of that commit had no class for it, and called all
+five `UNEXPLAINED-REMOVAL`. Each was read by hand: two processes' releases of one
+incarnation answered within 5ms of each other, the test's create between, and
+the recreated Secret gone one or two revisions after it was created. They
+haven't been judged again by today's rule, whose near end is when the create
+began, and whose far end is bounded. So they state nothing.
+
+**What it can't show:**
+
+- **H3, the API server's, not ours.** A plain DELETE reads an object without
+  finalizers and removes it in a second step, over a first A2 that succeeded
+  in between. No hold can stop it, and it is as if the DELETE had come first.
+  A probe of the chained sub-test, most of it under CPU load, saw held objects
+  that had never been marked as being deleted go 58 times in 472 iterations of
+  8s, and 5 of those failed a deletion pass's read. It didn't have the DELETEs'
+  answers, so it took them for H3 by elimination; the stress has them. It
+  counts both, and fails on neither.
+- **H1, the same gap in a release.** The API server tests R3 and removes the
+  object in two steps. An A2 that lands between them succeeds, and goes with
+  the object. It was seen in 25 of 10,625 removals in that probe, with no
+  failed read. The stress counts it, by the version that R3's answer says its
+  tests ran on; a deletion pass's read that fails for it fails the run, under
+  its own name (`H1-LOST-A2`), on proof: the pass's A2 made the last version,
+  every release that took it had tested an older one, and no release of that
+  incarnation has an unknown outcome. The
+  other half of H1, where a second release of one incarnation removes the
+  next, wasn't seen there. The stress has seen it: two processes' releases of a
+  Secret answered, one removed it, the test's recreate landed, and the other's
+  removed the recreated one at the next revision. It fails the run, under its
+  own name (`H1-RECREATE`), only where both releases answered, of two
+  processes, one of them after the create began; no other write of ours on the
+  name overlaps the recreated Secret's life, and none, nor a DELETE, may have
+  landed; and nothing that began after the late release had ended was answered
+  as of before the removal. An A2 whose answer has its finalizer may overlap;
+  and so may a third process's release that, too, was answered as the removal
+  of the incarnation before: it is another candidate for the late one. Where,
+  within 200ms of the late release's end, neither the removal was delivered nor
+  anything answered as of after it, it isn't bounded: it fails the run as
+  `H1-RECREATE-UNBOUNDED`, which nothing excuses. One process's two releases of
+  one incarnation are a defect of ours, whenever they were.
+- **The chained case.** A pass that followed an older version of a Target may
+  drop from the record a Secret that the holder now needs (H2, open). The
+  stress counts such drops and doesn't fail on them: every release after one
+  is right by the records. Chains aren't in the first release.
+- **A wrong release that its own races hide.** A defect whose window is a few
+  milliseconds is found at the rate at which the stress's operations fall in
+  it, so one green run says little of it.
+- **`BeforeEstablish` left out:** a holder here has one ref, so its A2's own
+  404 is confirmed by the read that §6.7 asks for.
+- **A deleting user outside the caches:** that canary doesn't run there, where
+  only a pass of its holder would see the object being deleted.
+- **What the mutants weren't run on.** With three processes, and chained, the
+  same audits run, and what they would miss there isn't measured.
+- **`LAG`'s blind spots:** a run's last 5s; the Namespaces' feed; a handler that
+  returns just after the test's hook; a holder's versions within 5s of its end
+  (how many are judged is counted, with a floor); and, of a protected object that
+  a relist found gone, its versions in the 5s before that.
+  A machine that stands still for 5s fails it, and it can't tell.
+- **A stale NotFound** of an incarnation that did go soon after, in a moment when
+  nothing else was written between.
+- **The index** (§10.6), Disown, a restart and a lost response: other tests',
+  and the model's.
+- **A real cluster's rates.** envtest has one etcd, which doesn't sync its
+  writes, and no latency to it.
 
 **Drain:** cancel the process between A1 and A2, between R1 and R3, and in
 the middle of a release batch. Restart, and assert that it converges with

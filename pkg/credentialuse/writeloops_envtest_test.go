@@ -66,8 +66,16 @@ type controller struct {
 	passes   atomic.Int64
 	// beforeConnect, if set, runs before each Connect's read.
 	beforeConnect atomic.Pointer[func(ctx context.Context, holder types.NamespacedName, ref cu.Ref)]
-	stop          func() // ends the controller, and waits for its pass
-	cancel        func() // ends it, and doesn't wait: from inside a pass
+	// The stress test's recorder, if set, sees each pass begin, and gives it
+	// its context, and end; and each Connect that fails, which then isn't
+	// among failures: the recorder's audits judge it.
+	beginPass  func(ctx context.Context, nn types.NamespacedName) context.Context
+	endPass    func(ctx context.Context, res driver.Result, err error)
+	readFailed func(ctx context.Context, holder types.NamespacedName, ref cu.Ref, start time.Time, err error)
+	// paused are the holders no pass runs of, as of one that is slow.
+	paused sync.Map
+	stop   func() // ends the controller, and waits for its pass
+	cancel func() // ends it, and doesn't wait: from inside a pass
 }
 
 func newController(t *testing.T) *controller {
@@ -88,6 +96,7 @@ func (c *controller) connect(ctx context.Context, holder types.NamespacedName, r
 	if f := c.beforeConnect.Load(); f != nil {
 		(*f)(ctx, holder, ref)
 	}
+	start := time.Now()
 	var err error
 	switch ref.GroupKind {
 	case cutest.TargetGVK.GroupKind():
@@ -99,7 +108,9 @@ func (c *controller) connect(ctx context.Context, holder types.NamespacedName, r
 	default:
 		_, err = env.Kube.CoreV1().Secrets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	}
-	if err != nil {
+	if err != nil && c.readFailed != nil {
+		c.readFailed(ctx, holder, ref, start, err)
+	} else if err != nil {
 		h, herr := env.Dynamic.Resource(c.d.Holder).Namespace(holder.Namespace).Get(ctx, holder.Name, metav1.GetOptions{})
 		if herr == nil && h.GetDeletionTimestamp() != nil {
 			c.mu.Lock()
@@ -134,8 +145,18 @@ func (c *controller) start(d *driver.Driver) {
 			case <-ctx.Done():
 				return
 			case nn := <-c.q:
+				if _, paused := c.paused.Load(nn); paused {
+					continue
+				}
 				c.passes.Add(1)
-				res, err := d.Reconcile(ctx, nn)
+				passCtx := ctx
+				if c.beginPass != nil {
+					passCtx = c.beginPass(ctx, nn)
+				}
+				res, err := d.Reconcile(passCtx, nn)
+				if c.endPass != nil {
+					c.endPass(passCtx, res, err)
+				}
 				c.mu.Lock()
 				retry := 100 * time.Millisecond
 				if err != nil {
