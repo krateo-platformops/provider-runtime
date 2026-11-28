@@ -201,6 +201,66 @@ func TestAuditGapConsent(t *testing.T) {
 	})
 }
 
+// A pass reads a Namespace's consent for each gate it makes, and the object's
+// after it (liveConsentIn): the pair that a ref was judged on is an object's read
+// and the last read of its Namespace that ended before it began, whatever the pass
+// read of that Namespace since. Pass 929 of a cross run had two gates in one
+// Namespace, a recorded ref that was refused and a new ref that was granted, and
+// the second gate's read of the Namespace, which consented, was taken for the
+// first's.
+func TestAuditGapConsentPairs(t *testing.T) {
+	// nsRead is a live read of the Namespace by p, of its latest version.
+	nsRead := func(b *auditRun, p *stPass) {
+		b.call(stCall{proc: 1, g: "5", pass: p.id, op: "get", obj: nsObj(auditC.ns)}, func(c *stCall) { c.from(b.last[nsObj(auditC.ns)]) })
+	}
+	// objRead is the same of auditC.
+	objRead := func(b *auditRun, p *stPass) {
+		b.call(stCall{proc: 1, g: "5", pass: p.id, op: "get", obj: auditC}, func(c *stCall) { c.from(b.last[auditC]) })
+	}
+	grant := func(b *auditRun, consent string) {
+		b.put(nsObj(auditC.ns), "ut", func(v *stVersion) { v.consent = consent })
+	}
+	for _, c := range []struct {
+		name  string
+		build func(b *auditRun, p *stPass)
+		want  []string
+	}{
+		{"a refused ref, and a later gate's read of its Namespace that consents", func(b *auditRun, p *stPass) {
+			nsRead(b, p)
+			objRead(b, p) // refused: neither consents
+			grant(b, "ns")
+			nsRead(b, p) // the next gate's
+			b.a1(p)
+			p.unheld[auditC] = string(cu.ReasonConsentWithdrawn)
+			b.end(p)
+		}, nil},
+		{"a granted ref, and a later gate's read of its Namespace that refuses", func(b *auditRun, p *stPass) {
+			grant(b, "ns")
+			nsRead(b, p)
+			objRead(b, p) // granted by the Namespace
+			grant(b, "")
+			nsRead(b, p)
+			b.a1(p)
+			p.unheld[auditC] = string(cu.ReasonNotConsented)
+			b.end(p)
+		}, []string{"REF-UNACCOUNTED"}},
+		{"the Namespace read after the object's is no pair of it", func(b *auditRun, p *stPass) {
+			objRead(b, p)
+			grant(b, "ns")
+			nsRead(b, p)
+			b.a1(p)
+			p.unheld[auditC] = string(cu.ReasonNotConsented)
+			b.end(p)
+		}, []string{"REF-UNACCOUNTED"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newCrossRun("")
+			c.build(b, b.pass())
+			b.want(t, c.want...)
+		})
+	}
+}
+
 // A pass whose acquire stopped says why, in what the API server answered it.
 func TestAuditGapErrors(t *testing.T) {
 	b := newAuditRun(stressPlain).acquired()
