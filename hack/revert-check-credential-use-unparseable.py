@@ -109,7 +109,7 @@ KILLERS = {
     "one that is replaced queues the refs of both only": QUEUES,
     "any update queues the namespace": QUEUES,
     "the namespace is a batch of its own": {C: "TestARecordsChangeIsOneBatch"},
-    "the namespace's list that fails is lost": {C: "TestTogglesWhileABatchFails|TestTogglesDuringAGrace"},
+    "the namespace's list that fails is lost": {C: "TestAKindThatCantBeListedStopsNoOther|TestTogglesWhileABatchFails|TestTogglesDuringAGrace"},
     "one that is replaced keeps its turns": REPLACED,
     "one that is replaced keeps its conflicts": REPLACED,
     "one that is replaced keeps its write": REPLACED,

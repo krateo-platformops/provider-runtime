@@ -1597,13 +1597,18 @@ func TestATimeIsItsObjects(t *testing.T) {
 // what failed, at once, and no more; and the backoff isn't counted.
 func TestAStoppedBatchLeavesWhatFailed(t *testing.T) {
 	r, k := outside(t, heldObject(secretGVK, "out", "free", "u1", widgetGK, "out"), heldObject(secretGVK, "out", "fails", "u2", widgetGK, "out"))
-	r.failWhile(func(name string) bool { return name == "fails" })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.failWhile(func(name string) bool {
+		if name == "fails" {
+			cancel() // the loops stop under this read
+		}
+		return name == "fails"
+	})
 	r.track(t, widgetGK)
 	r.run(t)
 	r.drain()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	r.s.releaseBatch(ctx, k, []ID{secretID("out", "fails"), secretID("out", "free")})
+	r.s.releaseBatch(ctx, k, []ID{secretID("out", "free"), secretID("out", "fails")})
 	if got := r.queued(widgetGK, "out"); !slices.Equal(got, []ID{secretID("out", "fails")}) {
 		t.Errorf("the next write loops' batch is %v, want what failed", got)
 	}
@@ -1648,15 +1653,17 @@ func TestAnErrorThatNamesNoObjectLosesNone(t *testing.T) {
 	a, b := secretID("out", "a"), secretID("out", "b")
 	for _, stopped := range []bool{false, true} {
 		r, k := outside(t, heldObject(secretGVK, "out", "a", "u1", widgetGK, "out"), heldObject(secretGVK, "out", "b", "u2", widgetGK, "out"))
+		ctx, cancel := context.WithCancel(context.Background())
 		r.failWhile(func(name string) bool { return name == "a" })
-		r.s.hooks.released = func(res *ReleaseResult) { res.Failed = nil }
+		r.s.hooks.released = func(res *ReleaseResult) {
+			res.Failed = nil
+			if stopped {
+				cancel()
+			}
+		}
 		r.track(t, widgetGK)
 		r.run(t)
 		r.drain()
-		ctx, cancel := context.WithCancel(context.Background())
-		if stopped {
-			cancel()
-		}
 		r.s.releaseBatch(ctx, k, []ID{a, b})
 		retry, n := timersOf(r.s.queue, k)
 		queued := r.queued(widgetGK, "out")
@@ -1691,7 +1698,13 @@ func TestWhatFailedWithoutAnErrorIsRetried(t *testing.T) {
 	a, b := secretID("out", "a"), secretID("out", "b")
 	for _, stopped := range []bool{false, true} {
 		r, k := outside(t)
-		r.s.hooks.released = func(res *ReleaseResult) { res.Failed = []ID{a} }
+		ctx, cancel := context.WithCancel(context.Background())
+		r.s.hooks.released = func(res *ReleaseResult) {
+			res.Failed = []ID{a}
+			if stopped {
+				cancel()
+			}
+		}
 		w := &warnings{}
 		o := r.options(widgetGK)
 		o.Logger = w
@@ -1700,10 +1713,6 @@ func TestWhatFailedWithoutAnErrorIsRetried(t *testing.T) {
 		}
 		r.run(t)
 		r.drain()
-		ctx, cancel := context.WithCancel(context.Background())
-		if stopped {
-			cancel()
-		}
 		r.s.releaseBatch(ctx, k, []ID{a, b})
 		retry, n := timersOf(r.s.queue, k)
 		queued := r.queued(widgetGK, "out")
@@ -1751,7 +1760,8 @@ func TestAnErrorThatNamesNoObjectBacksOff(t *testing.T) {
 	}
 }
 
-// A batch that fails at many objects says how many, and why the first few did.
+// A batch that fails at many objects says how many, and why the first few did, in
+// each of its turns.
 func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	ctx := context.Background()
 	r, k := outside(t)
@@ -1768,19 +1778,36 @@ func TestAFailedBatchsLogIsBounded(t *testing.T) {
 	for i := range 500 {
 		ids = append(ids, secretID("out", fmt.Sprintf("a-name-of-some-length-%03d", i)))
 	}
-	r.s.releaseBatch(ctx, k, ids)
+	// One line a turn, of 64 objects at most.
+	r.s.queue.Add(k, ids...)
+	turns := 0
+	for range ids {
+		if _, ok := r.turn(ctx); !ok {
+			break
+		}
+		turns++
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(w.got) != 1 || len(w.got[0]) > 4096 || !strings.Contains(w.got[0], "500") || !strings.Contains(w.got[0], "a-name-of-some-length-000") || strings.Contains(w.got[0], "a-name-of-some-length-400") {
-		t.Errorf("%d warnings, the first of %d bytes; want one, of 500 objects, with the first few errors", len(w.got), len(strings.Join(w.got, "")))
+	if turns != 8 || len(w.got) != 8 {
+		t.Fatalf("%d warnings in %d turns, want one in each of 8", len(w.got), turns)
 	}
-	if !strings.Contains(w.got[0], "and 497 more") {
-		t.Errorf("%q doesn't say how many more there are", w.got[0])
+	for i, line := range w.got {
+		objects, more := 64, 61
+		if i == 7 {
+			objects, more = 52, 49
+		}
+		if len(line) > 4096 || !strings.Contains(line, fmt.Sprintf("objects %d ", objects)) || !strings.Contains(line, fmt.Sprintf("a-name-of-some-length-%03d", 64*i)) || strings.Contains(line, fmt.Sprintf("a-name-of-some-length-%03d", 64*i+40)) {
+			t.Errorf("warning %d of %d bytes: %q; want it of %d objects, with the first few errors", i, len(line), line, objects)
+		}
+		if !strings.Contains(line, fmt.Sprintf("and %d more", more)) {
+			t.Errorf("%q doesn't say how many more there are", line)
+		}
 	}
 	if got := errorSample(errors.New(strings.Repeat("é", 5000))); len(got) > maxLoggedBytes+3 || !strings.HasSuffix(got, "é...") {
 		t.Errorf("a long error is cut to %d bytes, ending %q", len(got), got[max(0, len(got)-8):])
 	}
-	if got := errorSample(errors.Join(errors.New("a"), errors.New("b"), errors.New("c"))); got != "a\nb\nc" {
+	if got := errorSample(joined([]error{errors.New("a"), errors.New("b"), errors.New("c")})); got != "a\nb\nc" {
 		t.Errorf("a short error is %q", got)
 	}
 }

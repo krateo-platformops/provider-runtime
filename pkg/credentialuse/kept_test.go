@@ -1729,21 +1729,32 @@ func TestAKeptRefInTheHoldersNamespaceIsKept(t *testing.T) {
 	}
 }
 
-// secretGets runs the one batch that waits, of the namespace ns, and returns
-// how many GETs of Secrets it makes.
+// secretGets runs the one batch that waits, of the namespace ns, in all its turns,
+// and returns how many GETs of Secrets it makes.
 func (r *fakeRig) secretGets(t *testing.T, tr *Tracker, whole bool) int {
 	t.Helper()
 	if n := r.s.queue.Len(); n != 1 {
 		t.Fatalf("%d batches wait, want one", n)
 	}
-	k, ids, _ := r.s.queue.Get(context.Background())
 	r.md.ClearActions()
-	if whole {
-		r.s.releaseBatch(context.Background(), k, ids)
-	} else if _, err := tr.proto.release(context.Background(), k.Namespace, ids); err != nil {
-		t.Fatal(err)
+	// A batch is read a turn at a time (§6.2): all its turns, until nothing of it
+	// waits, as a worker would, putting back what a turn didn't get to.
+	for turn := 0; r.s.queue.Len() > 0; turn++ {
+		if turn > 1000 {
+			t.Fatal("the batch's turns don't end")
+		}
+		k, ids, _ := r.s.queue.Get(context.Background())
+		if whole {
+			r.s.releaseBatch(context.Background(), k, ids)
+		} else {
+			res, err := tr.proto.release(context.Background(), k.Namespace, ids)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.s.queue.PutBack(k, res.Rest...)
+		}
+		r.s.queue.Done(k)
 	}
-	r.s.queue.Done(k)
 	return r.gotSecrets()
 }
 
@@ -1883,12 +1894,18 @@ func TestARecordsChangeIsOneBatch(t *testing.T) {
 			tr := r.track(t, widgetGK)
 			var batches [][]ID
 			r.s.queue.afterAdd = func(k batchKey) {
-				got, ids, _ := r.s.queue.Get(context.Background())
-				if got != k {
-					t.Errorf("batch %v, want %v", got, k)
+				// A worker takes a turn of what one Add queued at a time
+				// (§6.2): what is left of it, it takes next.
+				var batch []ID
+				for r.s.queue.Len() > 0 {
+					got, ids, _ := r.s.queue.Get(context.Background())
+					if got != k {
+						t.Errorf("batch %v, want %v", got, k)
+					}
+					batch = append(batch, ids...)
+					r.s.queue.Done(got)
 				}
-				batches = append(batches, ids)
-				r.s.queue.Done(got)
+				batches = append(batches, SortedIDs(batch))
 			}
 			h := holderHandler{tr}
 			switch {

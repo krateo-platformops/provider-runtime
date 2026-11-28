@@ -125,6 +125,9 @@ func (s *Shared) listHolders(ctx context.Context, t *Tracker) ([]metav1.PartialO
 	return listResource(ctx, s.c, t.gk, t.gvr, "", "")
 }
 
+// livePageTime is listPageTime, but for tests.
+var livePageTime = listPageTime
+
 // listLive is liveList on clients cl, for DisownPrefix, which has no Shared.
 func listLive(ctx context.Context, cl Clients, gk schema.GroupKind, namespace, selector string) ([]metav1.PartialObjectMetadata, error) {
 	m, err := cl.Mapper.RESTMapping(gk)
@@ -146,7 +149,7 @@ func listResource(ctx context.Context, cl Clients, gk schema.GroupKind, gvr sche
 	var out []metav1.PartialObjectMetadata
 	opts := metav1.ListOptions{LabelSelector: selector, Limit: listPageSize}
 	for {
-		l, err := c.List(ctx, opts)
+		l, err := listPage(ctx, livePageTime, c, opts)
 		if err != nil {
 			return nil, fmt.Errorf("credential-use: listing %s with %q outside the caches: %w", gk, selector, err)
 		}
@@ -294,7 +297,7 @@ func (s *Shared) recheckHeld(ctx context.Context, gk schema.GroupKind, ts []*Tra
 		id := ID{Group: gk.Group, Kind: gk.Kind, Namespace: m.Namespace, Name: m.Name}
 		for _, t := range ts {
 			for n := range holds(t, m) {
-				s.queue.Add(batchKey{t.gk, n}, id)
+				s.queue.AddHeld(batchKey{t.gk, n}, id)
 			}
 		}
 	}

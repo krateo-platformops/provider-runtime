@@ -216,7 +216,7 @@ func (s *Shared) requeueHeld(t *Tracker) {
 			}
 			id := ID{Group: p.gk.Group, Kind: p.gk.Kind, Namespace: m.Namespace, Name: m.Name}
 			for n := range holds(t, m) {
-				s.queue.Add(batchKey{t.gk, n}, id)
+				s.queue.AddHeld(batchKey{t.gk, n}, id)
 			}
 		}
 	}

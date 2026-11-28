@@ -41,7 +41,7 @@ MUTANTS = [
      [("\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\ts.queue.Settle(k, ids...) // dropped, or parked: nothing to remember\n\t\ts.waits.settle(k, ids...)\n\t\treturn\n\t}",
        "\tt := s.trackerOrPark(k, ids)\n\tif t == nil {\n\t\tif all := s.trackerList(); len(all) > 0 {\n\t\t\tt = all[0]\n\t\t} else {\n\t\t\treturn\n\t\t}\n\t}")]),
     ("an empty batch isn't filled", "writeloops.go",
-     [("\tif fill {\n\t\tids = slices.DeleteFunc(", "\tif fill && false {\n\t\tids = slices.DeleteFunc(")]),
+     [("\tif fill {\n\t\theld, err", "\tif fill && false {\n\t\theld, err")]),
     ("RequeueAt isn't honoured", "writeloops.go",
      [("\tfor _, a := range res.Asked {\n", "\tfor _, a := range res.Asked[:0] {\n")]),
     ("a failed batch isn't retried", "writeloops.go",
@@ -49,7 +49,7 @@ MUTANTS = [
     ("the backoff doesn't double", "queue.go",
      [("\t\td := q.backoff(f.n)\n", "\t\td := q.backoff(0)\n")]),
     ("an interrupted batch waits a backoff", "writeloops.go",
-     [("\tif ctx.Err() != nil {\n\t\tif len(ids) > 0 {\n\t\t\ts.queue.Add(k, ids...)\n\t\t}\n\t\treturn\n\t}\n\tretryIn := ", "\tretryIn := ")]),
+     [("\tif ctx.Err() != nil {\n\t\tif len(ids) > 0 {\n\t\t\ts.queue.PutBack(k, ids...)\n\t\t}\n\t\treturn\n\t}\n\tretryIn := ", "\tretryIn := ")]),
     # writeloops.go: §12's events.
     ("no WaitingForCredentialUsers", "writeloops.go",
      [("\t\ts.events.record(s.events.regarding(kp.P), \"Normal\", EventWaitingForUsers, note)\n", "\t\t_ = note\n")]),
@@ -111,9 +111,9 @@ MUTANTS = [
      [("\t\t\t\t\tif in.NamespaceDeleting {\n\t\t\t\t\t\tkept.Why = KeptNamespaceDeleting\n\t\t\t\t\t}\n", "")]),
     # The review of #114, defect 1: a batch of a kind being tracked waits for its Track.
     ("a batch of a kind being tracked is dropped", "shared.go",
-     [("\tif in := s.tracking[k.Holder]; in != nil {\n\t\tin.parked = append(in.parked, parkedBatch{key: k, ids: append([]ID(nil), ids...)})\n\t}\n", "")]),
+     [("\tif in := s.tracking[k.Holder]; in != nil {\n\t\theld, rest := s.queue.split(k, ids)\n\t\tin.parked = append(in.parked, parkedBatch{key: k, held: held, rest: rest})\n\t}\n", "")]),
     ("a parked batch isn't requeued when its Track succeeds", "shared.go",
-     [("\t\tfor _, b := range parked {\n\t\t\ts.queue.Add(b.key, b.ids...)\n\t\t}\n", "\t\t_ = parked\n")]),
+     [("\t\tfor _, b := range parked {\n", "\t\tfor _, b := range parked[:0] {\n")]),
     # §10.5, the user's decision of 2026-11-19: held objects outside the caches.
     ("the write loops' start doesn't recheck outside the caches", "writeloops.go",
      [("\t\ts.recheckUncached(ctx, trackers)\n", "\t\t_ = trackers\n")]),

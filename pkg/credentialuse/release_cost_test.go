@@ -1,0 +1,446 @@
+package credentialuse
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"sync"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+// What one release batch costs (§6.6): whoever can edit a holder's record
+// decides how many objects a batch covers, and so must not decide how long it
+// runs. Counts, not times.
+
+// costViews are caches of a batch: the protected objects given, and every
+// holder given, whatever its record names.
+type costViews struct {
+	protected map[ID]*metav1.PartialObjectMetadata
+	holders   []*metav1.PartialObjectMetadata
+	onNaming  func() // called for each object R0 reads
+}
+
+func (v costViews) Protected(id ID) (*metav1.PartialObjectMetadata, bool) {
+	m, ok := v.protected[id]
+	return m, ok
+}
+
+func (v costViews) HoldersNaming(_ ID, ns string) []*metav1.PartialObjectMetadata {
+	if v.onNaming != nil {
+		v.onNaming()
+	}
+	var out []*metav1.PartialObjectMetadata
+	for _, h := range v.holders {
+		if h.Namespace == ns {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+func (costViews) NamespaceDeleting(string) (bool, bool) { return false, true }
+
+// someIDs are n Secrets of namespace ns, whose names begin with prefix.
+func someIDs(ns, prefix string, n int) []ID {
+	ids := make([]ID, n)
+	for i := range ids {
+		ids[i] = secretID(ns, fmt.Sprintf("%s%03d", prefix, i))
+	}
+	return ids
+}
+
+// addHolder adds holder ns/name to the model, with record as its record's text
+// ("-" for none), and returns it as a cache has it.
+func addHolder(r *rig, name, record string, deleting bool) *metav1.PartialObjectMetadata {
+	m := metav1.ObjectMeta{Finalizers: []string{ownerFinalizer}}
+	if record != "-" {
+		m.Annotations = map[string]string{AnnotationRefs: record}
+	}
+	must(r.m.Create(widgetKey("ns", name), m))
+	if deleting {
+		must(r.m.Delete(widgetKey("ns", name)))
+	}
+	h, err := r.m.Get(widgetKey("ns", name))
+	must(err)
+	return h
+}
+
+// parsesOf counts, by holder, the records p's releases read.
+func parsesOf(p *protocol) map[string]int {
+	parses := map[string]int{}
+	p.readRecord = func(h metav1.Object) Record {
+		parses[h.GetName()]++
+		return ReadRecord(h)
+	}
+	return parses
+}
+
+func addHeld(r *rig, id ID) {
+	must(r.m.Create(keyOf(id), metav1.ObjectMeta{
+		Finalizers:  []string{fNS},
+		Annotations: map[string]string{fNS: "e0"},
+		Labels:      map[string]string{LabelHeld: "true", MarkerLabel(widgetGK): "true"},
+	}))
+}
+
+// A batch reads each holder's record once, however many objects it covers,
+// whether R0 or R2 asks, and whether it can be parsed.
+func TestABatchParsesARecordOnce(t *testing.T) {
+	const n = 50
+	ids := someIDs("ns", "forged-", n)
+	same, err := EncodeRecord(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := func(i int) string {
+		rec, _ := EncodeRecord(append(slices.Clone(ids), secretID("ns", fmt.Sprintf("z%03d", i))))
+		return rec
+	}
+	for what, c := range map[string]struct {
+		records  []string
+		deleting bool
+		held     bool // the objects are there, so R2 is reached
+	}{
+		"one holder":                 {[]string{same}, false, false},
+		"a deleting holder":          {[]string{same}, true, false},
+		"holders that name the same": {[]string{same, same, same}, false, false},
+		"other records":              {[]string{other(0), other(1), other(2)}, false, false},
+		"unparseable":                {[]string{"[", "{"}, false, false},
+		"R0 and R2":                  {[]string{other(0), other(1)}, false, true},
+		"R0 and R2, deleting":        {[]string{other(0), other(1)}, true, true},
+		"R0 and R2, unparseable":     {[]string{"["}, false, true},
+	} {
+		r := newRig(t)
+		v := costViews{}
+		for i, rec := range c.records {
+			v.holders = append(v.holders, addHolder(r, fmt.Sprintf("h%d", i), rec, c.deleting))
+		}
+		if c.held {
+			for _, id := range ids {
+				addHeld(r, id)
+			}
+		}
+		r.views = v
+		parses := parsesOf(r.p)
+		res, err := r.p.release(context.Background(), "ns", ids)
+		if err != nil || len(res.Released) != 0 {
+			t.Errorf("%s: %d released, %v", what, len(res.Released), err)
+		}
+		if c.held && len(res.Decisions) != n {
+			t.Errorf("%s: R2 decided %d, want %d", what, len(res.Decisions), n)
+		}
+		if len(parses) == 0 {
+			t.Errorf("%s: no record was read", what)
+		}
+		for h, got := range parses {
+			if got > 1 {
+				t.Errorf("%s: the record of %s was parsed %d times, want once", what, h, got)
+			}
+		}
+	}
+}
+
+// What one record names is never read as another's, in R0 or in R2: a holder
+// counts for the objects its own record names, none without a record, and all
+// with one that can't be parsed, as an empty one can't.
+func TestABatchKeepsRecordsApart(t *testing.T) {
+	a, b, c := secretID("ns", "a"), secretID("ns", "b"), secretID("ns", "c")
+	names := func(ids ...ID) string {
+		rec, _ := EncodeRecord(ids)
+		return rec
+	}
+	r := newRig(t)
+	v := costViews{protected: map[ID]*metav1.PartialObjectMetadata{}}
+	for _, h := range []struct {
+		name, record string
+		deleting     bool
+	}{
+		{"ab", names(a, b), false},
+		{"b", names(b), false},
+		{"b2", names(b), true},
+		{"none", "-", false},
+		{"nothing", names(), false},
+		{"elsewhere", names(secretID("ns", "d")), false},
+		{"empty", "", false},
+	} {
+		v.holders = append(v.holders, addHolder(r, h.name, h.record, h.deleting))
+	}
+	want := map[ID][2]int{a: {2, 0}, b: {4, 1}, c: {1, 0}}
+	for _, id := range []ID{a, b, c} {
+		addHeld(r, id)
+	}
+	r.views = v
+	// R2's reading: the caches don't have the objects, so R0 settles nothing.
+	res, err := r.p.release(context.Background(), "ns", []ID{a, b, c})
+	if err != nil || len(res.Decisions) != 3 {
+		t.Fatalf("release = %+v, %v", res, err)
+	}
+	for _, d := range res.Decisions {
+		if got := [2]int{d.Input.Users, d.Input.DeletingUsers}; got != want[d.P] {
+			t.Errorf("R2 of %s: %v users and deleting users, want %v", d.P, got, want[d.P])
+		}
+	}
+	// R0's: they are being deleted, in their grace, and cached, so R0 keeps b
+	// for its deleting user, and R1 the others for the grace.
+	for _, id := range []ID{a, b, c} {
+		must(r.m.Delete(keyOf(id)))
+		m := r.get(t, keyOf(id))
+		v.protected[id] = m
+	}
+	res, err = r.p.release(context.Background(), "ns", []ID{a, b, c})
+	if err != nil || len(res.Kept) != 3 {
+		t.Fatalf("release = %+v, %v", res, err)
+	}
+	for _, k := range res.Kept {
+		if got := [2]int{len(k.Users), len(k.DeletingUsers)}; got != want[k.P] {
+			t.Errorf("R0 of %s: %v users and deleting users, want %v", k.P, got, want[k.P])
+		}
+	}
+}
+
+// A batch's records answer as IsUser and IsDeletingUser do, of its own objects;
+// of any other they can't tell, and count every holder as its user, but one that
+// uses nothing whatever its record says.
+func TestABatchsRecordsAgreeWithIsUser(t *testing.T) {
+	ids := []ID{secretID("ns", "a"), secretID("ns", "b"), secretID("other", "a"), {Kind: "ConfigMap", Namespace: "ns", Name: "a"}, secretID("ns", "a")}
+	rec := func(of ...ID) string {
+		text, _ := EncodeRecord(of)
+		return text
+	}
+	var holders []*metav1.PartialObjectMetadata
+	for i, text := range []string{"-", "", "[", "{}", rec(), rec(ids[0]), rec(ids[1]), rec(ids[2], ids[3]), rec(ids...), rec(secretID("ns", "c")), rec(ids[0], secretID("ns", "c"))} {
+		for _, deleted := range []bool{false, true} {
+			for _, owned := range []bool{false, true} {
+				h := holderObject("ns", fmt.Sprintf("h%d-%v-%v", i, deleted, owned))
+				if text != "-" {
+					h.Annotations = map[string]string{AnnotationRefs: text}
+				}
+				if !owned {
+					h.Finalizers = nil
+				}
+				if deleted {
+					deleting(h, t0)
+				}
+				holders = append(holders, h)
+			}
+		}
+	}
+	p := &protocol{ownerFinalizers: ownerFinalizers}
+	records := p.newBatchRecords(ids)
+	for range 2 { // the second time, all from memory
+		for _, h := range holders {
+			for _, id := range ids {
+				if got, want := records.isUser(h, id), IsUser(h, id, ownerFinalizers); got != want {
+					t.Errorf("isUser(%s %q, %s) = %v, want %v", h.Name, h.Annotations[AnnotationRefs], id, got, want)
+				}
+				if got, want := records.isDeletingUser(h, id), IsDeletingUser(h, id, ownerFinalizers); got != want {
+					t.Errorf("isDeletingUser(%s %q, %s) = %v, want %v", h.Name, h.Annotations[AnnotationRefs], id, got, want)
+				}
+			}
+			if got, want := records.isUser(h, secretID("ns", "another")), !notAUser(h, ownerFinalizers); got != want {
+				t.Errorf("isUser(%s) of an object that isn't the batch's = %v, want %v", h.Name, got, want)
+			}
+		}
+	}
+}
+
+// A costLog is what batches on a fakeRig asked the API server for.
+type costLog struct {
+	mu     sync.Mutex
+	gets   []ID // R1's
+	lists  int  // R2's
+	before func(ctx context.Context, c Call) error
+}
+
+// log counts r's calls from now on: call it before Track.
+func (r *fakeRig) log() *costLog {
+	l := &costLog{}
+	r.s.hooks.wrapServer = func(srv server) server {
+		return hookServer{server: srv, before: func(ctx context.Context, c Call) error {
+			l.mu.Lock()
+			switch {
+			case c.Op == "get" && c.GK != namespaceGroupKind:
+				l.gets = append(l.gets, ID{Group: c.GK.Group, Kind: c.GK.Kind, Namespace: c.Namespace, Name: c.Name})
+			case c.Op == "list":
+				l.lists++
+			}
+			before := l.before
+			l.mu.Unlock()
+			if before != nil {
+				return before(ctx, c)
+			}
+			return nil
+		}}
+	}
+	return l
+}
+
+// take returns the GETs since the last take.
+func (l *costLog) take() []ID {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := l.gets
+	l.gets = nil
+	return out
+}
+
+func (l *costLog) setBefore(f func(ctx context.Context, c Call) error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.before = f
+}
+
+// turn takes the next batch, and runs it as a worker does.
+func (r *fakeRig) turn(ctx context.Context) (batchKey, bool) {
+	if r.s.queue.Len() == 0 {
+		return batchKey{}, false
+	}
+	k, ids, ok := r.s.queue.Get(ctx)
+	if !ok {
+		return k, false
+	}
+	r.s.releaseBatch(ctx, k, ids)
+	r.s.queue.Done(k)
+	return k, true
+}
+
+// quiet is a tracker on objs whose informers don't run, so its caches are
+// empty and nothing but the test queues a batch.
+func quiet(t *testing.T, objs ...runtime.Object) (*fakeRig, *Tracker, *costLog) {
+	t.Helper()
+	r := newFakeRigWith(t, SharedOptions{Namespaces: []string{"in"}}, append(objs, namespaceObject("in"), namespaceObject("out"))...)
+	l := r.log()
+	return r, r.track(t, widgetGK), l
+}
+
+// 200 held Secrets that nothing uses any more, among 500 holders that use
+// others: every Secret is read once and released, 64 to a turn, and every turn
+// lists the holders once and parses each of their records once.
+func TestAReleaseOfManyAmongManyHolders(t *testing.T) {
+	const secrets, holders = 200, 500
+	var objs []runtime.Object
+	ids := someIDs("out", "s", secrets)
+	for _, id := range ids {
+		objs = append(objs, heldObject(secretGVK, "out", id.Name, types.UID("u-"+id.Name), widgetGK, "out"))
+	}
+	for i := range holders {
+		objs = append(objs, holderObject("out", fmt.Sprintf("h%03d", i), secretID("out", fmt.Sprintf("used%03d", i))))
+	}
+	r, tr, l := quiet(t, objs...)
+	parses := parsesOf(tr.proto)
+	k := batchKey{widgetGK, "out"}
+	r.s.queue.Add(k, ids...)
+	turns := 0
+	for {
+		clear(parses)
+		if _, ok := r.turn(context.Background()); !ok {
+			break
+		}
+		turns++
+		for h, n := range parses {
+			if n > 1 {
+				t.Errorf("turn %d parsed the record of %s %d times, want once", turns, h, n)
+				break // one line of a turn is enough
+			}
+		}
+		if len(parses) != holders {
+			t.Errorf("turn %d parsed the records of %d holders, want all %d", turns, len(parses), holders)
+		}
+		if turns > secrets {
+			t.Fatal("the turns don't end")
+		}
+	}
+	if turns != 4 || l.lists != 4 {
+		t.Errorf("%d turns, %d lists; want 4 of each, of 64 Secrets at most", turns, l.lists)
+	}
+	if gets := l.take(); len(gets) != secrets || len(SortedIDs(gets)) != secrets {
+		t.Errorf("%d GETs of %d objects, want %d, one of each", len(gets), len(SortedIDs(gets)), secrets)
+	}
+	for _, id := range ids {
+		if r.heldBy(t, widgetGK, "out", id.Name) {
+			t.Fatalf("%s wasn't released", id)
+		}
+	}
+}
+
+// Once the context has ended, a batch asks the API server for nothing, whether
+// it ends before the batch, in R0, or under R1, and what it didn't get to is
+// the rest: neither decided nor failed.
+func TestAnEndedContextReadsNothingMore(t *testing.T) {
+	ids := someIDs("ns", "s", 6)
+	for what, c := range map[string]struct {
+		before bool // it has ended before the batch
+		inR0   bool // it ends as R0 reads the first object
+		reads  int  // it ends as R1 makes this read
+		want   int  // the reads made
+		naming int  // the objects R0 read
+	}{
+		"before the batch": {before: true},
+		"in R0":            {inR0: true, naming: 1},
+		"in R1":            {reads: 3, want: 3, naming: 6},
+	} {
+		r := newRig(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		gets, naming := 0, 0
+		r.views = costViews{onNaming: func() {
+			naming++
+			if c.inR0 {
+				cancel()
+			}
+		}}
+		r.srv.before = func(op, _, _ string) error {
+			if op == "get" {
+				if gets++; gets == c.reads {
+					cancel()
+				}
+			}
+			return nil
+		}
+		if c.before {
+			cancel()
+		}
+		res, err := r.p.release(ctx, "ns", ids)
+		cancel()
+		if gets != c.want || naming != c.naming {
+			t.Errorf("%s: %d reads and %d objects in R0, want %d and %d", what, gets, naming, c.want, c.naming)
+		}
+		if err != nil || len(res.Failed) != 0 || len(res.Bare) != c.want {
+			t.Errorf("%s: %+v, %v; want %d found gone and none failed", what, res, err, c.want)
+		}
+		all := slices.Concat(res.Bare, res.Rest)
+		if len(all) != len(ids) || !slices.Equal(SortedIDs(all), SortedIDs(ids)) {
+			t.Errorf("%s: bare %v, rest %v; want every object in one of them, once", what, res.Bare, res.Rest)
+		}
+	}
+}
+
+// The write loops' stop under a batch: what it hadn't got to is in the next
+// ones' batch, with no failure counted, and nothing of what it had decided.
+func TestAStoppedBatchLeavesItsRest(t *testing.T) {
+	r, _, l := quiet(t)
+	k := batchKey{widgetGK, "out"}
+	ids := someIDs("out", "s", 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := 0
+	l.setBefore(func(_ context.Context, c Call) error {
+		if c.Op == "get" {
+			if n++; n == 10 {
+				cancel()
+			}
+		}
+		return nil
+	})
+	r.s.queue.Add(k, ids...)
+	r.turn(ctx)
+	if got := r.queued(widgetGK, "out"); !slices.Equal(got, ids[10:]) {
+		t.Errorf("%d objects are queued: %v; want the 90 not read", len(got), got)
+	}
+	if f, timers := failuresOf(r.s.queue, k), r.queueTimers(); len(f) != 0 || timers != 0 {
+		t.Errorf("failures %v and %d timers, want none", f, timers)
+	}
+}

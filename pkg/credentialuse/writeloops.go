@@ -314,7 +314,7 @@ func (s *Shared) rescan() {
 			id := ID{Group: p.gk.Group, Kind: p.gk.Kind, Namespace: m.Namespace, Name: m.Name}
 			for _, t := range trackers {
 				for n := range holds(t, m) {
-					s.queue.Add(batchKey{t.gk, n}, id)
+					s.queue.AddHeld(batchKey{t.gk, n}, id)
 				}
 			}
 			if s.needsJanitor(m) {
@@ -336,11 +336,13 @@ func (s *Shared) releaseWorker(ctx context.Context) {
 	}
 }
 
-// releaseBatch runs one batch (§6.2 R0 to R3), and requeues its objects as its
-// result says: those that asked, each at its time, as at a grace's end; those
-// whose release must wait (§6.4), each when its wait ends; those it couldn't
-// decide, and only those, with backoff, or at once, for the next write loops,
-// when ctx ended under it. A namespace's list that fails is retried so too, and
+// releaseBatch runs one batch (§6.2 R0 to R3), a turn of its key, and requeues
+// its objects as its result says: those that asked, each at its time, as at a
+// grace's end; those whose release must wait (§6.4), each when its wait ends;
+// those it couldn't decide, and only those, with backoff, or at once, for the next
+// write loops, when ctx ended under it; and those it didn't get to where they were
+// in the queue, behind the other keys' turns, with nothing of theirs settled,
+// failed or waited for. A namespace's list that fails is retried so too, and
 // doesn't hold up what there is.
 //
 // A batch that fillAll marks, from an Add with no objects, also covers every
@@ -374,18 +376,24 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		}
 	}
 	if fill {
-		ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return id == fillAll })
 		held, err := s.heldIn(ctx, t, k.Namespace)
 		if err != nil {
 			fail(err, fillAll)
 		}
-		ids = SortedIDs(append(ids, held...))
-		ids = slices.Compact(ids)
+		s.queue.Known(k, held...)
+		ids = expand(ids, held)
 	}
 	res, err := t.proto.release(ctx, k.Namespace, ids)
 	if f := s.hooks.released; f != nil {
 		f(&res)
 	}
+	s.queue.Known(k, res.Known...)
+	s.queue.PutBack(k, res.Rest...)
+	rest := map[ID]bool{}
+	for _, id := range res.Rest {
+		rest[id] = true
+	}
+	ids = slices.DeleteFunc(slices.Clone(ids), func(id ID) bool { return rest[id] }) // from here on, the turn's
 	if err == nil && len(res.Failed) > 0 {
 		err = errors.New("credential-use: a batch left objects undecided, and no error says why")
 	}
@@ -424,8 +432,33 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 		s.queue.AddAt(k, when, asked...)
 	}
 	if len(errs) > 0 {
-		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), errors.Join(errs...))
+		s.retryBatch(ctx, t, k, SortedIDs(keysOf(failed)), joined(errs))
 	}
+}
+
+// expand is ids with the namespace's objects, held, where fillAll stands among
+// them, each once, where it first is. None is the whole namespace.
+func expand(ids, held []ID) []ID {
+	if len(ids) == 0 {
+		return held
+	}
+	out, seen := make([]ID, 0, len(ids)+len(held)), map[ID]bool{}
+	add := func(of ...ID) {
+		for _, id := range of {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	for _, id := range ids {
+		if id == fillAll {
+			add(held...)
+		} else {
+			add(id)
+		}
+	}
+	return out
 }
 
 // retryBatch requeues objects ids of batch k after err: at once, for the next
@@ -435,7 +468,7 @@ func (s *Shared) releaseBatch(ctx context.Context, k batchKey, ids []ID) {
 func (s *Shared) retryBatch(ctx context.Context, t *Tracker, k batchKey, ids []ID, err error) {
 	if ctx.Err() != nil {
 		if len(ids) > 0 {
-			s.queue.Add(k, ids...)
+			s.queue.PutBack(k, ids...)
 		}
 		return
 	}
@@ -456,13 +489,53 @@ const (
 	maxLoggedBytes  = 2000
 )
 
-// errorSample is err's first few lines, and how many more it has.
+// batchErrors are the errors of a batch, one for each object that failed at most,
+// joined as errors.Join does; a log line builds the texts of a few of them alone.
+type batchErrors []error
+
+// joined is errs as one error, or nil.
+func joined(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return batchErrors(errs)
+}
+
+func (e batchErrors) Error() string {
+	texts := make([]string, len(e))
+	for i, err := range e {
+		texts[i] = err.Error()
+	}
+	return strings.Join(texts, "\n")
+}
+
+func (e batchErrors) Unwrap() []error { return e }
+
+// leaves gives do each of the errors that err joins, or err.
+func leaves(err error, do func(error)) {
+	if es, ok := err.(batchErrors); ok {
+		for _, e := range es {
+			leaves(e, do)
+		}
+		return
+	}
+	do(err)
+}
+
+// errorSample is err's first few errors' lines, and how many more it has.
 func errorSample(err error) string {
-	lines := strings.SplitN(err.Error(), "\n", maxLoggedErrors+1)
+	var lines []string
+	n := 0
+	leaves(err, func(e error) {
+		if n < maxLoggedErrors {
+			lines = append(lines, strings.Split(e.Error(), "\n")...)
+		}
+		n++
+	})
 	var more string
-	if len(lines) > maxLoggedErrors {
-		more = fmt.Sprintf("\nand %d more", 1+strings.Count(lines[maxLoggedErrors], "\n"))
-		lines = lines[:maxLoggedErrors]
+	if rest := n - min(n, maxLoggedErrors) + len(lines) - min(len(lines), maxLoggedErrors); rest > 0 {
+		more = fmt.Sprintf("\nand %d more", rest)
+		lines = lines[:min(len(lines), maxLoggedErrors)]
 	}
 	text := strings.Join(lines, "\n")
 	if len(text) > maxLoggedBytes {

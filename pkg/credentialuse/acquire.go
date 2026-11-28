@@ -120,6 +120,17 @@ type protocol struct {
 	mustWait func(n string, o Waiting) bool
 	// calls, if set, counts the calls in flight, from detach to their stop.
 	calls *callsInFlight
+	// The release's own (release.go): readRecord, if set, is how it reads a
+	// holder's record, for tests to count; turnTime, if set, replaces the
+	// constant of that name; known, if set, is whether a batch's object is known
+	// to carry the finalizer for holder namespace n, and readLimit how long the
+	// answer to its read may take.
+	readRecord func(metav1.Object) Record
+	known      func(n string, id ID) bool
+	turnTime   time.Duration
+	readLimit  func(n string, id ID) time.Duration
+	// missed are the kinds a release couldn't map; nil remembers none.
+	missed *missedKinds
 	// heldDeleting, if set, is told of every object an A2 held that its
 	// response shows being deleted, with the holder namespace.
 	heldDeleting func(id ID, namespace string)

@@ -13,6 +13,8 @@ package credentialuse
 //     dropped it;
 //   - no batch has an object that wasn't added to its key since the key's
 //     previous batch was taken;
+//   - a batch's objects are in the order they were added, however often they
+//     are added again, and what a worker puts back has the place it had;
 //   - a key is never queued twice: Len never exceeds the keys waiting;
 //   - a timer adds nothing before its time, and nothing after ShutDown;
 //   - a failed object is added once its own backoff has passed, which failing
@@ -40,7 +42,7 @@ import (
 
 // An enumOp is one operation of a scenario.
 type enumOp struct {
-	kind   string // add, after, at, fail, settle, step, get, done, rescan, shutdown
+	kind   string // add, held, after, at, fail, settle, step, get, back, done, rescan, shutdown
 	key    string // A or B
 	id     string
 	worker int
@@ -48,9 +50,9 @@ type enumOp struct {
 
 func (o enumOp) String() string {
 	switch o.kind {
-	case "add", "after", "at", "fail", "settle":
+	case "add", "held", "after", "at", "fail", "settle":
 		return o.kind + "(" + o.key + o.id + ")"
-	case "get", "done":
+	case "get", "back", "done":
 		return fmt.Sprintf("%s%d", o.kind, o.worker)
 	}
 	return o.kind
@@ -66,6 +68,13 @@ type enumState struct {
 
 	held    map[int]batchKey // what each worker holds
 	stopped bool
+	// places are the objects of each key's next batch, and has those of each
+	// worker's, by when each was added. What one step of the clock adds is in no
+	// order.
+	places   map[batchKey]map[ID]int
+	has      map[int]map[ID]int
+	last     int
+	stepping bool
 	// owed are the additions not yet in a batch: per key, the objects added
 	// since its last take, each with whether ShutDown excuses it.
 	owed map[batchKey]map[ID]bool
@@ -113,6 +122,7 @@ func newEnumState(t *testing.T, order string) *enumState {
 	q := newBatchQueue(nil)
 	q.clock = &unlockedClock{FakeClock: clk, t: t, q: q}
 	return &enumState{t: t, order: order, clk: clk, q: q, start: clk.Now(),
+		places: map[batchKey]map[ID]int{}, has: map[int]map[ID]int{},
 		held: map[int]batchKey{}, owed: map[batchKey]map[ID]bool{}, since: map[batchKey]map[ID]bool{}, failing: map[batchKey]map[ID]*enumFailure{}}
 }
 
@@ -131,6 +141,19 @@ func (s *enumState) added(k batchKey, id ID) {
 	}
 	s.owed[k][id] = true
 	s.since[k][id] = true
+	if _, waits := s.places[k][id]; !waits {
+		if !s.stepping {
+			s.last++
+		}
+		s.place(k, id, s.last)
+	}
+}
+
+func (s *enumState) place(k batchKey, id ID, at int) {
+	if s.places[k] == nil {
+		s.places[k] = map[ID]int{}
+	}
+	s.places[k][id] = at
 }
 
 func (s *enumState) apply(o enumOp) {
@@ -138,6 +161,9 @@ func (s *enumState) apply(o enumOp) {
 	switch o.kind {
 	case "add":
 		s.q.Add(enumKey(o.key), enumID(o.id))
+		s.added(enumKey(o.key), enumID(o.id))
+	case "held":
+		s.q.AddHeld(enumKey(o.key), enumID(o.id))
 		s.added(enumKey(o.key), enumID(o.id))
 	case "rescan":
 		// The write loops' Start: every held object's batch, at once.
@@ -217,6 +243,30 @@ func (s *enumState) apply(o enumOp) {
 		}
 		s.since[k] = map[ID]bool{}
 		s.held[o.worker] = k
+		at := s.places[k]
+		for i := 1; i < len(ids); i++ {
+			if at[ids[i-1]] > at[ids[i]] {
+				s.fail("the batch of %v is %v, which were added at %v", k, ids, at)
+			}
+		}
+		s.has[o.worker] = at
+		delete(s.places, k)
+	case "back":
+		// The worker puts back all it took.
+		k, busy := s.held[o.worker]
+		if !busy || s.stopped {
+			return
+		}
+		var ids []ID
+		for id, at := range s.has[o.worker] {
+			ids = append(ids, id)
+			again, waits := s.places[k][id]
+			s.added(k, id)
+			if !waits || at < again {
+				s.place(k, id, at)
+			}
+		}
+		s.q.PutBack(k, SortedIDs(ids)...)
 	case "done":
 		k, busy := s.held[o.worker]
 		if !busy {
@@ -236,6 +286,9 @@ func (s *enumState) apply(o enumOp) {
 // step moves the clock by d, and expects the timers due by then to fire.
 func (s *enumState) step(d time.Duration) {
 	s.clk.Step(d)
+	s.last++
+	s.stepping = true
+	defer func() { s.stepping = false }()
 	now := s.clk.Now()
 	var left []enumTimer
 	for _, tm := range s.timers {
@@ -398,7 +451,7 @@ func ops(spec string) []enumOp {
 		case strings.Contains(f, ":"):
 			kind, rest, _ := strings.Cut(f, ":")
 			out = append(out, enumOp{kind: kind, key: rest[:1], id: rest[1:]})
-		case strings.HasPrefix(f, "get") || strings.HasPrefix(f, "done"):
+		case strings.HasPrefix(f, "get") || strings.HasPrefix(f, "done") || strings.HasPrefix(f, "back"):
 			kind := strings.TrimRight(f, "0123456789")
 			w, err := strconv.Atoi(f[len(kind):])
 			if err != nil {
@@ -433,6 +486,11 @@ func TestBatchQueueEveryOrdering(t *testing.T) {
 		"the rescan":                  "rescan add:A2 after:B1 step get1 get2 done1 done2",
 		"stop":                        "add:A1 after:B2 get1 step shutdown done1 add:A2",
 		"stop with both held":         "add:A1 add:B2 get1 get2 after:A2 shutdown done1 done2",
+		"places":                      "add:A2 add:A1 add:A3 add:A2 get1 done1 get2",
+		"putting back":                "add:A2 add:A1 get1 back1 add:A2 add:A3 done1 get2",
+		"known to be held":            "add:A2 held:A2 add:A1 get1 back1 held:A1 done1 get2",
+		"putting back, and timers":    "add:A2 after:A1 get1 back1 step step done1 get2",
+		"stop with a batch put back":  "add:A2 add:A1 get1 back1 shutdown done1 add:A3",
 	}
 	total := 0
 	for name, spec := range scenarios {

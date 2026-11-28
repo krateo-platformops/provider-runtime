@@ -1036,12 +1036,27 @@ const (
 	carriesRBACDenied
 )
 
+// readStore reads the index live, in the time of a list's page: the write loops'
+// recheck makes it before the parts after it.
+func (ix *index) readStore(ctx context.Context) (indexVersion, error) {
+	return answered(ctx, livePageTime, ix.store.get)
+}
+
+// read is a live GET of id, which must be answered in the time of a list's page: the
+// write loops' recheck makes one for each line, before the parts after it. A prune's,
+// and a deferred one's, are in the prune's own, shorter bound too (§10.6.2).
+func (ix *index) read(ctx context.Context, id ID) (*metav1.PartialObjectMetadata, error) {
+	return answered(ctx, livePageTime, func(ctx context.Context) (*metav1.PartialObjectMetadata, error) {
+		return ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+	})
+}
+
 // carries reads id live, and reports whether it carries a finalizer with the
 // kind's prefix. An RBAC 403, recognised by the authorizer's message as §6.2
 // does (class (d)), is reported once per object (denied); an admission or
 // policy 403 is an ordinary failure, retried.
 func (ix *index) carries(ctx context.Context, id ID) carriage {
-	m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+	m, err := ix.read(ctx, id)
 	switch Classify(err) {
 	case ClassNone:
 		ix.readable(id)
@@ -2116,7 +2131,7 @@ func (t *Tracker) startQuiet() {
 // §10.6.5, M1 of the review of revision 16), run at their start, and, while
 // they run, after a Track and when t's CRD goes.
 func (s *Shared) recheckIndex(ctx context.Context, t *Tracker, done map[ID]bool) error {
-	return t.idx.recheckRest(ctx, done, func(id ID, n string) { s.queue.Add(batchKey{t.gk, n}, id) })
+	return t.idx.recheckRest(ctx, done, func(id ID, n string) { s.queue.AddHeld(batchKey{t.gk, n}, id) })
 }
 
 // recheckRest reads the index live, reads each object it names, and hands
@@ -2128,7 +2143,7 @@ func (s *Shared) recheckIndex(ctx context.Context, t *Tracker, done map[ID]bool)
 // try before this one dealt with, which this one skips, and adds to.
 func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func(id ID, n string)) error {
 	var errs []error
-	cur, err := ix.store.get(ctx)
+	cur, err := ix.readStore(ctx)
 	if Classify(err) == ClassNotFound || err == nil && ix.needsRebuild(cur) {
 		// Gone, or never rebuilt since its creation (§10.6.6). A rebuild
 		// that fails doesn't stop the recheck of the lines there are: its
@@ -2139,7 +2154,7 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 		} else if err != nil {
 			errs = append(errs, err)
 		}
-		cur, err = ix.store.get(ctx)
+		cur, err = ix.readStore(ctx)
 		if gone && Classify(err) == ClassNotFound {
 			// No index, and no holders to rebuild it from: no line to
 			// recheck, and none to write (§6.4, what it doesn't cover).
@@ -2157,7 +2172,7 @@ func (ix *index) recheckRest(ctx context.Context, done map[ID]bool, enqueue func
 		if done[id] {
 			continue
 		}
-		m, err := ix.srv.Get(ctx, id.GroupKind(), id.Namespace, id.Name)
+		m, err := ix.read(ctx, id)
 		switch Classify(err) {
 		case ClassNone:
 			ix.readable(id)

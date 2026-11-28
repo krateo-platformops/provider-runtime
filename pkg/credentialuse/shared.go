@@ -236,6 +236,8 @@ type Shared struct {
 	failures watchFailures
 	// calls are the acquirer calls in flight, which a drain waits for.
 	calls callsInFlight
+	// missed are the kinds that the release batches couldn't map.
+	missed *missedKinds
 
 	// trackWaiting counts Tracks waiting for another Track of their kind,
 	// for tests.
@@ -350,6 +352,7 @@ func newShared(c Clients, o SharedOptions, clk sharedClock) *Shared {
 		// holder kind of the process (§9.4).
 		unheldReads: newSharedReads(clk),
 		releaseWait: randomReleaseWait,
+		missed:      &missedKinds{},
 		trackers:    map[schema.GroupKind]*Tracker{},
 		tracking:    map[schema.GroupKind]*inflight{},
 		runDone:     make(chan struct{}),
@@ -803,8 +806,8 @@ type inflight struct {
 
 // A parkedBatch is a release batch held while its kind's Track runs.
 type parkedBatch struct {
-	key batchKey
-	ids []ID
+	key        batchKey
+	held, rest []ID // by whether they are known to carry the finalizer
 }
 
 // endTracking ends the Track of gk that mine records: the release batches
@@ -831,7 +834,10 @@ func (s *Shared) endTracking(gk schema.GroupKind, mine *inflight) {
 	s.mu.Unlock()
 	if t != nil {
 		for _, b := range parked {
-			s.queue.Add(b.key, b.ids...)
+			s.queue.AddHeld(b.key, b.held...)
+			if len(b.rest) > 0 || len(b.held) == 0 {
+				s.queue.Add(b.key, b.rest...)
+			}
 		}
 		if wctx != nil {
 			go func() {
@@ -853,7 +859,8 @@ func (s *Shared) trackerOrPark(k batchKey, ids []ID) *Tracker {
 		return t
 	}
 	if in := s.tracking[k.Holder]; in != nil {
-		in.parked = append(in.parked, parkedBatch{key: k, ids: append([]ID(nil), ids...)})
+		held, rest := s.queue.split(k, ids)
+		in.parked = append(in.parked, parkedBatch{key: k, held: held, rest: rest})
 	}
 	return nil
 }

@@ -829,8 +829,8 @@ with `NewGenericServerResponse(422, …)` (`pkg/endpoints/handlers/patch.go:423-
 which drops json-patch's text. What remains is the generic message
 "the server rejected our request due to an error in our request", and no
 causes. A `remove` at an index that has moved looks the same. Either means
-**the state changed**: the releaser goes back to R1, at most 5 times per
-batch, and then requeues the batch with backoff. Each retry rebuilds the
+**the state changed**: the releaser goes back to R1, at most 4 times, and
+at its fifth such patch requeues the object with backoff. Each retry rebuilds the
 patch from R1's new read. A 422 with a policy's text
 is (c) there too, and anything else is an error for the batch.
 
@@ -858,26 +858,125 @@ so too, as a whole, deciding what it can list again, and doesn't hold up the
 kinds that could be listed. An object that fails stays in memory, and is read
 again every 5 minutes, for as long as it fails: it isn't dropped when no record
 names it any more, since a hold may still be there. That has no bound, a name
-of a kind that can't be mapped included; bounding what a holder's data can put
-there is the release cost's change. R0's keep is a decision as any other, so it
-ends a pending retry: its user's event runs the batch again, that of one whose
-record can't be parsed included, which queues all that the caches show as held
-for its namespace (§10.2), and so every hold R0 keeps for it. What isn't held
-isn't queued: a PerName object whose index prune failed, live and watched, and
-bare, keeps its line until the write loops' next start, or the next batch that
-names it. One user has no such event yet, and its fix is its
-own: a ghost of a kind whose CRD is gone, which the cache keeps. The protocol's
+of a kind that can't be mapped included, and neither has what waits for its first
+read, while names are added faster than the turns below read them: memory grows
+with the names, on a leader and on a process that waits for election. What each
+costs is bounded (below), not how many there are; that is left to a later release.
+R0's keep is a decision as any other, so it ends a pending retry: its user's
+event runs the batch again, that of one whose record can't be parsed included,
+which queues all that the caches show as held for its namespace (§10.2), and so
+every hold R0 keeps for it. What isn't held isn't queued: a PerName object whose
+index prune failed, live and watched, and bare, keeps its line until the write
+loops' next start, or the next batch that names it. A ghost of a kind whose CRD
+is gone, which the cache keeps, had no such event: the CRD's deletion now runs
+those batches (§10.2), and R0 doesn't take the cache's word then (§6.4). The protocol's
 model decides one batch (`RequeueAt` is all it reads of a schedule), and has
 none for what failed, what asked, or the backoff: those are the release loop's,
 tested on the queue by enumeration and on the loop. A time a batch asks for, a
 grace's end or a repaired epoch's recheck, is for the object that asked, each at
 its own time, not for the rest of the batch, and waits for no backoff. An object
 whose release must wait (R1, §6.4) is neither decided nor failed: it is queued
-again when its wait ends, and its backoff stays as it was. The log line of a
-failed batch has the first few errors, and how many more there are.
+again when its wait ends, and its backoff stays as it was. What is logged of a
+failed batch is one line for each turn (below) that fails at something, with how
+many objects that is, the first few errors, and how many more there are, and a line
+is about 2 KB at most: 500 names that all fail at once are 8 lines, each time they
+are retried, and 450,000, 7,000. A name that isn't answered takes a turn's time, so
+500 of them are up to 500 lines.
+
+**A batch is a turn of its key.** Whoever can edit a holder's record decides how
+many objects wait in its (K, N), and must not decide how long the other keys'
+releases wait. So:
+
+- **A turn reads 64 objects live at most**, at R1, retried or not. R0, below, which
+  reads the caches alone, covers what the turn took from the queue: 2,048 at most,
+  and a namespace's list (§10.5). An object whose release meets a change is read
+  again in its own turn, past the 64 and its time, at most 4 times: put back, it
+  would lose which resourceVersion its patch was built from.
+- **What a turn doesn't get to goes back where it was**, before what was added since
+  (and, past 1,024 that were put back, before what was put back before it), and the key
+  behind the other keys. It is neither decided nor failed: its failures, its pending retry and
+  what is counted for it stay as they were.
+- **The queue is first in, first out**, and adding an object again doesn't move it.
+  A key has two lines: of what is known to carry K's finalizer for N, as what the
+  protected informers, the rescan and the same requeue as a holder kind's CRD goes, the
+  rechecks, a namespace's list, the batch an A2
+  asks for (§10.2) and a grace's end queue, a record's names that the caches show
+  carrying it, and what a read of a batch showed, do; and of the rest. What is known
+  stays so while it waits, is put back, fails, or is held up by a Track. A turn takes 1,024 of
+  each at most, and reads the known ones first, with 16 of the 64 for the others,
+  which may be real holds the caches don't show (§10.5, a per-name watch that
+  hasn't synced, a label a third party stripped). The first of each sort is read, and
+  its Namespace, in every turn. So an object waits for no more turns than objects were in its line
+  before it, whatever is added since; one that is known to carry the finalizer waits
+  for none of the rest; and nothing is moved by a record's being edited.
+- **A turn's reads begin within 10s**: none of R1's begins after that, in its first
+  round, but the first of each sort, and what wasn't begun goes back. **Each call that
+  is sent must be answered in a time of its own**: R1's 10s, doubled at each failure of
+  its object in a row, to 60s, the API server's own for a request; a Namespace's, read
+  within the same 10s for them all, the longest of those of the objects that ask for
+  it, and its failure is one for all of them; a page of R2's list, or of any live list,
+  a minute, not the list. So an object whose reads are slow is released late, not
+  never. The time starts when the call is sent, or a connection for it is asked for
+  (`answered`), and again at each attempt that client-go makes by itself, as after a
+  429: **what the client's own rate limiter makes it wait isn't limited**, before the
+  first or, for 5 minutes, before another, and makes it late, as it always did; a body
+  has those 5 minutes too. (But an attempt that ends in a reset gives no sign: what
+  client-go waits before its next counts in the time of the one that was reset.) A deadline would be refused by that limiter at once,
+  unsent, whenever its wait passes it (`TestPremiseAClientRefusesAReadItCantWaitFor`),
+  so behind a standing backlog of calls nothing would ever be released; and a time that
+  a turn's reads shared would leave R2 none. A transport that gives no sign of what is
+  sent, as one that isn't built on net/http's, has no such time, as before.
+- **How long one turn can hold a worker**, with nothing that is sent answered, beside
+  the limiter's wait: R1 30s for names that are new, 130s if two that failed three times
+  or more are among them; the Namespaces 10s and twice the longest of their objects'
+  times; the list a minute a page, and before it a minute for each protected kind when
+  the batch is a namespace's outside the caches; in PerName mode, the prune: each write of
+  up to 50 lines, with its reads, in 15s and its check in 10s (§10.6.2), so 30s for a
+  turn's 64; and in the write loops' recheck a minute for the index and for each line. An answer that
+  begins and doesn't end, its first byte read, has 5 minutes more; and client-go makes a
+  call that is answered 429 up to 10 times, each with its time and 5 minutes more, so a
+  server that keeps answering so can keep one call for about an hour, where nothing
+  bounded it before. **Behind a backlog B of calls in the limiter**, whose wait counts in R1's
+  10s, a turn makes a read of each sort, a Namespace's, a page and a patch, B each: with
+  B over 10s about 4 to 5 B of a worker for the release of one known object, and B for
+  a made-up name, as each read of every name cost before. Not limited here, and not more than before: the
+  mapper, which takes no context, and whose discovery client-go gives up after 32s (a
+  turn's window lets one or two of them begin); the epoch's repair in R1, and R3's
+  patches, at most 64 and a conflict's, each of which the API server answers or cuts; and a conflict's rounds, up to 4 more, of objects that were read.
+- **Once the write loops' context ends**, nothing more is read, and what wasn't
+  reached goes back for the next ones.
+- **Each holder's record is parsed once a turn**, by R0 and R2 together, one that
+  can't be parsed too, whatever the objects and the holders are. Nothing of it
+  outlives the turn.
+- **A kind that can't be mapped is looked for once a minute**, which costs a
+  discovery: R1 remembers the miss, of 256 kinds at most, the oldest out, and each
+  of its objects fails as it would have. So once its CRD is back, a release waits for
+  the rest of that minute, and then for the retry after: up to a minute and one
+  backoff later than without it. More kinds than 256, and a discovery that fails
+  rather than says that there is no such kind, as of an aggregated API that is down,
+  aren't remembered: each read of one is a discovery (§6.6). Acquire asks no such
+  memory. A kind that is no
+  longer in `Protected` is read as any other: only these batches release what is
+  left of it.
+
+*Why this delays, and loses nothing.* Nothing of the rest is decided; what a turn
+does decide, it decides on R1's and R2's reads, all of its own and in their order,
+and on R3's tests, unchanged. R2's list is live; the text of a record alone says
+what it names, so R0's parse of a text serves R2's. An object leaves the queue only
+decided, failed, which has its retry, asked for at a time, waiting (§6.4), which
+queues it again when its wait ends, or parked behind a Track of its kind, which puts
+it back. By mode:
+LabelScoped, every event and the rescan queue what they did. PerName, the same of
+the per-name watches and the index's recheck; a line is pruned only for an object
+that its turn read, live, without a finalizer of the kind, so one of the rest keeps
+its line (§10.6.3). PerNamePoll (§10.7, not built): an A2's own batch is of the
+known line, and nothing here needs a watch, which only orders. Outside the caches
+(§10.5): the live lists' objects are of the known line; those only a record names
+are of the other one, which no number of the former can starve.
 
 **The releaser** works on one holder kind K and one namespace N at a time,
-for the set of protected objects pending there (R7). For each pending P:
+for the set of protected objects pending there (R7), a turn of them. For each
+pending P:
 
 - **R0. Fast path.** Ask the holder informer's index for users of P in N,
   leaving out the holders §6.1 excludes. Stop if either:
@@ -902,9 +1001,9 @@ for the set of protected objects pending there (R7). For each pending P:
   deleting:
   - *before*, every holder event re-ran the whole batch: up to H × (M GETs,
     one Namespace GET and one list);
-  - *after*, those batches stop at R0, and one full batch (M GETs, one
-    Namespace GET, one list) runs once the cache shows the last deleting
-    user gone.
+  - *after*, those batches stop at R0, and one full batch (M GETs, and one
+    Namespace GET and one list for each 64 of them) runs once the cache shows
+    the last deleting user gone.
 - **R1. Get P live.** Note its resourceVersion, the index *i* of the
   finalizer in `metadata.finalizers`, the epoch *e*, and its
   `deletionTimestamp`.
@@ -1115,7 +1214,7 @@ checks every release against it.
 
 **That leaves an unrecoverable window: the rest of R2's reads, usually below
 100ms and not bounded by that, and about M round trips for M R3 patches in a
-row** (L3). Say
+row** (L3), at most 64 since a turn's are (§6.2). Say
 the namespace's deletion begins between R2's Namespace GET and R3's patch,
 after the grace, while no user is deleting. R3 then lands first, because
 the namespace controller takes far longer than that to discover and delete
@@ -1443,13 +1542,18 @@ the evidence: the GET is.
   each round (`discoveryTimeout`).
 - *The cost* is one GET and one for each of the group's versions, one after
   another, for a round that found the CRD gone, and nothing otherwise. It is per
-  batch, so at least per (K, N), and objects of one key that are at different
-  backoffs are retried in batches of their own, each with its reads: with 30
-  versions and holders in 50 namespaces, one CRD's deletion is about 1,600 GETs
-(each batch's GET of the CRD, of the group, and of its 30 versions),
-  and more for keys whose objects had failed at different times. A client with a rate limit may not finish a
-  large group within the 10s; the batch is then retried. And a discovery that
-  hangs holds one of the two release workers for 10s for each key of K, so that
+  turn (§6.2) and per round of it that reaches R2, so at least per turn of 64
+  objects of a key (K, N), and a key takes ceil(n/64) turns for n objects. While
+  the CRD is absent R0 keeps nothing, so every held object goes through R1 and
+  its turn. Objects of one key that are at different backoffs are retried in
+  batches of their own, each with its reads. With 30 versions (32 GETs a turn:
+  the CRD, the group, and its 30 versions) and holders in 50 namespaces that
+  hold 1,000 objects each, one CRD's deletion is 50 x 16 turns x 32 = about
+  25,600 GETs, and more for keys whose objects had failed at different times.
+  The CRD's going queues every hold the caches show (§10.2), so a flood of them
+  multiplies these figures. A client with a rate limit may not finish a
+  large group within the 10s; the turn is then retried. And a discovery that
+  hangs holds one of the two release workers for 10s for each turn of a key of K, so that
   every kind's releases wait. The answer isn't shared between batches: that
   would be state in a path that decides a release, to save reads on a rare
   event.
@@ -1622,12 +1726,18 @@ only come after the write it reports.
     completes. That gives about 1,000 × (0.05s + 0.5s) ÷ 2 ≈ 4.6 minutes
     with the predicate, and about 9 without.
   - With saturation on, local slots pace it further.
-- **A release:** for a batch of M pending objects in (K, N), M GETs, one
-  Namespace GET per deleting namespace, one paginated metadata-only list of
-  K in N, and up to M patches. A namespace teardown with 50 Secrets lists
-  the holders once, not 50 times. An object being deleted, in a namespace that the
+- **A release:** for M pending objects in (K, N), M GETs, up to M patches, and, for
+  each turn of 64 of them (§6.2), one Namespace GET per deleting namespace and one
+  paginated metadata-only list of K in N, none if R1 left nothing to decide. A
+  namespace teardown with 50 Secrets lists the holders once, not 50 times, and one
+  with 200, 4 times: 200 GETs, 4 lists, 200 patches; in PerName mode 4 prunes too,
+  each of up to 50 lines a write, and a GET of each object whose line it took. 4
+  lists are up to 0.4s of one of the two workers, below. A failed batch logs one line
+  a turn. An object being deleted, in a namespace that the
   cache doesn't show being deleted or in none, is read once more, and its release begins
-  after a wait below 2s, 1s on average (§6.2 R1). Its batch is its own, with its own
+  after a wait below 2s, 1s on average (§6.2 R1). It is queued again then as known to be
+  held, behind what is known of its key before it: behind more than a turn of that, it
+  waits a turn more. Its batch is its own, with its own
   list, unless other waits of the key end while it is busy: they share the next. Behind
   a busy key it waits for that too. If it is then kept, that is reported as much later
   (§12). The list usually waits below 100ms in the API server, not at most (§6.4), with a
@@ -1636,6 +1746,18 @@ only come after the write it reports.
   R1 began up to 0.24s after its wait's end with 40 at once of a quiet kind at a poll of
   1ms, and 0.38s at 200ms; with 200 in one namespace p50 0.59s, p90 1.2s, and 2.0s at
   the longest (3,827 R3s). So 4s in all after the grace is possible.
+- **A name that no object has**, as anyone who can edit a holder's record can put
+  there, costs one GET at each change of the record. **One that can't be read**, of a
+  kind that can't be mapped, that the process may not get, or that no request can ask
+  for, fails: it costs a read, and for an unmapped kind a discovery, at each of its
+  retries too, every 5 minutes for as long as the process lives, whatever the records
+  say by then (§6.2). A kind's objects share one discovery a minute while no more than
+  256 such kinds are asked for; a record of 4,500 names, each of a kind of its own, is
+  4,500 discoveries every 5 minutes, 15 a second, as it was without the memory, and
+  nothing here bounds that: asking only for kinds that are protected is left to a later
+  release. A turn with nothing to decide makes no list. 100 records
+  of 4,500 made-up names each are 7,000 turns of their own key, and one turn of it
+  is what another key waits for.
 
 ### 6.7 The invariant, restated so it is true
 
@@ -3346,7 +3468,8 @@ until a batch covers it again. It is counted per object, not per
 (object, N), which is exact while no hold crosses namespaces (cross-namespace
 refs are unheld until consent, §11.3).
 
-**An empty batch keeps its meaning.** A batch added with no objects asks
+**An empty batch keeps its meaning.** (Its list is made once, and its objects then
+take their turns, §6.2.) A batch added with no objects asks
 for every held object of its namespace, and a later addition of objects
 to the same (K, N), as a holder's event during a teardown makes, must not
 turn it into a batch of those objects alone. The queue keeps a marker for
@@ -3670,8 +3793,8 @@ another writer's change.
      deduplicated per (P, K, N), and another such A2 starts the margin over.
      §7.2 says how long a stop lets an A2, and its check, go on.
 - **The pruner removes after R3, then checks after.**
-  1. After a release batch's R3s, it removes, **up to 50 in one write**
-     (L1), the lines of the objects whose K's marker label R3 removed. Each
+  1. After a release batch's R3s, a turn of at most 64 objects (§6.2), it
+     removes, **up to 50 in one write** (L1), the lines of the objects whose K's marker label R3 removed. Each
      write has the two steps below to itself, before the next.
   2. After that write, it **live-GETs each P whose line any attempt of it
      tried to remove**. If P carries a finalizer with K's prefix again (a
