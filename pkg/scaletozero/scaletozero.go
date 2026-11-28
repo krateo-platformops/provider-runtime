@@ -117,7 +117,7 @@
 // Every failed read is an error, never "nothing held", so the controller stays
 // up: a failed LIST, a missing or unreadable CRD, a missing or unreadable
 // index, a failed GET of an object a line names, and a line whose kind the
-// RESTMapper can't map (decided 2026-11-25).
+// RESTMapper can't map (decided 2026-11-26).
 //
 // Both options need a RESTMapper, for the CRD's name and for the kinds of the
 // index's lines. ReconcileWithOptions takes c.RESTMapper() when no

@@ -646,7 +646,7 @@ For a connecter that implements `reconciler.CredentialRefsProvider`; see
 | `KindOptions.MaxDepth` | 3 | Levels of `Next` followed; none in this release. |
 | `KindOptions.DeletionGrace` | 60s | How long a protected object that is being deleted, in a live namespace, is kept for its users before only those being deleted keep it (§5). |
 | `KindOptions.ProbeInterval` | 15s | The missing-ref prober's tick (§10.3). |
-| `KindOptions.DisownInterval` | derived: `max(60s, ⌈span / (DisownPasses − 1)⌉)` | Disown's pass interval; published on the holder CRD, validated against the provider's reconcile timeout when set. |
+| `KindOptions.DisownInterval` | derived: `max(60s, ⌈span / (DisownPasses − 1)⌉)`, where span = `max(2 × TimeoutBound, TimeoutBound + LandingMargin)`, `TimeoutBound` is the kind's largest reconcile or request timeout and `LandingMargin` is 60s (`shared.go:1237-1238`, `:1296-1310`) | Disown's pass interval; published on the holder CRD, validated against the provider's reconcile timeout when set. |
 | `KindOptions.DisownPasses` | 5 | Consecutive zero passes before Disown settles. |
 | `SharedOptions.IndexNamespace` | none | Where PerName indexes live (installer's `krateo-credential-use`). |
 | `SharedOptions.IndexMaxLines` | 2000 | Cap of each index, in lines. |
@@ -657,6 +657,8 @@ Switches and labels, all under `credential-use.krateo.io/`:
 |---|---|---|
 | `allow-holders-from` | a Secret or a Namespace | The namespaces whose holders may hold it, comma-separated; `*` on a Secret only. |
 | `disown` | a holder CRD | `all`, or a comma-separated list of protected kinds: stop protecting. |
+| `config`, `index` | a holder CRD | Written by the runtime, don't edit: the settings every process of the kind shares (written once; a process that disagrees refuses to start), and the pointer to the kind's index (`names.go:50-68`). |
+| `rebuilt` | an index ConfigMap | Written by the runtime, don't edit: `<uid>/<kinds>`, set when a rebuild from the records completed. |
 | `held-count`, `disown-settled` | a holder CRD | Written by the runtime. Disown has settled when `disown` is set and not empty, `disown-settled` equals it and `held-count` is `"0"`. |
 | `vouched`, `vouched-index` | an index ConfigMap | An operator's vouch for what Disown can't read: `<ns>/<Kind[.group]>/<name>` or `<ns>/<Kind[.group]>/*`, and `<uid>/<kinds>`. |
 | `refs.v1`, `unheld` | a holder | The runtime's record and its list of refs not held. Don't edit. |

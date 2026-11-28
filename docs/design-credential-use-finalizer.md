@@ -1,16 +1,16 @@
 ---
 type: Architecture
 title: provider-runtime — credential-use finalizer
-description: Design, built as the first credential-use tag (direct refs only), for holding the Secrets (and the objects that lead to them) that a managed resource reads, for as long as losing them would be unrecoverable, so a namespace deletion can't wedge on a managed resource whose credentials were deleted first.
+description: Design, built and unreleased (the first credential-use tag holds direct refs only), for holding the Secrets (and the objects that lead to them) that a managed resource reads, for as long as losing them would be unrecoverable, so a namespace deletion can't wedge on a managed resource whose credentials were deleted first.
 resource: github.com/krateo-platformops/provider-runtime
 tags: [design, finalizer, deletion, credentials, reconciler]
-timestamp: 2026-11-09T00:00:00Z
+timestamp: 2026-11-28T00:00:00Z
 ---
 
 # Credential-use finalizer
 
-**Status:** built, revision 18, as the first credential-use tag; direct refs
-only (below). The build followed
+**Status:** built, unreleased, revision 18: the first credential-use tag will
+hold direct refs only (below). The build followed
 [the implementation plan](./plan-credential-use-implementation.md), eleven
 stacked PRs. §19 records what the build found, and the user guide is
 [usage](./usage.md#credential-use). The user chose the approach: a finalizer on each Secret an object uses, the
@@ -2246,17 +2246,18 @@ the line.
 - **What isn't published, and why that is safe.** A rollout can run
   processes with different `Protected` kinds or a different `RefsFunc` for
   a while. Each pass records what it computed, and release reads only records.
-  Nothing is lost while every ref stays named by some version that runs, and
-  `TestTwoRefsFuncVersions` shows no `Connect` failing on a ref it held. But it
+  Nothing is lost while both versions name the same refs. `TestTwoRefsFuncVersions`
+  shows that no `Connect` fails on a ref it held, and it deletes nothing. But it
   **churns**: two versions keep rewriting a holder's record back and forth, and
   each rewrite triggers A1 and a release batch, until the rollout finishes.
   **"Safe per pass" is wrong when the versions name different refs** (found
   2026-11-24). A pass of the version that names fewer rewrites the record without
-  what only the other names, so that object may be released, if its Secret or its
-  namespace is being deleted just then, and a later pass of the other version,
-  deleting, finds it gone. The three subtests of `TestRolloutWithTwoRefsFuncs`
-  show it, failing, at `a2967a3` on the branch
-  `proof/credentialuse-stale-chain`; they aren't on main. It applies to direct
+  what only the other names, and the object is released then, if its Secret or
+  its namespace is being deleted. It is lost if the Secret or its namespace is
+  deleted before the other version's next pass, which then finds it gone. The
+  model shows three cases, each with v2 naming the extra ref throughout: v1's
+  deletion pass; v1's live pass while the Secrets are being deleted; and v1's
+  live pass just before the namespace's deletion. It applies to direct
   refs, so to this release. It is a documented limit of this release, not a
   decided design; recording a `RefsFunc` version with the refs was set aside.
   **The rule the test shows:** finish the rollout, so that no process of a version
@@ -6680,7 +6681,7 @@ user's decisions being named as theirs in those sections:
 | A run of zeros is of passes over a CRD nobody else changed; a CRD that keeps changing is reported, with an event and a metric | §7.4, §12 |
 | A process whose write loops haven't started refuses its passes | §7.2, §7.5 |
 | An operator's vouch of a kind in a namespace, `team-a/Secret/*` (for a namespace 2026-11-24; of its kind, decided 2026-11-25): a bare `team-a/*` is malformed, and a switch widened to another kind finds it unvouched | §7.4, §10.6.6 |
-| A stop drains the live checks the index holds in memory, within 10s, before the write loops end (decided 2026-11-25); a kill stays the accepted case | §7.2, §10.6.3 |
+| A stop drains the live checks the index holds in memory, as the write loops end: 10s from the last busy moment, at most 25s after the loops end (decided 2026-11-25); a kill stays the accepted case | §7.2, §10.6.3 |
 
 ## 18. Open questions for the user
 
@@ -6714,7 +6715,7 @@ is [usage](./usage.md#credential-use); the release notes are in the
 `ErrChainsNotSupported` (§9; decided 2026-11-24). An established holder says so
 on `Synced=True/ReconcileSuccess`, with the message `credential-use: refs
 refused, not held: <the error, cut> (§9)`, records `CredentialUseDegraded` once,
-and is counted by `credentialuse_refused_holders` (decided 2026-11-25; §9, §12;
+and the holder is counted, new holders too, by `credentialuse_refused_holders` (decided 2026-11-25; §9, §12;
 `refusalOf` and `refusedSynced`, `pkg/reconciler/credentialuse.go:804-830`;
 `noteRefused`, `pkg/credentialuse/tracker.go:578-594`). Chain code and its tests
 stay, and nothing in production reaches them.

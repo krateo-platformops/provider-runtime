@@ -267,7 +267,7 @@ func (o options) indexHeld(ctx context.Context, r client.Reader, prefix string) 
 
 // lineHeld reports whether the object an index line names carries a finalizer
 // with prefix. One that is gone, or can't exist, holds nothing. A kind the
-// mapper can't map is an error (decided 2026-11-25).
+// mapper can't map is an error (decided 2026-11-26).
 func lineHeld(ctx context.Context, r client.Reader, mapper meta.RESTMapper, id credentialuse.ID, prefix string) (bool, error) {
 	m, err := mapper.RESTMapping(id.GroupKind())
 	if err != nil {

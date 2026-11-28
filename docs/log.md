@@ -15,21 +15,23 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
 ## 2026-11-28 — unreleased: credential-use, the first tag
 - **What it is.** `pkg/credentialuse` and the reconciler's adapter hold the
   Secrets, and the objects that lead to them, that a managed resource reads in
-  `Connect`, with a finalizer `credential-use.<kind>.<group>/<namespace>`, for as
+  `Connect`, with a finalizer `credential-use.<lowercase kind>.<group>/<namespace>`, for as
   long as losing them would be unrecoverable. A namespace deletion can't wedge on
   a managed resource whose credentials were deleted first. A connecter opts in by
   implementing `reconciler.CredentialRefsProvider`; one that doesn't changes
   nothing. [usage](./usage.md#credential-use) has the guide and
   [the design](./design-credential-use-finalizer.md) the protocol. This entry is
-  the release notes of the first credential-use tag; its version and date are
-  set when the tag is cut.
+  the release notes of the first tag in which it holds anything; the package's
+  vocabulary has shipped since v1.13.0. Its version and date are set when the tag
+  is cut.
 - **Direct refs only** (decided 2026-11-24). A ref with a `Next`, a chain, is
   refused in this release with `credentialuse.ErrChainsNotSupported` (#142): the
   whole list, its direct refs included. A new object doesn't connect. An
   established one keeps working, with `Synced=True/ReconcileSuccess` and the
   message `credential-use: refs refused, not held: <the error, cut> (§9)` for as
   long as it lasts (decided 2026-11-25), one `CredentialUseDegraded` event, and
-  the gauge `credentialuse_refused_holders{holder_kind}`.
+  the gauge `credentialuse_refused_holders{holder_kind}`, which counts the
+  holders, new ones included, whose last pass in this process was refused.
 - **`MetricsRecorder` gains `RefusedHolders(holderKind string, n int)`.** An
   implementation outside this module embeds `credentialuse.NopMetrics`, or
   `*telemetry.Metrics`, not both. A recorder given to `reconciler.WithMetrics`
@@ -48,12 +50,16 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
     `HeldWithOptions`, and their options `WithHeld`, `WithHeldIndex`,
     `WithHeldFilter` and `WithRESTMapper` (#147): a Kind whose controller holds
     credentials, or whose Disown switch hasn't settled, counts as having
-    instances. `Exists` and `Reconcile` keep their signatures. A set switch that
+    instances. `Exists` and `Reconcile` keep their signatures. `WithHeld` and
+    `WithHeldIndex` are independent and add up (decided 2026-11-25): a kind that
+    mixes the modes passes both. A set switch that
     parses to nothing, and an index line whose kind doesn't map, keep the
     controller up until fixed by hand (decided 2026-11-25 and 2026-11-26).
   - The reconciler's `CredentialRefsProvider`, `WithCredentialUse`,
     `WithCredentialUseShared`, `CredentialUseSource` and
-    `IgnoreCredentialUseRecord`, and `reconcilertest.AssertCredentialRefsCover`.
+    `IgnoreCredentialUseRecord`, and `CredentialUseCheckingReader`.
+  - In `reconcilertest`: `AssertCredentialRefsCover`, and `RecordingReader` with
+    `NewRecordingReader` and `Read`, which the connecter under test is built with.
 - **RBAC, by mode** (a ClusterRole with a ClusterRoleBinding, never a namespaced
   Role; [usage](./usage.md#grants) has the table):
   - *LabelScoped* (default): `get`, `list`, `watch`, `patch` on `secrets` and each
@@ -78,11 +84,12 @@ notes live in GitHub Releases; the mechanics are in [release](./release.md).
   A graceful stop drains the index's queued checks, bounded: 10s from the last
   busy moment, at most 25s after the loops end (decided 2026-11-25, #146), so a
   `GracefulShutdownTimeout` under about 25s cuts it short; a kill stays the
-  accepted case (accepted 2026-11-24). After a protected kind's CRD is recreated with another scope,
-  restart the providers that track it (decided 2026-11-24). The limits that stay,
-  each decided: the Disown kill path in PerName, a paused holder, conflicting refs
-  (the first wins, with a log and a metric), the standby cap and the cost of a
-  release batch ([usage](./usage.md#limits-each-decided)).
+  accepted case (accepted 2026-11-24). After a protected kind's CRD is recreated
+  with another scope, restart the providers that track it (decided 2026-11-24).
+  The limits that stay: the Disown kill path in PerName and a paused holder (each
+  decided 2026-11-24), a rollout that changes which refs `RefsFunc` names,
+  conflicting refs (the first wins, with a log and a metric), the standby cap and
+  the cost of a release batch ([usage](./usage.md#limits)).
 - **Observability.** The `credentialuse.acquire` span event and its attribute
   keys are settled; its `outcome` and reason sets are closed, and the counts
   describe one pass ([design-tracing](./design-tracing.md#45-events-on-the-root)).
