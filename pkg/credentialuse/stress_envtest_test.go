@@ -902,7 +902,7 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 			}
 		}
 	}
-	cutest.Eventually(t, 2*time.Minute, func() error {
+	nothingLeft := func() error {
 		for _, ns := range nss {
 			for _, k := range stressKinds {
 				l, err := env.Dynamic.Resource(k.gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
@@ -939,7 +939,14 @@ func stress(t *testing.T, n int, d time.Duration, so cu.SharedOptions, mode stre
 			}
 		}
 		return nil
-	})
+	}
+	cutest.Eventually(t, 2*time.Minute, nothingLeft)
+	// An A2 that was in flight when its holder went may land after the last look
+	// and before the processes stop, and holds what nothing will release: look once
+	// more after a quiet second, which is many times what an A2 takes, and give
+	// that release the time it needs.
+	time.Sleep(time.Second)
+	cutest.Eventually(t, 10*time.Second, nothingLeft)
 }
 
 // maxFindings bounds how many findings of one class are printed whole.

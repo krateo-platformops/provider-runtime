@@ -75,6 +75,7 @@ type stressRecorder struct {
 	stopped  time.Time
 	frozen   time.Duration
 	outside  bool
+	began    uint64          // the highest revision of the lists the recording starts from
 	ended    map[string]bool // by kind and namespace: its watch has delivered the recording's last object
 }
 
@@ -98,6 +99,7 @@ func startRecorder(t *testing.T, mode stressMode) *stressRecorder {
 			t.Fatal(err)
 		}
 		r.mu.Lock()
+		r.began = max(r.began, parseRV(l.GetResourceVersion()))
 		for i := range l.Items {
 			r.versions = append(r.versions, versionOf(kind, &l.Items[i]))
 		}
@@ -223,7 +225,7 @@ func (r *stressRecorder) finish(t *testing.T) *stHistory {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return newStHistory(stRecording{mode: r.mode, grace: testGrace, versions: r.versions, calls: r.calls, passes: r.passes, reads: r.reads, writes: r.writes, events: r.events,
-		gaps: r.gaps, synced: r.synced, stopped: r.stopped, frozen: r.frozen, outside: r.outside})
+		gaps: r.gaps, synced: r.synced, stopped: r.stopped, frozen: r.frozen, outside: r.outside, began: r.began})
 }
 
 // running reports whether a pass of holder o has begun and hasn't ended. One

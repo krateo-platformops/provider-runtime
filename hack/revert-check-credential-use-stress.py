@@ -49,8 +49,8 @@ sys.stdout.reconfigure(line_buffering=True)
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
 AQ, RE, DE, PA, VE = C + "acquire.go", C + "release.go", C + "decide.go", C + "patch.go", C + "verified.go"
-CO, IN, SE, QU, BR = C + "consent.go", C + "informers.go", C + "server.go", C + "queue.go", C + "batchrecords.go"
-FILES = [AQ, RE, DE, PA, VE, CO, IN, SE, QU, BR]
+CO, IN, SE, QU, BR, KP = C + "consent.go", C + "informers.go", C + "server.go", C + "queue.go", C + "batchrecords.go", C + "kept.go"
+FILES = [AQ, RE, DE, PA, VE, CO, IN, SE, QU, BR, KP]
 
 NO_EPOCH_TEST = (PA, "\t\t{Op: \"test\", Path: annotation, Value: epoch},\n", "")
 NO_UID_TEST = (PA, "\t\t{Op: \"test\", Path: \"/metadata/uid\", Value: string(uid)},\n", "")
@@ -65,7 +65,6 @@ KEPT_LISTS = [(RE, "\t\"fmt\"\n\t\"slices\"\n\t\"time\"\n", "\t\"fmt\"\n\t\"slic
 # The start of every live read of a consent: the gate's, and a kept ref's (#138).
 LIVE_READ = "\tns, read := namespaces[id.Namespace]\n"
 LIVE_YES = "\tif consents(o.Annotations[AnnotationAllowHoldersFrom], ns.consent, obj.GetNamespace()) {\n\t\treturn gateHoldLive"
-CACHED_YES = "\tif cachedOK && p.cachedYes(obj, id) {\n\t\treturn gateHoldCached\n\t}\n"
 GRACE_END = "\treturn firstSeen.Add(ahead + grace)\n"
 SKIP = "\t\t\t\tif cached, ok := p.views.Protected(id); ok && p.ver.canSkip(obj.GetUID(), obj.GetResourceVersion(), id, cached.GetUID(), namespace) {"
 WROTE = "\t\tp.ver.wrote(%s, namespace, issued)\n\t\tp.wroteDeleting(id, namespace, out)\n\t\treturn ClassNone, out.UID, nil\n\t}\n\tvar last error\n"
@@ -102,7 +101,7 @@ MUTANTS = [
     # A release that skips the grace.
     ("a release skips the grace", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead)\n")], [EARLY]),
     ("the grace is half as long", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace/2)\n")], [EARLY]),
-    ("a grace that never ends", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")], ["CANARY-NOT-RELEASED", "TOO-LITTLE", STUCK]),
+    ("a grace that never ends", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")], ["CANARY-NOT-RELEASED", "TOO-LITTLE"]),
     ("a release ignores a terminating namespace",
      [(RE, "\t\t\t\t\tnsDeleting[ns] = m.DeletionTimestamp != nil\n", "\t\t\t\t\tnsDeleting[ns] = m == nil\n")], [OVER, KEPT]),
     # R2's and the gate's reads.
@@ -164,9 +163,15 @@ MUTANTS = [
     ("the consent gate says no, and reads nothing", [(CO, LIVE_READ, "\tif p != nil {\n\t\treturn gateNotHeld\n\t}\n" + LIVE_READ)], [UNACCOUNTED, DROP], ("cross",)),
     ("the consent gate says no, whatever it read", [(CO, LIVE_YES, LIVE_YES.replace("if consents", "if false && consents"))], [UNACCOUNTED, DROP], ("cross",)),
     ("the consent gate says yes, whatever it read", [(CO, LIVE_YES, LIVE_YES.replace("if consents", "if true || consents"))], [NO_CONSENT], ("cross",)),
+    # Since #138 a recorded ref is read by gateRecorded first, and gate's cached
+    # no is reached only if it didn't (a cache that said yes then and no now): the
+    # window of an earlier version of this mutant, found 1 in 52 iterations. The
+    # mutant is where the cached no is confirmed now: the recorded ref's.
     ("a cached no isn't confirmed",
-     [(CO, CACHED_YES, CACHED_YES + "\tif _, ok := p.views.Protected(id); cachedOK && ok && p.namespaceViews != nil {\n"
-                                    "\t\tif _, known := p.namespaceViews.NamespaceConsent(id.Namespace); known {\n\t\t\treturn gateNotHeld\n\t\t}\n\t}\n")],
+     [(KP, "\t\tfound := p.liveConsentIn(reads, obj, id, namespaces)\n",
+       "\t\tfound := gateHoldLive\n\t\tif _, ok := p.views.Protected(id); ok && p.namespaceViews != nil {\n"
+       "\t\t\tif _, known := p.namespaceViews.NamespaceConsent(id.Namespace); known {\n\t\t\t\tfound = gateNotHeld\n\t\t\t}\n\t\t}\n"
+       "\t\tif found != gateNotHeld {\n\t\t\tfound = p.liveConsentIn(reads, obj, id, namespaces)\n\t\t}\n")],
      [UNACCOUNTED, DROP], ("cross",)),
     # What a pass says, and what never happens.
     ("every third acquire fails",

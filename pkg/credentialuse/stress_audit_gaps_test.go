@@ -274,32 +274,68 @@ func TestAuditGapConsentPairs(t *testing.T) {
 // A hold that is left at the end of the run, with no holder that uses it, is
 // stuck: the audits that judge a release see none of it, since none came. One
 // that a late release took by then is no such, nor is one with a user.
+//
+// A user is a holder of the finalizer's kind and namespace, that is there, names
+// the object, and, if it is being deleted, has its owner finalizer still (§6.1).
+// And only what the run could have left is judged: of a holder namespace that
+// the run made, and a holder kind that its processes track.
 func TestAuditGapStuckHold(t *testing.T) {
+	plain := func() *auditRun { return newAuditRun(stressPlain) }
+	held := func(b *auditRun) *auditRun {
+		b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+		return b
+	}
+	// holder changes auditH, after a pass that holds s for it.
+	holder := func(f func(v *stVersion)) func() *auditRun {
+		return func() *auditRun {
+			b := plain().acquired()
+			b.put(auditH, "uh", f)
+			return b
+		}
+	}
 	for _, c := range []struct {
 		name  string
-		build func(b *auditRun)
+		build func() *auditRun
 		want  []string
 	}{
-		{"a hold that no holder names", func(b *auditRun) {
-			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
-		}, []string{"STUCK-HOLD"}},
-		{"a hold whose holder is gone", func(b *auditRun) {
-			b.acquired()
+		{"a hold that no holder names", func() *auditRun { return held(plain()) }, []string{"STUCK-HOLD"}},
+		{"a hold whose holder is gone", func() *auditRun {
+			b := plain().acquired()
 			b.remove(auditH)
+			return b
 		}, []string{"STUCK-HOLD"}},
-		{"a hold that a release took, late", func(b *auditRun) {
-			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+		{"a hold that a release took, late", func() *auditRun {
+			b := held(plain())
 			b.wait(5 * time.Second)
 			b.batch()
 			b.r3()
+			return b
 		}, nil},
-		{"a hold with a user", func(b *auditRun) { b.acquired() }, nil},
+		{"a hold with a user", func() *auditRun { return plain().acquired() }, nil},
+		{"a holder that names another object now, and stays", holder(func(v *stVersion) { v.spec, v.rec = "s2", nil }), []string{"STUCK-HOLD"}},
+		{"a holder that is being deleted, and has its owner finalizer", holder(func(v *stVersion) { v.deleting = true }), nil},
+		{"a holder that is being deleted, and lacks its owner finalizer", holder(func(v *stVersion) { v.deleting, v.fins = true, nil }), []string{"STUCK-HOLD"}},
+		{"a holder of another namespace is no user of its finalizer", func() *auditRun {
+			b := newCrossRun("ns")
+			b.put(auditC, "uc", func(v *stVersion) { b.hold(v, "e0") })
+			b.put(nsObj("other"), "uo", nil)
+			b.put(stObj{"Widget", "other", "h2"}, "u2", func(v *stVersion) {
+				v.spec, v.rec, v.fins = "target/c", []stObj{auditC}, []string{ownerFinalizer}
+			})
+			return b
+		}, []string{"STUCK-HOLD"}},
+		{"a hold of a namespace that the run didn't make", func() *auditRun {
+			b := held(plain())
+			b.began = b.rv + 1000
+			return b
+		}, nil},
+		{"a hold for a holder kind that the run doesn't track", func() *auditRun {
+			b := newAuditRun(stressChained)
+			b.put(auditS, "u1", func(v *stVersion) { v.fins = append(v.fins, "credential-use.target.credentialuse.test.krateo.io/ns") })
+			return b
+		}, nil},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			b := newAuditRun(stressPlain)
-			c.build(b)
-			b.want(t, c.want...)
-		})
+		t.Run(c.name, func(t *testing.T) { c.build().want(t, c.want...) })
 	}
 }
 
