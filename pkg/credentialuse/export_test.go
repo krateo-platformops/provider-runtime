@@ -2,6 +2,7 @@ package credentialuse
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -81,6 +82,23 @@ func (s *Shared) QueuedBatch(gk schema.GroupKind, ns string) (bool, []ID) {
 	defer q.mu.Unlock()
 	k := batchKey{gk, ns}
 	return q.queued[k], SortedIDs(keysOf(q.pending[k]))
+}
+
+// Flood adds n names that no record has to the batch of holder kind gk in
+// namespace ns.
+func (s *Shared) Flood(gk schema.GroupKind, ns string, n int) {
+	ids := make([]ID, n)
+	for i := range ids {
+		ids[i] = SecretRef(ns, fmt.Sprintf("flood-%d", i)).ID()
+	}
+	s.queue.Add(batchKey{gk, ns}, ids...)
+}
+
+// Collapsed is how many namespaces' names of holder kind gk the queue dropped, and
+// the write loops haven't made up for.
+func (s *Shared) Collapsed(gk schema.GroupKind) int {
+	keys, _ := s.queue.collapsedOf(gk)
+	return len(keys)
 }
 
 // DrainQueue takes every batch waiting in the queue, as a release loop with

@@ -858,10 +858,11 @@ so too, as a whole, deciding what it can list again, and doesn't hold up the
 kinds that could be listed. An object that fails stays in memory, and is read
 again every 5 minutes, for as long as it fails: it isn't dropped when no record
 names it any more, since a hold may still be there. That has no bound, a name
-of a kind that can't be mapped included, and neither has what waits for its first
-read, while names are added faster than the turns below read them: memory grows
-with the names, on a leader and on a process that waits for election. What each
-costs is bounded (below), not how many there are; that is left to a later release.
+of a kind that can't be mapped included, and neither has, while the write loops run,
+what waits for its first read, when names are added faster than the turns below read
+them. What each costs is bounded (below), not how many there are; that is left to a
+later release. While they don't run, it is bounded ("Without the write loops",
+below).
 R0's keep is a decision as any other, so it ends a pending retry: its user's
 event runs the batch again, that of one whose record can't be parsed included,
 which queues all that the caches show as held for its namespace (§10.2), and so
@@ -958,6 +959,71 @@ releases wait. So:
   memory. A kind that is no
   longer in `Protected` is read as any other: only these batches release what is
   left of it.
+
+**Without the write loops**, as in a process that waits for election, nothing drains
+the queue, and the informers fill it, with every name that any record has had, and
+every object that was held, since the process started. So until the loops run, **what
+waits is bounded**: 65,536 names, more than 10,000 holders' of a few refs each; 32 MiB
+of them, a name costing its text and 256 bytes, since one may be as long as a record
+lets it, which is about what it takes; and 16,384 keys of all holder kinds, of some
+0.6 KB each beside their names. Past the names or the
+bytes, the key whose names take the most is **collapsed**: all that waits of it is
+dropped, what is known to be held too, its namespace's list waits instead (§10.5), and
+what it is added is dropped until the loops have made up for it. Past the keys, the
+holder kind with the most of them is, as a whole. So a flood costs its own (K, N)
+first, or its kind, but one with more honest names than it goes before it. When the
+loops end, as when their leadership does, what waited for a retry or a time waits in
+the queue, under the same bound, and its counts are forgotten. Not bounded by it: the
+graces' timers, one for each deletion of a held object and each finalizer it has, for
+the minute each lasts; and the release waits' timers (§6.4), below 2s, one for each
+object that waits. When either fires, what it adds is under the bound.
+
+At their start, and when a Track ends while they run, the loops make up for what
+collapsed (decided by the user, 2026-11-24), after the rescan, §10.5's lists and the
+index's recheck, which run whatever was dropped:
+
+- the names that the records of the cached holders have now are queued again, of the
+  collapsed namespaces, or of all of a collapsed kind's. They may be the flood's, if
+  its records still have them: that many GETs, 64 to a turn;
+- **every object of each LabelScoped protected kind is listed once**, in every
+  namespace, with no selector, metadata only, 500 to a page, a page at a time in memory
+  and a minute for each; what carries K's finalizer for one of those N, or any N of a
+  collapsed kind, is queued, its labels stripped or not, the caches or their lists
+  showing it or not. At 1 to 2 KB an object, 10,000 Secrets are 20 pages and 10 to 20 MB
+  on the wire. It is made once for an overflow, however much that collapsed, and again
+  by each Track that ends while the loops run, of a kind that did: of the kinds it
+  protects, for what it has collapsed. One that fails is retried with the release loop's
+  backoff, kind by kind, and write loops that end before all succeeded leave it to the
+  next, whole: a kind that can never be listed keeps it owed, so each election lists the
+  others again.
+
+*What finds what, after an overflow:*
+
+| A hold that nothing uses | Found by |
+|---|---|
+| in the caches | the rescan |
+| outside the caches, with its label, in any namespace | §10.5's lists |
+| LabelScoped, its labels stripped, in any namespace | the list above |
+| PerName, its labels stripped or not | the index's recheck: a GET for each line. Such a kind isn't listed, which its RBAC would refuse (§13) |
+| PerName, with no line in the index: gone (§10.6.6's residual), or never written, as of a hold made when the kind was LabelScoped | **nothing**, until something names it again. A restart doesn't find it either. While its labels are there, an operator who may list the kind finds it by its marker label; or `DisownPrefix` with its name (§10.6.6) |
+| PerNamePoll (not built) | its index, the same way |
+| of a kind that a record names and `Protected` no longer lists | the record, while a cached holder has it |
+| of such a kind, that no record names any more | **nothing**, until something names it again |
+
+*Who overflows at each start.* The bound holds until the loops run, which is after the
+informers' first sync, with leader election or without; and the informers' first events
+queue what is held and what the records name. So a process with **more than 65,536 held
+objects and recorded names**, a Secret that two holder kinds name counting for each, or
+more than 16,384 namespaces of holders, each counted for each of its holder kinds, makes
+that one paged list at **each** start, before its leadership or not. Past the keys it is
+the kind with the most that collapses, whichever made them too many. It costs no more than that: a page is
+dropped once it is read, and the holds it finds are the rescan's.
+
+Who else can make it happen is whoever can edit a holder's record, or a few of them: 15
+records of 4,500 names, or 140 names of 250,000 characters. The list follows an
+election, or a Track, not the edit, so they can't make it more often than that. An
+authorizer that lets a kind be listed only with the label selector (RBAC can't) refuses
+it: it is retried and logged, and what it would have found stays.
 
 *Why this delays, and loses nothing.* Nothing of the rest is decided; what a turn
 does decide, it decides on R1's and R2's reads, all of its own and in their order,
@@ -2629,11 +2695,13 @@ refs are needed before Connect, when there is no client yet.
     janitor. They need leader election.
 
   **No release batch is lost while the write loops wait for election** (M1
-  of the review of revision 16). The informers start before election, under
+  of the review of revision 16), but for what a flood of names overflows (§6.2,
+  "Without the write loops"). The informers start before election, under
   warmup and on standby replicas, so they see holder deletions and
   `deletionTimestamp`s before any write loop runs. Two things keep them:
   - **the (K, N) batch queue is created by `NewShared`**, before any
-    informer starts. It buffers and deduplicates from the first event, and
+    informer starts. It buffers and deduplicates from the first event, within
+    a bound (§6.2), and
     the grace's `AddAfter` timers go into it too. The release loop drains it
     once elected;
   - **the write loop's `Start` rescans**: it enqueues the batch of every
@@ -5288,6 +5356,12 @@ labelled object whose finalizers are gone doesn't count, and the janitor in
 §10.1 removes its label. The cluster-wide, live count for Disown is
 separate, and is written on the CRD (§7.4).
 
+**Names dropped without the write loops** (§6.2) are said at the loops' start, and at the
+end of a Track of their kind: one warning for each holder kind, with how many
+namespaces' were dropped, whether every namespace's were, and what is kept, before the
+list that makes up for them, and one for each try of it that fails. Nothing says it
+while the process waits.
+
 **The metrics**, all labelled `holder_kind`:
 `credentialuse_held_objects` and `credentialuse_waiting_objects` (gauges),
 `credentialuse_index_fill_ratio` (gauge, PerName and PerNamePoll),
@@ -5357,7 +5431,7 @@ remove the finalizers it holds there. That is a new wedge.
 | Resource | Verbs | Why |
 |---|---|---|
 | Secrets, and each other `Protected` kind | `get`, `patch` | A2, R1, R3, the live fallbacks and the prober |
-| the same | `list`, `watch` | the label-scoped informer |
+| the same | `list`, `watch` | the label-scoped informer; one list of every object's metadata, with no selector, after names were dropped without the write loops (§6.2) |
 | namespaces | `get`, `list`, `watch` | §5's live `deletionTimestamp` check; the metadata-only informer that sees consent on Namespaces (§11.3) |
 | the holder kind | `get`, `list`, `watch`, `patch`, `update` | the holder informer, R2's consistent list, A1 (patch), and `Forget` in the finalizer-removal Update and on its own (update) (L8) |
 | customresourcedefinitions, by `resourceNames` (the holder CRDs) | `get`, `list`, `watch`, `patch` | the Disown switch, read through a field-selected watch; R2's GET of a CRD that is gone (§6.4); the one-time settings and index pointer, the count fields, written only on change, and the removal of a stale `disown-settled` before a hold, without which that hold fails (§6.4, §7.3, §7.4, §10.6) |

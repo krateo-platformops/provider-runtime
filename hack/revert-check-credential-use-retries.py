@@ -212,7 +212,10 @@ KILLERS = {
     "a retry adds what was settled": ONE,
     "ShutDown keeps the failures": ONE,
     "a key whose objects are all settled is remembered": {C: "TestADroppedBatchForgetsItsFailures"},
-    "a timer taken is added": {C: "TestFailBetweenItsTwoSteps"},
+    # Where an addition of nothing queues nothing, a retry's timer that fires after
+    # it was settled adds nothing anyway: what is left of the rule is the times that
+    # the write loops' end moves into the queue.
+    "a timer taken is added": {C: "TestFailBetweenItsTwoSteps|TestATimerTheLoopsEndTookAddsNothing"},
     "a dropped batch's failures are remembered": {C: "TestADroppedBatchForgetsItsFailures"},
     "R1's failed read isn't reported": SAYS,
     "a rejected release isn't reported": SAYS,
