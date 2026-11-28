@@ -5960,7 +5960,10 @@ end, every namespace tears down, and no object is left with a
 **What the stress test shows.** `TestStress` runs direct refs in four of its
 five sub-tests (Secrets in the holder's namespace, with two and with three
 processes and with every hold outside the caches; and Secrets in another
-namespace whose consent toggles), and chains in the fifth. It used to fail
+namespace whose consent toggles), and chains in the fifth, through the test
+hook that has its trackers follow them (`FollowChains`): production refuses
+chains in the first tag (§9), and the chain code stays under the audits for
+the release that follows them. It used to fail
 only when a deleting holder's read failed, and it counted every such failure.
 That could tell neither of two things: a wrong release of an object that
 nobody was reading then, which the test's own DELETE finished off; nor a
@@ -6072,8 +6075,13 @@ can see, at envtest's timings, shows in under about 1% of iterations (95%). It
 says no more. It says nothing about stale holders (the driver reads them live);
 more than one ref per holder; lost responses, 5xx, restarts, failover, clock
 skew, or two API servers; a holder recreated under its name; liveness beyond the
-canaries; chains, PerName, Disown, or cluster-scoped kinds; events, or the
-unheld annotation; or a real cluster's rates of H1 and H3. Of the target's
+canaries; chains but through the test hook, PerName, Disown, or cluster-scoped
+kinds; events, or the unheld annotation; or a real cluster's rates of H1 and H3.
+Nor of what a release batch does when its key holds more than a turn covers (64
+objects, §6.2): a stress key holds seven at most, so every turn covers it whole,
+and no audit has seen a turn that leaves some for the next. Nor of a holder kind
+whose CRD is gone (§6.4), or of the drain of the index's checks at a stop (§10.6.3):
+no CRD is deleted and no kind is PerName here, so that drain has nothing to do. Of the target's
 namespaces of cross-namespace holds, only the canary's is deleted.
 
 An iteration is excused only if every error line of it is an audit's of the API

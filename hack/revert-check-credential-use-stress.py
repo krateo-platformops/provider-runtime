@@ -49,8 +49,8 @@ sys.stdout.reconfigure(line_buffering=True)
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 C = "pkg/credentialuse/"
 AQ, RE, DE, PA, VE = C + "acquire.go", C + "release.go", C + "decide.go", C + "patch.go", C + "verified.go"
-CO, IN, SE, QU = C + "consent.go", C + "informers.go", C + "server.go", C + "queue.go"
-FILES = [AQ, RE, DE, PA, VE, CO, IN, SE, QU]
+CO, IN, SE, QU, BR = C + "consent.go", C + "informers.go", C + "server.go", C + "queue.go", C + "batchrecords.go"
+FILES = [AQ, RE, DE, PA, VE, CO, IN, SE, QU, BR]
 
 NO_EPOCH_TEST = (PA, "\t\t{Op: \"test\", Path: annotation, Value: epoch},\n", "")
 NO_UID_TEST = (PA, "\t\t{Op: \"test\", Path: \"/metadata/uid\", Value: string(uid)},\n", "")
@@ -58,8 +58,8 @@ R3 = "\t\t\tpt, err := ReleasePatch(r.meta, p.holder, n)\n"
 LATE_R3 = (RE, R3, "\t\t\ttime.Sleep(200 * time.Millisecond)\n" + R3)
 REREAD = ("\t\t\tif again, err := p.srv.Get(ctx, r.id.GroupKind(), r.id.Namespace, r.id.Name); err == nil && hasFinalizer(again, f) {\n"
           "\t\t\t\tr.meta = again\n\t\t\t}\n")
-R2 = "\t\tholders, err := p.srv.List(ctx, p.holder, n)\n"
-KEPT_LISTS = [(RE, "\t\"fmt\"\n\t\"time\"\n", "\t\"fmt\"\n\t\"sync\"\n\t\"time\"\n"),
+R2 = "\t\tholders, gone, err := p.listHolders(ctx, n)\n"
+KEPT_LISTS = [(RE, "\t\"fmt\"\n\t\"slices\"\n\t\"time\"\n", "\t\"fmt\"\n\t\"slices\"\n\t\"sync\"\n\t\"time\"\n"),
               (RE, "// cachedUse is R0's reading of one object's users in the caches.\n",
                "var keptLists sync.Map\n\n// cachedUse is R0's reading of one object's users in the caches.\n")]
 # The start of every live read of a consent: the gate's, and a kept ref's (#138).
@@ -85,12 +85,13 @@ CACHED = ("plain", "cross", "chained", "three")
 MUTANTS = [
     # R2 ignoring deleting users.
     ("a holder being deleted is no user",
-     [(DE, "\tif holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers) {\n\t\treturn false",
-       "\tif holder.GetDeletionTimestamp() != nil {\n\t\treturn false")], [OVER]),
+     [(DE, "\treturn holder.GetDeletionTimestamp() != nil && !IsEstablished(holder, ownerFinalizers)\n",
+       "\treturn holder.GetDeletionTimestamp() != nil\n")], [OVER]),
+    # A batch asks its own records (#148), not IsDeletingUser.
     ("after the grace, users being deleted don't keep the object (R0 and R2)",
-     [(DE, "\treturn holder.GetDeletionTimestamp() != nil && IsUser(holder, p, ownerFinalizers)\n", "\treturn false\n")], [OVER, KEPT]),
+     [(BR, "\treturn h.DeletionTimestamp != nil && b.isUser(h, id)\n", "\treturn false\n")], [OVER, KEPT]),
     ("the same, in R2 alone",
-     [(RE, "\t\t\t\tif IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {", "\t\t\t\tif false && IsDeletingUser(&holders[i], r.id, p.ownerFinalizers) {")], [OVER, KEPT]),
+     [(RE, "\t\t\t\tif records.isDeletingUser(&holders[i], r.id) {", "\t\t\t\tif false && records.isDeletingUser(&holders[i], r.id) {")], [OVER, KEPT]),
     # R3 without the epoch test.
     ("R3 doesn't test the epoch", [NO_EPOCH_TEST], [UNREAD, OVER]),
     ("R3 doesn't test the epoch, and is 200ms late", [NO_EPOCH_TEST, LATE_R3], [UNREAD, OVER, EARLY]),
@@ -105,14 +106,14 @@ MUTANTS = [
     ("R2 lists before R1",
      [(RE, "\tbuiltFrom := map[ID]string{} // the resourceVersion each failed release was built from\n",
        "\tbuiltFrom := map[ID]string{} // the resourceVersion each failed release was built from\n\tearly, earlyErr := p.srv.List(ctx, p.holder, n)\n"),
-      (RE, R2, "\t\tholders, err := early, earlyErr\n")], [UNREAD, OVER]),
+      (RE, R2, "\t\tholders, gone, err := early, false, earlyErr\n")], [UNREAD, OVER]),
     ("R2 decides on the list of the batch before",
      KEPT_LISTS + [(RE, R2, R2 + "\t\tif err == nil {\n\t\t\tif old, ok := keptLists.Swap(fmt.Sprintf(\"%p/%s\", p, n), holders); ok {\n"
                             "\t\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t\t}\n\t\t}\n")], [OVER]),
     ("every second batch makes no list, and decides on the one before",
-     KEPT_LISTS + [(RE, R2, "\t\tvar holders []metav1.PartialObjectMetadata\n\t\tvar err error\n"
+     KEPT_LISTS + [(RE, R2, "\t\tvar holders []metav1.PartialObjectMetadata\n\t\tvar gone bool\n\t\tvar err error\n"
                             "\t\tif old, ok := keptLists.LoadAndDelete(fmt.Sprintf(\"%p/%s\", p, n)); ok {\n"
-                            "\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t} else if holders, err = p.srv.List(ctx, p.holder, n); err == nil {\n"
+                            "\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t} else if holders, gone, err = p.listHolders(ctx, n); err == nil {\n"
                             "\t\t\tkeptLists.Store(fmt.Sprintf(\"%p/%s\", p, n), holders)\n\t\t}\n")], [UNREAD]),
     ("the Namespace is read at resourceVersion 0",
      [(SE, SEND_GET, "\tvar o metav1.GetOptions\n\tif gk == namespaceGroupKind {\n\t\to.ResourceVersion = \"0\"\n\t}\n\treturn c.Get(ctx, name, o)\n")], [OVER, NO_CONSENT]),
@@ -178,7 +179,7 @@ MUTANTS = [
      [(IN, "func (h holderHandler) OnUpdate(oldObj, newObj any) {\n", "var holderVersions atomic.Int64\n\nfunc (h holderHandler) OnUpdate(oldObj, newObj any) {\n\tif holderVersions.Add(1) > 300 {\n\t\treturn\n\t}\n"),
       (IN, "\t\"sync\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n")], ["LAG"]),
     ("a ref that a record drops queues no release",
-     [(IN, "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil {\n", "\tfor _, m := range []*metav1.PartialObjectMetadata{old, cur} {\n\t\tif m != nil && (m != old || cur == nil) {\n")],
+     [(IN, "\tids := slices.Concat(was.IDs, is.IDs)\n", "\tids := slices.Clone(is.IDs)\n\tif cur == nil {\n\t\tids = append(ids, was.IDs...)\n\t}\n")],
      ["TOO-LITTLE", "CANARY-NOT-RELEASED"]),
 ]
 
