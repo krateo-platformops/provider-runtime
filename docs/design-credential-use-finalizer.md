@@ -3494,7 +3494,7 @@ refuses a `Next`, §9, `chain.go:89-100`, so neither applies to it):
   which client-side apply fills with the whole object a user applied, and can hold
   a Secret's data. The informer caches drop it: their transform keeps only
   `credential-use.` keys (`informers.go:171-178`). A2's and R1's responses are
-  not transformed (`server.go:89` and `server.go:115`): they are the API server's
+  not transformed (`server.go:97` and `server.go:123`): they are the API server's
   metadata as read. A runtime that logs or caches one must drop the annotation
   first.
 
@@ -6716,7 +6716,7 @@ on `Synced=True/ReconcileSuccess`, with the message `credential-use: refs
 refused, not held: <the error, cut> (§9)`, records `CredentialUseDegraded` once,
 and is counted by `credentialuse_refused_holders` (decided 2026-11-25; §9, §12;
 `refusalOf` and `refusedSynced`, `pkg/reconciler/credentialuse.go:804-830`;
-`noteRefused`, `pkg/credentialuse/tracker.go:573-589`). Chain code and its tests
+`noteRefused`, `pkg/credentialuse/tracker.go:578-594`). Chain code and its tests
 stay, and nothing in production reaches them.
 
 **Open doc items, now closed.**
@@ -6727,8 +6727,8 @@ stay, and nothing in production reaches them.
 - *"Safe per pass" for two `RefsFunc` versions*: wrong when they name different
   refs, §7.3. It applies to this release.
 - *Which client writes*: in this release no A2, R1 or R3 goes through the dynamic
-  client. The protocol's server is the metadata client alone (`server.go:19-24`,
-  `:76-80`); the dynamic client reads a chain's content (`chain.go:45-62`), which
+  client. The protocol's server is the metadata client alone (`server.go:25-33`,
+  `:84-88`); the dynamic client reads a chain's content (`chain.go:45-62`), which
   a refused list never reaches.
 - *The first adopter's process model*: §16.3.
 - *A protected kind's CRD recreated with another scope* (decided 2026-11-24):
@@ -6737,9 +6737,9 @@ stay, and nothing in production reaches them.
 
 **Decided since, in the code.** Vouches name the kinds, `<ns>/<Kind[.group]>/*`,
 and a bare `<ns>/*` is malformed (decided 2026-11-25; `parseVouched`,
-`index.go:1092-1112`, §7.4, §10.6.6). A stop drains the index's queued checks,
+`index.go:1107-1127`, §7.4, §10.6.6). A stop drains the index's queued checks,
 10s from the last busy moment and at most 25s after the loops end (decided
-2026-11-25; `drainIndexes`, `writeloops.go:204-260`, §10.6.3), so a graceful
+2026-11-25; `drainIndexes`, `writeloops.go:208-264`, §10.6.3), so a graceful
 shutdown timeout under about 25s cuts it short. A set Disown switch that parses
 to nothing, and an index line whose kind doesn't map, keep a Kind's controller up
 until fixed by hand (decided 2026-11-25 and 2026-11-26; the `scaletozero`

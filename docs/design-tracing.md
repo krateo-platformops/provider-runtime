@@ -559,16 +559,17 @@ release that makes it.
 
 The names and the outcome strings are pinned by `TestCredentialUseEventNames`
 (`pkg/tracing/names_test.go`), and `TestTracingCredentialUseAcquireEvent`
-(`pkg/reconciler/credentialuse_test.go:1366`) pins that each outcome's event is on
-the root. **No test pins (3) for this outcome**: nothing asserts the root's status
-for a `must_not_connect` pass. `pkg/reconciler/tracing_test.go` asserts Error on
-the root for other failing passes (for example `:523`), which is the same path.
+(`pkg/reconciler/credentialuse_test.go:1368`) pins that each outcome's event is on
+the root. **(3) is pinned** by `TestTracingCredentialUseMustNotConnectEndsRootWithError`
+(`pkg/reconciler/credentialuse_test.go:1454`): a `must_not_connect` pass ends the
+root with status Error. `pkg/reconciler/tracing_test.go` asserts Error on the root
+for other failing passes (for example `:523`), which is the same path.
 
 **The counts describe one pass.** Each event carries what that pass's Acquire
 did, so for a resource read its latest event, and never add events up. A hold the
 record kept that the pass dropped, because its target withdrew consent, is not
 in `.held` and not lost to the count: it is in `.unheld.ConsentWithdrawn`
-(`kept.go:165`, `acquire.go:574`), and in `.refs`. The attributes count what
+(`kept.go:165`, `acquire.go:585`), and in `.refs`. The attributes count what
 Acquire returned (`acquireAttributes`, `pkg/reconciler/credentialuse.go`): a pass
 whose chain was refused holds nothing, so it reports no ref but those its consent
 gate dropped.
