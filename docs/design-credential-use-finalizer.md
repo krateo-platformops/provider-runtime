@@ -5993,6 +5993,13 @@ failure that the API server had caused (H3 below). Now:
   seen.
 - **Every finalizer that goes, goes by a release, and every object that goes,
   by a release of that incarnation or by a DELETE that named it.**
+- **No hold is left without a user** (`STUCK-HOLD`). The audits above judge a
+  release that came, and a hold that nothing releases has none. At the run's end,
+  which waits for the last version of each kind the test's watches carry, no
+  protected object that is still there keeps a credential-use finalizer that no
+  holder of its kind and namespace uses: every object, whatever namespace it was
+  in, and not only those that the end of the run waits for, or the canaries'. A hold
+  that a late release took by then isn't one.
 - **What a pass reports is checked:** a deletion pass holds each ref with an
   A2 of its own. A live one may skip, by §6.3 and by what its own informers had
   delivered, which the test's hooks see: the holder's version it works from,

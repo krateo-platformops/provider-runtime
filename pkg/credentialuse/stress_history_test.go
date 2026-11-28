@@ -521,6 +521,13 @@ const (
 	// findEstablished: a holder got its owner finalizer, and a ref of its
 	// record was neither held nor found absent by its pass (§6.7).
 	findEstablished = "ESTABLISHED-UNHELD"
+	// findStuckHold: a protected object keeps a credential-use finalizer at the
+	// run's end, and no holder of its kind and namespace uses it: nothing
+	// released it, and nothing will, as no batch of that key comes. The canaries
+	// are three objects, and the end of a run waits for the objects of its own
+	// namespaces; this is every object, a namespace torn down in the run's course
+	// among them.
+	findStuckHold = "STUCK-HOLD"
 	// findNotHeld, findNotKept and findNotReleased are the canaries': what must
 	// happen in every run didn't (stress_envtest_test.go).
 	findNotHeld     = "CANARY-NOT-HELD"
@@ -860,6 +867,7 @@ func (h *stHistory) audit() *stReport {
 	h.auditWorkers(r)
 	h.auditReleases(r)
 	h.auditFinalizers(r)
+	h.auditStuck(r)
 	h.auditRemovals(r)
 	h.auditPasses(r)
 	h.auditRecords(r)
@@ -1465,6 +1473,37 @@ func (h *stHistory) countWithdrawn(r *stReport, p stObj, kind, n string, landed 
 			return
 		}
 	}
+}
+
+// auditStuck: at the end of the recording, which waits for the last version of
+// each kind that the test's watches carry, no protected object that is still
+// there keeps a credential-use finalizer that no holder uses (§6.1). A hold that
+// is released late is released by then: the last version is what counts. A user
+// is a holder's last version, if it is there, that names the object and isn't
+// being deleted without its owner finalizer.
+func (h *stHistory) auditStuck(r *stReport) {
+	for o, vs := range h.objs {
+		if !h.protectedKind(o.kind) || len(vs) == 0 || vs[len(vs)-1].gone {
+			continue
+		}
+		last := vs[len(vs)-1]
+		for _, f := range credentialUse(last.fins) {
+			if kind, n, _ := holderOfFinalizer(f); !h.usedBy(kind, n, o) {
+				r.find(stFinding{class: findStuckHold, text: fmt.Sprintf("%s: keeps %s with no users at the end of the run: %s", o, f, last),
+					obj: o, from: last.at.Add(-5 * time.Second), to: last.at.Add(time.Second), zero: last.at})
+			}
+		}
+	}
+}
+
+// usedBy: a holder of kind in n is, at the end, a user of o.
+func (h *stHistory) usedBy(kind, n string, o stObj) bool {
+	for _, holder := range h.holders[holderKey(kind, n)] {
+		if vs := h.objs[holder]; len(vs) > 0 && !vs[len(vs)-1].gone && vs[len(vs)-1].user(o) {
+			return true
+		}
+	}
+	return false
 }
 
 // auditFinalizers: a credential-use finalizer leaves an object that stays

@@ -77,6 +77,9 @@ OVER, EARLY, UNREAD = "RELEASED-OVER-A-USER", "RELEASED-INSIDE-THE-GRACE", "RELE
 NO_A2, NO_CONSENT, UNACCOUNTED = "HELD-WITHOUT-A2", "HELD-WITHOUT-CONSENT", "REF-UNACCOUNTED"
 DROP, DIFFERS, UNANNOUNCED = "RECORD-DROP", "RECORD-DIFFERS", "HELD-BEFORE-THE-RECORD"
 KEPT = "CANARY-NOT-KEPT"
+# A hold left at the end of the run with no user: what a defect that releases late or
+# never leaves, which no audit of a release sees, since none came.
+STUCK = "STUCK-HOLD"
 CACHED = ("plain", "cross", "chained", "three")
 
 # (name, [(file, old, new), ...], the classes that find it): every old must
@@ -99,7 +102,7 @@ MUTANTS = [
     # A release that skips the grace.
     ("a release skips the grace", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead)\n")], [EARLY]),
     ("the grace is half as long", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace/2)\n")], [EARLY]),
-    ("a grace that never ends", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")], ["CANARY-NOT-RELEASED", "TOO-LITTLE"]),
+    ("a grace that never ends", [(DE, GRACE_END, "\treturn firstSeen.Add(ahead + grace + time.Hour)\n")], ["CANARY-NOT-RELEASED", "TOO-LITTLE", STUCK]),
     ("a release ignores a terminating namespace",
      [(RE, "\t\t\t\t\tnsDeleting[ns] = m.DeletionTimestamp != nil\n", "\t\t\t\t\tnsDeleting[ns] = m == nil\n")], [OVER, KEPT]),
     # R2's and the gate's reads.
@@ -109,12 +112,12 @@ MUTANTS = [
       (RE, R2, "\t\tholders, gone, err := early, false, earlyErr\n")], [UNREAD, OVER]),
     ("R2 decides on the list of the batch before",
      KEPT_LISTS + [(RE, R2, R2 + "\t\tif err == nil {\n\t\t\tif old, ok := keptLists.Swap(fmt.Sprintf(\"%p/%s\", p, n), holders); ok {\n"
-                            "\t\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t\t}\n\t\t}\n")], [OVER]),
+                            "\t\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t\t}\n\t\t}\n")], [OVER, STUCK]),
     ("every second batch makes no list, and decides on the one before",
      KEPT_LISTS + [(RE, R2, "\t\tvar holders []metav1.PartialObjectMetadata\n\t\tvar gone bool\n\t\tvar err error\n"
                             "\t\tif old, ok := keptLists.LoadAndDelete(fmt.Sprintf(\"%p/%s\", p, n)); ok {\n"
                             "\t\t\tholders = old.([]metav1.PartialObjectMetadata)\n\t\t} else if holders, gone, err = p.listHolders(ctx, n); err == nil {\n"
-                            "\t\t\tkeptLists.Store(fmt.Sprintf(\"%p/%s\", p, n), holders)\n\t\t}\n")], [UNREAD]),
+                            "\t\t\tkeptLists.Store(fmt.Sprintf(\"%p/%s\", p, n), holders)\n\t\t}\n")], [UNREAD, STUCK]),
     ("the Namespace is read at resourceVersion 0",
      [(SE, SEND_GET, "\tvar o metav1.GetOptions\n\tif gk == namespaceGroupKind {\n\t\to.ResourceVersion = \"0\"\n\t}\n\treturn c.Get(ctx, name, o)\n")], [OVER, NO_CONSENT]),
     ("every read is at resourceVersion 0",
@@ -180,7 +183,7 @@ MUTANTS = [
       (IN, "\t\"sync\"\n", "\t\"sync\"\n\t\"sync/atomic\"\n")], ["LAG"]),
     ("a ref that a record drops queues no release",
      [(IN, "\tids := slices.Concat(was.IDs, is.IDs)\n", "\tids := slices.Clone(is.IDs)\n\tif cur == nil {\n\t\tids = append(ids, was.IDs...)\n\t}\n")],
-     ["TOO-LITTLE", "CANARY-NOT-RELEASED"]),
+     ["TOO-LITTLE", "CANARY-NOT-RELEASED", STUCK]),
 ]
 
 SUBTESTS = {

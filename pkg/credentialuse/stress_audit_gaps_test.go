@@ -271,6 +271,38 @@ func TestAuditGapConsentPairs(t *testing.T) {
 	}
 }
 
+// A hold that is left at the end of the run, with no holder that uses it, is
+// stuck: the audits that judge a release see none of it, since none came. One
+// that a late release took by then is no such, nor is one with a user.
+func TestAuditGapStuckHold(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		build func(b *auditRun)
+		want  []string
+	}{
+		{"a hold that no holder names", func(b *auditRun) {
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+		}, []string{"STUCK-HOLD"}},
+		{"a hold whose holder is gone", func(b *auditRun) {
+			b.acquired()
+			b.remove(auditH)
+		}, []string{"STUCK-HOLD"}},
+		{"a hold that a release took, late", func(b *auditRun) {
+			b.put(auditS, "u1", func(v *stVersion) { b.hold(v, "e0") })
+			b.wait(5 * time.Second)
+			b.batch()
+			b.r3()
+		}, nil},
+		{"a hold with a user", func(b *auditRun) { b.acquired() }, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newAuditRun(stressPlain)
+			c.build(b)
+			b.want(t, c.want...)
+		})
+	}
+}
+
 // A pass whose acquire stopped says why, in what the API server answered it.
 func TestAuditGapErrors(t *testing.T) {
 	b := newAuditRun(stressPlain).acquired()
